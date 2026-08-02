@@ -1,0 +1,1181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER Quality Multiplier — Degradation Rules Specification — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier-quality-multiplier--degradation-rules-specification">TIER Quality Multiplier — Degradation Rules Specification</h1>
+<h2 id="deterministic-state-machine-for-post-merge-quality-assessment">Deterministic State Machine for Post-Merge Quality Assessment</h2>
+<blockquote>
+<p>⚠️ <strong>Implementation status (as of 2026-07-12, <code>main</code>).</strong> This document
+specifies the <strong>full, target</strong> 8-event quality model. <code>tierd</code> implements a
+<strong>subset</strong> of it today (#134). Quality is <strong>derived, not mutated</strong>: each signal
+is appended to an append-only <code>quality_events</code> log and the outcome&#39;s quality is
+recomputed as the <strong>worst-of</strong> the applicable floors, clamped to <code>[0.1, 1.0]</code>
+(<code>internal/quality.Resolve</code>, driven from <code>internal/webhook/handler.go</code>).</p>
+<p><strong>Implemented today:</strong></p>
+<ul>
+<li><strong>Event 1 — CI passes</strong> (<code>ci_pass</code>; quality stays <code>1.0</code>), including the
+30-minute same-SHA flaky-rerun neutralisation of an earlier failure.</li>
+<li><strong>Event 2 — CI fails on the merge commit</strong> → floor <strong><code>0.7</code></strong>, within the
+48-hour window (from the <code>workflow_run</code> webhook).</li>
+<li><strong>Event 4 — full revert</strong> → the strategic-vs-quality classification IS
+performed: a <strong>quality</strong> revert floors to <strong><code>0.1</code></strong>, a <strong>strategic</strong> revert
+to <strong><code>0.8</code></strong>, within the 60-day window (from the <code>push</code> webhook).</li>
+</ul>
+<p><strong>NOT yet implemented</strong> (specified below, but no code enforces them):</p>
+<ul>
+<li><strong>Event 3</strong> — follow-up fix (<code>-0.15</code>)</li>
+<li><strong>Event 5</strong> — partial revert (<code>1.0 - 0.9·fraction</code>)</li>
+<li><strong>Event 6</strong> — production-incident correlation</li>
+<li><strong>Event 7</strong> — hotfix-branch detection (<code>0.4</code>)</li>
+<li><strong>Event 8</strong> — downstream-CI failure (<code>-0.20</code> per service)</li>
+<li>the <strong>no-CI <code>0.95</code></strong> &#34;unverified&#34; penalty (the Event 1 edge case), the
+cross-PR flaky registry, and the persisted provisional → observing → final
+phase state machine / dashboard provisional indicator (the 48h/60d bounds ARE
+applied as event windows, but the lifecycle state is not materialized).</li>
+</ul>
+<p>Treat Sections 3–12 as the intended design; the bullets above are what the tool
+measures today. (Ref: readiness review finding C2 — publishing this spec
+as-if-fully-implemented would misrepresent what the tool measures.)</p>
+</blockquote>
+<p><strong>Specification dated:</strong> March 26, 2026 — the date this design was written. See the implementation-status banner above for what the code enforces today.</p>
+<p><strong>Author:</strong> TIER maintainers</p>
+<p><strong>Status:</strong> Complete specification, partially implemented. The design below is settled and not a draft; <code>tierd</code> enforces the subset itemized in the banner above. &#34;Final&#34; here describes the specification, not the shipped behavior.</p>
+<p><strong>Design constraint:</strong> 100% automated. Zero human input. The quality multiplier is a pure function of observable system events.</p>
+<hr>
+<h2 id="1-governing-principles">1. Governing Principles</h2>
+<ol>
+<li><strong>Innocence by default.</strong> Every merged PR starts at quality = 1.0. The system only degrades; it never requires proof of quality.</li>
+<li><strong>Degradations stack via worst-of.</strong> When multiple degradation events apply to the same PR, the system takes the <strong>minimum</strong> (worst) quality value, not the sum of penalties. Rationale: stacking penalties would double-punish cascading failures (CI fails, then a revert follows, which is the expected response to a CI failure -- the revert should not be an additional penalty on top of the failure it corrected).</li>
+<li><strong>One exception to worst-of: follow-up fix is additive with CI failure.</strong> A CI failure (0.7) followed by a follow-up fix (penalty of -0.15) compounds to 0.55, because these are genuinely independent quality signals. See Section 3 for the precise rule.</li>
+<li><strong>Observation window is two-phase.</strong> Phase 1 (48 hours): fast signals lock. Phase 2 (60 days): slow signals can still degrade. After 60 days, quality is FINAL and immutable.</li>
+<li><strong>No human override endpoint.</strong> The adversarial analysis (O-02) correctly identifies that override mechanisms become gaming vectors. Instead, every edge case has a deterministic rule that handles it without judgment.</li>
+</ol>
+<hr>
+<h2 id="2-observation-window-design">2. Observation Window Design</h2>
+<h3 id="why-two-phases">Why two phases?</h3>
+<p>The existing architecture doc proposed 48 hours for initial finalization and 60 days for the full window. This is correct, but the two phases serve distinct purposes that need to be explicit.</p>
+<h3 id="phase-1-immediate-verification-0-48-hours-post-merge">Phase 1: Immediate Verification (0-48 hours post-merge)</h3>
+<p><strong>Purpose:</strong> Catch build breaks, CI failures, and obvious merge problems.</p>
+<p><strong>What it covers:</strong></p>
+<ul>
+<li>CI pass/fail on the merge commit</li>
+<li>Flaky CI re-run resolution</li>
+<li>Immediate revert (someone notices a break and reverts within hours)</li>
+</ul>
+<p><strong>Behavior:</strong> Quality is &#34;provisional&#34; during this phase. Dashboard marks the score with a provisional indicator. At T+48h, whatever quality value exists becomes the Phase 1 baseline.</p>
+<p><strong>Why 48 hours, not 24:</strong> Many teams have CI pipelines that run integration tests on a nightly or twice-daily cadence. A 24-hour window would miss the first integration test cycle for PRs merged in the afternoon. 48 hours guarantees at least one full CI cycle on any merge schedule.</p>
+<h3 id="phase-2-regression-observation-48-hours---60-days-post-merge">Phase 2: Regression Observation (48 hours - 60 days post-merge)</h3>
+<p><strong>Purpose:</strong> Catch production regressions, follow-up fixes, reverts, downstream failures, and incident correlation.</p>
+<p><strong>What it covers:</strong></p>
+<ul>
+<li>Follow-up fix commits touching the same files</li>
+<li>Full or partial reverts</li>
+<li>Production incidents correlated to deploys containing this PR</li>
+<li>Hotfix branches referencing this PR&#39;s issue</li>
+<li>Downstream CI failures in other services</li>
+</ul>
+<p><strong>Behavior:</strong> Quality can only degrade during Phase 2 (never improve). At T+60 days, quality is locked as FINAL.</p>
+<p><strong>Why 60 days, not 30:</strong> The adversarial analysis (G-04) identified that 30 days does not cover monthly release cycles or slow-rolling production issues. 60 days covers two full monthly release cycles and captures the vast majority of regression signals. Anything beyond 60 days is either a strategic revert (not a quality signal) or a latent bug so subtle that penalizing the original author is unfair.</p>
+<h3 id="post-window-60-days">Post-window (60+ days)</h3>
+<p>Quality is FINAL. No further events can modify it. If a regression surfaces at day 61+, it contributes to the team-level &#34;long-tail regression&#34; sidecar metric but does not affect the individual PR&#39;s quality score. This is a deliberate design choice: at some point, responsibility shifts from the author to the system.</p>
+<hr>
+<h2 id="3-event-by-event-degradation-rules">3. Event-by-Event Degradation Rules</h2>
+<h3 id="event-1-ci-passes-cleanly-on-merge">Event 1: CI Passes Cleanly on Merge</h3>
+<p><strong>Trigger signal:</strong> <code>workflow_run</code> webhook with <code>conclusion: &#34;success&#34;</code> for the merge commit SHA on the target branch.</p>
+<p><strong>Degradation:</strong> None. Quality remains at 1.0.</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.ci.run WHERE
+    head_sha = pr.merge_commit_sha AND
+    conclusion = &#34;success&#34; AND
+    branch = pr.base_branch
+SET quality_event(pr_id, &#34;ci_pass&#34;, timestamp)
+</code></pre>
+<p><strong>Edge case -- no CI configured:</strong> If no <code>workflow_run</code> event arrives within 48 hours of merge, the system cannot verify CI. Quality receives a -0.05 penalty (quality = 0.95) as a mild incentive to adopt CI. This is NOT a failure penalty; it is an &#34;unverified&#34; penalty. The dashboard labels it &#34;no CI signal&#34; rather than &#34;CI failed.&#34;</p>
+<hr>
+<h3 id="event-2-ci-fails-on-the-merge-commit">Event 2: CI Fails on the Merge Commit</h3>
+<p><strong>Trigger signal:</strong> <code>workflow_run</code> webhook with <code>conclusion: &#34;failure&#34;</code> for the merge commit SHA on the target branch.</p>
+<p><strong>Degradation:</strong> quality = 0.7</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.ci.run WHERE
+    head_sha = pr.merge_commit_sha AND
+    conclusion = &#34;failure&#34; AND
+    branch = pr.base_branch
+
+# Check flaky test registry before applying penalty
+IF failure_test_names INTERSECT flaky_registry(7_day_window) != EMPTY:
+    # All failing tests are known-flaky -- do not penalize
+    SET quality_event(pr_id, &#34;ci_fail_flaky&#34;, timestamp)
+    # quality stays at 1.0
+ELSE IF failure_test_names PARTIAL_INTERSECT flaky_registry(7_day_window):
+    # Some tests are flaky, some are genuine failures
+    SET quality_event(pr_id, &#34;ci_fail_partial_flaky&#34;, timestamp)
+    # quality = 0.7 (genuine failures present)
+ELSE:
+    SET quality_event(pr_id, &#34;ci_fail&#34;, timestamp)
+    # quality = 0.7
+</code></pre>
+<p><strong>Flaky CI handling (the 30-minute re-run rule):</strong></p>
+<p>A test is classified as &#34;flaky&#34; if it meets BOTH of the following:</p>
+<ol>
+<li>The same test name has failed on at least 2 unrelated PRs (different authors, different file sets) in the last 7 days.</li>
+<li>OR: The CI run fails, then a re-run of the exact same commit SHA succeeds within 30 minutes with no code changes.</li>
+</ol>
+<p>When a CI failure is fully attributable to known-flaky tests:</p>
+<ul>
+<li>Quality remains at 1.0</li>
+<li>The event is logged as <code>ci_fail_flaky</code> for audit purposes</li>
+<li>The flaky test is added/refreshed in the flaky registry with a 7-day TTL</li>
+</ul>
+<p>When a CI failure contains a mix of flaky and non-flaky test failures:</p>
+<ul>
+<li>Quality = 0.7 (the genuine failure is real)</li>
+<li>The flaky tests are noted in the event metadata but do not mitigate the penalty</li>
+</ul>
+<p><strong>The flaky registry is automated:</strong></p>
+<pre><code>Flaky Registry Rules:
+- Entry: (test_name, repo, first_seen, last_seen, failure_count, unrelated_pr_count)
+- A test enters the registry when it fails on &gt;= 2 PRs with disjoint file sets within 7 days
+- TTL: 7 days from last_seen. If the test stops being flaky, it ages out.
+- A test is removed from the registry if it passes on 10 consecutive CI runs
+- The registry is per-repository, not global
+</code></pre>
+<p><strong>Why 0.7 specifically:</strong> The adversarial analysis (P-04) notes the steep cliff between CI failure (0.7) and regression (0.3). The 0.7 value represents a 30% reduction -- significant enough to incentivize pre-merge CI hygiene, but not catastrophic. A CI failure is a &#34;you should have caught this&#34; signal, not a &#34;you broke production&#34; signal. The 30% penalty is calibrated to roughly offset the weight-1 bonus of a trivial task, ensuring that a CI failure on a trivial task effectively zeroes its contribution.</p>
+<hr>
+<h3 id="event-3-follow-up-fix-commit-touches-same-files-within-n-days">Event 3: Follow-Up Fix Commit Touches Same Files Within N Days</h3>
+<p><strong>Trigger signal:</strong> A new commit on the target branch that:</p>
+<ol>
+<li>Modifies at least one file that was also modified by the original PR, AND</li>
+<li>Is part of a PR/issue that references the original PR/issue (via commit message, PR body, or issue link), OR</li>
+<li>Is authored by a different developer AND touches &gt;= 50% of the same files within 14 days (even without an explicit reference)</li>
+</ol>
+<p><strong>Degradation:</strong> quality -= 0.15 (from whatever the current quality is)</p>
+<p><strong>Observation sub-window:</strong> 14 days from merge. Follow-up fixes after 14 days are considered normal maintenance, not quality signals from the original PR.</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.git.push WHERE
+    branch = target_branch AND
+    timestamp &lt;= pr.merged_at + 14_days
+
+FOR each commit in push:
+    changed_files = commit.files_changed
+    FOR each recent_pr in prs_merged_in_last_14_days:
+        file_overlap = changed_files INTERSECT recent_pr.files_changed
+
+        IF file_overlap IS NOT EMPTY:
+            # Check for explicit reference
+            has_reference = (
+                commit.message MATCHES /(?:fixes|closes|follow-up|followup|caused by|regression from)\s*#?{recent_pr.issue_id}/i
+                OR commit.pr_body MATCHES /(?:fixes|closes|follow-up|followup|caused by|regression from)\s*#?{recent_pr.issue_id}/i
+            )
+
+            # Check for implicit signal (different author, high file overlap)
+            is_implicit_fix = (
+                commit.author != recent_pr.author AND
+                |file_overlap| / |recent_pr.files_changed| &gt;= 0.5
+            )
+
+            IF has_reference OR is_implicit_fix:
+                SET quality_event(recent_pr.id, &#34;followup_fix&#34;, timestamp, {
+                    fixing_commit: commit.sha,
+                    file_overlap: file_overlap,
+                    detection_method: &#34;explicit&#34; if has_reference else &#34;implicit&#34;
+                })
+                # quality = current_quality - 0.15
+</code></pre>
+<p><strong>Why -0.15 (subtractive) instead of a fixed floor:</strong> A follow-up fix after a clean merge (1.0 - 0.15 = 0.85) is different from a follow-up fix after a CI failure (0.7 - 0.15 = 0.55). The first case is &#34;minor issue, you missed something.&#34; The second case is &#34;CI already told you something was wrong, and someone else had to clean up more.&#34; The subtractive model captures this compound signal naturally.</p>
+<p><strong>Stacking rule for multiple follow-up fixes:</strong> The -0.15 penalty applies only once. If three different developers each submit follow-up fixes to the same original PR&#39;s files, the original PR&#39;s quality degrades by 0.15 total, not 0.45. Rationale: one quality problem can manifest in multiple fix commits. The problem count is one; the fix count is irrelevant.</p>
+<p><strong>Edge case -- quality improvement follow-up:</strong> See Section 4 (Edge Cases), item 4.</p>
+<hr>
+<h3 id="event-4-full-revert-of-the-pr-within-60-days">Event 4: Full Revert of the PR Within 60 Days</h3>
+<p><strong>Trigger signal:</strong> A commit on the target branch that:</p>
+<ol>
+<li>Has a commit message matching <code>Revert &#34;&lt;original PR title&gt;&#34;</code> or <code>revert: &lt;description&gt;</code> referencing the original PR, OR</li>
+<li>Is detected by <code>git revert --find-object=&lt;merge_commit_sha&gt;</code>, OR</li>
+<li>Removes &gt;= 90% of the lines added by the original PR (measured by inverse diff analysis)</li>
+</ol>
+<p><strong>Degradation:</strong> quality = 0.1</p>
+<p><strong>Observation window:</strong> 60 days (the full Phase 2 window).</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.git.push WHERE
+    branch = target_branch AND
+    timestamp &lt;= pr.merged_at + 60_days
+
+FOR each commit in push:
+    # Method 1: Commit message pattern matching
+    is_revert_by_message = (
+        commit.message MATCHES /^Revert &#34;.*&#34;/i
+        OR commit.message MATCHES /revert.*#\d+/i
+        OR commit.message MATCHES /revert.*{pr.merge_commit_sha[:8]}/i
+    )
+
+    # Method 2: Inverse diff analysis
+    IF NOT is_revert_by_message:
+        original_additions = lines_added_by(pr)
+        commit_deletions = lines_deleted_by(commit)
+        overlap = original_additions INTERSECT commit_deletions
+        is_revert_by_content = |overlap| / |original_additions| &gt;= 0.90
+
+    IF is_revert_by_message OR is_revert_by_content:
+        # Determine revert reason via commit message classification
+        reason = classify_revert_reason(commit.message, commit.pr_body)
+
+        IF reason == &#34;strategic&#34;:
+            # Product decision, not quality failure
+            SET quality_event(pr_id, &#34;revert_strategic&#34;, timestamp)
+            # quality = 0.8 (not the author&#39;s fault, but work did not survive)
+        ELSE:
+            # Quality, performance, or stability revert
+            SET quality_event(pr_id, &#34;revert_quality&#34;, timestamp)
+            # quality = 0.1
+</code></pre>
+<p><strong>Revert reason classification (deterministic, no LLM):</strong></p>
+<p>The revert commit message and PR body are scanned for keyword patterns:</p>
+<pre><code>STRATEGIC_PATTERNS = [
+    /product decision/i,
+    /PM requested/i,
+    /feature flag.*disable/i,
+    /business requirement.*changed/i,
+    /pivot/i,
+    /deprecat/i,
+    /sunset/i,
+    /removing feature/i,
+    /no longer needed/i,
+    /replaced by/i
+]
+
+QUALITY_PATTERNS = [
+    /broke/i, /break/i, /broken/i,
+    /crash/i, /OOM/i, /out of memory/i,
+    /regression/i, /degradation/i,
+    /incident/i, /outage/i,
+    /bug/i, /defect/i,
+    /performance.*degrad/i,
+    /memory leak/i,
+    /data loss/i, /corrupt/i,
+    /timeout/i, /deadlock/i,
+    /security.*vuln/i
+]
+
+classify_revert_reason(message, body):
+    text = message + &#34; &#34; + (body or &#34;&#34;)
+    strategic_hits = count(pattern in STRATEGIC_PATTERNS if pattern.match(text))
+    quality_hits = count(pattern in QUALITY_PATTERNS if pattern.match(text))
+
+    IF strategic_hits &gt; 0 AND quality_hits == 0:
+        RETURN &#34;strategic&#34;
+    ELSE:
+        # Default to quality. When in doubt, the conservative
+        # interpretation is that the code had a problem.
+        RETURN &#34;quality&#34;
+</code></pre>
+<p><strong>Why 0.1 for quality reverts:</strong> A full revert means the code was bad enough that the fastest path to recovery was complete removal. This is the second-worst outcome (only &#34;AI code discarded before merge&#34; at 0.0 is worse, but that case never enters the quality multiplier because the PR was never merged). The 0.1 is not zero because the developer still did work that informed what NOT to do -- there is marginal learning value, and a 0.0 multiplier would make the denominator (tokens spent) entirely wasted, which overpunishes.</p>
+<p><strong>Why 0.8 for strategic reverts:</strong> The developer wrote working code that was removed for business reasons. They should not receive full credit (the code is gone), but they should not be heavily penalized either. 0.8 represents a 20% haircut -- &#34;the work did not survive, but that is not your fault.&#34;</p>
+<hr>
+<h3 id="event-5-partial-revert-some-files-reverted-others-kept">Event 5: Partial Revert (Some Files Reverted, Others Kept)</h3>
+<p><strong>Trigger signal:</strong> A commit that reverts SOME but not ALL of the original PR&#39;s changes. Specifically:</p>
+<ul>
+<li>Removes between 20% and 89% of the lines added by the original PR (below 20% is noise; above 90% is a full revert per Event 4)</li>
+</ul>
+<p><strong>Degradation:</strong> quality = 1.0 - (0.9 * revert_fraction)</p>
+<p>Where <code>revert_fraction</code> = (lines from original PR that were removed) / (total lines added by original PR)</p>
+<p><strong>The math:</strong></p>
+<pre><code>revert_fraction = |lines_removed_from_original| / |lines_added_by_original|
+
+# Clamp to the partial revert range
+IF revert_fraction &lt; 0.20:
+    # Below threshold: not a meaningful revert, ignore
+    RETURN (no degradation)
+
+IF revert_fraction &gt;= 0.90:
+    # Full revert: handle under Event 4 rules
+    RETURN Event_4_handling
+
+# Partial revert degradation
+quality = max(0.1, 1.0 - (0.9 * revert_fraction))
+
+# Examples:
+#   20% reverted: quality = 1.0 - 0.18 = 0.82
+#   30% reverted: quality = 1.0 - 0.27 = 0.73
+#   50% reverted: quality = 1.0 - 0.45 = 0.55
+#   70% reverted: quality = 1.0 - 0.63 = 0.37
+#   89% reverted: quality = 1.0 - 0.80 = 0.20
+</code></pre>
+<p><strong>Observation window:</strong> 60 days (same as full revert).</p>
+<p><strong>Strategic vs. quality classification:</strong> Same keyword-based classification as Event 4. If the partial revert is strategic, apply a reduced haircut: quality = 1.0 - (0.2 * revert_fraction). This means a 50% strategic partial revert yields quality = 0.90 rather than 0.55.</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.git.push WHERE
+    branch = target_branch AND
+    timestamp &lt;= pr.merged_at + 60_days
+
+FOR each commit in push:
+    FOR each recent_pr in prs_merged_in_last_60_days:
+        original_additions = lines_added_by(recent_pr)
+        commit_deletions = lines_deleted_by(commit) INTERSECT original_additions
+
+        revert_fraction = |commit_deletions| / |original_additions|
+
+        IF 0.20 &lt;= revert_fraction &lt; 0.90:
+            reason = classify_revert_reason(commit.message, commit.pr_body)
+            IF reason == &#34;strategic&#34;:
+                quality = 1.0 - (0.2 * revert_fraction)
+            ELSE:
+                quality = max(0.1, 1.0 - (0.9 * revert_fraction))
+
+            SET quality_event(recent_pr.id, &#34;partial_revert&#34;, timestamp, {
+                revert_fraction: revert_fraction,
+                reason: reason,
+                quality_value: quality
+            })
+</code></pre>
+<hr>
+<h3 id="event-6-production-incident-correlated-to-a-deploy-containing-this-pr">Event 6: Production Incident Correlated to a Deploy Containing This PR</h3>
+<p><strong>Trigger signal:</strong> An incident webhook (<code>incident.triggered</code> from PagerDuty, OpsGenie, Datadog, or equivalent) where:</p>
+<ol>
+<li>The incident fires within the observation window of any PR merged in the last 60 days, AND</li>
+<li>The deploy that is running when the incident fires contains the PR&#39;s merge commit (determined by deploy manifest / release tag / commit range in the deploy), AND</li>
+<li>The incident&#39;s affected service matches the PR&#39;s target repository or a declared downstream dependency</li>
+</ol>
+<p><strong>Degradation:</strong> Depends on incident severity:</p>
+<table>
+<thead>
+<tr>
+<th>Severity</th>
+<th>Quality</th>
+<th>Signal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0 (full outage, data loss)</td>
+<td>0.2</td>
+<td><code>incident.severity = &#34;P0&#34; OR incident.severity = &#34;SEV1&#34;</code></td>
+</tr>
+<tr>
+<td>P1 (major degradation, &gt;10% users)</td>
+<td>0.3</td>
+<td><code>incident.severity = &#34;P1&#34; OR incident.severity = &#34;SEV2&#34;</code></td>
+</tr>
+<tr>
+<td>P2 (minor degradation, &lt;10% users)</td>
+<td>0.5</td>
+<td><code>incident.severity = &#34;P2&#34; OR incident.severity = &#34;SEV3&#34;</code></td>
+</tr>
+<tr>
+<td>P3 (cosmetic, no user impact)</td>
+<td>0.7</td>
+<td><code>incident.severity = &#34;P3&#34; OR incident.severity = &#34;SEV4&#34;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Attribution logic -- the hard part:</strong></p>
+<p>A deploy typically contains multiple PRs. Which one caused the incident? This is the single most difficult attribution problem in the entire quality system.</p>
+<p><strong>Solution: Deploy-window proportional attribution.</strong></p>
+<pre><code>ON tier.incident.new WHERE incident.service IN monitored_services:
+
+# Step 1: Identify the deploy that was running when the incident fired
+deploy = get_active_deploy(incident.service, incident.fired_at)
+
+# Step 2: Get all PRs in that deploy
+prs_in_deploy = get_prs_in_deploy(deploy)
+
+# Step 3: Score each PR&#39;s causal likelihood using deterministic signals
+FOR each pr in prs_in_deploy:
+    pr.causal_score = compute_causal_score(pr, incident)
+
+# Step 4: Apply penalty only to PRs above the causal threshold
+FOR each pr in prs_in_deploy WHERE pr.causal_score &gt;= CAUSAL_THRESHOLD:
+    severity_quality = severity_to_quality(incident.severity)
+    # Scale the penalty by causal confidence
+    pr.quality = 1.0 - (pr.causal_score * (1.0 - severity_quality))
+    SET quality_event(pr.id, &#34;incident_correlated&#34;, timestamp, {
+        incident_id: incident.id,
+        severity: incident.severity,
+        causal_score: pr.causal_score,
+        quality_value: pr.quality
+    })
+</code></pre>
+<p><strong>Causal score computation (deterministic, no LLM):</strong></p>
+<pre><code>CAUSAL_THRESHOLD = 0.4
+
+compute_causal_score(pr, incident):
+    score = 0.0
+
+    # Signal 1: File overlap with error stack trace (if available)
+    # Weight: 0.35
+    IF incident.stack_trace IS NOT NULL:
+        error_files = extract_files_from_stacktrace(incident.stack_trace)
+        overlap = pr.files_changed INTERSECT error_files
+        IF |overlap| &gt; 0:
+            score += 0.35 * (|overlap| / |error_files|)
+
+    # Signal 2: Service/package match
+    # Weight: 0.25
+    IF pr.target_repo == incident.service_repo:
+        score += 0.15
+        IF pr.packages_modified INTERSECT incident.affected_packages:
+            score += 0.10
+
+    # Signal 3: Recency (more recent PRs are more likely causal)
+    # Weight: 0.20
+    hours_since_merge = (incident.fired_at - pr.merged_at).total_hours()
+    recency_score = max(0, 1.0 - (hours_since_merge / (60 * 24)))  # linear decay over 60 days
+    score += 0.20 * recency_score
+
+    # Signal 4: Change risk profile
+    # Weight: 0.20
+    risk = 0.0
+    IF pr.modifies_database_migrations: risk += 0.08
+    IF pr.modifies_api_surface: risk += 0.06
+    IF pr.modifies_auth_or_security: risk += 0.06
+    IF pr.lines_changed &gt; 500: risk += 0.04  # large changes carry more risk
+    IF pr.files_changed_count &gt; 20: risk += 0.04
+    score += min(0.20, risk)
+
+    RETURN min(1.0, score)
+</code></pre>
+<p><strong>When causal attribution is uncertain:</strong> If no PR in the deploy scores above the CAUSAL_THRESHOLD (0.4), the incident is logged as &#34;unattributed incident&#34; at the team level. No individual PR&#39;s quality is affected. This prevents the system from randomly penalizing innocent PRs when the root cause cannot be determined from signals alone.</p>
+<p><strong>Edge case -- cascading failure across deploys:</strong> If the incident spans multiple services, each service&#39;s deploy is analyzed independently. A PR only gets penalized via the deploy of its own target repository, not via downstream service incidents. Downstream failures are handled by Event 8.</p>
+<hr>
+<h3 id="event-7-hotfix-branch-created-referencing-this-prs-issue">Event 7: Hotfix Branch Created Referencing This PR&#39;s Issue</h3>
+<p><strong>Trigger signal:</strong> A branch is created matching the pattern <code>hotfix/*</code> that:</p>
+<ol>
+<li>References the original PR&#39;s issue number in the branch name (e.g., <code>hotfix/123-fix-auth-crash</code>), OR</li>
+<li>Has its first commit message reference the original issue (e.g., <code>hotfix: fix crash introduced by #123</code>)</li>
+</ol>
+<p><strong>Degradation:</strong> quality = 0.4</p>
+<p><strong>Rationale:</strong> A hotfix is stronger than a follow-up fix but weaker than a full revert. Someone created an emergency branch to fix something the original PR broke. This is a clear signal that the original code caused a production-grade problem, but the fix was targeted rather than a wholesale rollback.</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.git.branch WHERE
+    branch_name MATCHES /^hotfix\//
+
+# Extract issue references from branch name
+issue_refs = extract_issue_ids(branch_name)
+
+# Also check the first commit on the branch
+first_commit = get_first_commit_on_branch(branch_name)
+issue_refs += extract_issue_ids(first_commit.message)
+
+FOR each issue_id in issue_refs:
+    original_pr = get_pr_for_issue(issue_id)
+    IF original_pr IS NOT NULL AND
+       original_pr.merged_at + 60_days &gt;= now():
+        SET quality_event(original_pr.id, &#34;hotfix_branch&#34;, timestamp, {
+            hotfix_branch: branch_name,
+            referenced_issue: issue_id
+        })
+        # quality = 0.4
+</code></pre>
+<p><strong>Why 0.4:</strong> Positioned between follow-up fix (0.85 from a clean start) and full revert (0.1). A hotfix means the code caused an urgent problem severe enough to bypass normal workflow, but the code was salvageable (unlike a full revert). The 0.4 value aligns with the P1 incident severity (0.3) plus a small margin because not all hotfixes are incident-driven -- some are proactive catches before incidents fire.</p>
+<p><strong>Interaction with Event 6:</strong> If a hotfix is created AND a production incident fires for the same issue, the system takes the worst-of: min(0.4, incident_quality). The hotfix event does not stack additional penalty on top of an incident.</p>
+<hr>
+<h3 id="event-8-pr-causes-downstream-ci-failure-in-another-service">Event 8: PR Causes Downstream CI Failure in Another Service</h3>
+<p><strong>Trigger signal:</strong> A CI failure in Service B where:</p>
+<ol>
+<li>Service B&#39;s CI runs integration tests against Service A, AND</li>
+<li>Service A&#39;s latest deploy includes the PR under evaluation, AND</li>
+<li>The CI failure in Service B started occurring AFTER the deploy containing this PR, AND</li>
+<li>The CI failure in Service B did NOT exist in the CI run immediately before the deploy</li>
+</ol>
+<p><strong>Degradation:</strong> quality -= 0.20 (subtractive, same as follow-up fix logic)</p>
+<p><strong>Observation window:</strong> 14 days from the deploy containing the PR. Downstream failures beyond 14 days are too far removed to attribute with confidence.</p>
+<p><strong>Detection logic:</strong></p>
+<pre><code>ON tier.ci.run WHERE
+    conclusion = &#34;failure&#34; AND
+    repo != pr.target_repo  # Different service
+
+# Step 1: Check if this service depends on the PR&#39;s target service
+IF NOT dependency_graph.depends_on(ci_run.repo, pr.target_repo):
+    SKIP  # No declared dependency, no attribution
+
+# Step 2: Check temporal causality
+deploy = get_most_recent_deploy(pr.target_repo, before=ci_run.started_at)
+IF pr.merge_commit_sha NOT IN deploy.commit_range:
+    SKIP  # This PR was not in the relevant deploy
+
+# Step 3: Check that this failure is new (not pre-existing)
+previous_ci_run = get_previous_ci_run(ci_run.repo, ci_run.workflow)
+IF previous_ci_run.conclusion == &#34;failure&#34;:
+    SKIP  # This failure pre-dates the deploy; not caused by this PR
+
+# Step 4: Verify via flaky registry
+IF failure_test_names ALL IN flaky_registry(ci_run.repo, 7_day_window):
+    SKIP  # All failures are known-flaky in the downstream service
+
+# Attribution confirmed
+SET quality_event(pr.id, &#34;downstream_ci_failure&#34;, timestamp, {
+    downstream_repo: ci_run.repo,
+    failing_tests: failure_test_names,
+    deploy_id: deploy.id
+})
+# quality = current_quality - 0.20
+</code></pre>
+<p><strong>Cascading failure rule (PR A is fine, PR B breaks PR A&#39;s functionality):</strong></p>
+<p>This is the &#34;who gets penalized&#34; problem. The rule is: <strong>the PR whose deploy caused the failure gets penalized, not the PR whose code was broken.</strong></p>
+<p>Rationale: PR A was working before PR B was deployed. PR B introduced the breaking change. PR B&#39;s author is responsible for verifying that their change does not break existing contracts. PR A&#39;s quality is unaffected.</p>
+<p>Concretely: if PR B in Service X causes Service Y&#39;s CI to fail, and Service Y&#39;s CI tests exercise functionality introduced by PR A (merged weeks ago), then:</p>
+<ul>
+<li>PR B receives the -0.20 downstream CI penalty</li>
+<li>PR A&#39;s quality is unchanged</li>
+</ul>
+<p>The temporal causality check (Step 3 above) enforces this: only PRs in the deploy that caused the NEW failure are candidates for attribution.</p>
+<p><strong>Stacking rule:</strong> Like follow-up fixes, the downstream CI penalty applies at most once per downstream service. If PR X breaks CI in three different downstream services, the total penalty is -0.20 * 3 = -0.60 (with a floor at 0.1). This is intentional: breaking three services is worse than breaking one.</p>
+<hr>
+<h2 id="4-edge-cases">4. Edge Cases</h2>
+<h3 id="edge-case-1-flaky-ci----test-fails-on-merge-passes-on-re-run-within-30-minutes">Edge Case 1: Flaky CI -- Test Fails on Merge, Passes on Re-Run Within 30 Minutes</h3>
+<p><strong>Rule:</strong> If the exact same commit SHA passes CI on a re-run within 30 minutes of the initial failure, AND no code changes were pushed between the failure and the re-run, the failure is retroactively classified as flaky.</p>
+<p><strong>Implementation:</strong></p>
+<pre><code>ON tier.ci.run WHERE
+    head_sha = previously_failed_sha AND
+    conclusion = &#34;success&#34; AND
+    timestamp &lt;= original_failure.timestamp + 30_minutes AND
+    no_push_events_between(original_failure.timestamp, timestamp)
+
+# Retroactively reclassify the failure
+UPDATE quality_event SET
+    event_type = &#34;ci_fail_flaky&#34;,
+    quality_impact = NULL  # no penalty
+WHERE
+    pr_id = affected_pr.id AND
+    event_type = &#34;ci_fail&#34; AND
+    ci_run_sha = previously_failed_sha
+
+# Add to flaky registry
+flaky_registry.upsert(
+    test_name = original_failure.failing_tests,
+    repo = original_failure.repo,
+    last_seen = timestamp
+)
+</code></pre>
+<p><strong>What if the re-run happens after 30 minutes?</strong> The 30-minute window is firm. Beyond 30 minutes, the system cannot distinguish between &#34;flaky test&#34; and &#34;transient infrastructure issue that was silently fixed.&#34; The penalty stands, but the event is annotated with &#34;re-run passed at T+{minutes}&#34; for transparency.</p>
+<p><strong>What if someone pushes a fix and then re-runs?</strong> If a push event exists between the failure and the re-run, it is NOT a flaky test -- it is a follow-up fix. The CI failure penalty (0.7) applies, and if the fix constitutes a follow-up fix under Event 3 rules, that penalty applies too.</p>
+<hr>
+<h3 id="edge-case-2-cascading-failure----pr-a-is-fine-pr-b-breaks-pr-as-functionality">Edge Case 2: Cascading Failure -- PR A is Fine, PR B Breaks PR A&#39;s Functionality</h3>
+<p><strong>Rule:</strong> Addressed in Event 8 above. The causal PR (PR B) is penalized. The broken PR (PR A) is not. Temporal causality is the deciding factor.</p>
+<p><strong>What about the case where PR A introduced a latent fragility that PR B exposed?</strong> Example: PR A adds a function that works but does not validate input. PR B sends unexpected input. Whose fault is it?</p>
+<p><strong>Rule:</strong> PR B is penalized. The reasoning: PR A was working within its specified contract. PR B introduced a new interaction that violated that contract. Even if PR A &#34;should have&#34; validated input, the system has no way to deterministically identify latent fragilities -- only actual failures. PR A&#39;s quality reflects what happened, not what might have happened.</p>
+<p>If the team subsequently identifies PR A&#39;s fragility and creates a follow-up fix for it, Event 3 will apply to PR A at that point, degrading its quality by -0.15. This is the correct outcome: the fragility was not a quality problem until it manifested.</p>
+<hr>
+<h3 id="edge-case-3-long-tail-regression----incident-happens-45-days-after-merge">Edge Case 3: Long-Tail Regression -- Incident Happens 45 Days After Merge</h3>
+<p><strong>Rule:</strong> 45 days is within the 60-day observation window. The incident attribution process (Event 6) runs normally. The causal score&#39;s recency signal will be low (45/60 of the decay applied), which reduces the causal score but does not eliminate it. If the stack trace and file overlap signals are strong, the PR will still score above the CAUSAL_THRESHOLD and receive the incident penalty.</p>
+<p><strong>What about an incident at day 61?</strong> The observation window is closed. The PR&#39;s quality is FINAL. The incident contributes to the team-level &#34;long-tail regression&#34; metric but does not affect the individual PR score.</p>
+<p><strong>Rationale:</strong> Any system needs a statute of limitations. Code that has been running in production for 60 days without incident has survived a meaningful burn-in period. If it fails at day 61, the failure is as much a function of environmental change (load growth, dependency updates, config drift) as original code quality. Punishing a 2-month-old PR for a new failure is not a useful quality signal.</p>
+<hr>
+<h3 id="edge-case-4-quality-improvement----follow-up-commit-improves-the-original">Edge Case 4: Quality Improvement -- Follow-Up Commit IMPROVES the Original</h3>
+<p><strong>Rule:</strong> Quality can only degrade, never improve, during the observation window. A follow-up commit that adds tests, improves error handling, or enhances the original code does NOT increase the quality multiplier above its current value.</p>
+<p><strong>Rationale for no positive adjustment:</strong></p>
+<ol>
+<li>
+<p><strong>Gaming vector.</strong> If improvements could raise quality, developers would submit intentionally incomplete PRs at 0.8, then submit a &#34;follow-up&#34; to boost to 1.1 (or some bonus). The follow-up is trivial -- add a few test cases, improve an error message -- but the TIER numerator inflates.</p>
+</li>
+<li>
+<p><strong>Asymmetric information.</strong> The system cannot deterministically distinguish between &#34;genuine improvement to already-good code&#34; and &#34;fixing an omission that should have been in the original PR.&#34; A human can tell the difference; the system cannot. Since this specification requires zero human input, the safe default is to not grant positive credit for something that might be a disguised fix.</p>
+</li>
+<li>
+<p><strong>The correct metric for improvements already exists.</strong> The follow-up improvement is itself a separate PR with its own outcome weight and quality score. The developer gets credit for the improvement through its own TIER contribution. Double-counting it as a quality boost to the original PR inflates the numerator twice for one piece of work.</p>
+</li>
+</ol>
+<p><strong>How to detect an improvement (for logging, not for scoring):</strong></p>
+<pre><code>is_improvement = (
+    commit.files_changed SUBSET_OF pr.files_changed AND
+    commit.message MATCHES /(?:add.*test|improve.*error|enhance|refactor|clean.*up|document)/i AND
+    commit.lines_added &gt; commit.lines_deleted AND  # Net addition, not replacement
+    NOT commit.message MATCHES /(?:fix|bug|broken|regression|hotfix)/i  # Not a fix
+)
+
+IF is_improvement:
+    LOG quality_event(pr.id, &#34;followup_improvement&#34;, timestamp)
+    # quality unchanged -- logged for analytics only
+</code></pre>
+<p><strong>Exception -- recovery from CI failure:</strong> If a PR has quality = 0.7 due to CI failure (Event 2), and a follow-up commit fixes the CI failure and CI subsequently passes, the quality does NOT recover to 1.0. The CI failure happened; the fact that it was fixed is good, but the quality signal (code was merged in a broken state) is real. The fix itself is its own PR/commit with its own quality score.</p>
+<hr>
+<h2 id="5-quality-resolution-algorithm">5. Quality Resolution Algorithm</h2>
+<p>When multiple events affect the same PR, the final quality is computed by this algorithm:</p>
+<pre><code>resolve_quality(pr_id):
+    events = get_quality_events(pr_id)
+
+    IF events IS EMPTY:
+        RETURN 1.0  # No degradation events, clean ship
+
+    # Separate events into categories
+    floor_events = []      # Events that set an absolute quality floor
+    additive_events = []   # Events that subtract from quality
+
+    FOR each event in events:
+        SWITCH event.type:
+            CASE &#34;ci_pass&#34;:
+                CONTINUE  # No effect
+
+            CASE &#34;ci_fail_flaky&#34;:
+                CONTINUE  # No effect (retroactively cleared)
+
+            CASE &#34;ci_fail&#34;, &#34;ci_fail_partial_flaky&#34;:
+                floor_events.append(0.7)
+
+            CASE &#34;followup_fix&#34;:
+                additive_events.append(-0.15)  # Applies once regardless of count
+
+            CASE &#34;revert_quality&#34;:
+                floor_events.append(0.1)
+
+            CASE &#34;revert_strategic&#34;:
+                floor_events.append(0.8)
+
+            CASE &#34;partial_revert&#34;:
+                floor_events.append(event.quality_value)
+
+            CASE &#34;incident_correlated&#34;:
+                floor_events.append(event.quality_value)
+
+            CASE &#34;hotfix_branch&#34;:
+                floor_events.append(0.4)
+
+            CASE &#34;downstream_ci_failure&#34;:
+                # Stacks per downstream service, max 3 services
+                additive_events.append(-0.20)  # Per unique downstream service
+
+            CASE &#34;no_ci_signal&#34;:
+                additive_events.append(-0.05)
+
+    # Step 1: Find the worst floor event
+    IF floor_events IS NOT EMPTY:
+        worst_floor = min(floor_events)
+    ELSE:
+        worst_floor = 1.0
+
+    # Step 2: Apply additive penalties
+    # De-duplicate follow-up fix (only one -0.15 regardless of count)
+    unique_followup_count = min(1, count(e for e in additive_events if e == -0.15))
+    # De-duplicate downstream failures per service (max 3)
+    unique_downstream_count = min(3, count(e for e in additive_events if e == -0.20))
+    # No-CI signal (only once)
+    unique_no_ci = min(1, count(e for e in additive_events if e == -0.05))
+
+    total_additive = (unique_followup_count * -0.15) + (unique_downstream_count * -0.20) + (unique_no_ci * -0.05)
+
+    # Step 3: Combine
+    # Start from worst floor, then apply additive penalties
+    quality = worst_floor + total_additive
+
+    # Step 4: Clamp
+    quality = max(0.1, min(1.0, quality))
+
+    RETURN quality
+</code></pre>
+<h3 id="worked-examples">Worked Examples</h3>
+<p><strong>Example A: Clean merge, no events</strong></p>
+<ul>
+<li>Events: [ci_pass]</li>
+<li>Floor events: none</li>
+<li>Additive events: none</li>
+<li>Quality = 1.0</li>
+</ul>
+<p><strong>Example B: CI fails on merge</strong></p>
+<ul>
+<li>Events: [ci_fail]</li>
+<li>Floor: min(0.7) = 0.7</li>
+<li>Additive: none</li>
+<li>Quality = 0.7</li>
+</ul>
+<p><strong>Example C: CI fails, then someone submits a follow-up fix</strong></p>
+<ul>
+<li>Events: [ci_fail, followup_fix]</li>
+<li>Floor: min(0.7) = 0.7</li>
+<li>Additive: -0.15</li>
+<li>Quality = 0.7 - 0.15 = 0.55</li>
+</ul>
+<p><strong>Example D: Clean merge, but PR causes a P1 incident with causal_score 0.8</strong></p>
+<ul>
+<li>Events: [ci_pass, incident_correlated(severity=P1, causal=0.8)]</li>
+<li>incident quality = 1.0 - (0.8 * (1.0 - 0.3)) = 1.0 - 0.56 = 0.44</li>
+<li>Floor: min(0.44) = 0.44</li>
+<li>Additive: none</li>
+<li>Quality = 0.44</li>
+</ul>
+<p><strong>Example E: PR gets fully reverted due to quality issues</strong></p>
+<ul>
+<li>Events: [ci_pass, revert_quality]</li>
+<li>Floor: min(0.1) = 0.1</li>
+<li>Additive: none</li>
+<li>Quality = 0.1</li>
+</ul>
+<p><strong>Example F: Incident fires AND a hotfix branch is created</strong></p>
+<ul>
+<li>Events: [incident_correlated(severity=P1, quality=0.3), hotfix_branch]</li>
+<li>Floor: min(0.3, 0.4) = 0.3</li>
+<li>Additive: none</li>
+<li>Quality = 0.3 (hotfix does not add additional penalty; worst-of applies)</li>
+</ul>
+<p><strong>Example G: CI fails, follow-up fix, AND downstream CI failure in 2 services</strong></p>
+<ul>
+<li>Events: [ci_fail, followup_fix, downstream_ci_failure(service_a), downstream_ci_failure(service_b)]</li>
+<li>Floor: min(0.7) = 0.7</li>
+<li>Additive: -0.15 + (-0.20 * 2) = -0.55</li>
+<li>Quality = 0.7 - 0.55 = 0.15</li>
+</ul>
+<p><strong>Example H: Partial revert of 40% of the code (quality reason)</strong></p>
+<ul>
+<li>Events: [partial_revert(fraction=0.4, reason=quality)]</li>
+<li>quality = max(0.1, 1.0 - (0.9 * 0.4)) = max(0.1, 0.64) = 0.64</li>
+<li>Floor: min(0.64) = 0.64</li>
+<li>Quality = 0.64</li>
+</ul>
+<p><strong>Example I: Strategic full revert (product decision)</strong></p>
+<ul>
+<li>Events: [revert_strategic]</li>
+<li>Floor: min(0.8) = 0.8</li>
+<li>Quality = 0.8</li>
+</ul>
+<hr>
+<h2 id="6-state-machine-diagram">6. State Machine Diagram</h2>
+<pre><code>                           PR MERGED
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │  State: PROVISIONAL  │
+                    │  quality = 1.0       │
+                    │  phase = 1           │
+                    └──────────┬──────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                 ▼
+         CI SIGNAL        REVERT SIGNAL    48h TIMER
+              │                │                 │
+         ┌────┴────┐     ┌────┴────┐            │
+         │ Pass    │     │Detected │            │
+         │ q=1.0   │     │         │            │
+         └─────────┘     │ Full?   │            │
+              │          ┌┴──┐     │            │
+         ┌────┴────┐    Yes  No    │            │
+         │ Fail    │     │    │    │            │
+         │         │     ▼    ▼    │            │
+         │ Flaky?  │  q=0.1  Partial            │
+         ├─Yes─►1.0│         q=f(frac)          │
+         │         │                            │
+         └─No──►0.7│                            │
+                   │                            │
+                   └───────────┬────────────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │  State: OBSERVING    │   T+48h to T+60d
+                    │  quality = Phase1_q  │
+                    │  phase = 2           │
+                    └──────────┬──────────┘
+                               │
+          ┌──────────┬─────────┼──────────┬──────────┐
+          ▼          ▼         ▼          ▼          ▼
+     FOLLOWUP    REVERT    INCIDENT   HOTFIX    DOWNSTREAM
+     FIX         (full/    CORR.     BRANCH    CI FAIL
+     q -= 0.15   partial)                      q -= 0.20
+                 q = 0.1   q = f(sev, q = 0.4  (per svc)
+                 or f()    causal)
+          │          │         │          │          │
+          └──────────┴─────────┴──────────┴──────────┘
+                               │
+                          (worst-of floors
+                           + sum of additives)
+                               │
+                               ▼ T+60d
+                    ┌─────────────────────┐
+                    │  State: FINAL        │
+                    │  quality = locked     │
+                    │  immutable            │
+                    └──────────────────────┘
+</code></pre>
+<p><strong>State transitions:</strong></p>
+<ul>
+<li>PROVISIONAL -&gt; OBSERVING: Automatic at T+48h</li>
+<li>PROVISIONAL -&gt; FINAL: Only if a full quality revert (0.1) occurs in Phase 1 (early finalization -- no point observing further)</li>
+<li>OBSERVING -&gt; FINAL: Automatic at T+60d</li>
+<li>FINAL -&gt; (no transitions): Terminal state</li>
+</ul>
+<hr>
+<h2 id="7-configuration-parameters">7. Configuration Parameters</h2>
+<p>All thresholds are configurable per organization. These are the defaults:</p>
+<pre><code>quality_config:
+  # Observation windows
+  phase1_duration_hours: 48
+  phase2_duration_days: 60
+  followup_fix_window_days: 14
+  downstream_failure_window_days: 14
+
+  # CI handling
+  flaky_rerun_window_minutes: 30
+  flaky_registry_ttl_days: 7
+  flaky_min_unrelated_failures: 2
+  flaky_clear_after_consecutive_passes: 10
+  no_ci_penalty: 0.05
+
+  # Degradation values
+  ci_failure_quality: 0.7
+  followup_fix_penalty: 0.15       # Subtractive
+  full_revert_quality: 0.1          # Quality reason
+  strategic_revert_quality: 0.8     # Business reason
+  hotfix_branch_quality: 0.4
+  downstream_failure_penalty: 0.20  # Subtractive, per service
+  downstream_failure_max_services: 3
+
+  # Partial revert
+  partial_revert_min_fraction: 0.20  # Below this, not a revert
+  partial_revert_max_fraction: 0.90  # Above this, full revert
+  partial_revert_quality_coefficient: 0.9   # quality = 1.0 - (coeff * fraction)
+  partial_revert_strategic_coefficient: 0.2  # Reduced coefficient for strategic
+
+  # Incident correlation
+  incident_causal_threshold: 0.4
+  incident_severity_map:
+    P0: 0.2
+    P1: 0.3
+    P2: 0.5
+    P3: 0.7
+
+  # Global
+  quality_floor: 0.1  # Absolute minimum quality (never 0.0 for merged code)
+</code></pre>
+<hr>
+<h2 id="8-data-model">8. Data Model</h2>
+<h3 id="quality_events-table">quality_events table</h3>
+<pre><code>CREATE TABLE quality_events (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pr_id           TEXT NOT NULL,           -- PR identifier (repo#number)
+    issue_id        TEXT,                    -- Linked issue identifier
+    event_type      TEXT NOT NULL,           -- See enum below
+    event_timestamp TIMESTAMPTZ NOT NULL,    -- When the event occurred
+    detected_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When TIER detected it
+    quality_impact  DECIMAL(3,2),            -- The quality value this event produces
+    metadata        JSONB NOT NULL DEFAULT &#39;{}&#39;, -- Event-specific data
+
+    -- Audit fields
+    source_event_id TEXT,                    -- ID of the webhook/signal that triggered this
+
+    CONSTRAINT valid_event_type CHECK (event_type IN (
+        &#39;ci_pass&#39;, &#39;ci_fail&#39;, &#39;ci_fail_flaky&#39;, &#39;ci_fail_partial_flaky&#39;,
+        &#39;no_ci_signal&#39;,
+        &#39;followup_fix&#39;, &#39;followup_improvement&#39;,
+        &#39;revert_quality&#39;, &#39;revert_strategic&#39;,
+        &#39;partial_revert&#39;,
+        &#39;incident_correlated&#39;,
+        &#39;hotfix_branch&#39;,
+        &#39;downstream_ci_failure&#39;
+    ))
+);
+
+CREATE INDEX idx_quality_events_pr ON quality_events(pr_id);
+CREATE INDEX idx_quality_events_type ON quality_events(event_type);
+CREATE INDEX idx_quality_events_timestamp ON quality_events(event_timestamp);
+</code></pre>
+<h3 id="quality_scores-table-materialized">quality_scores table (materialized)</h3>
+<pre><code>CREATE TABLE quality_scores (
+    pr_id           TEXT PRIMARY KEY,
+    issue_id        TEXT,
+    merged_at       TIMESTAMPTZ NOT NULL,
+    phase           TEXT NOT NULL DEFAULT &#39;provisional&#39;,  -- provisional, observing, final
+    quality         DECIMAL(3,2) NOT NULL DEFAULT 1.00,
+    last_updated    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finalized_at    TIMESTAMPTZ,            -- Set when phase = &#39;final&#39;
+    event_count     INT NOT NULL DEFAULT 0,
+    worst_event     TEXT,                    -- The event_type that had the most impact
+
+    CONSTRAINT valid_phase CHECK (phase IN (&#39;provisional&#39;, &#39;observing&#39;, &#39;final&#39;)),
+    CONSTRAINT valid_quality CHECK (quality &gt;= 0.10 AND quality &lt;= 1.00)
+);
+
+CREATE INDEX idx_quality_scores_phase ON quality_scores(phase);
+CREATE INDEX idx_quality_scores_issue ON quality_scores(issue_id);
+</code></pre>
+<h3 id="flaky_registry-table">flaky_registry table</h3>
+<pre><code>CREATE TABLE flaky_registry (
+    test_name       TEXT NOT NULL,
+    repo            TEXT NOT NULL,
+    first_seen      TIMESTAMPTZ NOT NULL,
+    last_seen       TIMESTAMPTZ NOT NULL,
+    failure_count   INT NOT NULL DEFAULT 1,
+    unrelated_pr_count INT NOT NULL DEFAULT 0,
+    consecutive_passes INT NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (test_name, repo)
+);
+
+CREATE INDEX idx_flaky_registry_last_seen ON flaky_registry(last_seen);
+</code></pre>
+<hr>
+<h2 id="9-implementation-priority">9. Implementation Priority</h2>
+<h3 id="phase-1-mvp----ship-first">Phase 1 (MVP -- ship first)</h3>
+<ol>
+<li>Event 1 &amp; 2: CI pass/fail detection (workflow_run webhooks)</li>
+<li>Event 4: Full revert detection (commit message pattern matching)</li>
+<li>The 48h/60d observation window and phase transitions</li>
+<li>The quality resolution algorithm</li>
+<li>Basic flaky registry (30-minute re-run rule only)</li>
+</ol>
+<h3 id="phase-2-core-quality-signals">Phase 2 (Core quality signals)</h3>
+<ol>
+<li>Event 3: Follow-up fix detection (file overlap + reference parsing)</li>
+<li>Event 5: Partial revert detection (inverse diff analysis)</li>
+<li>Event 7: Hotfix branch detection</li>
+<li>Full flaky registry with 7-day TTL and cross-PR failure tracking</li>
+</ol>
+<h3 id="phase-3-advanced-attribution">Phase 3 (Advanced attribution)</h3>
+<ol>
+<li>Event 6: Incident correlation (requires PagerDuty/OpsGenie integration)</li>
+<li>Event 8: Downstream CI failure detection (requires dependency graph)</li>
+<li>Causal score computation</li>
+<li>Revert reason classification (strategic vs. quality keywords)</li>
+</ol>
+<hr>
+<h2 id="10-validation-test-cases">10. Validation Test Cases</h2>
+<p>These test cases must pass before the quality system ships:</p>
+<pre><code>TEST 1: Clean merge
+  Input: PR merged, CI passes, no events for 60 days
+  Expected: quality = 1.0, phase = final
+
+TEST 2: CI failure
+  Input: PR merged, CI fails, no re-run
+  Expected: quality = 0.7
+
+TEST 3: Flaky CI recovery
+  Input: PR merged, CI fails, same SHA re-run passes in 15 minutes
+  Expected: quality = 1.0, event reclassified as ci_fail_flaky
+
+TEST 4: Flaky CI timeout
+  Input: PR merged, CI fails, same SHA re-run passes in 45 minutes
+  Expected: quality = 0.7 (30-minute window exceeded)
+
+TEST 5: Follow-up fix after clean merge
+  Input: PR merged clean, follow-up fix at day 7 touches same files
+  Expected: quality = 0.85
+
+TEST 6: Follow-up fix after CI failure
+  Input: PR merged, CI fails, follow-up fix at day 3
+  Expected: quality = 0.55 (0.7 - 0.15)
+
+TEST 7: Multiple follow-up fixes (no stacking)
+  Input: PR merged clean, three different follow-up fixes at days 2, 5, 9
+  Expected: quality = 0.85 (only one -0.15 penalty)
+
+TEST 8: Follow-up fix outside window
+  Input: PR merged clean, follow-up fix at day 20
+  Expected: quality = 1.0 (14-day window exceeded)
+
+TEST 9: Full quality revert
+  Input: PR merged, reverted at day 10, message says &#34;caused OOM&#34;
+  Expected: quality = 0.1
+
+TEST 10: Full strategic revert
+  Input: PR merged, reverted at day 30, message says &#34;product decision to remove feature&#34;
+  Expected: quality = 0.8
+
+TEST 11: Partial revert (50% quality)
+  Input: PR merged, 50% of lines reverted at day 15
+  Expected: quality = 0.55 (1.0 - 0.9 * 0.5)
+
+TEST 12: Partial revert (50% strategic)
+  Input: PR merged, 50% of lines reverted at day 15, strategic reason
+  Expected: quality = 0.90 (1.0 - 0.2 * 0.5)
+
+TEST 13: Partial revert below threshold
+  Input: PR merged, 15% of lines reverted
+  Expected: quality = 1.0 (below 20% threshold, ignored)
+
+TEST 14: P0 incident with high causal score
+  Input: PR merged, P0 incident fires, causal_score = 0.9
+  Expected: quality = 1.0 - (0.9 * 0.8) = 0.28
+
+TEST 15: P2 incident with threshold causal score
+  Input: PR merged, P2 incident fires, causal_score = 0.4
+  Expected: quality = 1.0 - (0.4 * 0.5) = 0.80
+
+TEST 16: Incident with below-threshold causal score
+  Input: PR merged, P1 incident fires, causal_score = 0.3
+  Expected: quality = 1.0 (below CAUSAL_THRESHOLD, no penalty)
+
+TEST 17: Hotfix branch created
+  Input: PR merged, hotfix branch created referencing this PR&#39;s issue
+  Expected: quality = 0.4
+
+TEST 18: Hotfix + incident (worst-of)
+  Input: PR merged, P1 incident (quality=0.3) AND hotfix branch created
+  Expected: quality = 0.3 (worst-of: min(0.3, 0.4))
+
+TEST 19: Downstream CI failure in one service
+  Input: PR merged, downstream CI fails in one service
+  Expected: quality = 0.80 (1.0 - 0.20)
+
+TEST 20: Downstream CI failure in three services
+  Input: PR merged, downstream CI fails in three services
+  Expected: quality = 0.40 (1.0 - 0.60)
+
+TEST 21: Combined worst case
+  Input: PR merged, CI fails (0.7), follow-up fix (-0.15), downstream fails in 2 services (-0.40)
+  Expected: quality = max(0.1, 0.7 - 0.15 - 0.40) = max(0.1, 0.15) = 0.15
+
+TEST 22: No CI configured
+  Input: PR merged, no CI webhook received for 48 hours
+  Expected: quality = 0.95 (1.0 - 0.05 no_ci_penalty)
+
+TEST 23: Improvement follow-up (no positive effect)
+  Input: PR merged clean, follow-up adds tests to same files, message says &#34;add tests for auth module&#34;
+  Expected: quality = 1.0 (improvement logged but no quality change)
+
+TEST 24: Revert outside observation window
+  Input: PR merged, reverted at day 65
+  Expected: quality = 1.0 (finalized at day 60, revert ignored for this PR)
+
+TEST 25: Phase transition timing
+  Input: PR merged at T=0, CI passes at T+1h, follow-up fix at T+36h
+  Expected at T+36h: quality = 0.85, phase = provisional
+  Expected at T+48h: quality = 0.85, phase = observing
+  Expected at T+60d: quality = 0.85, phase = final
+</code></pre>
+<hr>
+<h2 id="11-dashboard-presentation">11. Dashboard Presentation</h2>
+<p>The quality multiplier appears in the dashboard with the following visual treatment:</p>
+<table>
+<thead>
+<tr>
+<th>Quality Range</th>
+<th>Label</th>
+<th>Color</th>
+<th>Icon</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1.0</td>
+<td>Clean Ship</td>
+<td>Green</td>
+<td>Checkmark</td>
+</tr>
+<tr>
+<td>0.90 - 0.99</td>
+<td>Minor Deduction</td>
+<td>Light Green</td>
+<td>Checkmark (dimmed)</td>
+</tr>
+<tr>
+<td>0.70 - 0.89</td>
+<td>Issues Detected</td>
+<td>Yellow</td>
+<td>Warning</td>
+</tr>
+<tr>
+<td>0.40 - 0.69</td>
+<td>Significant Issues</td>
+<td>Orange</td>
+<td>Alert</td>
+</tr>
+<tr>
+<td>0.10 - 0.39</td>
+<td>Severe Quality Failure</td>
+<td>Red</td>
+<td>Error</td>
+</tr>
+</tbody>
+</table>
+<p>Each PR in the dashboard shows:</p>
+<ul>
+<li>Current quality value</li>
+<li>Phase (provisional / observing / final)</li>
+<li>Event timeline (chronological list of quality events with timestamps)</li>
+<li>Days remaining in observation window (if not final)</li>
+</ul>
+<hr>
+<h2 id="12-relationship-to-adversarial-analysis-mitigations">12. Relationship to Adversarial Analysis Mitigations</h2>
+<p>This specification directly addresses the following adversarial analysis findings:</p>
+<table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G-04: Quality Score Manipulation (30-day window too short)</td>
+<td>Extended to 60-day window with two phases</td>
+</tr>
+<tr>
+<td>G-04: Follow-up-as-new-issue pattern</td>
+<td>Event 3 detects follow-ups via file overlap even without explicit issue references</td>
+</tr>
+<tr>
+<td>O-02: Quality Multiplier Override Abuse</td>
+<td>No human override mechanism exists. Flaky CI is handled deterministically</td>
+</tr>
+<tr>
+<td>P-04: Speed-Quality Tradeoff Exploitation</td>
+<td>Graduated penalty scale (not binary cliffs). Partial reverts scale linearly</td>
+</tr>
+<tr>
+<td>M-05: Retroactive Score Changes</td>
+<td>Two-phase observation with &#34;provisional&#34; labeling and finalization at T+60d</td>
+</tr>
+<tr>
+<td>M-06: Reverted Work</td>
+<td>Both strategic and quality reverts handled with distinct penalties</td>
+</tr>
+</tbody>
+</table>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

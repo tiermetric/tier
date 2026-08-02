@@ -1,0 +1,331 @@
+# TIER server configuration — example.
+#
+# Use with:  tierd serve --config config.yaml
+#
+# Precedence (highest wins): CLI flag > env var > config file > builtin default.
+# A key you set here is only applied when you did NOT pass the equivalent CLI
+# flag AND its env var (where one exists) is unset.
+#
+# Strict parsing: an unknown/typo'd key makes `tierd serve` fail at startup
+# rather than silently ignoring it — so every key below is a real key.
+
+http:
+  # Listen address. Loopback by default. A non-loopback bind (e.g. 0.0.0.0:8080)
+  # is REFUSED unless api_token is set — fail-closed, so you never expose
+  # unauthenticated spend data or an open provider relay by accident.
+  # If port 8080 is already in use, change it here (boot fails on a bind conflict).
+  # Flag: --addr
+  addr: "127.0.0.1:8080"
+
+  # GitHub webhook HMAC secret (X-Hub-Signature-256). Empty = the
+  # POST /webhook/github route is NOT mounted (fail-closed). Prefer the env var
+  # or the "@/path/to/file" indirection form so the secret stays off the command
+  # line. Generate one with: openssl rand -hex 32
+  # Flag: --webhook-secret   Env: TIER_WEBHOOK_SECRET
+  webhook_secret: ""
+
+  # API token (write/admin scope). When set, required as
+  # `Authorization: Bearer <token>` on write endpoints and score GETs, and as
+  # `X-Tier-Token: <token>` on the proxies. Empty = auth disabled AND the bind is
+  # restricted to loopback (see addr). Prefer the env var or "@/path/to/file".
+  # Flag: --api-token   Env: TIER_API_TOKEN
+  api_token: ""
+
+  # Read-only viewer token (#190). A SECOND bearer credential that grants ONLY
+  # the read routes — GET /scores, /scores/{developer}, /metrics, and the
+  # dashboard data — and is rejected (403) on every write endpoint and the
+  # proxies. Hand this to a CFO/VP-Eng who needs the dashboard without write or
+  # erase power. Must DIFFER from api_token (equal values are refused at startup).
+  # A read token ALONE does not permit a non-loopback bind — that still requires
+  # api_token. Empty = no read scope. Prefer the env var or "@/path/to/file".
+  # Flag: --read-token   Env: TIER_READ_TOKEN
+  read_token: ""
+
+  # CIDRs of trusted reverse proxies / TLS terminators. When the direct peer is
+  # inside one of these, the failed-auth lockout keys on the client IP from
+  # X-Forwarded-For instead of the peer address. Empty/absent = X-Forwarded-For
+  # is NEVER trusted (the safe default). Use a full prefix, e.g. 10.0.0.0/8 or
+  # 127.0.0.1/32 — a bare IP is rejected. Any --trusted-proxy-cidr on the CLI
+  # discards this list entirely.
+  # Flag: --trusted-proxy-cidr (repeatable)
+  trusted_proxy_cidrs: []
+
+  # Per-IP failed-auth lockout (#36). Defence-in-depth on top of the bearer gate:
+  # after max_failures bad auths from one IP within failure_window, that IP is
+  # locked out (429) for lockout. A successful auth clears its counter. These
+  # thresholds are also settable via --auth-max-failures / --auth-failure-window /
+  # --auth-lockout; a CLI flag overrides the value here.
+  auth:
+    # Failed auths from one IP within failure_window before the 429 lockout.
+    # 0 DISABLES the limiter entirely (the bearer gate still applies). Absent =
+    # the builtin default (10).
+    # Flag: --auth-max-failures
+    max_failures: 10
+
+    # Sliding window over which max_failures is counted. Go duration STRING
+    # (e.g. "60s", "2m") — NOT a bare number (a raw integer would be read as
+    # nanoseconds). Absent = the builtin default (60s).
+    # Flag: --auth-failure-window
+    failure_window: "60s"
+
+    # How long a tripped IP stays locked out (429). Go duration STRING
+    # (e.g. "15m", "1h") — same string-not-number rule as failure_window.
+    # Absent = the builtin default (15m).
+    # Flag: --auth-lockout
+    lockout: "15m"
+
+# SQLite database path. This example ships a RELATIVE path so
+# `tierd serve --config config.example.yaml` runs verbatim on a fresh machine —
+# the database file is created under the current working directory. For a real
+# deployment, set an ABSOLUTE path you can write to, e.g. /var/lib/tier/tier.db.
+# NOTE: a literal "~" is NOT expanded here; the builtin default (when this key
+# is ABSENT) is expanded to ~/.tier/tier.db via the OS home directory.
+# Flag: --db
+db: "tier.db"
+
+# Path to a price-table YAML override. Empty = the embedded default price table.
+# A bad file fails startup (never a silent fallback).
+# Flag: --prices   Env: TIER_PRICES
+prices_file: ""
+
+# Zero-outcome tripwire look-back window, in days (#189). tierd fails LOUD — a
+# WARN log plus the tier_zero_outcome_tripwire metric set to 1 — when AI cost
+# accrued in this window but ZERO outcomes were recorded, the silent-TIER-0 case
+# for trunk-based teams (direct pushes never fire a pull_request merged event) or
+# a broken GitHub webhook. Checked once at startup and hourly thereafter. Must be
+# >= 1. Absent = the builtin default (7).
+# Flag: --zero-outcome-window-days
+zero_outcome_window_days: 7
+
+# Reporting mode (#185). REQUIRED — `tierd serve` FAILS to start when this
+# resolves empty from flag, env, AND config, so an existing deployment can never
+# silently change who is named in its reports.
+#   team       — emit ONLY team-level aggregates; never name an individual. The
+#                safe posture under EU works-council / GDPR Art. 22 co-determination
+#                (Germany §87 BetrVG, France CSE, Netherlands WOR Art. 27). Teams
+#                with fewer than k_anonymity contributing developers collapse into
+#                an aggregate "other" bucket (their spend/outcomes stay in the
+#                totals — never dropped).
+#   developer  — keep named per-developer rows (only where per-individual
+#                measurement is lawful and consented; see docs/legal-and-privacy.md).
+# This example ships `team` as the safe default. `tierd score` (the local CLI) is
+# unaffected — the gate applies only to the served surfaces.
+# REQUIRED onboarding for `team` mode (#232): populate org_hierarchy via
+# `PUT /api/v1/org_hierarchy/{developer}` or the bulk `POST /api/v1/org_hierarchy`
+# BEFORE trusting /scores. With no hierarchy, every developer falls under the
+# k-anonymity floor into a single anonymous row and org spend allocation reads 0;
+# serve logs a startup WARN in that state.
+# Flag: --aggregation   Env: TIER_AGGREGATION
+aggregation: team
+
+# k-anonymity cohort floor for `aggregation: team` (#185). A team with fewer than
+# this many CONTRIBUTING developers is collapsed into the "other" aggregate so no
+# sub-k cohort is individually identifiable. Default 5; the HARD minimum is 3 —
+# serve refuses to start with a smaller value. Ignored in developer mode (but the
+# minimum is still enforced). Absent = the builtin default (5).
+# Flag: --k-anonymity   Env: TIER_K_ANONYMITY
+k_anonymity: 5
+
+proxy:
+  # Upstream Anthropic API URL for the /anthropic/ reverse proxy. Set to ""
+  # to disable the Anthropic proxy route.
+  # Flag: --anthropic-target
+  anthropic_target: "https://api.anthropic.com"
+
+  # Upstream OpenAI-compatible API URL for the /openai/ reverse proxy. Set to ""
+  # to disable the OpenAI proxy route.
+  # Flag: --openai-target
+  openai_target: "https://api.openai.com"
+
+watch:
+  # Git repositories to tail Claude Code JSONL for (live ingestion). An empty
+  # list disables live JSONL ingestion. Any --watch-repo on the CLI discards
+  # this list entirely.
+  # Flag: --watch-repo (repeatable)
+  repos: []
+
+  # Optional: pin a watched repository's canonical "owner/repo" identity (#231).
+  # Config-only; there is no CLI flag.
+  #
+  # Absent, TIER reads the repository's remote.origin.url. If that is missing too,
+  # the rows are stored as "unqualified" (logged once per repo) and issues sharing
+  # a number across repositories will fuse.
+  #
+  # SET THIS FOR FORKS. A contributor whose origin is "alice/tier" produces cost
+  # attributed to alice/tier, while the upstream webhook records outcomes against
+  # tiermetric/tier — so their cost never joins their outcomes. Nothing but an
+  # explicit override can fix that.
+  #
+  # Example:
+  #   repo_slugs:
+  #     /Users/alice/src/tier: tiermetric/tier
+  repo_slugs: {}
+
+outcomes:
+  # Push-to-default-branch outcome capture (#196). OFF by default. When true, a
+  # qualifying direct commit to the default branch becomes a DEGRADED outcome so
+  # trunk-based teams (who commit straight to main behind feature flags and never
+  # fire a pull_request merged event) aren't silently scored ~0.
+  #
+  # The push grain is deliberately NOT comparable to PR-grain outcomes: a GitHub
+  # push payload carries no diff stats and the webhook has no local clone, so each
+  # push outcome takes the degraded 0.5 weight (weight_source='push') and all
+  # qualifying commits sharing an issue within one UTC day collapse into ONE outcome
+  # (source='push'). Scoring/audit views can segment on source to keep the two grains
+  # apart. A squash-merged PR is captured once (via the pull_request webhook), not
+  # twice — its push is deduped against the stored merge commit SHA.
+  # Flag: --push-capture   Env: TIER_PUSH_CAPTURE
+  push_capture: false
+
+  # Generated / vendored path deny-list (#240, audit C4). A push-captured direct
+  # commit whose changed files are ALL generated — a regenerated protobuf, a
+  # `go mod vendor` sync, a lockfile bump — carries no engineering outcome and
+  # must not earn a degraded push outcome. Only the push-capture path is affected;
+  # PR-labelled and PR-heuristic weights are untouched (the pull_request payload
+  # carries no per-file list and TIER makes no outbound GitHub API call by design).
+  # Absent → the built-in default set shown below. An explicit [] disables all
+  # exclusion. Pattern shapes: a trailing "/" is a directory prefix (matched at
+  # the repo root or any nested segment), a leading "*" is a filename suffix, and
+  # a bare token is an exact basename anywhere in the tree.
+  generated_paths:
+    - "vendor/"
+    - "node_modules/"
+    - "*.pb.go"
+    - "*_generated.go"
+    - "*.gen.go"
+    - "go.sum"
+    - "package-lock.json"
+    - "yarn.lock"
+    - "pnpm-lock.yaml"
+    - "Cargo.lock"
+    - "poetry.lock"
+    - "Gemfile.lock"
+    - "composer.lock"
+
+  # PR size-label -> outcome-weight overrides (#244). TIER recognises GitHub's
+  # size/xs..xl labels (and the bare xs..xl forms) out of the box; set this ONLY
+  # if your org uses DIFFERENT label names (e.g. "size: M" with a space, "size-l",
+  # or an S-prefixed scheme). Only the NAMES are configurable — every weight MUST
+  # be one of the fixed scale 0.5, 1, 3, 5, 8 (an off-scale value FAILS startup) so
+  # scores stay comparable across orgs. Matching is case-insensitive, and a custom
+  # table REPLACES the built-ins (it does not merge). A configured match still
+  # records weight_source='label'. Absent or {} = the built-in table is used
+  # unchanged:
+  #   size/xs, xs: 0.5   size/s, s: 1   size/m, m: 3   size/l, l: 5   size/xl, xl: 8
+  # Example override for an org whose labels are "S".."XXL" (note XXL maps to the
+  # top weight — there is no sixth bucket):
+  #   size_labels:
+  #     "xs": 0.5
+  #     "s": 1
+  #     "m": 3
+  #     "l": 5
+  #     "xl": 8
+  #     "xxl": 8
+  size_labels: {}
+
+# collectors — OPTIONAL org-level spend pollers, DISABLED by default.
+# The whole section is commented out so this example runs verbatim. To
+# enable a poller, uncomment its block (`collectors:` + the block) and set
+# a real api_key (prefer the "@/path/to/file" indirection form) and org.
+# collectors:
+  # Anthropic Admin API poller (#138). Captures ORG-LEVEL spend not seen by the
+  # JSONL watcher or the reverse proxy (CI agents, direct-to-API tools, laptops
+  # without tierd) by polling the provider's own usage/cost reports. Absent this
+  # block, the poller is DISABLED. There is NO CLI flag or env var for it — it is
+  # config-file only.
+  #
+  # DOUBLE-COUNT SAFE: it ingests only the settled-day REMAINDER (org aggregate
+  # minus what the proxy/JSONL already captured) under the "unattributed"
+  # developer, so spend captured per-request is never counted twice.
+  # anthropic_admin:
+    # Org Admin API key (sk-ant-admin…). Prefer the "@/path/to/file" indirection
+    # form so the key never appears on the command line or in this file. Required
+    # to enable the poller.
+    # api_key: "@/etc/tier/anthropic-admin-key"
+
+    # Org identifier used as the org_actual_spend + attribution key. Required.
+    # org: "myorg"
+
+    # Poll cadence. Optional; default 1h; minimum 5m (validated at startup).
+    # poll_interval: "1h"
+
+    # The poller reconciles cost against org_actual_spend rows scoped to
+    # source='anthropic-admin', so other-provider pollers and manual finance rows
+    # (other sources) for the same (org, period) coexist safely — spend is stored
+    # per-source and summed on read. ⚠ Just don't ALSO hand-post THIS org's
+    # Anthropic spend via POST /api/v1/org_actual_spend (it lands under 'manual' and
+    # the summed read would double-count the Anthropic invoice). The poller owns the
+    # Anthropic feed; record only other providers' spend manually.
+
+  # OpenAI Usage/Costs API poller (#139). The structural twin of anthropic_admin
+  # above, for the OpenAI side: captures ORG-LEVEL OpenAI spend not seen by the
+  # JSONL watcher or the reverse proxy by polling OpenAI's own Usage/Costs
+  # reports. Absent this block, the poller is DISABLED. Config-file only (no CLI
+  # flag or env var).
+  #
+  # DOUBLE-COUNT SAFE: same settled-day REMAINDER model as anthropic_admin. It
+  # also carves OpenAI's cached tokens out of input (input_cached_tokens is a
+  # SUBSET of input_tokens), so cached prompt tokens are never double-counted.
+  # openai_usage:
+    # Org admin/owner API key. Prefer the "@/path/to/file" indirection form so
+    # the key never appears on the command line or in this file. Required to
+    # enable the poller.
+    # api_key: "@/etc/tier/openai-admin-key"
+
+    # Org identifier used as the org_actual_spend + attribution key. Required.
+    # org: "myorg"
+
+    # Poll cadence. Optional; default 1h; minimum 5m (validated at startup).
+    # poll_interval: "1h"
+
+    # Reconciles cost against org_actual_spend rows scoped to
+    # source='openai-usage', so it never cannibalizes another provider's or a
+    # manual finance row for the same (org, period) — spend is stored per-source
+    # and summed on read. ⚠ Same caveat as anthropic_admin: don't ALSO hand-post
+    # THIS org's OpenAI spend via POST /api/v1/org_actual_spend (it lands under
+    # 'manual' and the summed read would double-count). The poller owns the
+    # OpenAI feed; record only other providers' spend manually.
+
+  # Codex rollout-log collector (#464). UNLIKE the two pollers above this is a
+  # LOCAL, per-developer, per-call capture path with NO credential: it reads the
+  # rollout logs the Codex CLI already writes to
+  # ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl. It is the Codex twin of the
+  # Claude Code JSONL watcher, and the ONLY way TIER captures Codex — Codex
+  # speaks the OpenAI *Responses* API, which the reverse proxy's Chat
+  # Completions parser cannot read (#463), so a Codex call through the proxy
+  # yields no token event at all.
+  #
+  # Also enablable with the --codex-rollout flag (which wins over this block's
+  # absence, and uses the defaults below).
+  #
+  # SCOPE: attributes to the SAME repos as the JSONL watcher (watch.repos /
+  # --watch-repo, honoring watch.repo_slugs). A Codex session whose cwd is
+  # outside every watched repo is DROPPED, not attributed. With no watched repo
+  # the collector stays disabled and logs why.
+  #
+  # ACCURACY: per-call usage is derived by DIFFERENCING Codex's cumulative
+  # total_token_usage snapshots — never by summing last_token_usage, which
+  # double-counts Codex's re-emitted token_count events (measured: a 17%
+  # overcount on a real session). Containment invariants are FATAL: a log whose
+  # own numbers contradict each other contributes zero events rather than a
+  # confidently wrong cost.
+  # codex_rollout:
+    # Override the ~/.codex/sessions root. Optional; empty uses the default.
+    # Useful when CODEX_HOME is relocated.
+    # sessions_dir: "/Users/me/.codex/sessions"
+
+    # Re-scan cadence. Optional; default 5m; minimum 30s (validated at startup).
+    # Re-scanning is idempotent — events carry stable keys, so a re-scan
+    # converges on the same rows instead of duplicating spend. The FIRST pass
+    # backfills every rollout log on disk; after that an internal scan cursor
+    # bounds each pass to the files touched since the last one, so the cost per
+    # tick tracks what changed rather than how much Codex history you have.
+    # scan_interval: "5m"
+
+# ---------------------------------------------------------------------------
+# Flags that have NO config-file key yet (set them via flag or env var):
+#
+#   --log-format  (env TIER_LOG_FORMAT)   auto | json | text
+#   --log-level   (env TIER_LOG_LEVEL)    debug | info | warn | error
+#   --config                              path to this file
+# ---------------------------------------------------------------------------

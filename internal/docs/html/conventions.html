@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adoption conventions — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="adoption-conventions">Adoption conventions</h1>
+<p>TIER silently depends on two conventions. Following them is the difference
+between meaningful scores and a wall of <code>unattributed</code> cost with no explanation.</p>
+<h2 id="pr-size-labels--outcome-weight">PR size labels → outcome weight</h2>
+<blockquote>
+<p>The weight scale below is <strong>normative and versioned</strong> — it is the canonical
+rubric, stamped as <code>rubric.version</code> in every <code>/scores</code> response. See
+<a href="rubric.html" rel="nofollow">rubric.md</a> for the versioned rubric, its worked per-size and
+per-<code>work_type</code> calibration examples, and the &#34;what you may / may not compare&#34;
+rules. This section documents how the label is <em>read</em>; rubric.md defines what
+each size <em>means</em>.</p>
+<p><strong>Operator override caveat.</strong> <code>outcomes.size_labels</code> lets an operator rename
+which labels map onto the fixed <code>{0.5, 1, 3, 5, 8}</code> scale. Renaming a label is
+fine, but mapping a size to a <em>different</em> weight than rubric.md&#39;s calibration
+(e.g. everyday work as <code>l</code>/5 rather than <code>m</code>/3) is a <strong>local divergence the
+stamp cannot see</strong> — two deployments both stamp <code>rubric.version: 1</code> while
+scoring the same work differently. Cross-org <code>cost_per_point</code> comparison
+therefore requires matched <code>size_labels</code> on top of matched versions;
+same-org-over-time is unaffected because one deployment&#39;s config is stable.</p>
+</blockquote>
+<p>The <strong>weight</strong> of a merged PR is its size. TIER reads it from a GitHub label. The
+match is case-insensitive and accepts both the <code>size/</code> prefix and the bare form:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>size/xs</code> or <code>xs</code></td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><code>size/s</code> or <code>s</code></td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>size/m</code> or <code>m</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>size/l</code> or <code>l</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>size/xl</code> or <code>xl</code></td>
+<td>8</td>
+</tr>
+</tbody>
+</table>
+<p><strong>No recognized label?</strong> TIER falls back to a lines/files heuristic:</p>
+<pre><code>weight = min(8, max(0.5, ceil(log2(lines_changed + files_changed × 10 + 1))))
+</code></pre>
+<p>The heuristic is a reasonable default, but explicit labels are more accurate and
+consistent — a two-line change to a critical path and a two-line typo fix get the
+same heuristic weight, which labels let you correct.</p>
+<h2 id="issue-references--attribution">Issue references → attribution</h2>
+<p>Cost and outcomes are attributed to an <strong>issue id</strong> derived from the branch name
+or the PR/commit body. These are the exact accepted formats:</p>
+<table>
+<thead>
+<tr>
+<th>Where</th>
+<th>Format</th>
+<th>Example</th>
+<th>Resolves to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>branch</td>
+<td><code>&lt;prefix&gt;/&lt;N&gt;-&lt;slug&gt;</code> — trailing <code>-</code>/<code>_</code> optional; <code>N</code> has no leading zero</td>
+<td><code>feature/42-auth</code>, <code>feature/42</code></td>
+<td><code>issue-42</code></td>
+</tr>
+<tr>
+<td>branch</td>
+<td>tracker key <code>[A-Z][A-Z0-9]+-&lt;N&gt;</code></td>
+<td><code>fix/TIER-99-crash</code></td>
+<td><code>TIER-99</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td><code>closes #N</code>, <code>fixes #N</code>, <code>resolves #N</code> (case-insensitive)</td>
+<td><code>closes #42</code></td>
+<td><code>issue-42</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td>tracker key <code>[A-Z][A-Z0-9]+-&lt;N&gt;</code></td>
+<td><code>part of PROJ-123</code></td>
+<td><code>PROJ-123</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td>whitespace-preceded <code>#N</code></td>
+<td><code>see #42</code></td>
+<td><code>issue-42</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Branch precedence:</strong> a tracker key (e.g. <code>TIER-99</code>) takes priority over a bare
+numeric segment when both appear in a branch.</p>
+<p><strong>PR-body precedence:</strong> <code>closes #N</code> (highest confidence) &gt; tracker key
+(<code>PROJ-123</code>) &gt; bare <code>#N</code> (lowest confidence). This lets a Jira/Linear shop that
+references a tracker key in the PR body — with a generic branch name — still get
+attribution, while an explicit <code>closes #N</code> always wins when present.</p>
+<h3 id="the-year-guard-a-deliberate-tradeoff">The year guard (a deliberate tradeoff)</h3>
+<p>A <strong>bare</strong> 4-digit branch segment in the range <strong>1900–2099</strong> is treated as a
+calendar year, not an issue number, and is <strong>dropped</strong>:</p>
+<ul>
+<li><code>release/2024-fix</code> → <em>no attribution</em> (2024 read as a year, not issue #2024)</li>
+<li><code>release/2024</code> → <em>no attribution</em></li>
+</ul>
+<p>This biases toward the far more common release/date-stamp branch over an issue
+whose number happens to land in the year band. Numbers with 1–3 digits or 5+
+digits are never guarded (<code>feature/42</code>, <code>bugfix/1234</code>, <code>feature/12345</code> all
+attribute normally; <code>feature/2100</code> attributes because it is above the window).</p>
+<p>The guard <strong>skips</strong> a year segment rather than aborting, so a branch that
+carries both a date stamp and an issue number still attributes: <code>release/2024-42</code>
+→ <code>issue-42</code> (the <code>2024</code> is skipped, <code>42</code> is used).</p>
+<p>If your issue numbers genuinely reach 1900–2099, disambiguate with an <strong>explicit
+marker</strong>, where no guard applies: use a tracker key (<code>fix/PROJ-2024-…</code> →
+<code>PROJ-2024</code>) or reference <code>#2024</code> in the PR body.</p>
+<h3 id="things-that-do-not-match-and-why">Things that do NOT match (and why)</h3>
+<ul>
+<li><code>release/2024-fix</code> — a bare 4-digit year-band segment; guarded as a date
+stamp (see above). Use a tracker key or a <code>#N</code> body reference for issue 2024.</li>
+<li><code>## Section</code> — a Markdown heading; the <code>#</code> is not whitespace-preceded by a
+digit, so it never matches an issue.</li>
+<li><code>#FF0000</code> — a hex color, not a numeric issue reference.</li>
+<li><code>main</code>, <code>master</code>, <code>HEAD</code> — excluded by name; work on these branches is not
+attributed to an issue.</li>
+</ul>
+<blockquote>
+<p><strong>Caveat for PR bodies:</strong> because tracker keys are now read from free-form
+body text, prose tokens shaped like a key — <code>UTF-8</code>, <code>SHA-256</code>, <code>HTTP-2</code> — can
+be mis-read as an issue when the body has no other reference. An explicit
+<code>closes #N</code> overrides this, so prefer it whenever a PR closes a GitHub issue.</p>
+</blockquote>
+<h3 id="consequence-of-a-miss">Consequence of a miss</h3>
+<p>If neither the branch nor the PR body yields an issue reference:</p>
+<ul>
+<li><strong>Cost</strong> from that session lands in an <code>unattributed</code> bucket instead of against
+an issue.</li>
+<li><strong>PR outcome</strong> is skipped — a merged PR with no derivable issue records no
+outcome, so it contributes nothing to the TIER numerator.</li>
+</ul>
+<p>The fix is always the same: name branches <code>&lt;prefix&gt;/&lt;issue-number&gt;-&lt;slug&gt;</code> (for
+example <code>fix/127-webhook-guide</code>) and reference the issue in the PR body with
+<code>closes #&lt;n&gt;</code>.</p>
+<h2 id="multi-repo-organizations">Multi-repo organizations</h2>
+<p>A GitHub issue number is only unique <strong>within one repository</strong>. Repo A&#39;s issue #42
+and repo B&#39;s issue #42 are different work. TIER therefore stores a repository
+qualifier alongside every cost row and every outcome row, in its own <code>repo</code> column
+(#231).</p>
+<p>The <code>issue_id</code> value itself is unchanged — it is still <code>issue-42</code> — so nothing that
+reads <code>issue_id</code> needs to change. The repository lives beside it.</p>
+<table>
+<thead>
+<tr>
+<th>Producer</th>
+<th>Where <code>repo</code> comes from</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GitHub webhook</td>
+<td><code>repository.full_name</code> on the delivery</td>
+</tr>
+<tr>
+<td>JSONL collector / <code>tierd ship</code></td>
+<td><code>watch.repo_slugs</code> override, else the repo&#39;s <code>remote.origin.url</code></td>
+</tr>
+<tr>
+<td><code>POST /api/v1/events</code>, <code>POST /api/v1/outcomes</code></td>
+<td>the optional <code>repo</code> field</td>
+</tr>
+<tr>
+<td>Reverse proxy</td>
+<td>the optional <code>X-Tier-Repo</code> request header</td>
+</tr>
+</tbody>
+</table>
+<p>All of them are normalized to a canonical, lowercase <code>owner/repo</code> (no scheme, no
+host, no trailing <code>.git</code>). GitLab nested groups keep their full path
+(<code>group/subgroup/project</code>).</p>
+<p><strong>Tracker keys are not qualified.</strong> <code>TIER-99</code> and <code>PROJ-9</code> are unique across an
+organization by construction, so they are stored verbatim.</p>
+<p><strong>When the repository cannot be determined</strong> the row stores the reserved value
+<code>unqualified</code>. That happens for rows captured before this feature existed, for the
+reverse proxy when a client omits <code>X-Tier-Repo</code>, and for a checkout with no
+<code>origin</code> remote. Such rows are not lost: cost and outcomes join <strong>tolerantly</strong> —
+the repository disambiguates only when <em>both</em> sides name a real one. A repo-blind
+cost row still counts toward its issue&#39;s outcome, exactly as it did before.</p>
+<p><strong>Forks need an explicit override.</strong> A contributor working from a fork has
+<code>origin = alice/tier</code>, while the upstream webhook reports <code>tiermetric/tier</code>. Nothing
+can reconcile those automatically, so name the upstream slug in config:</p>
+<pre><code>watch:
+  repos:
+    - /Users/alice/src/tier
+  repo_slugs:
+    /Users/alice/src/tier: tiermetric/tier
+</code></pre>
+<p>Without it, that contributor&#39;s cost is attributed to <code>alice/tier</code> and never joins
+the outcomes recorded against <code>tiermetric/tier</code>.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

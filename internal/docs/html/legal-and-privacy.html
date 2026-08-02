@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legal &amp; Privacy: Deploying TIER Where Per-Developer Measurement Is Regulated — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="legal--privacy-deploying-tier-where-per-developer-measurement-is-regulated">Legal &amp; Privacy: Deploying TIER Where Per-Developer Measurement Is Regulated</h1>
+<blockquote>
+<p>⚠️ <strong>This document is not legal advice.</strong> It is deployment and positioning
+guidance written by engineers, not lawyers. Employment law, works-council
+obligations, and data-protection rules vary by country, by industry, and over
+time, and they turn on facts specific to your organization. <strong>Before deploying
+TIER in a way that measures or ranks named individuals, consult your own legal
+counsel, your Data Protection Officer (DPO), and — where one exists — your
+works council or employee representative body.</strong> Nothing here creates a
+compliance guarantee.</p>
+</blockquote>
+<h2 id="why-this-document-exists">Why this document exists</h2>
+<p>TIER attributes AI token spend to outcomes and, in its default modes, reports
+that attribution <strong>per named developer</strong>. In several of TIER&#39;s target markets,
+measuring or ranking the performance of named employees is legally
+constrained — sometimes requiring prior co-determination or works-council
+agreement, sometimes restricted outright under data-protection law. Adopters
+need to understand that exposure <em>before</em> their legal and HR review, not after.</p>
+<p>This guide covers: what TIER actually measures and stores; the EU labor-law
+exposure of per-developer ranking; TIER&#39;s posture under GDPR Article 22
+(automated profiling); when a Data Protection Impact Assessment (DPIA) is
+indicated; the works-council consultation prerequisites; and a
+jurisdiction-by-jurisdiction decision table for choosing a deployment mode.</p>
+<h2 id="tiers-stance-in-writing">TIER&#39;s stance, in writing</h2>
+<p><strong>TIER is a diagnostic, not a performance-appraisal input.</strong> It is designed to
+answer an organizational question — &#34;are we getting dollar-value outcomes for
+our AI token spend?&#34; — not to grade individuals. The metric is deliberately
+aggregate-friendly (team-level rollups are first-class), and the project&#39;s
+position is that TIER numbers <strong>should not be fed into individual performance
+reviews, compensation, promotion, ranking-and-yanking, or disciplinary
+processes.</strong></p>
+<p>Two independent reasons make this the right posture:</p>
+<ol>
+<li><strong>Legal.</strong> In co-determined jurisdictions (below), using a measurement system
+as an input to individual appraisal is precisely the use that triggers the
+heaviest obligations, and can be unlawful without prior agreement.</li>
+<li><strong>Methodological.</strong> Per-developer TIER is easily distorted — by task mix,
+pairing, seniority, review load, and the incentive to game any number that is
+tied to a person&#39;s evaluation. TIER measures <em>spend efficiency of a body of
+work</em>, which is a team-and-portfolio property, not a fair proxy for
+individual worth.</li>
+</ol>
+<p>Treat any per-developer view as an engineering diagnostic (e.g. &#34;which cost
+attribution is missing an issue reference?&#34;), and make organizational decisions
+from <strong>team-level</strong> numbers.</p>
+<h2 id="what-tier-measures-and-stores-and-what-it-never-touches">What TIER measures and stores (and what it never touches)</h2>
+<p>The single most important fact for a privacy review: <strong>TIER never reads,
+transmits, or stores prompt or completion content, source code, or file
+contents.</strong> Its parsers are field allowlists — token counts and metadata only.</p>
+<p>Full, code-grounded detail is in <strong><a href="privacy.html" rel="nofollow">docs/privacy.md</a></strong> (guarantee
+verified against the code on 2026-07-04). In summary, TIER stores in a single
+local SQLite file, with no external transmission by default:</p>
+<ul>
+<li>a <strong>developer identifier</strong> (an OS username, or a GitHub login for PR
+outcomes) plus any alias mapping you configure;</li>
+<li>an <strong>issue id</strong> derived from a branch name or PR/commit body;</li>
+<li><strong>model names</strong>, <strong>token counts</strong>, and <strong>list-price cost</strong> in micro-dollars;</li>
+<li><strong>PR metadata</strong> (number, author login, size-derived weight, quality, merge
+SHA); and</li>
+<li>two <strong>conditional</strong> stores that hold personal data and that an auditor should
+note specifically: <strong>watcher tail-state</strong> (only in live <code>--watch-repo</code> mode)
+and <strong>raw GitHub webhook payloads</strong> (only when the webhook path is enabled).
+The raw webhook payloads <em>do</em> contain contributor names, email addresses, PR
+titles, and commit messages — the same PR/commit metadata GitHub itself
+stores — bounded to roughly 90 days. See <a href="privacy.html" rel="nofollow">docs/privacy.md</a> for the
+exact fields, retention bounds, and how to store none of it (run without the
+webhook path).</li>
+</ul>
+<p>The privacy guarantee bounds <em>content</em>. It does <strong>not</strong> by itself resolve the
+<em>labor-law</em> question, because the developer identifier plus cost attribution is
+personal data about a named individual regardless of whether any prompt text is
+stored. That is the subject of the rest of this document.</p>
+<h2 id="single-tenant-reality-relevant-to-data-segregation-claims">Single-tenant reality (relevant to data-segregation claims)</h2>
+<p>TIER today is <strong>single-tenant with no organizational isolation.</strong> There is no
+<code>tenant_id</code> / org column: developer identifiers are global, so two
+organizations&#39; <code>alice</code> rows would collide. Practical consequences for a legal
+review:</p>
+<ul>
+<li><strong>Do not run TIER as a shared multi-org service.</strong> Run one instance per team
+or per organization. TIER cannot enforce data segregation between cohorts,
+business units, or legal entities within a single database — that separation
+must be achieved by running <strong>separate instances</strong> with separate database
+files and separate access control.</li>
+<li>Do not represent to a works council or DPA that TIER provides
+cross-team/cross-entity data isolation. It does not. The only isolation
+boundary that exists is the process and its local SQLite file (mode <code>0600</code>).</li>
+</ul>
+<h2 id="eu-labor-law-exposure-of-per-developer-ranking">EU labor-law exposure of per-developer ranking</h2>
+<p>In much of the EU, systems that monitor employee performance or behavior are
+subject to <strong>co-determination</strong> or <strong>works-council consultation</strong> before they
+may be introduced. Per-developer TIER — which ranks named developers by an
+efficiency number — is squarely the kind of system these rules govern. The
+threshold is generally the <em>capability</em> to monitor individual performance, not
+whether you subjectively intend to use it that way.</p>
+<h3 id="germany--betriebsrat-co-determination-87-betrvg">Germany — Betriebsrat co-determination (§87 BetrVG)</h3>
+<p>Under <strong>§87(1) No. 6 of the Betriebsverfassungsgesetz (BetrVG)</strong>, the works
+council (<strong>Betriebsrat</strong>) has a <strong>mandatory co-determination right</strong> over the
+introduction and use of &#34;technical devices designed to monitor the behavior or
+performance of employees.&#34; German case law reads this broadly: a system that is
+<em>objectively suitable</em> for monitoring individual performance is covered even if
+that is not its stated purpose. A per-developer TIER deployment is very likely
+in scope.</p>
+<ul>
+<li><strong>Consequence:</strong> where a Betriebsrat exists, introducing per-developer TIER
+generally requires a <strong>works agreement (Betriebsvereinbarung)</strong> negotiated in
+advance. Deploying without one can render the measurement unlawful and its
+outputs unusable, and can expose the employer to injunctive relief.</li>
+<li><strong>Team-only aggregate</strong> reporting that never surfaces individual performance
+substantially reduces (though a works council may still wish to be consulted
+about) this exposure.</li>
+</ul>
+<h3 id="france--cse-works-council-consultation">France — CSE works-council consultation</h3>
+<p>In France, introducing a tool capable of monitoring employee activity generally
+requires <strong>prior information-and-consultation of the CSE (Comité Social et
+Économique)</strong> (see, broadly, Art. L2312-38 of the Code du travail), and
+employees must be <strong>informed in advance</strong> of any system used to monitor their
+activity. The CNIL (the French DPA) has repeatedly emphasized proportionality
+and transparency for workplace monitoring. Per-developer measurement without
+prior CSE consultation and employee information is a live legal risk.</p>
+<h3 id="netherlands--works-council-consent-wor-art-27">Netherlands — works council consent (WOR Art. 27)</h3>
+<p>Under the <strong>Wet op de ondernemingsraden (WOR)</strong>, the works council
+(<strong>Ondernemingsraad</strong>) has a <strong>consent right (instemmingsrecht) under Article
+27</strong> over decisions to adopt, amend, or withdraw arrangements for personnel
+monitoring or for processing personal data of employees, including systems that
+monitor presence, behavior, or performance. Adopting per-developer TIER without
+the OR&#39;s prior consent can make the introduction voidable.</p>
+<h3 id="other-eueea-jurisdictions">Other EU/EEA jurisdictions</h3>
+<p>Most EU/EEA member states have an analogous works-council consultation or
+co-determination regime for employee-monitoring systems (e.g. Italy&#39;s Art. 4 of
+the Statuto dei Lavoratori, which restricts remote monitoring of workers).
+<strong>Assume consultation is required and confirm locally.</strong> The safe default in any
+EU/EEA jurisdiction is team-only aggregate reporting plus advance consultation.</p>
+<h2 id="gdpr-article-22-posture-automated-profiling">GDPR Article 22 posture (automated profiling)</h2>
+<p><strong>GDPR Article 22</strong> restricts decisions &#34;based solely on automated processing,
+including profiling,&#34; that produce <strong>legal effects</strong> or <strong>similarly
+significantly affect</strong> an individual. TIER&#39;s designed posture keeps it clear of
+Article 22:</p>
+<ul>
+<li><strong>TIER does not make decisions.</strong> It produces a diagnostic number. It does not
+automatically discipline, rank-and-yank, deny promotion, or alter compensation.</li>
+<li><strong>Keep a human in the loop and keep TIER out of appraisal.</strong> Article 22&#39;s
+strongest protections attach when an automated output <em>solely</em> drives a
+significant decision about a person. TIER&#39;s stance (above) — that its numbers
+are not an appraisal input — is what keeps a deployment out of that box. If an
+adopter <em>does</em> wire TIER outputs into individual HR decisions, they change the
+legal analysis and likely trigger Article 22 (and the co-determination regimes
+above) in full.</li>
+</ul>
+<p>Independently of Article 22, per-developer cost attribution is <strong>personal data</strong>
+under GDPR. The usual obligations apply: a <strong>lawful basis</strong> (legitimate interest
+will require a balancing test and is weakened by any appraisal use),
+<strong>transparency</strong> to the data subjects, <strong>data minimization</strong>, <strong>purpose
+limitation</strong>, and <strong>storage limitation</strong>. Team-only aggregate reporting that
+cannot single out an individual is the strongest data-minimization posture.</p>
+<h2 id="when-a-dpia-is-indicated">When a DPIA is indicated</h2>
+<p>A <strong>Data Protection Impact Assessment</strong> is required under <strong>GDPR Article 35</strong>
+when processing is &#34;likely to result in a high risk&#34; to individuals —
+explicitly including &#34;<strong>systematic and extensive evaluation of personal
+aspects ... based on automated processing, including profiling</strong>&#34; and
+&#34;<strong>systematic monitoring</strong>.&#34; Several EU DPAs list <em>employee monitoring</em> on their
+mandatory-DPIA lists.</p>
+<p><strong>Practical guidance:</strong></p>
+<ul>
+<li><strong>Per-developer deployment:</strong> treat a DPIA as <strong>expected</strong>. Systematic
+evaluation of employees&#39; work efficiency is a textbook high-risk case.</li>
+<li><strong>Team-only aggregate deployment:</strong> a DPIA is far less likely to be required,
+because processing that cannot single out an individual is not &#34;evaluation of
+personal aspects&#34; of a data subject — but document that reasoning and confirm
+with your DPO.</li>
+<li><strong>Do the DPIA before deployment,</strong> involve the DPO, and where consultation is
+required, sequence it with the works-council process (below). A DPIA is also
+the natural place to record the retention bounds and the conditional
+personal-data stores documented in <a href="privacy.html" rel="nofollow">docs/privacy.md</a>.</li>
+</ul>
+<h2 id="works-council-consultation-prerequisites-checklist">Works-council consultation prerequisites (checklist)</h2>
+<p>Where a works council or equivalent body exists, treat the following as
+prerequisites <strong>before</strong> per-developer TIER goes live. Adapt to local law with
+counsel:</p>
+<ol>
+<li><strong>Engage early.</strong> Bring the works council in at the design/decision stage, not
+after deployment. In Germany the co-determination right precedes introduction.</li>
+<li><strong>Document purpose and scope.</strong> State plainly that TIER is a spend-efficiency
+diagnostic, name what it measures, and — critically — commit in writing to
+what it will <strong>not</strong> be used for (individual appraisal, discipline,
+compensation, ranking).</li>
+<li><strong>Describe the data.</strong> Provide the <a href="privacy.html" rel="nofollow">docs/privacy.md</a> field list:
+what is stored, the no-content guarantee, retention bounds, and the
+conditional PII stores (watcher state, raw webhook payloads).</li>
+<li><strong>Prefer the least-intrusive mode.</strong> Offer team-only aggregate reporting as
+the default; justify any per-developer processing against necessity and
+proportionality.</li>
+<li><strong>Agree access controls and retention.</strong> Who can read scores; how long data
+is kept; how the single-tenant local database is protected.</li>
+<li><strong>Reach the required instrument</strong> — a Betriebsvereinbarung (DE), CSE
+information-and-consultation record (FR), or OR consent (NL) — before go-live.</li>
+<li><strong>Provide transparency to employees</strong> and a route to raise concerns.</li>
+<li><strong>Complete the DPIA</strong> and reconcile it with the consultation outcome.</li>
+</ol>
+<h2 id="deployment-decision-table-team-only-vs-per-developer-by-jurisdiction">Deployment decision table: team-only vs per-developer, by jurisdiction</h2>
+<p>The recommended deployment mode depends on where your developers are employed
+(the location of the <em>employees measured</em>, not the company HQ). &#34;Team-only&#34; here
+means reporting that never surfaces an individual developer&#39;s performance.</p>
+<blockquote>
+<p><strong>Availability note (accurate as of 2026-07-09):</strong> TIER now ships a dedicated
+<strong>team-only aggregation mode</strong> with a k-anonymity floor (issue <strong>#185</strong>). It is
+selected by a <strong>REQUIRED</strong> <code>--aggregation team|developer</code> setting on
+<code>tierd serve</code> (env <code>TIER_AGGREGATION</code>, config key <code>aggregation</code>): there is <strong>no
+silent default</strong> — <code>tierd serve</code> refuses to start until you choose, so an
+existing deployment can never change its reporting posture on upgrade by
+accident. In <code>team</code> mode <code>GET /api/v1/scores</code>, the dashboard, and
+<code>GET /api/v1/scores/{developer}</code> <strong>never</strong> return an individual developer name:
+named rows are replaced by team aggregates, and any team with fewer than the
+k-anonymity floor of <strong>contributing</strong> developers is collapsed into an aggregate
+<strong>&#34;other&#34;</strong> bucket (its spend and outcomes remain in the totals — never
+dropped — so team numbers stay honest). The floor defaults to <strong>k = 5</strong> with a
+<strong>hard minimum of 3</strong> (<code>--k-anonymity</code>, env <code>TIER_K_ANONYMITY</code>, config key
+<code>k_anonymity</code>); <code>tierd serve</code> refuses to start with a smaller value. The local
+<code>tierd score</code> CLI is a deliberate carve-out — it is a single-operator tool that
+reads the invoking user&#39;s own JSONL, not a served multi-viewer surface, so it
+is not gated. <strong>Still restrict access and consult as required:</strong> team mode
+removes the technical capability to surface individuals, but the underlying
+database still stores per-developer identifiers (see the storage note below),
+so run one instance per cohort and follow the works-council / DPIA steps below.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Jurisdiction of measured employees</th>
+<th>Recommended mode</th>
+<th>Prerequisites before go-live</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Germany (DE)</strong></td>
+<td><strong>Team-only</strong></td>
+<td>Betriebsrat co-determination; works agreement (§87 BetrVG) if any individual-level capability remains; DPIA</td>
+<td>Per-developer monitoring is co-determined under §87(1) No. 6; suitability to monitor is enough to trigger it.</td>
+</tr>
+<tr>
+<td><strong>France (FR)</strong></td>
+<td><strong>Team-only</strong></td>
+<td>Prior CSE information-and-consultation; advance employee notice; DPIA</td>
+<td>Monitoring tools require CSE consultation and transparency (Code du travail L2312-38; CNIL guidance).</td>
+</tr>
+<tr>
+<td><strong>Netherlands (NL)</strong></td>
+<td><strong>Team-only</strong></td>
+<td>OR consent under WOR Art. 27; DPIA</td>
+<td>Personnel-monitoring arrangements need works-council consent before adoption.</td>
+</tr>
+<tr>
+<td><strong>Other EU / EEA</strong></td>
+<td><strong>Team-only (default)</strong></td>
+<td>Local works-council consultation; DPIA; lawful basis + transparency</td>
+<td>Most member states have analogous monitoring-consultation regimes; confirm locally.</td>
+</tr>
+<tr>
+<td><strong>UK</strong></td>
+<td>Team-only preferred; per-developer only with safeguards</td>
+<td>UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance</td>
+<td>No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring.</td>
+</tr>
+<tr>
+<td><strong>US (at-will, non-union)</strong></td>
+<td>Per-developer possible</td>
+<td>Internal policy; transparency; still keep TIER out of appraisal</td>
+<td>Fewer statutory constraints, but the diagnostic-not-appraisal stance still applies; state privacy laws may add duties.</td>
+</tr>
+<tr>
+<td><strong>Anywhere with a collective agreement / union</strong></td>
+<td>Follow the agreement</td>
+<td>Whatever the agreement requires</td>
+<td>A collective bargaining agreement can impose obligations beyond statute regardless of country.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>How to read this table:</strong> in every EU/EEA row the safe default is <strong>team-only
+aggregate reporting plus advance consultation</strong>. Run <code>tierd serve</code> with
+<code>--aggregation team</code> (the #185 mode) so named per-developer views are technically
+suppressed — the API, dashboard, and per-developer endpoint never return an
+individual name, and sub-k cohorts collapse into &#34;other&#34;. Pair that with access
+restriction (a read-only viewer token, #190) and separate instances per cohort.
+Per-developer deployment in a co-determined jurisdiction should not go live until
+both (a) the required works-council instrument is in place and (b) a DPIA has
+been completed — and even then, only as an engineering diagnostic, never as an
+appraisal input.</p>
+<h2 id="summary">Summary</h2>
+<ul>
+<li>TIER stores <strong>no prompt/completion content, no code, no file contents</strong> (see
+<a href="privacy.html" rel="nofollow">docs/privacy.md</a>, verified 2026-07-04) — but per-developer cost
+attribution is still <strong>personal data</strong> and still triggers labor-law and
+data-protection duties.</li>
+<li>In <strong>DE / FR / NL</strong> (and most of the EU/EEA), per-developer ranking is
+<strong>co-determined or consultation-restricted</strong> — engage the works council and
+complete a DPIA before go-live.</li>
+<li><strong>Team-only aggregate</strong> reporting is the low-exposure default and is now a
+built-in mode (#185): run <code>tierd serve --aggregation team</code> (k-anonymity floor
+<code>--k-anonymity</code>, default 5, hard minimum 3) so the API, dashboard, and
+per-developer endpoint never surface an individual name and sub-k cohorts
+collapse into &#34;other&#34; with totals preserved. <code>aggregation</code> is a required
+setting with no silent default; the local <code>tierd score</code> CLI is not gated.</li>
+<li>TIER is <strong>single-tenant with no org isolation</strong> — separate cohorts by running
+separate instances; do not claim built-in data segregation.</li>
+<li>TIER&#39;s position, in writing: <strong>diagnostic, not a performance-appraisal input.</strong></li>
+<li><strong>None of the above is legal advice.</strong> Consult your counsel, DPO, and works
+council.</li>
+</ul>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="privacy.html" rel="nofollow">docs/privacy.md</a> — exactly what TIER reads, stores, and never
+touches, grounded in the code.</li>
+<li><a href="how-tier-relates.html" rel="nofollow">docs/how-tier-relates.md</a> — why TIER complements DORA /
+SPACE / DX Core 4 rather than replacing them (reinforces the aggregate,
+non-appraisal framing).</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

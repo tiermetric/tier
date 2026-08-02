@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER /api/v1 compatibility contract — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier-apiv1-compatibility-contract">TIER <code>/api/v1</code> compatibility contract</h1>
+<p>This document is the <strong>stability contract</strong> for TIER&#39;s HTTP API. It pins, for
+every <code>/api/v1</code> endpoint: its stability guarantee, its response schema, and the
+project&#39;s rules for what may change without a version bump and what may not.</p>
+<p>It exists because a JSON field&#39;s <strong>meaning</strong> can change while it stays
+parseable, and nothing in the wire bytes announces it. #187 demoted the
+top-level <code>/scores</code> <code>developers</code>/<code>teams</code>/<code>total</code> fields to a pooled back-compat
+summary that is explicitly <strong>not</strong> a cross-type ranking, with no version signal and no
+changelog a consumer could detect. External orgs scripting against <code>/scores</code>
+kept computing a comparison the project itself now calls a category error. This
+contract makes that class of change <strong>announced and detectable</strong> instead of
+silent.</p>
+<p>The Go response structs in <code>internal/api/</code> are the authoritative field
+definitions; this document must be kept in step with them (see
+<a href="#changing-the-api" rel="nofollow">Changing the API</a>).</p>
+<ul>
+<li><strong>Base path:</strong> <code>/api/v1</code> (the Prometheus scrape at <code>/metrics</code> is the one
+documented exception, mounted at the root).</li>
+<li><strong>Scope:</strong> single-process, single-tenant. There is no <code>/v2</code> today.</li>
+<li><strong>Out-of-scope HTTP surfaces:</strong> the inbound <code>POST /webhook/github</code> seam (mounted
+at the root when <code>TIER_WEBHOOK_SECRET</code> is set) and the dashboard UI at <code>/</code> are
+<strong>not</strong> part of this <code>/api/v1</code> contract — the webhook is a GitHub-governed wire
+seam (see the JSONL ingestion contract) and the dashboard is UI, both governed
+separately.</li>
+<li><strong>Encoding:</strong> UTF-8 JSON unless noted. The two bulk exports also emit CSV via
+<code>Accept: text/csv</code>.</li>
+</ul>
+<h2 id="feature-detection">Feature detection</h2>
+<p><strong>The supported feature-detection mechanism is the <code>version</code> field of
+<code>GET /api/v1/livez</code>.</strong> It is the build version the binary was compiled with
+(injected via <code>-ldflags</code>; falls back to <code>&#34;dev&#34;</code>). A client that needs to know
+whether a server supports a given field or endpoint should read <code>livez.version</code>
+rather than probing behaviour. <code>livez</code> is unauthenticated (a liveness probe must
+not need credentials), so feature detection never requires a token.</p>
+<p>Do <strong>not</strong> rely on the presence or absence of an individual response field for
+feature detection at runtime: additive fields (below) can appear at any release,
+and <code>omitempty</code> fields are absent whenever their value is empty even on a server
+that fully supports them.</p>
+<h2 id="the-compatibility-rule">The compatibility rule</h2>
+<p><strong>JSON responses are additive-only. A field&#39;s semantics are frozen once
+shipped.</strong></p>
+<ol>
+<li><strong>Adding a field is additive.</strong> A new response field may be added at any
+release. Clients MUST ignore unknown fields.</li>
+<li><strong>Renaming or removing a field is BREAKING.</strong> It is not a refactor. It
+requires a new field name (additive) or a <code>/v2</code> (breaking), never a
+rename-in-place.</li>
+<li><strong>Changing a field&#39;s SEMANTICS is BREAKING even when the type and name are
+unchanged.</strong> If the number a field carries comes to mean something different
+-- a different population, unit, scope, or definition -- you MUST either
+introduce a <strong>new field name</strong> for the new meaning or bump to <code>/v2</code>. You may
+not repurpose an existing field in place. This is the #187 rule: the demotion
+should have shipped the new meaning under a new key (it did -- <code>work_types</code>)
+and the change to the OLD keys&#39; meaning should have been <strong>announced</strong> (it
+was not).</li>
+<li><strong>Closed-set (enum) values are additive too.</strong> A new allowed value for a
+string enum (<code>source</code>, <code>fidelity</code>, <code>weight_source</code>, <code>work_type</code>,
+<code>work_type_source</code>, <code>billing_mode</code>, watcher <code>status</code>) may be appended; an
+existing value may not be renamed or removed.</li>
+<li><strong>CSV column order is append-only.</strong> The four exports
+(<a href="#get-apiv1events" rel="nofollow"><code>GET /events</code></a>, <a href="#get-apiv1outcomes" rel="nofollow"><code>GET /outcomes</code></a>,
+<a href="#get-apiv1quality_events" rel="nofollow"><code>GET /quality_events</code></a>,
+<a href="#get-apiv1quality_history" rel="nofollow"><code>GET /quality_history</code></a>)
+carry a positional CSV contract. Columns are only ever <strong>appended</strong> at the
+end, never reordered or removed, and an existing column&#39;s VALUES never change
+shape (<code>issue_id</code> stayed <code>&#34;issue-42&#34;</code> when <code>repo</code> arrived in its own new
+column, #231). This restates the contract already enforced in
+<code>internal/api/export.go</code> (<code>eventsCSVHeader</code>, <code>outcomesCSVHeader</code>,
+<code>qualityEventsCSVHeader</code>, <code>qualityHistoryCSVHeader</code>) and documented in
+<code>docs/how-it-works.md</code>.</li>
+</ol>
+<p>Request bodies are strict in the other direction: the write endpoints decode
+with <code>DisallowUnknownFields()</code>, so an <strong>unknown request field is rejected 400</strong>.
+Adding a new <strong>optional</strong> request field is additive (old clients omit it); making
+a previously-optional field required, or adding a required field, is breaking.</p>
+<h3 id="additive-vs-breaking-at-a-glance">Additive vs breaking at a glance</h3>
+<table>
+<thead>
+<tr>
+<th>Change</th>
+<th>Classification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Add a new response field</td>
+<td>Additive</td>
+</tr>
+<tr>
+<td>Add a new endpoint</td>
+<td>Additive</td>
+</tr>
+<tr>
+<td>Add a new optional request field</td>
+<td>Additive</td>
+</tr>
+<tr>
+<td>Append a new CSV column at the end</td>
+<td>Additive</td>
+</tr>
+<tr>
+<td>Append a new enum value</td>
+<td>Additive</td>
+</tr>
+<tr>
+<td>Rename a response field</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Remove a response field</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Change a field&#39;s meaning/unit/scope in place</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Reorder or remove a CSV column</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Change an existing CSV column&#39;s value shape</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Add a required request field / make an optional one required</td>
+<td><strong>Breaking</strong></td>
+</tr>
+<tr>
+<td>Change a success status code</td>
+<td><strong>Breaking</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="announcing-a-deprecation-or-a-semantic-change">Announcing a deprecation or a semantic change</h2>
+<p>When a field or endpoint is being retired, or a field&#39;s meaning is changing
+(which ships as a new field plus a deprecation of the old one), the change is
+announced two ways:</p>
+<ol>
+<li><strong>The <code>Deprecation</code> (RFC 9745) and <code>Sunset</code> (RFC 8594) response headers</strong> on
+the affected endpoint. <code>Deprecation</code> carries the date the field/endpoint
+became deprecated; <code>Sunset</code> carries the date after which it may be removed (a
+<code>/v2</code> or a removal). Together they <strong>replace</strong> the single RFC 7234
+<code>Warning: 299</code> header precedent on <code>POST /costs</code> (deprecating
+<code>cache_write_tokens</code>): <code>Warning</code> was deprecated by RFC 9111 and is dropped by
+some intermediaries, so it is not a reliable deprecation signal.
+<code>Warning: 299</code> remains only for the one already-shipped <code>cache_write_tokens</code>
+case for back-compat; new deprecations use the <code>Deprecation</code>/<code>Sunset</code> pair.</li>
+<li><strong>An entry in the <a href="#api-changelog" rel="nofollow">API changelog</a> below</strong>, naming the field,
+the change, the release, and the issue.</li>
+</ol>
+<p>A <strong>semantic demotion</strong> (a field&#39;s meaning narrowing or changing, like #187)
+MUST additionally:</p>
+<ul>
+<li>ship the new meaning under a <strong>new field name</strong> (never repurpose the old
+field), and</li>
+<li>document, in the old field&#39;s changelog entry and its Go doc comment, exactly
+what it now means and what a consumer should read instead.</li>
+</ul>
+<h2 id="endpoint-catalog">Endpoint catalog</h2>
+<p>Auth scopes (see <code>internal/api/handler.go</code>):</p>
+<ul>
+<li><strong>write</strong> -- requires the write/admin bearer token (<code>Authorization: Bearer</code>).
+The read-only viewer token is rejected 403.</li>
+<li><strong>read</strong> -- satisfied by EITHER the read-only viewer token or the write token.</li>
+<li><strong>open</strong> -- no token (probes only; never exposes spend data).</li>
+</ul>
+<p>When the server is started with no API token (loopback-only, fail-closed per
+<code>cmd/tierd</code>), auth is disabled and all scopes are transparent.</p>
+<p>Error bodies are uniformly <code>{&#34;error&#34;: &#34;&lt;message&gt;&#34;}</code> with a 4xx/5xx status.</p>
+<h3 id="write-endpoints">Write endpoints</h3>
+<h4 id="post-apiv1costs"><code>POST /api/v1/costs</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
+<li>Manual single-row cost import. Request: <code>costRequest</code> -- <code>developer</code>,
+<code>issue_id</code>, <code>model</code> (required); <code>input_tokens</code>, <code>output_tokens</code>,
+<code>cache_read_tokens</code>, <code>cache_write_5m_tokens</code>, <code>cache_write_1h_tokens</code>,
+<code>cost_usd</code>, <code>source</code>, <code>fidelity</code>, <code>idempotency_key</code> (optional).</li>
+<li><code>cache_write_tokens</code> is the <strong>deprecated</strong> legacy single-bucket field
+(superseded by the 5m/1h split, #55); when present and non-zero it is routed
+to the 5m bucket and the response carries the legacy <code>Warning: 299</code> header.</li>
+<li><code>source</code> accepts only <code>&#34;api&#34;</code> or omitted; <code>fidelity</code> accepts <code>&#34;daily&#34;</code>,
+<code>&#34;estimated&#34;</code>, or omitted (<code>&#34;realtime&#34;</code> is rejected -- reserved for automated
+capture).</li>
+<li><strong>Keyed re-post (<code>idempotency_key</code> present):</strong> an <strong>identical</strong> re-post (same
+key, same cost) is idempotent -- <code>201</code>, no new row. A re-post with the same key
+but a <strong>different</strong> <code>cost_usd</code> is rejected with <strong><code>409 Conflict</code></strong> (#295): the
+stored cost is immutable (#233), so the correction is refused rather than
+applied. Divergence is judged on the stored <strong>integer</strong> <code>cost_micro</code>, so an
+honest retry whose float/FX/rounding jitter rounds to the same micro value is
+<strong>not</strong> a conflict. To change a recorded figure, re-post under a <strong>new</strong>
+<code>idempotency_key</code> (deleting a single row is operator-level, direct against the
+store — there is no delete-by-key route).</li>
+<li>Dedup is keyed on <code>idempotency_key</code> alone, and <strong>only</strong> a <code>cost_micro</code>
+divergence raises <code>409</code>. A re-post that reuses a key but changes a <em>non-cost</em>
+field (<code>developer</code>, <code>issue_id</code>, <code>model</code>, token counts) is still a silent no-op
+on those columns (they are immutable on conflict, #233) -- it is NOT a <code>409</code>.
+Reuse a key only for a genuine retry of the same event.</li>
+</ul>
+<h4 id="post-apiv1events"><code>POST /api/v1/events</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, body <code>{&#34;accepted&#34;: &lt;int&gt;}</code>.</li>
+<li>Bulk repo-aware ingest (array body). <code>accepted</code> counts events processed, not
+rows newly created (the MAX-on-conflict UPSERT absorbs replays). Per-event
+fields mirror <code>costRequest</code> plus <code>repo</code>, <code>session_id</code>, and a <strong>required</strong>
+RFC3339 <code>timestamp</code>. Since #233 the server reprices token counts with its own
+price table; the client <code>cost_usd</code> is retained only as a cross-check.</li>
+</ul>
+<h4 id="post-apiv1outcomes"><code>POST /api/v1/outcomes</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code> on insert, <code>200 OK</code> on duplicate.</li>
+<li>Response <code>outcomeResponse</code>: <code>status</code> (<code>&#34;created&#34;</code> or <code>&#34;duplicate&#34;</code>; always
+present) plus <code>weight_source</code>, <code>weight</code>, <code>work_type</code> (<code>omitempty</code>). Dedup is on
+<code>merge_commit_sha</code>; a replay returns <code>200</code> with <code>status: &#34;duplicate&#34;</code> and
+echoes the stored row&#39;s weight/source/work_type.</li>
+</ul>
+<h4 id="post-apiv1actual_spend"><code>POST /api/v1/actual_spend</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
+<li>Finance per-developer invoice total. Request: <code>developer</code>, <code>period</code> (YYYY-MM),
+<code>actual_paid_usd</code>. Rows accumulate; negatives are accepted as credit memos.</li>
+</ul>
+<h4 id="post-apiv1org_actual_spend"><code>POST /api/v1/org_actual_spend</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
+<li>Org-level invoice total (one contract covering N developers). Request: <code>org</code>,
+<code>period</code> (YYYY-MM), <code>actual_paid_usd</code>. Same accumulate/credit-memo semantics.</li>
+</ul>
+<h4 id="get-apiv1org_actual_spend"><code>GET /api/v1/org_actual_spend</code></h4>
+<ul>
+<li><strong>Scope:</strong> write (finance audit read; NOT granted to the viewer token).</li>
+<li><strong>Success:</strong> <code>200 OK</code>, <code>orgActualSpendResponse</code>:
+<ul>
+<li><code>since</code> (string, echoed window lower bound)</li>
+<li><code>orgs</code> (array of <code>{org, period, actual_paid_usd, entries}</code>)</li>
+</ul>
+</li>
+<li><code>?org=</code> filters to one org; <code>?since=</code> sets the window. <code>actual_paid_usd</code> is the
+net (source-scoped sum) roll-up per (org, period); <code>entries</code> is the row count
+behind that net.</li>
+</ul>
+<h4 id="post-apiv1developer_alias"><code>POST /api/v1/developer_alias</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
+<li>Maps a raw identifier to a canonical developer. Request: <code>alias</code>, <code>canonical</code>
+(both required). Chain/self-map violations are <code>400</code>.</li>
+</ul>
+<h4 id="delete-apiv1developer_aliasalias"><code>DELETE /api/v1/developer_alias/{alias}</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>204 No Content</code>; <code>404</code> if not mapped.</li>
+</ul>
+<h4 id="get-apiv1developer_alias"><code>GET /api/v1/developer_alias</code></h4>
+<ul>
+<li><strong>Scope:</strong> write (admin; discloses the identity map).</li>
+<li><strong>Success:</strong> <code>200 OK</code>, <code>{&#34;aliases&#34;: {&lt;alias&gt;: &lt;canonical&gt;, ...}}</code>.</li>
+</ul>
+<h4 id="put-apiv1org_hierarchydeveloper"><code>PUT /api/v1/org_hierarchy/{developer}</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>, the stored <code>HierarchyRow</code>:
+<code>{developer, team, division, org}</code>. Request body: <code>{team, division, org}</code>.</li>
+</ul>
+<h4 id="post-apiv1org_hierarchy"><code>POST /api/v1/org_hierarchy</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, <code>{&#34;accepted&#34;: &lt;int&gt;}</code>.</li>
+<li>All-or-nothing bulk import (array of <code>{developer, team, division, org}</code>).</li>
+</ul>
+<h4 id="get-apiv1org_hierarchy"><code>GET /api/v1/org_hierarchy</code></h4>
+<ul>
+<li><strong>Scope:</strong> write (discloses the full developer-&gt;team map).</li>
+<li><strong>Success:</strong> <code>200 OK</code>, <code>{&#34;hierarchy&#34;: [{developer, team, division, org}, ...]}</code>.</li>
+</ul>
+<h4 id="post-apiv1period_membershipdeveloperend"><code>POST /api/v1/period_membership/{developer}/end</code></h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>,
+<code>{developer, org, period_end}</code> (the applied end record). Request: <code>{org, period_end}</code>.</li>
+</ul>
+<h4 id="delete-apiv1developerid-gdpr-art-17-erasure"><code>DELETE /api/v1/developer/{id}</code> (GDPR Art. 17 erasure)</h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>,
+<code>{&#34;deleted&#34;: {&lt;table&gt;: &lt;count&gt;, ...}, &#34;total_deleted&#34;: &lt;int&gt;}</code>; <code>404</code> when
+nothing matched (which makes a repeated erasure idempotent). Available in
+team-aggregation mode (compliance tooling, not a reporting surface).</li>
+</ul>
+<h4 id="get-apiv1developeridexport-gdpr-art-15-access"><code>GET /api/v1/developer/{id}/export</code> (GDPR Art. 15 access)</h4>
+<ul>
+<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>, <code>store.DeveloperExport</code>:
+<code>{developer, identifiers, token_events, outcomes, actual_spend, org_hierarchy, period_membership, quality_events, quality_history, developer_alias}</code> (each a
+row array grouped by table). <code>404</code> when the developer has no data. Available
+in team-aggregation mode.</li>
+</ul>
+<h3 id="read-endpoints">Read endpoints</h3>
+<h4 id="get-apiv1scores"><code>GET /api/v1/scores</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>, <code>scoresResponse</code>.</li>
+<li>Query: <code>?since=</code> (YYYY-MM-DD / YYYY-MM / YYYY, default 90 days), <code>?until=</code>
+(or <code>?before=</code>) exclusive upper bound, <code>?team=</code>, <code>?work_type=</code>.</li>
+<li>Fields:
+<ul>
+<li>
+<p><code>since</code> (string) -- echoed window lower bound (UTC calendar day).</p>
+</li>
+<li>
+<p><code>price_table</code> (<code>{version, effective_date}</code>) -- <strong>always present</strong> price
+provenance stamp (#233).</p>
+</li>
+<li>
+<p><code>rubric</code> (<code>{version}</code>) -- <strong>always present</strong> canonical weight-rubric stamp
+(#239, <code>scoring.RubricVersion</code>), the weight-side analogue of <code>price_table</code>. A
+<code>weighted_points</code> count (hence <code>tier</code> and <code>cost_per_point</code>) is comparable
+across responses ONLY when <code>rubric.version</code> AND <code>price_table.version</code> both
+match. See <a href="rubric.html" rel="nofollow">docs/rubric.md</a> for the versioned rubric and its
+&#34;what you may / may not compare&#34; rules. There is deliberately <strong>no</strong> absolute
+good/ok/poor band.</p>
+</li>
+<li>
+<p><code>total</code> (<code>teamScoreJSON</code> or absent) -- rollup across all developers in the
+response. <strong>POOLED back-compat summary (#187): NOT a cross-type ranking.</strong>
+See <code>work_types</code> for the authoritative within-category comparison.</p>
+</li>
+<li>
+<p><code>developers</code> (array of <code>developerScoreJSON</code>) -- per-developer rows in
+developer mode; an explicit <strong>empty array</strong> in any anonymized mode
+(team/division). Same <strong>pooled</strong> caveat as <code>total</code>.</p>
+</li>
+<li>
+<p><code>aggregation</code> (string, <code>omitempty</code>, #270) -- discriminator naming the
+ANONYMIZED grouping level whose rows populate <code>teams</code>: <code>&#34;team&#34;</code> (#185) or
+<code>&#34;division&#34;</code>. Omitted in developer mode (which ships <code>developers</code>, no <code>teams</code>).
+It is the seam that lets a consumer tell what each <code>teams</code> label means, since a
+division-mode response is otherwise structurally identical to a team-mode one.
+A future org/department level would set its own name here with the SAME <code>teams</code>
+array -- no new response field.</p>
+</li>
+<li>
+<p><code>teams</code> (array, <code>omitempty</code>) -- populated <strong>only</strong> in an anonymized mode:
+k-anonymized GROUP aggregates, no individual names. In <code>--aggregation team</code>
+(#185) each row is a team; in <code>--aggregation division</code> (#270) each row is a
+division (one level up in <code>org_hierarchy</code>), labelled in the same <code>team</code> field.
+The <code>aggregation</code> discriminator above says which. A group with fewer than <code>k</code>
+contributing developers folds into the residual <code>&#34;other&#34;</code> row; a developer
+whose division is empty/unset folds into <code>&#34;other&#34;</code> too.</p>
+</li>
+<li>
+<p><code>team</code> (<code>teamScoreJSON</code>, <code>omitempty</code>) -- populated only when <code>?team=</code> filters
+to one team (developer mode only).</p>
+</li>
+<li>
+<p><code>data_quality</code> (<code>omitempty</code>) -- <strong>presence contract (#351):</strong> the block is now
+present whenever the window has spend or outcomes (it always carries the
+always-on attribution shares below); it is omitted ONLY for a truly empty window.
+So a consumer must key off the SPECIFIC field it cares about, NOT off block presence
+as a boolean &#34;a warning fired&#34; (the pre-#351 reading -- still true for the tripwire
+fields, which stay omit-when-clean). Fields: the zero-token-outcome tripwire (#136):
+<code>{zero_token_outcomes: [{developer, issue_id, tokens}]}</code> in developer mode,
+<code>{zero_token_outcome_count: &lt;int&gt;}</code> (name-free) in team mode. May additionally
+carry <code>mixed_price_versions</code> (<code>[&lt;int&gt;]</code>, <code>omitempty</code>, #293): the ascending
+distinct <code>price_table</code> versions that priced the window&#39;s <code>token_events</code>, present
+ONLY when that set has more than one element -- the mix <code>cost_micro</code>&#39;s
+immutability (#233) creates, which the single top-level <code>price_table.version</code>
+stamp would otherwise mask. Name-free, so it carries in BOTH developer and
+team mode. It also carries the <strong>true attribution-coverage</strong> fields (#351):</p>
+<ul>
+<li><code>attributed_cost_share</code> (<code>&lt;float&gt;</code> in <code>[0,1]</code>, <code>omitempty</code>) -- the fraction of
+window <code>cost_micro</code> that joins to a REAL issue rather than the <code>unattributed</code>
+sentinel (<code>attributed / total</code>, exact from the same window&#39;s cost composition).
+<strong>This is the honest coverage headline</strong> an adopter must see up front -- but it
+measures issue-attribution, which is NECESSARY BUT NOT SUFFICIENT for a score:
+spend on a real issue with no OUTCOME counts here yet drives no TIER. Read it WITH
+<code>attributed_outcome_share</code> -- the two measure DIFFERENT joins (cost-&gt;issue here,
+outcome-&gt;cost there) and are NOT expected to reconcile. Present whenever the window
+has spend; <code>omitempty</code> fires ONLY when there is no spend (a real <code>0.0</code> -- all spend
+unattributed -- IS emitted, not dropped). Do NOT confuse it with <code>coverage_pct</code>
+(see caveat below). Name-free; carries in both modes.</li>
+<li><code>attributed_outcome_share</code> (<code>&lt;float&gt;</code> in <code>[0,1]</code>, <code>omitempty</code>) -- the fraction
+of the window&#39;s outcomes whose canonical <code>(developer, repo, issue)</code> has ANY
+matching token spend (<code>tokens &gt; 0</code>, a looser bar than the zero-token tripwire).
+Falls to ~0 under the identity-mismatch failure mode below. Present whenever the
+window has outcomes; <code>omitempty</code> fires only when it has none. Name-free. A high
+<code>attributed_cost_share</code> with a low <code>attributed_outcome_share</code> and a non-empty
+<code>unjoined_developers</code> is the silent-TIER=0 signature the three fields exist to make
+loud.</li>
+<li><code>unjoined_developers</code> (<code>omitempty</code>) -- developers present on only ONE side of the
+cost/outcome join (#351/#125): cost keyed to an OS username, outcomes to a GitHub
+login, with no <code>developer_alias</code> mapping them, which otherwise reads as a silent
+TIER=0. Shape <code>{cost_only?: [&lt;name&gt;], outcome_only?: [&lt;name&gt;], cost_only_count, outcome_only_count}</code>. Present only when at least one side is non-empty. In
+developer mode the name lists are populated so the operator can map the aliases;
+in <strong>team-aggregation mode (#185) the names are suppressed</strong> and only the two
+counts carry, through the same k-anon guard as <code>zero_token_outcomes</code>.</li>
+</ul>
+<blockquote>
+<p><strong>Caveat -- <code>coverage_pct</code> is NOT attribution coverage.</strong> The per-developer /
+<code>total</code> / <code>team</code> <code>coverage_pct</code> is <strong>capture fidelity</strong>: the share of the spend
+tierd DID record that arrived per-request (realtime proxy/JSONL) rather than as
+a coarse estimate. It reads ~100% even when most spend never attributes to an
+issue, which is why it was mistaken for completeness. Its computation is
+unchanged (#136 keeps the wire name stable; the dashboard labels it &#34;Fidelity&#34;).
+Attribution completeness is <code>data_quality.attributed_cost_share</code>, added here.</p>
+</blockquote>
+<ul>
+<li><code>unattributed_buckets</code> (array, <code>omitempty</code>) -- the labeled split of the single
+unattributed mass (attribution refocus, Option B): one row per reason the join
+could not tie spend to an issue. Shape <code>[{bucket, cost_usd, share}]</code>, sorted by
+descending cost. <code>bucket</code> is the stable label <code>unattributed:main</code> (exploratory
+on a mainline branch), <code>unattributed:detached-head</code>,
+<code>unattributed:branch-without-issue</code>, or the base <code>unattributed</code> (host-blind
+producers). <code>share</code> is of TOTAL window cost, so the buckets + <code>attributed_cost_share</code>
+sum to 1.0. Present only when the window has unattributed spend. Name-free; carries
+in both modes.</li>
+<li><code>exploratory_cost_share</code> (<code>&lt;float&gt;</code> in <code>[0,1]</code>, <code>omitempty</code>) -- the org headline
+for exploratory overhead: the <code>unattributed:main</code> bucket&#39;s share of total window
+cost. This overhead STAYS in the denominator (it is real planning/exploration
+spend); the field makes it <em>visible</em> rather than excluded. Pointer-emitted so a
+real <code>0.0</code> carries; present alongside <code>unattributed_buckets</code>. Name-free.</li>
+</ul>
+</li>
+<li>
+<p><code>work_types</code> (array of <code>workTypeSegmentJSON</code>, <code>omitempty</code>) -- the
+<strong>authoritative</strong> type-segmented view (#187): one entry per <code>work_type</code>, each
+<code>{work_type, aggregation?, developers?, teams?, total?}</code> scored over ONLY that
+category (the per-segment <code>aggregation</code> mirrors the top-level discriminator, #270).
+This is the surface for comparing developers/teams; the pooled
+<code>developers</code>/<code>teams</code>/<code>total</code> above are retained for back-compat and are not a
+cross-type ranking.</p>
+</li>
+<li>
+<p><code>cost_composition</code> (<code>omitempty</code>) -- cost-composition sidecar (#234): a
+whole-window, name-free breakdown of WHERE spend went, for optimization. Omitted
+when the window has no token spend. Shape:
+<code>{total_cost_usd, attributed_cost_usd, unattributed_cost_usd, unattributed_share,</code>
+<code>cache_read_share, premium_model_share, by_model: [{model, host, cost_usd, share,</code>
+<code>premium}], by_class: {input_tok, output_tok, cache_read, cache_write}}</code>. Dollar
+figures are USD; shares are fractions in <code>[0,1]</code>. <strong>Reconciliation</strong> (exact in
+the underlying integer micro-dollars; the USD floats reconcile to micro-dollar
+precision): <code>attributed_cost_usd + unattributed_cost_usd == total_cost_usd</code> and
+<code>sum(by_model[].cost_usd) == total_cost_usd</code> (no residual bucket). <code>cache_read_share</code>
+is <code>cache_read / (input + cache_read + cache_write)</code> (input-side hit share, docs/
+pricing-philosophy.md §4); <code>premium_model_share</code> is the SPEND share on models
+pricing &gt;= $5/M base input (the frontier/reasoning tier). <code>by_class</code> is TOKEN
+counts, not allocated dollars (a stored blended <code>cost_micro</code> is not exactly
+splittable per class); <code>by_model.premium</code> and the model breakdown are host-aware
+(#300), so an open-weights model split across hosts stays multiple rows. Present
+identically in developer and team-aggregation mode -- it names no individual, so
+it does not defeat k-anonymity (#185).</p>
+</li>
+</ul>
+</li>
+<li><code>developerScoreJSON</code>: <code>developer, tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, exploratory_cost_share, cost_per_point, sample_n, ci_low, ci_high, cost_per_point_ci_low, cost_per_point_ci_high, ranked, flagged_outcomes</code>. <code>exploratory_cost_share</code> (attribution
+refocus, Option B) is this developer&#39;s <code>unattributed:main</code> cost / their total window
+cost -- the per-developer companion to <code>data_quality.exploratory_cost_share</code>, naturally
+k-anon-safe because developer rows are not emitted in team-aggregation mode. The array
+is <strong>not pre-sorted</strong>; the client applies the
+two-tier order using the <code>ranked</code> flag (#133). <code>cost_per_point</code> (#239) is
+<code>total_cost_usd / weighted_points</code> -- the inverse-unit dual of <code>tier</code>
+(numerically <code>1000/tier</code>); it is <strong><code>null</code> on a zero-point row</strong> (#472) so &#34;no
+accepted outcome&#34; is not encoded as the most-efficient <code>0</code>, while a genuine
+zero-cost (FREE) row keeps its honest <code>0</code>. <code>cost_per_point_ci_low/high</code>
+are its 95% self-relative bootstrap interval, the reciprocal (ends swapped) of
+the <code>tier</code> CI -- <code>0</code> for unranked rows. See <a href="rubric.html" rel="nofollow">docs/rubric.md</a>.</li>
+<li><code>teamScoreJSON</code>: <code>team (omitempty), tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point</code>. No CI at team
+grain (the bootstrap is a per-developer signal, #133).</li>
+</ul>
+<h4 id="get-apiv1scoresdeveloper"><code>GET /api/v1/scores/{developer}</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>, <code>developerDetailResponse</code>.</li>
+<li><strong>Blanket <code>404</code> in any anonymized (team/division) mode</strong> (#185, #270): it names
+one individual by construction; the 404 is returned for every path value, before any lookup, so
+it is not an existence oracle.</li>
+<li>Fields: <code>developer, tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, sample_n, ci_low, ci_high, cost_per_point_ci_low, cost_per_point_ci_high, ranked, flagged_outcomes, issues</code>. <code>cost_per_point</code> and its CI mirror <code>developerScoreJSON</code> (#239).
+<code>issues</code> is an array of <code>{issue_id, weight, quality, pr_number (omitempty), zero_token}</code>. Note: this endpoint&#39;s top-level object has no <code>rubric</code>/<code>price_table</code>
+stamp of its own -- read those from <code>GET /api/v1/scores</code> for the same window.</li>
+</ul>
+<h4 id="get-apiv1scorescompare"><code>GET /api/v1/scores/compare</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>, <code>compareResponse</code> (#277).</li>
+<li>Purpose: a before/after period comparison -- two half-open windows in, per-row
+deltas plus a CI-overlap significance flag out. Reuses the SAME windowed scores
+computation as <a href="#get-apiv1scores" rel="nofollow"><code>GET /scores</code></a>, so a compared score never
+diverges from what <code>/scores</code> reports for the same window. It is an <strong>aggregate
+view like <code>/scores</code></strong>, so in any anonymized (team/division) mode it returns <code>200</code>
+with k-anonymized group deltas -- it is NOT the single-developer <code>404</code> carve-out.</li>
+<li>Query (each window mirrors <code>/scores</code>&#39; <code>since</code>/<code>until</code> grammar and validation,
+#276): <code>?since_a=</code>, <code>?until_a=</code> (window A = &#34;before&#34;); <code>?since_b=</code>, <code>?until_b=</code>
+(window B = &#34;after&#34;). Each <code>since_</code> defaults to 90 days ago; each <code>until_</code> is an
+optional exclusive upper bound that must be strictly after its <code>since_</code>
+(<code>400</code> otherwise) and is retention-checked (<code>422</code>). Every delta is <strong>B - A</strong>.</li>
+<li>Fields:
+<ul>
+<li><code>window_a</code>, <code>window_b</code> (<code>{since, until?, data_quality?}</code>) -- each window&#39;s
+echoed bounds and its <strong>OWN</strong> <code>data_quality</code> block (#277): the zero-token /
+<code>mixed_price_versions</code> signal is per window (a mixed-version WARN can apply to
+one window and not the other), same shape and mode-dependent name-suppression
+as <a href="#get-apiv1scores" rel="nofollow"><code>/scores</code>&#39; <code>data_quality</code></a>. Only the zero-token and
+<code>mixed_price_versions</code> signals are carried here; the #351 coverage shares are a
+<code>/scores</code>-only surface. <code>until</code> is omitted when the window is open-ended.</li>
+<li><code>price_table</code> (<code>{version, effective_date}</code>) -- <strong>always present</strong> active-table
+stamp (#233); per-window pricing mixes surface via each window&#39;s
+<code>data_quality.mixed_price_versions</code>.</li>
+<li><code>mode</code> (string) -- <code>&#34;developer&#34;</code>, <code>&#34;team&#34;</code>, or <code>&#34;division&#34;</code>, echoing the
+server&#39;s aggregation mode so a consumer knows whether <code>developers</code> or <code>teams</code>
+carries the rows (the same discriminator as <code>/scores</code>&#39; <code>aggregation</code>).</li>
+<li><code>developers</code> (array of <code>developerDeltaJSON</code>) -- per-developer deltas in
+developer mode; an explicit <strong>empty array</strong> in any anonymized mode (#185, #270),
+never a named row. Each row: <code>{developer, present_a, present_b, a, b, delta_tier, delta_weighted_points, delta_total_cost_usd, significant}</code>. <code>a</code>/<code>b</code> are
+<code>scoreSideJSON</code> (<code>{tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, sample_n, ci_low, ci_high, ranked}</code>). <code>cost_per_point</code> (#239) is the same points-guarded
+<code>total_cost_usd / weighted_points</code> (<code>0</code> on a zero-point side) <code>/scores</code>&#39;
+developer rows and the team compare sides carry, added for contract parity; no
+self-relative <code>cost_per_point</code> CI on a side. Rows are the
+<strong>union</strong> of developers across both windows; a delta and <code>significant</code> are
+computed <strong>only</strong> when the developer is present in BOTH windows (<code>0</code>/<code>false</code>
+otherwise, never fabricated against an absent side).</li>
+<li><code>teams</code> (array of <code>teamDeltaJSON</code>, <code>omitempty</code>) -- populated <strong>only</strong> in an
+anonymized mode (team #185 / division #270): each row <code>{team (omitempty), a, b, delta_tier, delta_weighted_points, delta_total_cost_usd, significant}</code> where
+<code>a</code>/<code>b</code> are <code>teamScoreJSON</code>. <strong>k-anonymity is a two-window INTERSECTION (#277):</strong>
+a group is a named row only if it independently clears the k-floor in BOTH
+windows; a group sub-k in EITHER window (including one present in only one window)
+folds into the single <code>other</code> residual on BOTH sides, so a group&#39;s PRESENCE never
+differs across windows and no sub-k aggregate can be recovered from a delta.
+<code>significant</code> is <strong>always <code>false</code></strong> here: group aggregates carry no bootstrap CI
+(an interval is a per-developer signal, #133).</li>
+<li><code>total</code> (<code>teamDeltaJSON</code>, <code>omitempty</code>) -- name-free grand-rollup delta across
+every developer in each window, present in both modes; <code>nil</code> when both windows
+are empty. <code>significant</code> is always <code>false</code>.</li>
+</ul>
+</li>
+<li><strong>Significance test:</strong> <code>significant</code> is <code>true</code> for a developer row only when the
+developer is present AND <code>ranked</code> (#133) in BOTH windows and the two 95% bootstrap
+TIER confidence intervals do <strong>not</strong> overlap (<code>a.ci_high &lt; b.ci_low</code> or
+<code>b.ci_high &lt; a.ci_low</code>). Any overlap, or an unranked/below-floor window, renders it
+<code>false</code> -- the move is within sampling noise or the sample cannot support the claim.</li>
+<li>Unblocks the dashboard dumbbell comparison (#278).</li>
+</ul>
+<h4 id="get-apiv1events"><code>GET /api/v1/events</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>. <strong>403 in any anonymized (team/division) mode</strong> (#185, #270:
+raw per-developer rows are suppressed). Keyset-paginated bulk export of
+<code>token_events</code>.</li>
+<li>Query: <code>?since=</code>, <code>?until=</code>, <code>?limit=</code> (rejected loudly above the store max),
+<code>?cursor=</code> (opaque, echo the previous page&#39;s cursor).</li>
+<li><strong>JSON</strong> (default): <code>eventsExportResponse</code> -- <code>{next_cursor, events: [...]}</code>.
+Each event: <code>id, ts, developer, issue_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cost_micro, source, fidelity, idempotency_key, repo, session_id, price_version, host, billing_mode</code>.</li>
+<li><strong>CSV</strong> (<code>Accept: text/csv</code>): same fields in the <strong>append-only</strong> column order
+of <code>eventsCSVHeader</code>. Empty <code>next_cursor</code> (body and the <code>X-Next-Cursor</code> header)
+means the window is exhausted.</li>
+</ul>
+<h4 id="get-apiv1outcomes"><code>GET /api/v1/outcomes</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>. <strong>403 in any anonymized (team/division) mode</strong> (#185, #270).
+Same pagination/CSV contract as <code>GET /events</code>.</li>
+<li><strong>JSON:</strong> <code>outcomesExportResponse</code> -- <code>{next_cursor, outcomes: [...]}</code>. Each
+outcome: <code>id, ts, developer, issue_id, pr_number, weight, weight_source, quality, merge_commit_sha, additions, deletions, changed_files, source, work_type, work_type_source, repo, push_day</code>.</li>
+<li><strong>CSV:</strong> the <strong>append-only</strong> <code>outcomesCSVHeader</code> order.</li>
+<li><code>push_day</code> (#242) is the appended trailing column: the UTC calendar day a
+<code>source=&#39;push&#39;</code> outcome aggregates to (the per-issue-per-day dedup key), and
+<code>&#34;&#34;</code> for a PR outcome (NULL column), matching <code>merge_commit_sha</code>.</li>
+</ul>
+<h4 id="get-apiv1quality_events"><code>GET /api/v1/quality_events</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>. <strong>403 in any anonymized (team/division) mode</strong> (#185, #270:
+rows carry a per-developer <code>developer</code> column). Keyset-paginated bulk export of
+the append-only <code>quality_events</code> signal log (#242). Same <code>?since</code>/<code>?until</code>/
+<code>?limit</code>/<code>?cursor</code> query, pagination, and content-negotiation contract as
+<code>GET /events</code>.</li>
+<li><strong>JSON</strong> (default): <code>qualityEventsExportResponse</code> -- <code>{next_cursor, quality_events: [...]}</code>. Each row: <code>id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at</code>.</li>
+<li><strong>CSV</strong> (<code>Accept: text/csv</code>): the <strong>append-only</strong> <code>qualityEventsCSVHeader</code> order.</li>
+</ul>
+<h4 id="get-apiv1quality_history"><code>GET /api/v1/quality_history</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>. <strong>403 in any anonymized (team/division) mode</strong> (#185, #270).
+Keyset-paginated bulk export of the append-only <code>quality_history</code> transition log
+(#242). Same pagination/CSV contract as <code>GET /events</code>.</li>
+<li><strong>JSON:</strong> <code>qualityHistoryExportResponse</code> -- <code>{next_cursor, quality_history: [...]}</code>. Each row: <code>id, outcome_id, developer, issue_id, old_quality, new_quality, reason, source_ref, ts</code>.</li>
+<li><strong>CSV:</strong> the <strong>append-only</strong> <code>qualityHistoryCSVHeader</code> order.</li>
+<li>Together the two quality exports make an outcome&#39;s multiplier re-derivable
+(<code>quality == last new_quality</code>) from a BI export, not just the erasure-scoped
+DSAR export.</li>
+</ul>
+<h4 id="get-apiv1fidelity"><code>GET /api/v1/fidelity</code></h4>
+<ul>
+<li><strong>Scope:</strong> read (satisfied by EITHER the viewer token or the write token).
+<strong>Success:</strong> <code>200 OK</code>, <code>fidelityResponse</code>. <strong>403 in any anonymized
+(team/division) mode</strong> (#185, #270, same posture as <code>GET /events</code>/<code>GET /outcomes</code>): the body names individual developers, which the anonymized modes
+suppress, and it cannot be k-anonymized while staying a per-developer capture
+report -- the 403 is returned before the store is touched.</li>
+<li>Per-canonical-developer capture-fidelity signals (#236): the rollout view for
+&#34;which developers are (not) capturing, and at what quality.&#34; Raw
+<code>token_events</code> developer keys are canonicalized through <code>developer_alias</code>
+(#125) and merged, so a developer mid-rename is one row, not two. Takes no
+query parameters; the windows are fixed at 7d and 30d.</li>
+<li>Top-level fields (<code>fidelityResponse</code>):
+<ul>
+<li><code>now</code>, <code>since_7d</code>, <code>since_30d</code> (strings) -- RFC3339 UTC stamps of the exact
+window bounds the counts below are measured over, so a reader never has to
+assume a server-local clock for what &#34;7d&#34;/&#34;30d&#34; meant for this response.</li>
+<li><code>developers</code> (array of <code>developerFidelityJSON</code>) -- one row per canonical
+developer, sorted by <code>developer</code>. An <strong>empty array</strong> <code>[]</code> on an empty DB
+(never null).</li>
+</ul>
+</li>
+<li><code>developerFidelityJSON</code>:
+<ul>
+<li><code>developer</code> (string) -- canonical developer identifier.</li>
+<li><code>event_count_7d</code>, <code>event_count_30d</code> (integers) -- <code>token_events</code> counts over
+the 7d and 30d windows.</li>
+<li><code>last_event_by_source</code> (object, <code>{source: RFC3339-UTC-string}</code>) -- the most
+recent event timestamp per capture source over <strong>all history</strong> (not just the
+30d window): the &#34;is this source still delivering&#34; signal. <strong>Always present</strong>
+(an empty object <code>{}</code> when the developer has no events), so a client can index
+it without a nil check; a source absent from the map has never delivered.</li>
+<li><code>fidelity_levels</code> (object, <code>{level: 30d-count}</code>) -- the 30d event count per
+fidelity level (<code>realtime</code>/<code>daily</code>/<code>estimated</code>). <strong>Always present</strong> (<code>{}</code>
+when empty); a developer with no <code>realtime</code> count is on a degraded capture
+path. Keys are the same <code>fidelity</code> closed set as elsewhere in this contract.</li>
+<li><code>unknown_model_cost_share</code> (number, <code>0..1</code>) -- the fraction of the developer&#39;s
+30d spend billed at the unknown-model pricing guess (#267): high share means
+TIER is pricing that spend at a <code>(host, model)</code> rate it cannot audit. <code>0</code> when
+30d spend is zero.</li>
+</ul>
+</li>
+<li><strong>Additive</strong> per the <a href="#additive-vs-breaking-at-a-glance" rel="nofollow">matrix above</a>: a new
+endpoint is additive, not a compat break. It was added in #320 (behind #236),
+after this contract doc (#241) was written, hence the catalog backfill (#322).</li>
+</ul>
+<h4 id="get-metrics"><code>GET /metrics</code></h4>
+<ul>
+<li><strong>Scope:</strong> read. Mounted at the <strong>root</strong> (<code>/metrics</code>, not <code>/api/v1</code>), and
+<strong>only</strong> when a metrics registry is wired (<code>cmd/tierd</code>); absent otherwise.</li>
+<li><strong>Success:</strong> <code>200 OK</code>, Prometheus text exposition
+(<code>text/plain; version=0.0.4</code>). Not a JSON contract; the additive-only rule
+applies at the level of metric/label names.</li>
+</ul>
+<h3 id="open-endpoints-probes">Open endpoints (probes)</h3>
+<h4 id="get-apiv1health"><code>GET /api/v1/health</code></h4>
+<ul>
+<li><strong>Scope:</strong> open. <strong>Success:</strong> <code>200 OK</code>, <code>{&#34;status&#34;: &#34;ok&#34;}</code>.</li>
+</ul>
+<h4 id="get-apiv1healthz"><code>GET /api/v1/healthz</code></h4>
+<ul>
+<li><strong>Scope:</strong> open. <strong>Readiness</strong> probe (#49). <code>200</code> when every subsystem is
+healthy, <code>503</code> when any subsystem is restarting/stopped; <strong>same JSON body in
+either case</strong>. As of #48 the body is extensible:
+<code>{&#34;watcher&#34;: &lt;health.WatcherSnapshot&gt;, &#34;subsystems&#34;: {&#34;&lt;name&gt;&#34;: {&#34;healthy&#34;: &lt;bool&gt;, &#34;detail&#34;: &lt;object, omitempty&gt;}}, &#34;healthy&#34;: &lt;bool&gt;}</code>.
+<ul>
+<li><code>subsystems</code> is a map keyed by subsystem name (<code>watcher</code>, and future
+collectors). Each value is <code>{healthy, detail}</code> where <code>detail</code> is that
+subsystem&#39;s payload (for <code>watcher</code>, a <code>WatcherSnapshot</code>). New collectors
+append a key here — no consumer needs new per-subsystem code.</li>
+<li><code>healthy</code> (top level) is the aggregate: <code>true</code> iff every subsystem is
+healthy. It mirrors the <code>200</code>/<code>503</code> status code.</li>
+<li><code>watcher</code> (top level) is <strong>retained for backward compatibility</strong> and
+duplicates <code>subsystems.watcher.detail</code>; it is deprecated in favour of the
+<code>subsystems</code> map. <code>WatcherSnapshot</code>: <code>status, last_error (omitempty), last_event_ts (omitempty), started_at (omitempty), restart_count, next_retry_at (omitempty), watch_add_failures, last_watch_add_error (omitempty)</code>.</li>
+<li>Do NOT wire a k8s liveness probe here.</li>
+</ul>
+</li>
+</ul>
+<h4 id="get-apiv1livez"><code>GET /api/v1/livez</code></h4>
+<ul>
+<li><strong>Scope:</strong> open. <strong>Liveness</strong> probe (#49); always <code>200</code>. Body <code>livezResponse</code>:
+<code>{status: &#34;alive&#34;, uptime_s: &lt;int&gt;, version: &lt;string&gt;}</code>. <code>version</code> is the
+documented <a href="#feature-detection" rel="nofollow">feature-detection</a> signal.</li>
+</ul>
+<h2 id="api-changelog">API changelog</h2>
+<p>Newest first. Every entry names the change, its classification, and the issue.
+Backfilled entries (<code>#185</code>, <code>#187</code>, <code>#191</code>, and the additive-column history)
+predate this discipline and are recorded here so the record is complete.</p>
+<ul>
+<li><strong>#277 -- <code>GET /api/v1/scores/compare</code> (additive: new endpoint).</strong> A before/after
+period comparison: two half-open windows (<code>since_a</code>/<code>until_a</code>, <code>since_b</code>/<code>until_b</code>)
+in, per-developer or per-group deltas plus a CI-overlap <code>significant</code> flag out. Read
+scope. Reuses the <code>/scores</code> windowed computation (extracted into a shared
+<code>loadWindow</code>), so a compared score matches <code>/scores</code> for the same window. Three
+invariants are enforced server-side (the reason it is an endpoint, not a client
+two-fetch): <strong>(1)</strong> anonymized-mode k-anonymity is a two-window INTERSECTION -- a
+group is named only if it clears the k-floor in BOTH windows, else it folds to
+<code>other</code> in both, so presence never differs across windows and no sub-k aggregate
+leaks through a delta; <strong>(2)</strong> the same anonymized guard as <code>/scores</code> -- never a
+named per-developer delta in team/division mode; <strong>(3)</strong> per-window <code>data_quality</code>.
+A new endpoint breaks no existing consumer. Unblocks the dashboard dumbbell (#278).</li>
+<li><strong>#239 -- <code>scores.cost_per_point</code> + <code>scores.rubric</code> version stamp (additive).</strong>
+Added the inverse-unit <code>cost_per_point</code> (<code>total_cost_usd / weighted_points</code>,
+<code>0</code> on a zero-point row) and its self-relative bootstrap CI
+(<code>cost_per_point_ci_low/high</code>, the reciprocal of the <code>tier</code> CI, no second
+resample) to <code>developerScoreJSON</code> and <code>developerDetailResponse</code>; <code>cost_per_point</code>
+(no CI) to <code>teamScoreJSON</code>; and an always-present top-level <code>rubric</code> (<code>{version}</code>,
+<code>scoring.RubricVersion</code>) stamping which canonical weight-rubric produced the
+<code>weighted_points</code>, the weight-side analogue of <code>price_table</code>. Purpose: give the
+TIER number a MEANING without an absolute band. <code>cost_per_point</code> is the
+constant-dollar benchmarking/trend unit. What closes the generous-vs-strict
+labeling exploit is NORMATIVITY -- the single canonical rubric compiled into the
+binary, so everyone weights against the same calibration instead of house
+habits; the <code>rubric</code> version stamp is PROVENANCE, not the closer: it does not
+set the weights, it records WHICH rubric produced a <code>weighted_points</code> so two
+numbers can be trusted to share a matched rubric (and a mismatch surfaces as
+non-comparable AND visible instead of a silent category error). <strong>No absolute good/ok/poor band is defined anywhere</strong> -- comparison is
+self-relative and valid only within a matched <code>rubric.version</code> + <code>price_table.version</code>
+(see <a href="rubric.html" rel="nofollow">docs/rubric.md</a>). Existing fields and the TIER formula are
+untouched; pinned consumers unbroken. A cross-org opt-in benchmark distribution
+is a forward-compatible follow-up that needs a second org&#39;s data to exist first.</li>
+<li><strong>#295 -- <code>POST /costs</code> divergent keyed re-post now <code>409</code> (bug-fix; narrowly
+breaking).</strong> Fixes silent financial data loss: after #233 a keyed re-post with
+the SAME <code>idempotency_key</code> but a CHANGED <code>cost_usd</code> was silently dropped
+(first-writer-wins) yet still returned <code>201</code>, so a finance correction vanished
+with a success code. Such a divergent re-post now returns <strong><code>409 Conflict</code></strong>
+with a JSON error body; the stored <code>cost_micro</code> remains immutable (#233) -- the
+<code>409</code> REJECTS the write, it never overwrites. <strong>Strictly scoped to the divergent
+case:</strong> an IDENTICAL re-post (same key, same cost) is unchanged -- still <code>201</code>,
+still idempotent -- and an unkeyed post is unchanged. Divergence is judged on
+the stored INTEGER <code>cost_micro</code>, so an honest retry whose float/FX/rounding
+jitter rounds to the same micro value does NOT <code>409</code>. Classified breaking only
+for a client that depended on the silent-drop-returns-<code>201</code> behavior -- i.e. on
+losing its own correction; the correction path is a NEW <code>idempotency_key</code> (or
+delete + re-post). A sanctioned audited override (ruling C) is a separate
+follow-up.</li>
+<li><strong>#351 -- <code>scores.data_quality</code> true-attribution-coverage + unjoined-developer
+flag (additive; presence-contract clarified).</strong> Added three <code>data_quality</code> fields
+so the headline <code>/scores</code> number is honest about how much of the window it actually
+covers: <code>attributed_cost_share</code> (fraction of window <code>cost_micro</code> joined to a real
+issue, not the <code>unattributed</code> sentinel), <code>attributed_outcome_share</code> (fraction of
+outcomes with matching token spend), and <code>unjoined_developers</code> (developers with cost
+but no outcomes, or outcomes but no cost -- the silent-TIER=0 identity mismatch;
+named in developer mode, name-free counts only in team-aggregation mode, #185). No
+existing field changed meaning or computation. <strong><code>coverage_pct</code> is NOT touched</strong> and
+was NOT measuring attribution coverage: it is per-developer capture FIDELITY
+(realtime vs. estimated share of recorded spend) and correctly reads ~100% even when
+most spend is unattributed -- the mismatch the PM surfaced was a reading error, now
+documented, not a bug in <code>coverage_pct</code>. <strong>Presence-contract note:</strong> the two coverage
+shares are ALWAYS present when the window has the relevant data (spend / outcomes),
+so a non-empty window now ships a <code>data_quality</code> block even when nothing is flagged
+(previously the block was omitted unless a tripwire fired). A truly empty window
+still ships no key; a consumer that ignores unknown keys is unaffected. The dashboard
+trust strip keys only off the zero-token fields, so it is visually unchanged.</li>
+<li><strong>#293 -- <code>scores.data_quality.mixed_price_versions</code> (additive).</strong> Added an
+<code>omitempty</code> <code>[&lt;int&gt;]</code> field to the <a href="#get-apiv1scores" rel="nofollow"><code>data_quality</code></a> block: the
+ascending distinct <code>price_table</code> versions that priced the window&#39;s <code>token_events</code>,
+present ONLY when more than one version is spanned. <code>scores.price_table.version</code>
+stamps a single active table, but <code>cost_micro</code> is immutable per row (#233) so a
+window legitimately mixes historical and active pricing; this WARN keeps the stamp
+from reading as false uniformity. Name-free (version integers only), so it carries
+identically in developer and team-aggregation mode. No existing field changed
+meaning; a consumer that ignores the key is unaffected.</li>
+<li><strong>#242 -- <code>push_day</code> on the outcomes export + quality audit bulk exports
+(additive).</strong> Appended <code>push_day</code> as the trailing column of the
+<a href="#get-apiv1outcomes" rel="nofollow"><code>GET /outcomes</code></a> JSON and CSV (the UTC per-issue-per-day
+dedup key a <code>source=&#39;push&#39;</code> row aggregates to; <code>&#34;&#34;</code> for a PR row) -- a pinned
+positional consumer is unbroken. Added two new read endpoints,
+<a href="#get-apiv1quality_events" rel="nofollow"><code>GET /api/v1/quality_events</code></a> and
+<a href="#get-apiv1quality_history" rel="nofollow"><code>GET /api/v1/quality_history</code></a>, reusing the #191
+keyset-pagination / limit / <code>Accept</code> machinery and inheriting the #185
+team-mode <code>403</code>. Together they make an outcome&#39;s multiplier re-derivable
+(<code>quality == last new_quality</code>) from a BI export, not just the erasure-scoped
+DSAR export.</li>
+<li><strong>#234 -- <code>scores.cost_composition</code> sidecar (additive).</strong> A whole-window,
+name-free breakdown of where spend went -- cost by normalized model, per-class
+token composition, attributed vs unattributed spend, and the two optimization
+levers (<code>cache_read_share</code>, <code>premium_model_share</code>). <code>omitempty</code>, so a window with
+no token spend ships no key. Pure sidecar: the TIER formula and every existing
+<code>/scores</code> field are untouched. Pinned consumers unbroken.</li>
+<li><strong>#48 -- <code>GET /api/v1/healthz</code> extensible subsystem body (additive).</strong> Added
+a top-level <code>subsystems</code> map (<code>{&#34;&lt;name&gt;&#34;: {healthy, detail}}</code>) and an
+aggregate <code>healthy</code> bool. The legacy top-level <code>watcher</code> block is retained
+(duplicates <code>subsystems.watcher.detail</code>) so pre-#48 consumers are unaffected;
+it is now deprecated in favour of the map. <code>200</code>/<code>503</code> semantics unchanged.
+Subsystems now register into a <code>health.Registry</code> instead of the handler
+hard-coding one key, so v1.5 collectors extend the body without a schema
+break.</li>
+<li><strong>#236 -- <code>GET /api/v1/fidelity</code> endpoint added (additive).</strong> Per-canonical-
+developer capture-fidelity signals (<code>now</code>/<code>since_7d</code>/<code>since_30d</code> window stamps;
+per developer <code>event_count_7d</code>, <code>event_count_30d</code>, <code>last_event_by_source</code>,
+<code>fidelity_levels</code>, <code>unknown_model_cost_share</code>). Read-scoped; <code>403</code> in
+team-aggregation mode like the bulk exports. Shipped in #320 on a branch that
+predated this contract doc (#241); the catalog entry was backfilled in #322. A
+new endpoint changes no existing surface.</li>
+<li><strong>#304 -- <code>host</code> + <code>billing_mode</code> columns (additive).</strong> Appended to the
+<code>token_events</code> JSON/CSV export. <code>billing_mode</code>
+(<code>per_token</code>|<code>subscription</code>|<code>self_hosted_amortized</code>) discriminates whether
+<code>cost_micro</code> is a canonical per-token figure or a derived/approximate one.
+Pinned consumers unbroken.</li>
+<li><strong>#238 -- <code>session_id</code> column (additive).</strong> Appended to the <code>token_events</code>
+export (and accepted on <code>POST /events</code>). Opaque Claude Code session UUID; NULL
+for session-blind producers.</li>
+<li><strong>#233 -- <code>price_table</code> stamp + <code>price_version</code> column (additive).</strong>
+<code>scores.price_table</code> (<code>{version, effective_date}</code>) is now always present;
+<code>price_version</code> was appended to the <code>token_events</code> export. The server became
+the single pricing authority (<code>POST /events</code> reprices; client <code>cost_usd</code> is a
+cross-check).</li>
+<li><strong>#231 -- <code>repo</code> column (additive).</strong> Appended to BOTH exports and accepted as
+an optional field on <code>POST /costs</code> and <code>POST /events</code>. <code>issue_id</code> values were
+deliberately left unchanged so a consumer pinned to <code>issue_id</code> keeps reading
+the same value; the repository arrived in its own new column rather than
+changing an existing column&#39;s shape in place.</li>
+<li><strong>#191 -- bulk exports added (additive).</strong> <code>GET /api/v1/events</code> and
+<code>GET /api/v1/outcomes</code> introduced (keyset-paginated, JSON default + CSV). Both
+return <code>403</code> in team-aggregation mode. New endpoints, no existing surface
+changed.</li>
+<li><strong>#187 -- work-type segmentation; <code>/scores</code> top-level fields SEMANTICALLY
+DEMOTED.</strong> Added <code>scores.work_types</code> (the authoritative within-category
+comparison) and <code>work_type</code>/<code>work_type_source</code> columns on the outcomes export
+(additive). <strong>In the same change, the top-level <code>developers</code>/<code>teams</code>/<code>total</code>
+became a POOLED population summary that is explicitly NOT a cross-type
+ranking.</strong> The numbers stayed parseable while their meaning narrowed; that
+semantic change shipped without a version signal or deprecation header, and is
+the motivating defect for this contract (#241). Under the rule above it should
+have been announced via a changelog entry and the field doc comments (it now
+is); the new meaning correctly shipped under a new key (<code>work_types</code>) rather
+than repurposing the old fields.</li>
+<li><strong>#270 -- division-aggregation mode + <code>aggregation</code> discriminator (additive
+field; new opt-in mode).</strong> Adds <code>--aggregation division</code>, a second ANONYMIZED
+level that rolls <code>org_hierarchy</code> up one step past team to division, reusing the
+identical k-anonymity floor and every suppression guard team mode has (the
+per-developer <code>/scores/{developer}</code> <code>404</code>, the bulk-export/fidelity <code>403</code>s). Its
+rows ride the SAME <code>teams</code> array as team mode; the new top-level <code>aggregation</code>
+string field (<code>omitempty</code>, absent in developer mode) says which level the rows
+are. Adding the field is additive and back-compatible; the mode itself is
+deploy-time and opt-in like #185. k-anonymity holds independently at each level
+because every level is a flat partition of the same developer set, so a sub-k
+team suppressed at team level is absorbed into a <code>&gt;= k</code> division at division
+level, never re-exposed.</li>
+<li><strong>#185 -- team-aggregation mode (behavioural, opt-in).</strong> When the server runs
+in <code>AggregationTeam</code> mode, <code>GET /scores</code> replaces named <code>developers</code> with
+k-anonymized <code>teams</code> and emits <code>developers</code> as an empty array, and
+<code>GET /scores/{developer}</code> blanket-<code>404</code>s. This is a deploy-time mode, not a
+wire-shape change to a given response, but it changes which fields are
+populated -- consumers must handle the empty-<code>developers</code>/<code>teams</code> shape. (The
+bulk exports landed later in #191 and inherit this policy, returning <code>403</code> in
+team mode; see that entry. Division mode #270 rides the same policy.)</li>
+<li><strong>#136 -- <code>data_quality</code> block + <code>zero_token</code>/<code>flagged_outcomes</code> fields
+(additive).</strong> Zero-token-outcome tripwire surfaced on <code>/scores</code> and
+<code>/scores/{developer}</code>.</li>
+<li><strong>#133 -- ranking fields (additive).</strong> <code>sample_n</code>, <code>ci_low</code>, <code>ci_high</code>,
+<code>ranked</code> added to per-developer rows; the array is not pre-sorted.</li>
+<li><strong>#55 -- <code>cache_write_5m_tokens</code>/<code>cache_write_1h_tokens</code> (additive);
+<code>cache_write_tokens</code> deprecated.</strong> The legacy single-bucket request field is
+accepted with a <code>Warning: 299</code> header (the last use of the RFC 7234 precedent;
+new deprecations use the RFC 9745 <code>Deprecation</code> / RFC 8594 <code>Sunset</code> pair).</li>
+</ul>
+<h2 id="changing-the-api">Changing the API</h2>
+<p>When you add a field, add it in the same PR to (1) the Go response struct in
+<code>internal/api/</code>, (2) this document&#39;s endpoint catalog, (3) the
+<a href="#api-changelog" rel="nofollow">API changelog</a>, and -- for the CSV exports -- (4) the relevant
+CSV header slice (<code>eventsCSVHeader</code>, <code>outcomesCSVHeader</code>, <code>qualityEventsCSVHeader</code>,
+<code>qualityHistoryCSVHeader</code>) and <code>docs/how-it-works.md</code>. When you
+deprecate or change a field&#39;s meaning, follow
+<a href="#announcing-a-deprecation-or-a-semantic-change" rel="nofollow">Announcing a deprecation</a>:
+new field name (never repurpose), the RFC 9745 <code>Deprecation</code> / RFC 8594 <code>Sunset</code>
+headers, and a changelog entry.</p>
+<h2 id="relationship-to-the-ingestion-seam-contract">Relationship to the ingestion seam contract</h2>
+<p>TIER&#39;s cross-service ingestion seam, <code>tier-jsonl-ingestion</code> (Claude Code session
+JSONL -&gt; tier collector), is pinned by the JSON schema at
+<code>docs/contracts/tier-jsonl-ingestion.schema.json</code>. That seam is the external
+Claude Code producer format tier consumes; tier owns and publishes the seam
+contract even though the data flows inbound, because tier, not the producer,
+defines which fields it requires. This document, by contrast, governs the HTTP
+API tier itself PRODUCES.
+The <code>/api/v1</code> REST surface is not yet pinned as its own formally versioned seam
+contract; that is a possible follow-up once an external consumer of the REST
+contract needs a stability guarantee.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

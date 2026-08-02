@@ -1,0 +1,104 @@
+# Public read-only DEMO instance (#429/#431) — demo.tiermetric.org.
+#
+# Topology: Cloudflare Tunnel -> loopback. `tierd demo` serves a SYNTHETIC,
+# read-only board on 127.0.0.1 INSIDE the container (writes structurally absent,
+# #429), and a cloudflared sidecar SHARES tierd's network namespace
+# (network_mode: service:tierd-demo) and tunnels demo.tiermetric.org ->
+# http://127.0.0.1:8080. tierd is NEVER directly exposed — there is no published
+# port — so validateBind (#59) stays satisfied on loopback and there is no API
+# token to manage: reads are intentionally open, and the data is obviously fake
+# (demo-* developers, DEMO-* issues, "ACME (DEMO)" org, recreated each start).
+#
+# This is DISTINCT from docker-compose.yml (the real, token-gated `serve`): never
+# point this file at a real database — it exposes open reads by design.
+#
+# Prereqs (infrastructure-management, one-time, in Cloudflare Zero Trust):
+#   1. Create a Named Tunnel; copy its connector token into deploy/cloudflared.env
+#      as CLOUDFLARE_TUNNEL_TOKEN=... (deploy/.gitignore ignores *.env).
+#   2. Add a Public Hostname route: demo.tiermetric.org -> http://127.0.0.1:8080.
+# Build + run (see deploy/DEMO.md for the full runbook + verification):
+#   make docker    # builds tierd:latest
+#   docker compose -f deploy/docker-compose.demo.yml --env-file deploy/cloudflared.env up -d
+
+services:
+  tierd-demo:
+    image: tierd:latest
+    # Built locally by `make docker`; never pulled. Explicit so a typo in the tag
+    # fails closed rather than reaching out to docker.io for something named tierd.
+    pull_policy: never
+
+    # `demo` recreates a synthetic DB each start and serves the read-only board on
+    # loopback. It forces read-only mode internally (#429), so the write/ingest/
+    # admin routes, the webhook, the proxies, the watcher, and the pollers are all
+    # structurally absent. Do NOT append --read-only here: `demo` does not accept
+    # serve flags, and it already implies read-only. Loopback bind => no token.
+    command: ["demo", "--addr", "127.0.0.1:8080", "--db", "/data/demo.db"]
+
+    # --- hardening (mirrors docker-compose.yml) ---
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Named volume so the image's /data ownership (uid 65532) carries over; the
+    # synthetic DB is rewritten on every start, so its contents are disposable.
+    volumes:
+      - demo-data:/data
+
+    # tierd exits 1 on a terminal HTTP-listener failure; the restart policy brings
+    # it back with a fresh synthetic board. REQUIRED, not optional.
+    restart: unless-stopped
+
+    # No in-container healthcheck: the Chainguard static base has no shell/curl and
+    # tierd has no self-probe. Probe the loopback liveness endpoint from the
+    # cloudflared namespace or the host: curl -fsS http://127.0.0.1:8080/api/v1/livez
+
+  cloudflared:
+    # PINNED (#536, 2026-07-29). cloudflared holds the tunnel-ingress credential
+    # AND shares tierd's network namespace, so a mutable tag here was the stack's
+    # highest-value supply-chain target — and this demo IS a public instance, so
+    # the pin was a DEPLOY GATE rather than a later "before prod" step.
+    #
+    # Tag AND digest, deliberately: the digest is what Docker enforces (it wins
+    # over the tag), while the version keeps the line readable and makes an
+    # upgrade reviewable. Verified 2026-07-29 that :2026.7.3 and :latest resolved
+    # to the SAME digest, so this pins the image that was current, not an older one.
+    #
+    # Pinned to the multi-arch INDEX digest, not a per-arch manifest: the index is
+    # itself content-addressed and references each arch's manifest BY digest, so
+    # immutability is transitive while the deploy still works on any host arch. Do
+    # not "helpfully" narrow this to one architecture.
+    #
+    # To upgrade: re-resolve BOTH and change them together —
+    #   crane digest cloudflare/cloudflared:<tag>
+    # ⚠️ A tag bumped WITHOUT its digest does NOT revert to a mutable pull — Docker
+    # keeps honouring the OLD digest and ignores the new tag. The file then LIES
+    # about what is running, and the security upgrade you believe you applied never
+    # shipped. Silent non-upgrade, which is the more dangerous direction here.
+    image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+
+    # Share tierd-demo's network namespace so `http://127.0.0.1:8080` resolves to
+    # the demo's loopback listener. Egress to the Cloudflare edge uses the same
+    # namespace's normal outbound path. A service sharing another's network cannot
+    # declare its own ports (it does not need any).
+    network_mode: "service:tierd-demo"
+    depends_on:
+      - tierd-demo
+
+    # Token-based (connector) tunnel: `cloudflared tunnel run` reads TUNNEL_TOKEN
+    # from the environment. --no-autoupdate keeps the pinned image authoritative.
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in deploy/cloudflared.env}
+
+    # cloudflared is a third-party connector; drop caps + privileges but leave the
+    # rootfs writable (it may write connection state / logs). No secrets on disk —
+    # the token comes from the environment.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  demo-data:

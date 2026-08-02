@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Understanding TIER — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="understanding-tier">Understanding TIER</h1>
+<p>This page is written in three layers. Each one is a complete, honest answer —
+stop wherever you have what you came for.</p>
+<ol>
+<li><strong><a href="#layer-1--the-short-answer" rel="nofollow">The short answer</a></strong> — what TIER is and why a team would want it. No jargon.</li>
+<li><strong><a href="#layer-2--how-the-meter-works" rel="nofollow">How the meter works</a></strong> — where the numbers come from.</li>
+<li><strong><a href="#layer-3--the-full-method-page-by-page" rel="nofollow">The full method, page by page</a></strong> — where every number is defined.</li>
+</ol>
+<hr>
+<h2 id="layer-1--the-short-answer">Layer 1 — The short answer</h2>
+<p>Your team is spending real money on AI coding tools. Most teams can tell you
+<strong>how much</strong>. Almost none can tell you <strong>what they got for it</strong>.</p>
+<p>TIER answers the second question: <strong>how much shipped work you got per dollar of
+AI spend</strong>, not how many tokens you burned.</p>
+<p>The number: <strong>outcome points per $1,000.</strong> Work that actually merged goes on
+top. On the bottom goes what that AI usage costs at a standard published price
+list — deliberately <em>not</em> your invoice, so two teams&#39; numbers mean the same
+thing. If you spent a lot and shipped little, you find out before the next
+invoice.</p>
+<p>TIER is built to grade <strong>the work, not the worker.</strong> Its anonymized reporting
+modes fold small groups behind an anonymity floor so no individual is named.
+There is no silent default here — the server refuses to start until someone
+explicitly picks a reporting mode. Naming individuals is a
+deliberate choice, legally weighty in some countries. Someone doing hard,
+ambiguous work will score lower than someone landing routine changes: a
+fact about the work, not the person.</p>
+<p>One caveat: this is an estimate, not a meter reading — it reads low on short
+windows by construction, and work mix moves it more than skill does.</p>
+<p>Measured on TIER&#39;s own repository, trailing 30 days to 2026-07-21: most of that
+window&#39;s spend joined no tracked outcome. Unattributed is not the same as wasted
+— it means the spend did not join an outcome TIER could see, which is a coverage
+statement about the measurement, not a verdict on the work.</p>
+<p><strong>Next:</strong> <a href="#layer-2--how-the-meter-works" rel="nofollow">How the meter works</a>, or see one now
+with <code>tierd demo</code> (<a href="https://github.com/tiermetric/tier/blob/main/README.md#see-it-in-60-seconds" rel="nofollow">README</a>).</p>
+<hr>
+<h2 id="layer-2--how-the-meter-works">Layer 2 — How the meter works</h2>
+<p>The score is a ratio:</p>
+<pre><code>TIER = outcome points ÷ (dollars spent / 1,000)
+</code></pre>
+<p>Read as <strong>&#34;outcome points per $1,000.&#34;</strong> Both halves are measured from things
+that actually happened, not from self-reports.</p>
+<h3 id="the-bottom-half-dollars">The bottom half: dollars</h3>
+<p>TIER reads the session files your AI coding tool already writes to disk —
+for Claude Code, the JSONL under <code>~/.claude/projects/</code>. Every request records
+how many tokens were used and by which model.</p>
+<p>Those tokens are converted to dollars using a <strong>reference price table</strong> shipped
+inside the binary, not your invoice. That is deliberate. An invoice bundles
+discounts, credits, and negotiated rates, so two teams doing identical work
+would score differently. A shared list price makes the number comparable.
+See <a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a> for why, and
+<a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> for the table itself.</p>
+<p>Spend is attributed to a piece of work by reading the issue reference from your
+branch name or PR. Spend it can&#39;t attribute lands in an <strong>unattributed</strong> bucket
+— and that bucket is reported, not hidden. A large unattributed share is
+usually exploration, spikes, and dead ends. That is real spend and real
+information.</p>
+<h3 id="the-top-half-outcome-points">The top half: outcome points</h3>
+<p>Only <strong>merged</strong> work counts. Not lines written, not PRs opened, not commits —
+merged. Code that never shipped produced no outcome, however much it cost.</p>
+<p>Each merged PR is worth points based on its size label, on a fixed five-point
+scale:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>xs</code></td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>m</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>l</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>xl</code></td>
+<td>8</td>
+</tr>
+</tbody>
+</table>
+<p>The scale is <strong>locked</strong>. Label <em>names</em> are configurable; the weights are not.
+If every org could set its own weights, &#34;points per $1,000&#34; would mean
+something different everywhere and cross-team comparison would be meaningless.</p>
+<p>Each PR&#39;s weight is then scaled by a <strong>quality multiplier</strong> — work that broke
+the build, failed CI, or got reverted is worth less than work that landed
+cleanly. So the numerator is <code>Σ(weight × quality)</code>.</p>
+<h3 id="three-things-that-will-bite-you">Three things that will bite you</h3>
+<p><strong>1. Task mix shapes the number more than skill does.</strong> A quarter of
+greenfield feature work and a quarter of gnarly production debugging will not
+score the same, and the difference is not effort or talent. Compare a team to
+its own history, not to another team&#39;s number.</p>
+<p><strong>2. Small groups are anonymized, by design.</strong> In the <code>team</code> setting, a
+group with fewer contributing developers than the anonymity floor (default
+five, minimum three) collapses into one anonymous row. Their spend and
+outcomes stay in the totals — nothing is dropped — but no individual is named. If you are evaluating TIER solo, you must explicitly ask
+for <code>developer</code> mode or you will not see your own row.</p>
+<p><strong>3. The two halves must cover the same window.</strong> Spend is booked up front;
+the outcome lands later, at merge. If you measure spend over a period longer
+than your outcomes, the number inflates. We inflated our own number this way
+once, caught it, and corrected it. Always window-match. See
+<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>.</p>
+<p><strong>Next:</strong> <a href="#layer-3--the-full-method-page-by-page" rel="nofollow">The full method, page by page</a>, or
+<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a> — the honest-reading
+guide, and the single most useful page here before you trust any score.</p>
+<hr>
+<h2 id="layer-3--the-full-method-page-by-page">Layer 3 — The full method, page by page</h2>
+<p>This layer says how each number is produced and <strong>links to the authoritative
+page for each formula rather than repeating it</strong> — restating a formula in two
+places is how the two copies drift apart.</p>
+<p>For the code-grounded account of what the tool does and does not do today,
+read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> alongside this.</p>
+<h3 id="capture--how-spend-gets-measured">Capture — how spend gets measured</h3>
+<p>TIER is <strong>JSONL-first</strong>. The primary path reads the session files the tool
+already writes locally; no proxy sits in front of your model provider and no
+request is intercepted. An optional reverse proxy exists for environments where
+JSONL isn&#39;t available, and open-weights / self-hosted models have their own
+capture path.</p>
+<ul>
+<li>Capture paths and the laptop-shipper topology — <a href="https://github.com/tiermetric/tier/blob/main/README.md#capturing-tokens" rel="nofollow">README § Capturing tokens</a></li>
+<li>Self-hosted and open-weights models — <a href="open-weights-capture.html" rel="nofollow">open-weights-capture.md</a></li>
+<li>What is read, stored, and never touched — <a href="privacy.html" rel="nofollow">privacy.md</a></li>
+</ul>
+<h3 id="pricing--how-tokens-become-dollars">Pricing — how tokens become dollars</h3>
+<p><code>ComputeCost</code> prices each event against the embedded table in
+<code>internal/store/prices.yaml</code>, which is the single source of truth and is
+versioned as one atomic unit. Model names are normalized (date and version
+suffixes stripped) before lookup; an unknown model falls back to a
+self-hosted-medium rate and emits a warning rather than silently billing wrong.</p>
+<ul>
+<li>Why list prices, not invoices — <a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a></li>
+<li>The table, and the erratum list — <a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a></li>
+<li>Normalization rules and the target governance model — <a href="cost-normalization-spec.html" rel="nofollow">cost-normalization-spec.md</a></li>
+</ul>
+<h3 id="attribution--how-spend-is-tied-to-work">Attribution — how spend is tied to work</h3>
+<p>Spend is joined to an issue via the issue reference carried by the branch name
+or PR body. Cost is attributed to your <strong>shipping identity</strong> (OS username by
+default); outcomes are attributed to the <strong>PR author&#39;s GitHub login</strong>. When
+those differ they must be mapped to one developer, or cost and outcomes land in
+separate rows and cannot be paired.</p>
+<ul>
+<li>Branch, label, and issue-reference conventions — <a href="conventions.html" rel="nofollow">conventions.md</a></li>
+<li>Identity mapping — <a href="https://github.com/tiermetric/tier/blob/main/README.md#identity-mapping" rel="nofollow">README § Identity mapping</a></li>
+</ul>
+<h3 id="scoring--how-outcomes-become-points">Scoring — how outcomes become points</h3>
+<p>The canonical rubric defines the fixed <code>{0.5, 1, 3, 5, 8}</code> size scale, the
+label taxonomy, the heuristic fallback when a PR carries no recognised label,
+and the quality multiplier derived from quality events.</p>
+<ul>
+<li>The canonical rubric, and why it defines no absolute good/bad band — <a href="rubric.html" rel="nofollow">rubric.md</a></li>
+<li>The quality multiplier&#39;s degradation rules — <a href="quality-degradation-spec.html" rel="nofollow">quality-degradation-spec.md</a></li>
+<li>Outcome ingest for teams not on GitHub — <a href="outcomes-api.html" rel="nofollow">outcomes-api.md</a></li>
+<li>GitHub webhook wiring — <a href="webhook-setup.html" rel="nofollow">webhook-setup.md</a></li>
+</ul>
+<h3 id="reading-the-result">Reading the result</h3>
+<ul>
+<li>Honest reading, windowing skew, and when a score is too provisional to trust — <a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a></li>
+<li>Where TIER sits alongside DORA, SPACE, and DX Core 4 — <a href="how-tier-relates.html" rel="nofollow">how-tier-relates.md</a></li>
+<li>Moving practices between people without ranking them — <a href="peer-learning.html" rel="nofollow">peer-learning.md</a></li>
+</ul>
+<h3 id="the-limits-stated-plainly">The limits, stated plainly</h3>
+<p>TIER can be gamed, and the ways it can be gamed are published rather than
+hidden: label inflation, PR splitting, cheap-work farming, and several failure
+modes that are structural rather than adversarial. Read
+<a href="adversarial-analysis.html" rel="nofollow">adversarial-analysis.md</a> before you put this number in
+front of anyone whose incentives it touches.</p>
+<p>Deploying per-developer measurement is regulated in some jurisdictions. If you
+operate in the EU or anywhere with works-council or GDPR Art. 22
+co-determination obligations, read
+<a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a> <strong>before</strong> you enable
+<code>developer</code> aggregation.</p>
+<h3 id="interfaces">Interfaces</h3>
+<ul>
+<li><code>/api/v1</code> compatibility contract — what is pinned and what may change — <a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a></li>
+<li>Operator security model — <a href="security.html" rel="nofollow">security.md</a></li>
+<li>Full documentation index — <a href="README.html" rel="nofollow">docs/README.md</a></li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

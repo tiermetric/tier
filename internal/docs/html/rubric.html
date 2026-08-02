@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The canonical TIER rubric (v1) — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="the-canonical-tier-rubric-v1">The canonical TIER rubric (v1)</h1>
+<p>This document is the <strong>versioned, normative rubric</strong> for TIER&#39;s outcome weights
+and work-type taxonomy. It is the weight-side analogue of the
+<a href="reference-price-table.html" rel="nofollow">reference price table</a>: the price table pins the
+<strong>dollars</strong>, this rubric pins the <strong>weighted points</strong>, and a TIER number is only
+comparable across two measurements when <strong>both</strong> stamps match.</p>
+<ul>
+<li><strong>Rubric version:</strong> <code>1</code> (the <code>scoring.RubricVersion</code> constant).</li>
+<li><strong>Where it is stamped:</strong> every <code>GET /api/v1/scores</code> response carries a top-level
+<code>rubric: {version}</code> block next to <code>price_table: {version, effective_date}</code>.</li>
+<li><strong>When it must change:</strong> any edit to the weight scale or the work-type taxonomy
+below <strong>must</strong> bump <code>scoring.RubricVersion</code>. That is the point of the stamp, not
+a side effect — a silent edit would make yesterday&#39;s scores falsely comparable
+to today&#39;s.</li>
+</ul>
+<blockquote>
+<p><strong>There is no absolute &#34;good&#34; TIER.</strong> This rubric deliberately defines <strong>no</strong>
+reference cohort and <strong>no</strong> good/ok/poor band. A weighted point is org-local by
+construction; a bare TIER of 40 is neither good nor bad on its own. What <em>is</em>
+defensible is a <strong>self-relative</strong> comparison — the same org over time, or two
+parties under a <em>matched</em> rubric + price version — expressed through
+<code>cost_per_point</code>. See <a href="#what-you-may-and-may-not-compare" rel="nofollow">What you may and may not compare</a>.</p>
+</blockquote>
+<h2 id="why-the-rubric-is-versioned-the-exploit-it-closes">Why the rubric is versioned (the exploit it closes)</h2>
+<p>TIER&#39;s numerator is <code>Σ(weight × quality)</code>. The weight comes from a size label (or
+a heuristic fallback — see <a href="conventions.html" rel="nofollow">conventions.md</a>). If the label→weight
+mapping is merely a &#34;convention&#34;, two orgs can apply it with different generosity:
+a generous-labeling org calls the same change <code>size/l</code> (5) that a strict org calls
+<code>size/m</code> (3). At <strong>identical real efficiency</strong>, the generous org posts a higher
+TIER. Without a stamped rubric, a cross-org comparison silently rewards labeling
+culture, not engineering yield — and TIER drifts into people-ranking, the one
+thing it must not do.</p>
+<p>Two distinct mechanisms address this — do not conflate them:</p>
+<ul>
+<li><strong>Normativity</strong> (this document&#39;s worked examples) is what makes a strict org and
+a generous org score the <em>same real work</em> the same way. Both are expected to
+calibrate against this canonical rubric rather than their house habits. This is
+the actual cross-org generosity guard.</li>
+<li><strong>The version stamp</strong> (<code>rubric.version</code> on the wire) is <em>provenance</em>: it makes a
+change to the rubric <strong>definition</strong> detectable over time, so a self-over-time or
+matched-version comparison can confirm the weighting did not drift. It does
+<strong>not</strong>, by itself, detect a cross-org generosity difference — two orgs on the
+same binary stamp the same version however each labels — nor a local
+<code>size_labels</code> remap (see the caveat under <a href="#size--weight" rel="nofollow">Size → weight</a>).</li>
+</ul>
+<p>So: a <code>rubric.version</code> <strong>mismatch</strong> makes a comparison non-comparable and visibly
+so; a <code>rubric.version</code> <strong>match</strong> is necessary but not sufficient — it must be
+paired with shared normative calibration (and matched <code>size_labels</code>) before a
+cross-org <code>cost_per_point</code> reading is defensible.</p>
+<h2 id="size--weight">Size → weight</h2>
+<p>The weight of a merged PR is its size, read from a GitHub label (case-insensitive,
+<code>size/</code> prefix optional). The scale is fixed — these five values and no others:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+<th>What it means (canonical calibration)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>size/xs</code> / <code>xs</code></td>
+<td>0.5</td>
+<td>Trivial: a one-line fix, a typo, a config flag, a dependency bump.</td>
+</tr>
+<tr>
+<td><code>size/s</code>  / <code>s</code></td>
+<td>1</td>
+<td>Small: a localized change to one function/file; a focused bug fix with a test.</td>
+</tr>
+<tr>
+<td><code>size/m</code>  / <code>m</code></td>
+<td>3</td>
+<td>Medium: a self-contained feature or fix spanning a few files; the everyday unit of work.</td>
+</tr>
+<tr>
+<td><code>size/l</code>  / <code>l</code></td>
+<td>5</td>
+<td>Large: a feature touching several components, or a non-trivial refactor with migration.</td>
+</tr>
+<tr>
+<td><code>size/xl</code> / <code>xl</code></td>
+<td>8</td>
+<td>Extra-large: a subsystem, a cross-cutting change, or a multi-day effort landed as one PR.</td>
+</tr>
+</tbody>
+</table>
+<p>With no recognized label, TIER falls back to the lines/files heuristic (see
+<a href="conventions.html#pr-size-labels--outcome-weight" rel="nofollow">conventions.md</a>); explicit labels
+are preferred because they let a reviewer correct the heuristic (a two-line change
+to a critical path is not a two-line typo fix).</p>
+<blockquote>
+<p><strong>What <code>rubric.version</code> does and does not assert.</strong> The stamp names the
+<strong>canonical</strong> rubric compiled into the binary — this scale and taxonomy. It is
+<strong>not</strong> a fingerprint of an operator&#39;s local configuration. The <code>weights</code>
+themselves are locked to the <code>{0.5, 1, 3, 5, 8}</code> scale (<code>#244</code>, enforced at
+startup), but an operator MAY rename the labels that map onto them via
+<code>outcomes.size_labels</code> (e.g. map a house label <code>epic</code> to <code>8</code>). Renaming which
+label triggers a weight does not change the meaning of a weight, so the stamp
+stays honest for that case. A local convention that maps a size to a
+<em>different</em> weight than this document&#39;s calibration (e.g. treating everyday
+work as <code>l</code>/5 rather than <code>m</code>/3) is a <strong>divergence the operator owns</strong>: the
+stamp cannot detect it, so such an org must not read its <code>cost_per_point</code>
+against another party&#39;s until the calibrations are reconciled. A
+config-fingerprint stamp is a possible future refinement; today the honest rule
+is &#34;matched <code>rubric.version</code> is necessary, not sufficient, across orgs with
+customized labels.&#34;</p>
+</blockquote>
+<h3 id="worked-examples-per-size">Worked examples (per size)</h3>
+<p>Assume a clean outcome (<code>quality = 1.0</code>; see <a href="#quality-multiplier" rel="nofollow">Quality multiplier</a>).</p>
+<ol>
+<li><strong>A <code>size/s</code> (weight 1) bug fix that cost $2.00 of AI compute.</strong>
+<ul>
+<li><code>weighted_points = 1 × 1.0 = 1</code></li>
+<li><code>cost_per_point = 2.00 / 1 = $2.00 per point</code></li>
+<li><code>tier = 1 / (2.00/1000) = 500</code></li>
+</ul>
+</li>
+<li><strong>A <code>size/l</code> (weight 5) feature that cost $12.00.</strong>
+<ul>
+<li><code>weighted_points = 5 × 1.0 = 5</code></li>
+<li><code>cost_per_point = 12.00 / 5 = $2.40 per point</code></li>
+<li><code>tier = 5 / (12.00/1000) ≈ 417</code></li>
+</ul>
+</li>
+<li><strong>A <code>size/xs</code> (weight 0.5) typo fix that cost $0.40.</strong>
+<ul>
+<li><code>weighted_points = 0.5</code></li>
+<li><code>cost_per_point = 0.40 / 0.5 = $0.80 per point</code></li>
+<li><code>tier = 0.5 / (0.40/1000) = 1250</code></li>
+</ul>
+</li>
+</ol>
+<p>Note example 3&#39;s TIER of 1250 — a tiny outcome against tiny cost produces an
+enormous ratio. This is exactly why raw TIER is <strong>not</strong> a rankable absolute, and
+why the <a href="api-compatibility.html" rel="nofollow">ranking floor</a> (<code>#133</code>: ≥ 3 outcomes and ≥ $5
+cost) exists. <code>cost_per_point</code> is the steadier unit: across the three examples it
+stays in the $0.80–$2.40 band even as TIER swings from 417 to 1250.</p>
+<h2 id="work-type-taxonomy">Work-type taxonomy</h2>
+<p>Outcomes are partitioned by <code>work_type</code> so a category is only ever compared to the
+same category (a security outcome against other security work, never against
+feature work). The canonical taxonomy is these seven categories, in order:</p>
+<table>
+<thead>
+<tr>
+<th><code>work_type</code></th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>feature</code></td>
+<td>New user-facing or internal capability. The default when unlabeled.</td>
+</tr>
+<tr>
+<td><code>bug</code></td>
+<td>Correcting incorrect behavior in shipped code.</td>
+</tr>
+<tr>
+<td><code>security</code></td>
+<td>Vulnerability remediation, hardening, auth/crypto work.</td>
+</tr>
+<tr>
+<td><code>incident</code></td>
+<td>Production incident response and remediation.</td>
+</tr>
+<tr>
+<td><code>tech-debt</code></td>
+<td>Refactoring, cleanup, dependency and platform maintenance.</td>
+</tr>
+<tr>
+<td><code>research</code></td>
+<td>Spikes, investigations, prototypes — exploratory work.</td>
+</tr>
+<tr>
+<td><code>compliance</code></td>
+<td>Regulatory, audit, privacy, and policy-driven work.</td>
+</tr>
+</tbody>
+</table>
+<p>The same size→weight scale applies <strong>within</strong> every work type; the taxonomy
+segments <em>what is compared to what</em>, it does not change how a point is earned.</p>
+<h3 id="worked-example-per-work_type">Worked example (per work_type)</h3>
+<p>A developer merges, in one window: a <code>size/m</code> <code>feature</code> ($9 cost), a <code>size/s</code>
+<code>bug</code> ($1.50), and a <code>size/l</code> <code>security</code> fix ($20).</p>
+<table>
+<thead>
+<tr>
+<th>Segment</th>
+<th>weight</th>
+<th>cost</th>
+<th>cost_per_point</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>feature</code></td>
+<td>3</td>
+<td>$9.00</td>
+<td>$3.00 / point</td>
+</tr>
+<tr>
+<td><code>bug</code></td>
+<td>1</td>
+<td>$1.50</td>
+<td>$1.50 / point</td>
+</tr>
+<tr>
+<td><code>security</code></td>
+<td>5</td>
+<td>$20.00</td>
+<td>$4.00 / point</td>
+</tr>
+</tbody>
+</table>
+<p>Each <code>cost_per_point</code> is meaningful <strong>only against the same segment</strong> in another
+window or (under a matched rubric + price version) another party. A pooled
+<code>cost_per_point</code> across the three is <strong>not</strong> a supported comparison — the
+<code>/scores</code> <code>work_types</code> array is the authoritative surface, and the pooled
+top-level rows are a back-compat summary, not a cross-type ranking (<code>#187</code>).</p>
+<h2 id="quality-multiplier">Quality multiplier</h2>
+<p>Weight is scaled by a quality multiplier derived from quality events (<code>#134</code>),
+so <code>weighted_points = Σ(weight × quality)</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Quality floor</th>
+<th>Multiplier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Clean</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>CI failure</td>
+<td>0.7</td>
+</tr>
+<tr>
+<td>Strategic revert</td>
+<td>0.8</td>
+</tr>
+<tr>
+<td>Quality revert</td>
+<td>0.1</td>
+</tr>
+</tbody>
+</table>
+<p>The quality floors are part of the rubric: changing them also bumps
+<code>rubric.version</code>.</p>
+<h2 id="cost_per_point-the-benchmarking-unit"><code>cost_per_point</code>: the benchmarking unit</h2>
+<p><code>cost_per_point = total_cost_usd / weighted_points</code> — USD per weighted outcome
+point. It is the <strong>inverse-unit dual</strong> of TIER (numerically <code>1000 / tier</code> when
+both are defined) and is the unit TIER should be <em>benchmarked and trended</em> on:</p>
+<ul>
+<li>It reads as money a CFO already understands (&#34;$2.40 per weighted point&#34;).</li>
+<li>Paired with the <code>price_table.version</code> stamp, it is a <strong>constant-dollar</strong>
+self-comparison over time.</li>
+<li>It is guarded on the points denominator: a zero-point row reports <code>0</code>
+(rendered <code>—</code>), never a divide-by-zero. (A <code>$0</code>-cost row with points reports a
+legitimate <code>0.0</code>, already surfaced by the zero-token tripwire <code>#136</code>.)</li>
+</ul>
+<h3 id="self-relative-interval-not-an-absolute-rank">Self-relative interval (not an absolute rank)</h3>
+<p><code>/scores</code> also returns <code>cost_per_point_ci_low/high</code>: the 95% percentile-bootstrap
+interval for a ranked developer&#39;s <code>cost_per_point</code>, derived by reciprocal
+transform from the same TIER bootstrap (<code>#133</code>) — it expresses <code>cost_per_point</code>
+against <strong>that developer&#39;s own resampled outcome history</strong>, the honest thing a
+single window supports. It is <strong>not</strong> a percentile rank against other developers
+or other orgs. A cross-org benchmark distribution — the DORA-report analogue —
+is a deliberate forward-compatible follow-up (<code>#239</code> item 4) that needs a second
+org&#39;s opt-in data to exist first; TIER does not synthesize one from an absent
+dataset.</p>
+<h2 id="what-you-may-and-may-not-compare">What you may and may not compare</h2>
+<table>
+<thead>
+<tr>
+<th>Comparison</th>
+<th>Allowed?</th>
+<th>Unit</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Same developer/team over time</td>
+<td><strong>Yes</strong></td>
+<td><code>cost_per_point</code></td>
+<td>Same <code>rubric.version</code> <strong>and</strong> same <code>price_table.version</code>. A <code>price_table</code> bump is a constant-dollar break; a <code>rubric</code> bump is a weighting break.</td>
+</tr>
+<tr>
+<td>Same developer/team, within one <code>work_type</code>, over time</td>
+<td><strong>Yes</strong></td>
+<td><code>cost_per_point</code> (per segment)</td>
+<td>As above; compare a segment only to the same segment.</td>
+</tr>
+<tr>
+<td>Two parties, matched versions</td>
+<td><strong>Cautiously</strong></td>
+<td><code>cost_per_point</code></td>
+<td>Same <code>rubric.version</code> <strong>and</strong> <code>price_table.version</code>, <strong>and</strong> matched <code>outcomes.size_labels</code> (a remap diverges from canonical calibration — the stamp cannot see it), <strong>and</strong> comparable cache-share context (see <a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md §4</a>). Different cache-hit rates change cost independent of yield.</td>
+</tr>
+<tr>
+<td>Two parties, mismatched <code>rubric.version</code> or <code>price_table.version</code></td>
+<td><strong>No</strong></td>
+<td>—</td>
+<td>Non-comparable by construction. This is the guard, not a limitation.</td>
+</tr>
+<tr>
+<td>Raw <code>tier</code> across parties</td>
+<td><strong>No</strong></td>
+<td>—</td>
+<td>The numerator is org-local; use <code>cost_per_point</code> under matched versions instead.</td>
+</tr>
+<tr>
+<td>Cross-type (<code>feature</code> vs <code>security</code>)</td>
+<td><strong>No</strong></td>
+<td>—</td>
+<td>A category error (<code>#187</code>). Compare within a <code>work_type</code> only.</td>
+</tr>
+<tr>
+<td>Against an absolute &#34;good&#34; value</td>
+<td><strong>No</strong></td>
+<td>—</td>
+<td>No such value exists. TIER has no reference cohort baked in, by design.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="conventions.html" rel="nofollow">conventions.md</a> — how labels and issue references are read
+(the operational input to this rubric).</li>
+<li><a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> — the dollar side of the
+pair; its <code>version</code> co-stamps every comparison.</li>
+<li><a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a> — cache-share context (§4),
+required for any cross-party <code>cost_per_point</code> reading.</li>
+<li><a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a> — the <code>/scores</code> wire contract for
+<code>cost_per_point</code>, its CI, and the <code>rubric</code> stamp.</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

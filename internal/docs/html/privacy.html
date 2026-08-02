@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="privacy">Privacy</h1>
+<p>TIER is built so that adopting it does not mean handing over your source code or
+your prompts. This document states exactly what TIER reads, what it stores, and
+what it never touches — each claim grounded in the code so a security reviewer
+can audit it.</p>
+<h2 id="the-core-guarantee">The core guarantee</h2>
+<blockquote>
+<p><strong>TIER never reads, transmits, or stores prompt or completion content.</strong> Every
+capture path parses with an allowlist. The Claude Code JSONL parser deserializes
+only <code>type</code>, <code>timestamp</code>, <code>gitBranch</code>, <code>cwd</code>, <code>sessionId</code>, and
+<code>message.{id,model,role,usage.*}</code> — token counts, not text; the proxy parsers
+extract only <code>id</code>/<code>model</code>/<code>usage</code> from response bodies; and the Codex
+rollout-log parser reads six fields, none of which is content.</p>
+</blockquote>
+<h2 id="why-the-guarantee-holds">Why the guarantee holds</h2>
+<p>TIER parses inputs with <strong>allowlist structs</strong>. Only the fields named in the
+struct are deserialized; every other JSON field — including any prompt or
+completion text — is silently dropped by the JSON decoder and never enters
+memory as a named value, let alone the database.</p>
+<ul>
+<li>
+<p><strong>JSONL capture</strong> (<code>internal/collector/jsonl.go</code>, the <code>jsonlEntry</code> struct):
+reads <code>type</code>, <code>timestamp</code>, <code>gitBranch</code>, <code>cwd</code>, <code>sessionId</code>, and under
+<code>message</code>: <code>id</code>, <code>model</code>, <code>role</code>, and the <code>usage</code> token counters
+(<code>input_tokens</code>, <code>output_tokens</code>, <code>cache_creation_input_tokens</code>,
+<code>cache_read_input_tokens</code>, and the 5m/1h cache-creation split). There is <strong>no
+content or text field</strong> in the struct.</p>
+</li>
+<li>
+<p><strong>Codex rollout-log capture</strong> (<code>internal/collector/codexrollout/parse.go</code>, the
+<code>rolloutLine</code> struct, #464): reads exactly six fields — the line <code>type</code> and
+<code>timestamp</code>, and under <code>payload</code>: <code>id</code> (the session UUID), <code>cwd</code>, <code>git.branch</code>,
+<code>model</code>, plus the <code>token_count</code> event&#39;s <code>info.total_token_usage</code> counters.
+Codex rollout logs contain a great deal more than that — the agent&#39;s full system
+prompt (<code>base_instructions</code>), your prompts, the model&#39;s messages and reasoning
+traces, tool output, and patch bodies — and <strong>none of it is deserialized</strong>: those
+fields have no counterpart in the struct, so the JSON decoder discards them. The
+<code>cwd</code> is read to decide which repository a session belongs to (a session outside
+every watched repo is dropped) and is <strong>not stored</strong> by this path — and, since it
+is never stored, it is never forwarded either, including by <code>tierd ship --codex-rollout</code> (#492). What that flag sends is the same usage-event shape as
+every other collector, listed under &#34;Where it goes&#34; below; enabling Codex capture
+adds no new <em>category</em> of data to what leaves the machine.</p>
+</li>
+<li>
+<p><strong>Reverse-proxy capture</strong> (<code>internal/proxy/proxy.go</code>): the provider response
+parsers read only the message <code>id</code>, the <code>model</code>, and the <code>usage</code> token counts
+from the response body. The response is passed through to the client
+byte-for-byte; TIER extracts usage and forwards the rest untouched.</p>
+</li>
+</ul>
+<p>Because the parsers are allowlists, adding no new fields is the default —
+capturing content would require deliberately adding a content field, which does
+not exist.</p>
+<h2 id="what-is-stored">What IS stored</h2>
+<p>TIER stores, in a <strong>single local SQLite file</strong> with <strong>no external
+transmission</strong>:</p>
+<ul>
+<li><strong>Developer identifier</strong> — an OS username (JSONL) or GitHub login (PR
+outcomes), and any alias→canonical mapping you configure.</li>
+<li><strong>Issue id</strong> — derived from the branch name or PR/commit body (e.g.
+<code>issue-42</code>, <code>TIER-99</code>).</li>
+<li><strong>Model names</strong> — e.g. <code>claude-opus-4-8</code>.</li>
+<li><strong>Token counts</strong> — input, output, and the cache read/write counters.</li>
+<li><strong>Cost</strong> — list-price cost in integer micro-dollars, computed from the token
+counts via a versioned reference price table.</li>
+<li><strong>Session id</strong> (<code>token_events.session_id</code>, #238) — the <strong>opaque agent session
+UUID</strong> an event belongs to (Claude Code&#39;s <code>sessionId</code>, or the Codex rollout
+log&#39;s <code>session_meta.id</code>), so context-bloat and rework-loop token-waste can be
+diagnosed at session grain. It is a random identifier only; it <strong>carries no
+prompt content, no completion text, and no file contents</strong>, and is <strong>NULL</strong> for
+rows a session-blind producer (the reverse proxy or an Admin-API poller)
+captured.</li>
+<li><strong>PR metadata</strong> — PR number, author login, size-derived weight, quality, and
+the merge commit SHA.</li>
+<li><strong>Watcher tail-state</strong> (<strong>live watch mode only</strong> — <code>--watch-repo</code> or the
+<code>watch.repos</code> config key) — when live ingestion is enabled, TIER persists one
+operational checkpoint row per watched
+JSONL file (<code>watcher_checkpoint</code>) so a restart resumes tailing from the last
+parsed byte instead of re-reading each file from the start. Each row&#39;s
+<code>metadata</code> column holds a small JSON blob describing the session being tailed:
+the <strong>absolute working-directory path</strong> (<code>cwd</code>), the <strong>git branch</strong>, and the
+<strong>session id</strong> (a UUID), plus the session start time, the first-observed model
+name, and an internal parse-sequence counter. Nothing here is captured unless
+you run the watcher; a one-shot <code>tierd score</code> writes no checkpoint.</li>
+<li><strong>Raw GitHub webhook payloads</strong> (<strong>only when the GitHub webhook path is
+enabled</strong> — i.e. you set <code>webhook_secret</code> / <code>TIER_WEBHOOK_SECRET</code> and point
+GitHub deliveries at <code>POST /webhook/github</code>; that endpoint is fail-closed and
+stays disabled without a secret) — for each <em>processed</em> delivery
+(<code>pull_request</code>, <code>push</code>, <code>workflow_run</code>), TIER retains the <strong>raw GitHub webhook
+request body</strong>, gzipped, in the <code>webhook_payloads</code> table so a score input can
+be re-derived months later (#137). Unlike every token-capture path above, this
+raw body <strong>does contain personal data</strong>: commit author <strong>names and email
+addresses</strong>, <strong>PR titles and descriptions</strong>, and <strong>commit messages</strong> — whatever
+GitHub places in a standard webhook payload (up to a 1 MB body). It remains
+<strong>not prompt text, not completion text, and not the contents of your source
+files</strong> — it is the same PR/commit metadata GitHub itself already stores.
+Retention is <strong>bounded</strong>: rows are pruned at process start (<code>Open()</code>) by two
+limits — a <strong>90-day age cap</strong> and a <strong>50,000-row cap</strong> (oldest evicted first),
+enforced by <code>PruneWebhookPayloads</code> (<code>internal/store/audit.go</code>). Both bounds are
+currently compile-time constants (<code>webhookPayloadRetentionDays</code> /
+<code>webhookPayloadMaxRows</code> in <code>internal/store/audit.go</code>), <strong>not config keys</strong> —
+there is no setting to change the window or cap without a code change, and no
+flag to keep the webhook path enabled while suppressing retention. The one
+operator control is the path itself: <strong>to store none of this, run TIER without
+the webhook path</strong> (JSONL capture and <code>tierd ship</code> never populate
+<code>webhook_payloads</code>).</li>
+</ul>
+<p>None of this is prompt text, completion text, code, file contents, or diffs — the
+raw webhook payloads included: they carry the PR/commit metadata GitHub already
+stores (names, emails, titles, messages), never your prompts or the contents of
+your files. The <code>session_id</code> above is likewise an <strong>opaque UUID</strong> — it groups a
+session&#39;s events without persisting anything the session said or produced. Two of the entries above are conditional and hold data an auditor
+should note. The watcher tail-state is <strong>derived operational state, safe to delete
+at any time</strong> — the watcher self-heals from the live file on the next change — and
+it too contains no prompt or completion text and no file contents; its <code>cwd</code> is an
+absolute directory <em>path</em> (a filesystem location, not the contents of any file),
+which can reveal an OS username or an internal project name. The raw webhook
+payloads are the one place TIER holds third-party personal data (contributor names
+and emails) <strong>at rest</strong>, bounded to ~90 days. Because of both, operators should
+treat the local database file (mode <code>0600</code>, single-tenant) accordingly — and may
+decline the webhook path entirely to store none of the webhook PII.</p>
+<h2 id="data-subject-rights-access-and-erasure-gdpr-art-15--art-17">Data-subject rights: access and erasure (GDPR Art. 15 / Art. 17)</h2>
+<p>Because TIER stores personal data keyed to a named developer, it ships two
+bearer-gated (write/admin-scoped) admin endpoints so an operator can honour a
+data-subject access or erasure request without hand-editing the database (#184):</p>
+<ul>
+<li>
+<p><strong>Erasure</strong> — <code>DELETE /api/v1/developer/{id}</code> deletes <strong>every</strong> stored row for
+that person in <strong>one transaction</strong> (all-or-nothing). It first resolves <code>{id}</code>
+through the alias map (single-hop) and then removes rows stored under the
+canonical id <em>or</em> any raw login that aliases to it, across <strong>all</strong> developer-PII
+tables:</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>token_events</code></td>
+<td>per-developer token counts and list-price cost</td>
+</tr>
+<tr>
+<td><code>outcomes</code></td>
+<td>per-developer PR/issue outcomes, weight, quality</td>
+</tr>
+<tr>
+<td><code>actual_spend</code></td>
+<td>per-developer actual-paid amounts</td>
+</tr>
+<tr>
+<td><code>org_hierarchy</code></td>
+<td>the developer&#39;s team/division/org</td>
+</tr>
+<tr>
+<td><code>period_membership</code></td>
+<td>the developer&#39;s org-membership windows</td>
+</tr>
+<tr>
+<td><code>quality_events</code></td>
+<td>per-developer CI/revert quality signals</td>
+</tr>
+<tr>
+<td><code>quality_history</code></td>
+<td>per-developer quality-transition log</td>
+</tr>
+<tr>
+<td><code>developer_alias</code></td>
+<td>the developer&#39;s alias→canonical mappings</td>
+</tr>
+</tbody>
+</table>
+<p>It returns per-table deleted-row counts and is <strong>idempotent</strong> (a second call, or
+a call for an unknown developer, deletes nothing and returns <code>404</code>).</p>
+</li>
+<li>
+<p><strong>Access (DSAR)</strong> — <code>GET /api/v1/developer/{id}/export</code> returns every stored
+row for the same resolved identifier set as JSON — the portable artifact you
+hand to the data subject.</p>
+</li>
+</ul>
+<p><strong>Known residual — <code>webhook_payloads</code>.</strong> The structured erasure above does <strong>not</strong>
+rewrite the raw GitHub webhook bodies retained in <code>webhook_payloads</code> (only present
+when the webhook path is enabled). As described in <em>What IS stored</em> above, those
+raw bodies may embed a contributor&#39;s name or email address. Surgically editing a
+gzipped raw audit body to redact one identifier is out of scope for the erasure
+endpoint; the <strong>mitigation is the retention bound</strong> — every such row is pruned at
+process start by a 90-day age cap and a 50,000-row cap (<code>PruneWebhookPayloads</code>),
+so any identifier embedded there ages out within ~90 days. An operator who must
+guarantee immediate removal of that residual can run TIER without the webhook path
+(which stores none of it) or delete the affected <code>webhook_payloads</code> rows directly.
+<code>org_actual_spend</code> is org-level (no developer column) and holds no personal data,
+so it is correctly outside the erasure/export scope.</p>
+<h2 id="where-it-goes">Where it goes</h2>
+<p>Nowhere by default. The database is a local file (SQLite). The only outbound
+network traffic TIER makes is:</p>
+<ul>
+<li>the <strong>reverse proxy</strong> forwarding your API calls to the upstream provider you
+configured (Anthropic / OpenAI), which happens only if you route traffic
+through it; and</li>
+<li><code>tierd ship</code> forwarding <strong>captured usage events</strong> (the fields listed above,
+never content) to a central <code>tierd</code> you operate — from Claude Code sessions by
+default, and from Codex rollout logs as well when <code>--codex-rollout</code> is passed.
+Both produce the same event shape; neither forwards a <code>cwd</code> or any content.</li>
+</ul>
+<p>TIER does not call home, and it does not transmit your data to the project
+maintainers or any third party.</p>
+<h2 id="legal-deployment-guidance">Legal deployment guidance</h2>
+<p>This document bounds what TIER stores as <em>content</em>. It does not resolve the
+<em>labor-law</em> question: per-developer cost attribution is personal data about a
+named individual, and in TIER&#39;s EU target markets (DE Betriebsrat
+co-determination, FR/NL works councils, GDPR Art. 22 profiling) measuring or
+ranking named individuals is co-determined or restricted. For deployment
+guidance — works-council prerequisites, DPIA pointers, and a team-only vs
+per-developer decision table by jurisdiction — see
+<a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a>. (Positioning guidance, not legal
+advice.)</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

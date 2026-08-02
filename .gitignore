@@ -1,0 +1,49 @@
+bin/
+*.db
+*.db-wal
+*.db-shm
+# Anchored to the repo root so this ignores only a stray binary built there
+# (e.g. `go build` with no -o); without the leading slash the bare name would
+# also match the cmd/tierd SOURCE dir, silently dropping any new file added
+# under it. Built binaries normally land in bin/ (ignored above).
+/tierd
+# Local Claude Code / agent workspace state.
+#
+# Scoped deliberately (was a blanket `.claude/`): the blanket rule meant ZERO of
+# the 25 agent definitions were tracked, so a .claude wipe, a bad `git clean` or
+# a fresh clone lost every one of them with no recovery path — and the CLAUDE.md
+# review matrix depends on those agents existing. Agent definitions, skills,
+# agent memory and the agent manifest are project configuration and belong in
+# the repo; only genuinely machine-local state stays out.
+.claude/settings.local.json
+.claude/worktrees/
+.claude/**/node_modules/
+
+# The Model Report instrument is its own repo (tiermetric/model-bench).
+# Never vendor it into tier — an errant `git add -A` did exactly that once.
+model-bench/
+
+# >>> tool-managed: agent durability >>>
+.claude/agents/*.md
+.claude/agent-memory-local/
+.claude/settings.local.json
+.claude/worktrees/
+# <<< tool-managed: agent durability <<<
+
+# Re-include the agent BODIES, overriding the tool-managed block above.
+# That block ignores .claude/agents/*.md on the theory that the agent manifest
+# makes them reproducible. It does not: the manifest is 8K of metadata (name,
+# model, scope, version) against 284K of actual system prompts, so it records
+# WHICH agents should exist and nothing about what they say. Bodies are
+# recoverable only from the coordination server, which makes 25 agent definitions —
+# and with them the CLAUDE.md review matrix — dependent on a service rather
+# than on the repo. Track them. (Steve, 2026-07-23.)
+!.claude/agents/*.md
+
+# Compiled docgen artifact. The Makefile only ever runs `go run .`, so this is
+# always a stray `go build` -- but it is 6.6MB of Mach-O embedding Go
+# module-cache paths under the developer's home directory, and it sat untracked
+# and UNIGNORED in the tree while a publish export was being built (#580).
+# Ignoring it stops `git add -A` making the leak permanent; publish-audit gate
+# (i) is the backstop that stops it shipping.
+tools/docgen/docgen

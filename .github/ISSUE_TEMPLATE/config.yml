@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / help / show-and-tell
+    url: https://github.com/tiermetric/tier/discussions
+    about: Usage questions, interpreting your TIER number, and sharing results — please use Discussions, not the issue tracker.
+  - name: Security vulnerability
+    url: https://github.com/tiermetric/tier/security/policy
+    about: Do NOT open a public issue for security reports. Follow the private disclosure process in SECURITY.md.

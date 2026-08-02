@@ -1,0 +1,112 @@
+# systemd unit for tierd — the laptop-server / VM deployment case.
+#
+# Install (run these from the root of a checked-out tier repo; `tierd` is the
+# binary you built with `make build`, sitting in that directory):
+#   cd /path/to/tier            # the repo root, so the relative paths below resolve
+#   # Idempotent system user + group (some hardened hosts set USERGROUPS_ENAB no,
+#   # so create the group explicitly rather than relying on useradd to imply it):
+#   getent group tier  >/dev/null || sudo groupadd --system tier
+#   getent passwd tier >/dev/null || sudo useradd --system --gid tier \
+#       --home-dir /var/lib/tier --shell /usr/sbin/nologin tier
+#   sudo install -m 0755 tierd /usr/local/bin/tierd
+#   sudo install -d -m 0750 -o tier -g tier /etc/tier
+#   sudo install -m 0640 -o root -g tier config.example.yaml /etc/tier/tierd.yaml   # edit it
+#   sudo install -m 0640 -o root -g tier deploy/tierd.env.example /etc/tier/tierd.env  # add secrets
+#   sudo install -m 0644 deploy/tierd.service /etc/systemd/system/tierd.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tierd
+#
+# (nologin is /usr/sbin/nologin on Debian/Ubuntu/RHEL/Rocky/SUSE/Arch. This unit
+# targets systemd hosts; on Alpine/OpenRC use `adduser -S` and /sbin/nologin.)
+#
+# Every non-obvious directive is commented — this file is meant to be copied blind.
+
+[Unit]
+Description=tierd — TIER token-impact measurement daemon
+Documentation=https://github.com/tiermetric/tier
+# Live JSONL ingestion and the (optional) reverse proxy make outbound HTTPS, and
+# the listener binds a socket, so start after the network is actually up — not
+# merely after the interface exists.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The config file MUST set `aggregation: team` (or `developer`) — it is REQUIRED
+# and has no default, so tierd exits at startup if it is unset from flag, the
+# TIER_AGGREGATION env var, AND this config. Secrets (TIER_API_TOKEN,
+# TIER_WEBHOOK_SECRET) come from the EnvironmentFile below, never from this
+# config or a literal flag.
+ExecStart=/usr/local/bin/tierd serve --config /etc/tier/tierd.yaml
+
+# Restart policy is REQUIRED, not optional. tierd exits 1 by design when the
+# JSONL watcher fails terminally (5 failures / 60s window) or the HTTP listener
+# crashes — the in-process supervisor handles transient failures, terminal
+# failure is delegated here. Without this, live capture stays down until a human
+# notices. RestartSec spaces out restarts so a hard-failing config does not spin.
+Restart=always
+RestartSec=5
+
+# Secrets live here (mode 0640, owned root:tier), not on the command line.
+# The leading `-` makes the file optional so `systemd-analyze verify` and a
+# first boot before the file exists do not hard-fail; tierd itself fails closed
+# if a required secret (e.g. TIER_API_TOKEN for a non-loopback bind) is missing.
+EnvironmentFile=-/etc/tier/tierd.env
+
+# Run as a dedicated unprivileged user — never root. tierd's SQLite files are
+# mode 0600 and its data dir 0700, so a single owning user is all it needs.
+User=tier
+Group=tier
+
+# --- Sandbox / hardening (matches the container posture) ---
+
+# No process started by this unit can gain new privileges (no setuid/setgid).
+NoNewPrivileges=yes
+
+# Read-only view of the whole filesystem except a few explicit writable paths.
+ProtectSystem=strict
+# Home directories are read-only. NOTE: a machine-level deployment that ALSO
+# tails a developer's Claude Code JSONL (`--watch-repo`, reading ~/.claude of the
+# capture user) needs that path made readable to the `tier` user, e.g.
+#   ReadOnlyPaths=/home/<dev>/.claude
+# This multi-user-on-one-host topology is the open capture-topology question
+# tracked in P1-02; the single-user default below assumes tierd runs on the same
+# account whose work it measures, or that JSONL arrives by another path.
+ProtectHome=read-only
+
+# StateDirectory creates and chowns /var/lib/tier to User:Group on start; point
+# the config's `db:` at /var/lib/tier/tier.db. ReadWritePaths carves that one
+# directory out of the ProtectSystem=strict read-only mount.
+StateDirectory=tier
+ReadWritePaths=/var/lib/tier
+
+# Defence-in-depth: a static Go net/http + pure-Go SQLite service needs none of
+# these, so denying them shrinks the blast radius with no functional cost. If a
+# future feature breaks under one of these, relax that single line and note why.
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# The listener uses IPv4/IPv6; fsnotify and SQLite use local file/unix APIs.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+# @system-service is the recommended baseline for daemons and covers inotify
+# (fsnotify) and file/network I/O. Deny the rest and return EPERM.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# tierd binds port 8080 (>1024) and needs no Linux capabilities at all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Safe for a CGO-free (CGO_ENABLED=0) Go binary: the Go runtime does not JIT, so
+# it never needs writable-and-executable memory.
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

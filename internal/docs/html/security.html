@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security hardening guide — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="security-hardening-guide">Security hardening guide</h1>
+<p>This guide is written for the person deploying TIER and for the security
+reviewer doing diligence on it. TIER&#39;s security model is a set of deliberate,
+documented trade-offs: they are safe <strong>only when the operator understands
+them</strong>. Every behavioral claim below carries a <code>(code: ...)</code> pointer so you can
+verify it against the source in minutes rather than take it on faith.</p>
+<p>Scope note: TIER today is <strong>single-process, single-tenant</strong>. There is no
+per-organization isolation — developer identifiers are global. Do not deploy a
+single <code>tierd</code> as a shared multi-organization service.</p>
+<p>Related reading:</p>
+<ul>
+<li><a href="privacy.html" rel="nofollow">privacy.md</a> — the full, code-grounded account of what TIER reads
+and stores (this guide summarizes its headline guarantee).</li>
+<li><a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a> — deploying where per-developer
+measurement is legally constrained.</li>
+<li><a href="webhook-setup.html" rel="nofollow">webhook-setup.md</a> — configuring the GitHub webhook.</li>
+<li><a href="conventions.html" rel="nofollow">conventions.md</a> — the attribution conventions TIER depends on.</li>
+</ul>
+<hr>
+<h2 id="1-what-tier-stores--and-what-it-never-stores">1. What TIER stores — and what it never stores</h2>
+<blockquote>
+<p><strong>TIER never persists prompt or completion content.</strong> The token-capture path
+parses provider responses and Claude Code session files through an allowlist:
+from that path, only token counts, model names, timestamps, and attribution
+identifiers (developer, issue, repository) reach disk. Prompt text, completion
+text, source code, file contents, and diffs are never deserialized, never
+transmitted, and never stored.</p>
+</blockquote>
+<p>Why the guarantee holds — the parsers are allowlist structs, so any field not
+named in the struct is dropped by the JSON decoder before it exists in memory:</p>
+<ul>
+<li>JSONL session collector: <code>jsonlEntry</code> decodes only <code>type</code>, <code>timestamp</code>,
+<code>gitBranch</code>, <code>cwd</code>, <code>sessionId</code>, and <code>message.{id,model,role,usage.*}</code> — usage
+is token counts, not text (code: <code>internal/collector/jsonl.go</code>, <code>jsonlEntry</code>).</li>
+<li>Reverse proxies: the response parsers extract only <code>id</code>, <code>model</code>, and <code>usage</code>
+from provider response bodies (code: <code>internal/proxy/proxy.go</code>).</li>
+<li>Seam-capture fixtures enforce the same allowlist for any captured test data
+(code: <code>testdata/seam-jsonl-ingestion/README.md</code>).</li>
+</ul>
+<p>What the capture path persists, exactly — the columns of <code>token_events</code> (code:
+<code>internal/store/store.go</code>, <code>schemaTables</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>developer</code></td>
+<td>attribution identifier (not a real name unless you make it one)</td>
+</tr>
+<tr>
+<td><code>issue_id</code></td>
+<td>derived issue identifier</td>
+</tr>
+<tr>
+<td><code>repo</code></td>
+<td>canonical <code>owner/repo</code>, or the <code>unqualified</code> sentinel (#231)</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>model name</td>
+</tr>
+<tr>
+<td><code>input_tok</code>, <code>output_tok</code>, <code>cache_read</code>, <code>cache_write_5m</code>, <code>cache_write_1h</code></td>
+<td>token counts</td>
+</tr>
+<tr>
+<td><code>cost_micro</code></td>
+<td>cost in integer micro-dollars</td>
+</tr>
+<tr>
+<td><code>source</code>, <code>fidelity</code></td>
+<td>capture provenance</td>
+</tr>
+<tr>
+<td><code>ts</code></td>
+<td>timestamp</td>
+</tr>
+</tbody>
+</table>
+<p>Branch names are read into memory to <em>derive</em> <code>issue_id</code>, but only the derived
+identifier is written — the branch string itself is never persisted (code:
+<code>internal/store/store.go</code>, the token-event insert path).</p>
+<p><strong>One other table stores free text — and it is not prompt content.</strong> When the
+GitHub webhook path is enabled, TIER retains the <strong>raw GitHub webhook body</strong>
+(gzipped) for every processed delivery in the <code>webhook_payloads</code> table, so a
+score input can be re-derived later (code: <code>internal/store/store.go</code>,
+<code>webhook_payloads</code>; <code>internal/webhook/handler.go</code>, <code>InsertWebhookPayload</code>;
+#137). That body <strong>does contain personal data</strong>: commit author names and email
+addresses, PR titles and descriptions, and commit messages — the same PR/commit
+metadata GitHub itself already stores. It is bounded by a 90-day age cap and a
+50,000-row cap (code: <code>internal/store/store.go</code>, <code>PruneWebhookPayloads</code>), stored
+in the same <code>0600</code> single-tenant database, and is <strong>deliberately excluded from
+the GDPR erase route</strong> (<code>DELETE /api/v1/developer/{id}</code>), so a contributor name
+embedded in an old payload is aged out by retention, not by erasure (code:
+<code>internal/store/store.go</code>, <code>EraseDeveloper</code> table list). This is the only
+free-text-at-rest surface, it is PR/commit metadata rather than prompts or
+code, and it exists only when you run the webhook. See <a href="privacy.html" rel="nofollow">privacy.md</a>
+for the full operator-facing disclosure and the deeper allowlist walkthrough.</p>
+<hr>
+<h2 id="2-the-api-token-is-org-secret-grade">2. The API token is org-secret-grade</h2>
+<p>A single <code>TIER_API_TOKEN</code> gates all writes, the score GETs, <code>/metrics</code>, and both
+reverse proxies (code: <code>internal/api/handler.go</code>, <code>requireAuth</code> / <code>requireRead</code>
+/ <code>ProxyAuth</code>). Treat this token like a CI deploy key, <strong>not</strong> a per-user
+credential. Any holder of the write token can:</p>
+<ul>
+<li><strong>Read every developer&#39;s spend and ranking</strong> — the score and export GETs
+return organization-wide data to any valid token.</li>
+<li><strong>Forge cost attribution.</strong> <code>POST /api/v1/costs</code> accepts an arbitrary
+<code>developer</code> field in the request body (code: <code>internal/api/handler.go</code>,
+<code>handlePostCosts</code>), and the reverse proxy attributes spend from a
+client-supplied <code>X-Tier-Developer</code> request header (code:
+<code>internal/proxy/proxy.go</code>). Nothing checks that the caller <em>is</em> that
+developer.</li>
+<li><strong>Forge outcomes (inflate the score numerator).</strong> <code>POST /api/v1/outcomes</code> is
+write-scoped to the same token (code: <code>internal/api/handler.go</code>,
+<code>handlePostOutcome</code>), so a holder can fabricate merged-PR outcomes and inflate
+any developer&#39;s TIER score — not just the cost denominator. This is the same
+capability the webhook HMAC protects against for the GitHub path (see below).</li>
+</ul>
+<p>There is no per-developer authorization: TIER cannot today restrict a token to
+one developer&#39;s own data. That capability is deliberately deferred to a possible
+enterprise tier (#65). <strong>Consequence:</strong> if forged attribution matters to you, do
+not hand the write token to individual developers. Front <code>tierd</code> with your own
+authenticating proxy that sets attribution from an authenticated identity, and
+keep the TIER token server-side.</p>
+<p><strong>Read-only viewer scope (shipped, #190).</strong> A separate <code>--read-token</code> /
+<code>TIER_READ_TOKEN</code> grants a least-privilege viewer credential: it is accepted on
+<code>GET /scores</code>, <code>GET /scores/{developer}</code>, <code>GET /metrics</code>, and the bulk exports
+(<code>GET /events</code>, <code>GET /outcomes</code>), and is rejected with 403 on every write, on
+the finance/admin GETs (<code>org_actual_spend</code>, <code>developer_alias</code>), on the GDPR
+export/erase routes, and on the proxies (code: <code>internal/api/handler.go</code>,
+<code>requireRead</code> and the <code>Register</code> route table). It lets you hand a CFO or
+VP-Eng dashboard access without the write, erase, or forge power the write
+token confers. The read token must differ from the write token — <code>tierd</code> refuses
+to start otherwise (code: <code>cmd/tierd/main.go</code>, <code>checkReadToken</code>) — and, on its
+own, does <strong>not</strong> permit a non-loopback bind: the bind check is gated on the
+write token alone (code: <code>cmd/tierd/main.go</code>, <code>validateBind</code>).</p>
+<p><strong>Rotation</strong> is a restart with a new token — there is no session state to
+invalidate. Both tokens support <code>@/path/to/file</code> indirection and env-var
+sourcing so the secret stays out of <code>ps</code> output and shell history (code:
+<code>cmd/tierd/main.go</code>, secret <code>@file</code> resolution; #37).</p>
+<hr>
+<h2 id="3-tokenless-mode-and-its-trust-boundary">3. Tokenless mode and its trust boundary</h2>
+<p>Running with an empty <code>TIER_API_TOKEN</code> disables bearer auth. This is <strong>safe by
+default, not unconditionally.</strong> <code>tierd</code> fails closed: with no token it refuses
+any non-loopback bind at startup (code: <code>cmd/tierd/main.go</code>, <code>validateBind</code>;
+#59). Three residual caveats you must understand:</p>
+<ol>
+<li><strong>The literal hostname <code>localhost</code> is trusted by convention.</strong> <code>validateBind</code>
+accepts <code>localhost</code> without resolving it. An attacker-controlled <code>/etc/hosts</code>
+entry that points <code>localhost</code> at a routable address can therefore defeat the
+check. Bind to the <code>127.0.0.1</code> literal if you want the IP-level guarantee.</li>
+<li><strong>Loopback can be re-exposed from outside the process.</strong> An SSH tunnel, or a
+container port-map such as <code>docker run -p 0.0.0.0:8080:8080</code>, re-publishes a
+loopback listener to a network. The bind check cannot see past the process
+boundary — that exposure is on you.</li>
+<li><strong>Zoned IPv6 literals are refused</strong> (for example <code>[::1%lo0]</code>) — deliberately,
+because the safe direction is to ask for the plain form rather than guess.</li>
+</ol>
+<p>In tokenless mode the read token has no effect, and the reverse proxies are an
+unauthenticated relay to the upstream provider — which is exactly why the bind
+is restricted to loopback. If you need to expose TIER on a network, set a token.</p>
+<hr>
+<h2 id="4-filesystem-hardening">4. Filesystem hardening</h2>
+<p><strong>The SQLite database and its <code>-wal</code> / <code>-shm</code> sidecars are created mode <code>0600</code>
+(owner read/write only), and legacy files are repaired to <code>0600</code> on every
+start</strong> (code: <code>internal/store/store.go</code>, <code>Open</code>; #130). Files are created tight
+(<code>O_CREATE</code> with <code>0600</code>), so there is no transient world-readable window, and a
+<code>chmod</code> sweep at the end of <code>Open</code> tightens any pre-existing <code>0644</code> file. The
+containing directory is created <code>0700</code> (code: <code>cmd/tierd/main.go</code>) — but if you
+pre-create the state directory yourself, <code>MkdirAll</code> leaves its existing mode
+untouched, so set it <code>0700</code> in that case. You do <strong>not</strong> need to <code>chmod</code> the
+database by hand.</p>
+<p>Caveats:</p>
+<ul>
+<li><strong>POSIX only.</strong> The <code>0600</code> guarantee relies on POSIX mode bits. On Windows
+<code>os.Chmod</code> only toggles the read-only attribute, so this protection does not
+apply there.</li>
+<li><strong>Re-tightened every restart.</strong> Because <code>Open</code> re-applies <code>0600</code> on each start,
+a manual relaxation does not stick. A backup agent or group that needs to read
+the DB must run <strong>as the <code>tierd</code> user</strong>, not rely on group-readable bits.</li>
+<li><strong>Run <code>tierd</code> under a dedicated, unprivileged user</strong> whose home holds the
+state directory, so the <code>0700</code>/<code>0600</code> owner-only permissions actually isolate
+the data from other accounts on the host.</li>
+<li><strong>Backups inherit the sensitivity.</strong> Any copy of the DB (or its sidecars) holds
+the same per-developer spend and attribution data. Protect the backup
+destination exactly as you protect the live file — the mode bits do not travel
+with a copy you make yourself.</li>
+</ul>
+<hr>
+<h2 id="5-rate-limit-lockout-topology">5. Rate-limit lockout topology</h2>
+<p><code>tierd</code> has a per-IP failed-authentication lockout: after <code>--auth-max-failures</code>
+failures within <code>--auth-failure-window</code>, the offending IP is locked out with a
+429 for <code>--auth-lockout</code> (defaults: 10 failures / 60s → 15 minutes) (code:
+<code>internal/api/ratelimit.go</code>, <code>DefaultRateLimitConfig</code>). It keys on the <strong>direct
+TCP peer</strong> and, by default, <strong>ignores <code>X-Forwarded-For</code></strong> — because a client
+controls that header, and honoring it would let an attacker mint unlimited
+lockout buckets and defeat the limiter entirely (code:
+<code>internal/api/ratelimit.go</code>, <code>clientIP</code>).</p>
+<p><strong>Consequence behind a shared TLS terminator, reverse proxy, or NAT:</strong> every
+client arrives from the same direct peer address, so they all share <strong>one</strong>
+lockout bucket. A single misconfigured client sending bad tokens can lock out
+the whole organization for the lockout window.</p>
+<p>Mitigations, in order of preference:</p>
+<ol>
+<li><strong>Configure <code>--trusted-proxy-cidr</code> (shipped, #131).</strong> When the direct peer is
+inside a trusted CIDR you supply, the limiter instead keys on the real client
+from <code>X-Forwarded-For</code> — specifically the rightmost hop <em>not</em> inside a trusted
+CIDR, which is the address your own edge appended and thus the one value a
+client cannot forge (code: <code>cmd/tierd/main.go</code>, <code>--trusted-proxy-cidr</code>;
+<code>internal/api/ratelimit.go</code>, <code>clientIP</code>). This flag is also settable in the
+config file as <code>http.trusted_proxy_cidrs</code>. Set it to your terminator&#39;s
+address range and per-client lockout is restored — this works only if your
+edge actually sets a trustworthy <code>X-Forwarded-For</code>; if the trusted peer
+forwards no XFF, <code>clientIP</code> falls back to the shared peer address.</li>
+<li>Fix the failing client (it is usually a stale or wrong token).</li>
+<li>Raise <code>--auth-max-failures</code>, or rate-limit at your terminator instead.</li>
+</ol>
+<p>Note: the limiter keys on the full client address; there is no coarser subnet
+bucketing, so distinct clients get distinct buckets once <code>--trusted-proxy-cidr</code>
+is configured correctly.</p>
+<hr>
+<h2 id="6-webhook-authentication">6. Webhook authentication</h2>
+<p>The GitHub webhook is authenticated with <strong>HMAC-SHA256</strong> over the request body,
+validated against the <code>X-Hub-Signature-256</code> header on every request (code:
+<code>internal/webhook/handler.go</code>, <code>verifySignature</code>). It is <strong>fail-closed</strong>: with
+no <code>TIER_WEBHOOK_SECRET</code> configured, the route is not even mounted, and if the
+handler is reached without a secret it rejects every request with 403 (code:
+<code>cmd/tierd/main.go</code>, webhook mount guard; <code>internal/webhook/handler.go</code>, #60).
+An unauthenticated webhook would let anyone who can reach the listener forge
+merged-PR outcomes.</p>
+<p>Supply the secret via <code>TIER_WEBHOOK_SECRET</code> or the <code>@/path/to/file</code> indirection
+so it stays out of <code>ps</code> output and shell history (code: <code>cmd/tierd/main.go</code>,
+#37). See <a href="webhook-setup.html" rel="nofollow">webhook-setup.md</a> for the GitHub-side
+configuration.</p>
+<hr>
+<h2 id="7-proxy-header-hygiene">7. Proxy header hygiene</h2>
+<p>The reverse proxies attribute spend from three internal request headers —
+<code>X-Tier-Developer</code>, <code>X-Tier-Issue</code>, and <code>X-Tier-Repo</code> — and <strong>strip all three
+from the outbound request before forwarding upstream</strong>, so they never reach the
+provider (code: <code>internal/proxy/proxy.go</code>, the <code>Rewrite</code> hook). The
+<code>X-Tier-Token</code> proxy credential is likewise stripped before forwarding (code:
+<code>internal/api/handler.go</code>, <code>ProxyAuth</code>). A non-canonical <code>X-Tier-Repo</code> value is
+ignored and never logged.</p>
+<hr>
+<h2 id="8-log-hygiene-log-injection-resistance">8. Log hygiene (log-injection resistance)</h2>
+<p>Every value derived from an untrusted request that reaches a log record flows
+through a sanitizer (<code>internal/logsafe</code>, wrapped at call sites as <code>logSafeStr</code> /
+<code>logSafeErr</code>). It <strong>strips carriage returns and line feeds</strong> — the explicit
+CR/LF removal that forms the forged-log-record barrier — then <code>%q</code>-quotes the
+result to escape any remaining control bytes, invalid UTF-8, or quotes, and caps
+the length. A structured logger plus this sanitizer means an attacker cannot
+inject a newline to forge a second, attacker-authored log line.</p>
+<p>A small, deliberate set of logged fields are left un-wrapped because they are
+<strong>provably constrained by construction</strong> and cannot carry a control byte: GitHub
+issue references (<code>issue-&lt;digits&gt;</code>), commit SHAs (<code>[0-9a-f]{40}</code>), the webhook
+event type (allowlist-bounded to <code>pull_request</code> / <code>push</code> / <code>workflow_run</code>),
+upstream-validated period strings, and numeric fields such as PR numbers. Each is
+documented at its call site.</p>
+<p>Note on static analysis: an automated code scanner may report these constrained
+bare fields as potential log-injection findings. They are false positives — the
+scanner cannot prove the regex/allowlist constraint that the code guarantees —
+and are triaged as such, rather than &#34;fixed&#34; by wrapping a value that already
+cannot forge a record.</p>
+<hr>
+<h2 id="9-reporting-a-vulnerability">9. Reporting a vulnerability</h2>
+<p>If you find a security issue in TIER, report it <strong>privately</strong> — do not open a
+public issue, and do not include a working exploit in a public channel.</p>
+<p>Use GitHub&#39;s private vulnerability reporting on this repository
+(<strong>Security → Report a vulnerability</strong>), which opens a disclosure channel
+visible only to the maintainers.</p>
+<p>A dedicated <code>SECURITY.md</code> will carry the full disclosure policy, supported-version
+window, and response-time commitment before public release. Until it lands, the
+private reporting channel above is the supported path.</p>
+<hr>
+<h2 id="planned--not-yet-shipped">Planned / not yet shipped</h2>
+<p>For accuracy, these are <strong>not</strong> current capabilities — do not rely on them:</p>
+<ul>
+<li><strong>Per-developer authorization</strong> on the API token (#65). Today one token reads
+and forges all attribution; see section 2.</li>
+<li><strong>Multi-tenant isolation.</strong> TIER is single-tenant; developer identifiers are
+global (see the scope note at the top).</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

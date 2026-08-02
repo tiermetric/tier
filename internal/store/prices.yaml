@@ -1,0 +1,310 @@
+# TIER Reference Price Table — list prices, US dollars per million tokens.
+#
+# This file is the SINGLE SOURCE OF TRUTH for model list prices (#68). It is
+# embedded into the tierd binary via go:embed (so the static image ships no
+# external file and zero-config still works) and parsed once at startup. An
+# operator may override it at runtime with `tierd --prices /path/to/prices.yaml`
+# (or the prices_file config key / TIER_PRICES env); a bad override fails startup
+# loudly rather than silently falling back.
+#
+# version + effective_date version the table as one atomic unit. Bump version on
+# any price change; effective_date (YYYY-MM-DD) stamps when the table was last
+# revised as a whole — NOT a guarantee that every row was (re)captured on that
+# date. Individual rows may have been captured earlier and carried forward; the
+# per-version changelog below records what each revision actually touched. The
+# original three-rules intent was an annual, full-calendar-year pin; mid-year
+# revisions (v5–v7) advance version and, where a revision re-verifies real rows,
+# effective_date, while leaving untouched rows at their prior captured values.
+#
+# `version` is a whole-table revision counter, NOT a schema-compatibility lever:
+# tierd strict-decodes against the schema it was COMPILED with (unknown keys are
+# rejected), so a file adding new keys requires a binary upgrade — an older tierd
+# will fail loudly on it rather than silently ignore the additions.
+#
+# Cache multipliers ARE stored here, per model (#122, reversing the earlier
+# per-provider design). Each model MAY carry optional cache_read_mult,
+# cache_write_5m_mult, cache_write_1h_mult (floats, multipliers of the input
+# rate). Omitted / 0 means "use the provider default"; an explicit positive value
+# overrides that class. Provider defaults: anthropic 5m 1.25x / 1h 2.0x / read
+# 0.1x; openai read 0.5x (no write SKU); google/xai/deepseek/self-hosted 1.0x.
+# Rationale: real discounts are per-MODEL, not per-provider (OpenAI 4-era reads
+# at 0.5x but the 5-era at 0.1x; Gemini 2.5+ implicit cache reads at 0.25x;
+# DeepSeek publishes an absolute $0.028/M hit). A negative multiplier, or any
+# multiplier on a combined entry, is a parse error. See docs/reference-price-table.md §7.
+#
+# provider must be one of: anthropic, openai, google, xai, deepseek, self-hosted.
+# combined: true marks a self-hosted entry where in+out share input_per_m and no
+# cache discount applies; output_per_m is omitted for those.
+#
+# billing_mode (#300): per_token | subscription | self_hosted_amortized. Omitted
+# derives from provider — self_hosted_amortized for a self-hosted entry, per_token
+# otherwise. The host-qualified open-weights rows (#268, at the bottom) set it
+# EXPLICITLY to per_token to override that self-hosted default: those hosts are
+# open-weights (self-hosted provider → 1.0x cache) but genuinely METER per token, so
+# the rate is an audited list price, not an amortized estimate. subscription rows
+# (Ollama Cloud / GLM, #113) are NOT seeded — they await the /events billing_mode
+# export (#304), or an exported cost would ship as a canonical $/M with no flag.
+#
+# Host-qualified keys (#300/#268): a key of the form `NormalizeModel(model)@<host>`
+# (see store.HostModelKey) prices a model on ONE serving host — the cost of an
+# open-weights model is a property of the host, not the weights. The host is the
+# bare `--openai-target` hostname the proxy stamps (url.URL.Hostname(), port dropped).
+# See docs/open-weights-capture.md.
+#
+# Long-context tier (#4): a model MAY carry an optional over-threshold tier —
+# context_threshold (token count), input_per_m_over, output_per_m_over. A request
+# whose input-side context (input + all cache classes) EXCEEDS context_threshold
+# is priced at the *_over rates instead of the base rates (ComputeCost picks the
+# tier by the call's token counts). Used for Anthropic's Sonnet 1M beta (>200K =
+# $6/$22.50) and Gemini Pro (>200K premium). All three fields are set together or
+# none — a partial spec is a parse error. Not valid on a combined entry.
+#
+# The three self-hosted-{large,medium,small} entries are REQUIRED: self-hosted-medium
+# is the unknown-model fallback rate, and selfHostedClass() resolves param-count
+# heuristics to these keys. Parsing rejects a table missing any of them.
+#
+# Minor-version aliases (opus-4-6/4-7/4-8, sonnet-4-6/4-7, haiku-4-5, fable-5) are
+# listed EXPLICITLY: NormalizeModel only strips date suffixes, not single trailing
+# digits, and each minor version carries its OWN audited price — they do NOT inherit
+# the base-family rate (Opus 4.0 is $15/$75 but 4.6/4.7/4.8 re-priced to $5/$25;
+# Fable 5 is a distinct family at $10/$50). A new minor version must be added here
+# or it falls through to the self-hosted-medium fallback with a one-time WARN (#80).
+
+# v5 (#135): added the RPT-2026 §1/§4 models missing from v4 — the gpt-5.x
+# family, o1, o4-mini, grok-4/4-fast/4.1-fast/code-fast-1/3-fast,
+# claude-opus-4-1 and 4-5, gemini flash-lite/3-flash/3.1-flash-lite, and
+# deepseek-v3.2. The gpt-5.x entries carry an explicit cache_read_mult 0.10
+# (the 5-era prompt-cache discount, RPT §7 — differs from the openai 4-era
+# 0.50 default). Providers not on the validProviders allowlist
+# (Mistral/Cohere/Amazon/hosted-OSS) are intentionally NOT listed: they still
+# fall back at self-hosted-medium with a WARN, now alertable via the
+# unknown-model cost share (#135). See docs/reference-price-table.md.
+#
+# v6 (#268): added host-qualified per-token rates for the top open-weights models on
+# the common per-token inference hosts (OpenRouter, Together, Fireworks, Groq,
+# DeepInfra) — see the bottom section. effective_date stays the 2026-03-01 RPT anchor
+# (like v5, which added models without re-dating the frontier table); the host rows
+# were captured 2026-07-13 and each carries its own source comment. Only per-token
+# hosts are seeded; subscription hosts (#113) await #304.
+#
+# v7 (#268/#300): added the current first-party Anthropic models that were still
+# falling through to the size-class 'guessed' fallback (a visible WARN, #286) —
+# claude-sonnet-5 ($3/$15 list) and claude-mythos-5 ($10/$50). The rest of the
+# current lineup (Opus 4.8/4.7/4.6, Fable 5, Haiku 4.5) was already priced (v5/#80).
+# Both new rows use claude.com published LIST prices; Sonnet 5's $2/$10 intro promo
+# (through 2026-08-31) is intentionally NOT encoded (the table is list-price, and
+# there is no time-based tier). UNLIKE v5/v6, this revision DOES advance
+# effective_date to the 2026-07-13 capture date: only the Anthropic rows added/re-
+# verified this pass were checked against current published rates — the non-Anthropic
+# frontier rows are carried forward unchanged from the 2026-03-01 RPT anchor and were
+# NOT re-validated here. The date stamps when the table as a unit was last revised.
+# v8 (#461): added the three GPT-5.6 Codex models (sol/terra/luna) that were falling
+# through to the size-class 'guessed' fallback (WARN) — they had no rows, so TIER
+# could not price Codex traffic at all. Rates are OpenAI's published STANDARD-tier
+# list prices (platform.openai.com/pricing, captured 2026-07-22): sol $5/$30,
+# terra $2.50/$15, luna $1/$6; cached-input is exactly 0.10x input in all three
+# (cache_read_mult 0.10, consistent with the other gpt-5.x rows). Batch (-50%) and
+# priority tiers are NOT encoded (the table is standard list-price). Only these three
+# rows were validated this pass; effective_date advances to the 2026-07-22 capture.
+# v9 (#512-adjacent): added claude-opus-5 at $5/$25 — the same rate as Opus 4.8,
+# verified against the claude.com model catalog and pricing page on 2026-07-26
+# rather than inferred from the 4.x pattern (Opus 4.1 is $15/$75, so the pattern
+# does not hold). Only this row was validated this pass; effective_date advances
+# to the 2026-07-26 capture.
+# ⚠ BUMPING THIS VERSION CHANGES prices_yaml_sha256, which every archived
+# model-bench evidence bundle is stamped with. Edition 1's panel was measured
+# under v8 and is frozen: a v9 run CANNOT join it (the protocol requires one rate
+# table across a panel). Opus 5 measurements belong to a NEW edition — re-derive
+# Edition 1's anchor dollars under v9 from the unchanged token evidence if you
+# publish a cross-edition price delta, or the delta is part model, part table.
+# EXPECTED ON DEPLOY, not a fault (both follow from #233 per-row immutability):
+# a /scores window straddling the deploy reports data_quality.mixed_price_versions
+# [8, 9] until the v8 rows age out (#293), and `tierd doctor` WARNs "local price
+# table v9 != server v8" against any tierd not yet redeployed. Already-stored
+# cost_micro keeps its v8 price and stamp; a row captured at a GUESSED rate does
+# NOT self-heal on re-ship — `tierd reprice --allow-guessed` is the repair path.
+version: 9
+effective_date: "2026-07-26"
+
+models:
+  # Anthropic
+  claude-opus-4: { input_per_m: 15.00, output_per_m: 75.00, provider: anthropic }   # Opus 4.0
+  # Opus 4.1 stays at Opus-4-generation pricing $15/$75 (RPT §1.1, the authority);
+  # only 4.5+ dropped to $5/$25. The readiness-review C5 shorthand grouped
+  # "opus-4-1/4-5 at $5/$25" — that $5/$25 applies to 4.5+ only, NOT to 4.1 (#135).
+  claude-opus-4-1: { input_per_m: 15.00, output_per_m: 75.00, provider: anthropic }   # Opus 4.1 (legacy flagship)
+  claude-opus-4-5: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 4.5
+  claude-opus-4-6: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 4.6
+  claude-opus-4-7: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 4.7
+  claude-opus-4-8: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 4.8
+  # Opus 5 is the current flagship and carries the SAME $5/$25 as Opus 4.8 — the
+  # generation advanced, the rate did not (claude.com model catalog + pricing page,
+  # captured 2026-07-26). Verified before adding, not assumed from the 4.x pattern:
+  # Opus 4.1 sits at $15/$75 two rows up, so "newer Opus = $5/$25" is NOT a rule.
+  # Why it needs its own row: NormalizeModel does not collapse opus-5 to opus-4-8,
+  # so without this entry ComputeCost falls through to the size-class heuristic and
+  # bills Opus 5 traffic at a GUESSED self-hosted rate behind a one-time WARN (#267)
+  # — precisely the silent-estimate failure this table exists to prevent.
+  # CAVEAT (not encoded): fast mode (speed=fast) bills at $10/$50, DOUBLE this rate,
+  # and TIER does not capture the speed flag — so fast-mode Opus 5 traffic prices LOW.
+  # This is NOT the same class as the un-encoded batch discount, and the direction is
+  # what matters: batch is -50%, so list-pricing it OVER-states cost and TIER reads
+  # worse than reality (conservative). Fast mode is +100%, so it UNDER-states cost —
+  # and cost is TIER's denominator, so the error inflates the score. On a metric whose
+  # whole claim is honest cost-per-outcome, an optimistic-direction error is the
+  # dangerous one. (Priority Tier does not cover Opus 5 at all, so there is no
+  # priority rate omitted here.) Unlike an unknown model, this path emits no WARN and
+  # no data_quality signal, which is the one gap in #267's no-silent-guess rule —
+  # `usage.speed` is already on the wire and decoded by both capture paths, so
+  # capturing it is a small follow-up rather than a redesign.
+  claude-opus-5: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 5
+  claude-fable-5: { input_per_m: 10.00, output_per_m: 50.00, provider: anthropic }   # Fable 5
+  # Mythos 5 (Project Glasswing) — same $10/$50 flagship rate and API surface as
+  # Fable 5; only the model id differs (claude.com model catalog). Its own audited
+  # row: NormalizeModel does not collapse it to fable-5, so without this it guesses.
+  claude-mythos-5: { input_per_m: 10.00, output_per_m: 50.00, provider: anthropic }   # Mythos 5
+  claude-sonnet-4: { input_per_m: 3.00, output_per_m: 15.00, provider: anthropic }
+  # Sonnet 4.5 carries the 1M-context beta premium above 200K input tokens ($6/$22.50);
+  # 4.6+ ship full 1M at the standard rate, so they need no over-tier (RPT §1.2).
+  claude-sonnet-4-5: { input_per_m: 3.00, output_per_m: 15.00, context_threshold: 200000, input_per_m_over: 6.00, output_per_m_over: 22.50, provider: anthropic } # Sonnet 4.5 (1M beta)
+  claude-sonnet-4-6: { input_per_m: 3.00, output_per_m: 15.00, provider: anthropic } # Sonnet 4.6
+  claude-sonnet-4-7: { input_per_m: 3.00, output_per_m: 15.00, provider: anthropic } # Sonnet 4.7
+  # Sonnet 5 — LIST price $3/$15 (claude.com model catalog). An intro promo of
+  # $2/$10 runs through 2026-08-31; this table carries the canonical LIST rate (the
+  # promo is time-boxed and conditional, and there is no time-based tier to encode
+  # it — see the PR body flag for maintainer review). No 1M-context over-tier: Sonnet 5 ships
+  # full 1M at the standard rate (unlike the Sonnet 4.5 beta).
+  claude-sonnet-5: { input_per_m: 3.00, output_per_m: 15.00, provider: anthropic }   # Sonnet 5
+  claude-haiku-3.5: { input_per_m: 0.80, output_per_m: 4.00, provider: anthropic }
+  claude-haiku-4-5: { input_per_m: 1.00, output_per_m: 5.00, provider: anthropic }   # Haiku 4.5
+  # OpenAI
+  # gpt-4.5 removed: retired, replaced by the GPT-5.x series (RPT §4). Do NOT
+  # restore it — a raw gpt-4.5-preview string now normalizes to gpt-4.5, misses
+  # the table, and fails loud (one-time WARN + tier_unknown_model_events_total).
+  # The gpt-4.x / o-series entries below are 4-era and correctly inherit the
+  # openai 0.50 cache-read default (no explicit multiplier). The gpt-5.x entries
+  # further down carry an explicit cache_read_mult: 0.10 — the 5-era prompt-cache
+  # discount differs from the 4-era 0.50 default (RPT §7). o1 and o4-mini are
+  # 4-era reasoning models, so they keep the 0.50 default like o3 / o3-mini.
+  gpt-4o: { input_per_m: 2.50, output_per_m: 10.00, provider: openai }
+  gpt-4.1: { input_per_m: 2.00, output_per_m: 8.00, provider: openai }
+  gpt-4.1-mini: { input_per_m: 0.40, output_per_m: 1.60, provider: openai }
+  gpt-4.1-nano: { input_per_m: 0.05, output_per_m: 0.20, provider: openai }
+  gpt-4o-mini: { input_per_m: 0.15, output_per_m: 0.60, provider: openai }
+  o1: { input_per_m: 15.00, output_per_m: 60.00, provider: openai }   # reasoning (legacy frontier), RPT §1.1
+  o3: { input_per_m: 2.00, output_per_m: 8.00, provider: openai }
+  o3-mini: { input_per_m: 0.55, output_per_m: 2.20, provider: openai }
+  o4-mini: { input_per_m: 1.10, output_per_m: 4.40, provider: openai }   # RPT §1.3/§4
+  # GPT-5.x (RPT §1/§4): all carry cache_read_mult: 0.10 (5-era cache discount).
+  gpt-5: { input_per_m: 1.25, output_per_m: 10.00, cache_read_mult: 0.10, provider: openai }
+  gpt-5.1: { input_per_m: 0.625, output_per_m: 5.00, cache_read_mult: 0.10, provider: openai }
+  gpt-5.2: { input_per_m: 0.875, output_per_m: 7.00, cache_read_mult: 0.10, provider: openai }
+  gpt-5.4: { input_per_m: 2.50, output_per_m: 15.00, cache_read_mult: 0.10, provider: openai }   # latest flagship (Mar 2026)
+  gpt-5.4-pro: { input_per_m: 30.00, output_per_m: 180.00, cache_read_mult: 0.10, provider: openai }   # ultra-premium tier
+  gpt-5-mini: { input_per_m: 0.125, output_per_m: 1.00, cache_read_mult: 0.10, provider: openai }
+  gpt-5-nano: { input_per_m: 0.05, output_per_m: 0.40, cache_read_mult: 0.10, provider: openai }
+  gpt-5.4-mini: { input_per_m: 0.75, output_per_m: 4.50, cache_read_mult: 0.10, provider: openai }
+  gpt-5.4-nano: { input_per_m: 0.20, output_per_m: 1.25, cache_read_mult: 0.10, provider: openai }
+  gpt-5.3-codex: { input_per_m: 1.75, output_per_m: 14.00, cache_read_mult: 0.10, provider: openai }   # Codex agentic
+  gpt-5.1-codex: { input_per_m: 1.25, output_per_m: 10.00, cache_read_mult: 0.10, provider: openai }
+  gpt-5.1-codex-mini: { input_per_m: 0.25, output_per_m: 2.00, cache_read_mult: 0.10, provider: openai }
+  # GPT-5.6 Codex family (#461, v8): OpenAI standard-tier list prices captured 2026-07-22.
+  gpt-5.6-sol: { input_per_m: 5.00, output_per_m: 30.00, cache_read_mult: 0.10, provider: openai }    # Codex flagship (5.6)
+  gpt-5.6-terra: { input_per_m: 2.50, output_per_m: 15.00, cache_read_mult: 0.10, provider: openai }  # Codex balanced
+  gpt-5.6-luna: { input_per_m: 1.00, output_per_m: 6.00, cache_read_mult: 0.10, provider: openai }    # Codex fast/affordable
+  # Google — Gemini Pro re-prices above 200K input tokens (RPT §1.2). Gemini 2.5+
+  # implicit caching discounts cached input 75% (cache_read_mult 0.25); the 0.25x
+  # scales off the SELECTED input rate, so an over-tier cached read bills at the
+  # premium base too. gemini-2.0-flash predates implicit caching (google 1.0x default).
+  gemini-2.5-pro: { input_per_m: 1.25, output_per_m: 10.00, cache_read_mult: 0.25, context_threshold: 200000, input_per_m_over: 2.50, output_per_m_over: 15.00, provider: google }
+  gemini-3.1-pro: { input_per_m: 2.00, output_per_m: 12.00, cache_read_mult: 0.25, context_threshold: 200000, input_per_m_over: 4.00, output_per_m_over: 18.00, provider: google }
+  gemini-2.5-flash: { input_per_m: 0.30, output_per_m: 2.50, cache_read_mult: 0.25, provider: google }
+  gemini-2.0-flash: { input_per_m: 0.10, output_per_m: 0.40, provider: google }
+  # New Google entries (RPT §1.3/§4). RPT §7's per-model cache_read_mult override
+  # table lists only gemini-2.5-pro / 2.5-flash / 3.1-pro at 0.25x; it does NOT
+  # extend that override to these lite/3.x rows, so they inherit the google 1.0
+  # default here rather than us inventing a multiplier the authority did not
+  # specify. Flagged for follow-up in the #135 PR body.
+  gemini-2.5-flash-lite: { input_per_m: 0.10, output_per_m: 0.40, provider: google }
+  gemini-3-flash: { input_per_m: 0.50, output_per_m: 3.00, provider: google }
+  gemini-3.1-flash-lite: { input_per_m: 0.25, output_per_m: 1.50, provider: google }
+  # xAI
+  grok-3: { input_per_m: 3.00, output_per_m: 15.00, provider: xai }
+  grok-3-mini: { input_per_m: 0.30, output_per_m: 0.50, provider: xai }
+  grok-3-fast: { input_per_m: 5.00, output_per_m: 25.00, provider: xai }   # premium speed (RPT §1.1/§4)
+  grok-4: { input_per_m: 3.00, output_per_m: 15.00, provider: xai }   # latest flagship
+  grok-4-fast: { input_per_m: 0.20, output_per_m: 0.50, provider: xai }
+  grok-4.1-fast: { input_per_m: 0.20, output_per_m: 0.50, provider: xai }
+  grok-code-fast-1: { input_per_m: 0.20, output_per_m: 1.50, provider: xai }   # dedicated coding
+  # DeepSeek — publishes an ABSOLUTE $0.028/M cache-hit rate, expressed here as a
+  # per-model cache_read_mult (0.028 / input rate): 0.1x of v3's $0.28, 0.0509x of
+  # r1's $0.55. See RPT §7. WARNING: this multiplier encodes an ABSOLUTE rate as a
+  # ratio of the BASE input rate, so it is only correct while these entries have NO
+  # long-context over-tier. Do NOT add context_threshold/input_per_m_over here
+  # without re-deriving cache_read_mult against the premium base — otherwise a
+  # >threshold cached read would bill at input_per_m_over*0.0509, overcharging.
+  deepseek-r1: { input_per_m: 0.55, output_per_m: 2.19, cache_read_mult: 0.0509, provider: deepseek } # $0.028/M ÷ $0.55/M
+  deepseek-v3: { input_per_m: 0.28, output_per_m: 0.42, cache_read_mult: 0.1, provider: deepseek }    # $0.028/M hit
+  # deepseek-v3.2 does NOT normalize to deepseek-v3 (NormalizeModel only strips
+  # date suffixes, not the ".2"), so it needs its own row (#135). Added per the
+  # spec's 3-field form (no cache_read_mult); its $0.028/M cache-hit parity with
+  # v3 is flagged for follow-up in the #135 PR body rather than inferred here.
+  deepseek-v3.2: { input_per_m: 0.28, output_per_m: 0.42, provider: deepseek }
+  # Self-hosted reference rates (flat combined in+out rate per million; no cache discount).
+  self-hosted-large: { input_per_m: 2.00, combined: true, provider: self-hosted }
+  self-hosted-medium: { input_per_m: 0.50, combined: true, provider: self-hosted }
+  self-hosted-small: { input_per_m: 0.10, combined: true, provider: self-hosted }
+
+  # ── Open-weights host-qualified per-token rates (#268) ──────────────────────────
+  # These key `NormalizeModel(model)@<bare-hostname>` (store.HostModelKey). A host-
+  # qualified rate outranks the model-only rate, but ONLY for that host; every other
+  # host still prices at the model-only / size-class path. The model-id portion is the
+  # EXACT string each host echoes in the response `model` field, normalized — it
+  # differs per host (Groq `llama-3.3-70b-versatile`, Together
+  # `.../Llama-3.3-70B-Instruct-Turbo`), so a key matches ONE host's id, not a canonical
+  # name; a mismatched key silently misses and falls to the size-class path. provider:
+  # self-hosted (open-weights → 1.0x cache, no documented prompt-cache discount on these
+  # hosts today); billing_mode: per_token is set explicitly (these hosts meter per token,
+  # so the rate is an audited list price, NOT the self-hosted amortized default). Rates
+  # captured 2026-07-13; hosted-open-weights pricing is the most volatile segment, so this
+  # set is small and backfilled on demand (override with `tierd --prices` if drifted).
+
+  # OpenRouter — openrouter.ai. First-party pricing API (openrouter.ai/api/v1/models);
+  # OpenRouter routes across upstreams so effective price can vary — these are its
+  # canonical list values.
+  "meta-llama/llama-3.3-70b-instruct@openrouter.ai": { input_per_m: 0.10, output_per_m: 0.32, provider: self-hosted, billing_mode: per_token } # openrouter.ai/meta-llama/llama-3.3-70b-instruct
+  "meta-llama/llama-3.1-8b-instruct@openrouter.ai": { input_per_m: 0.02, output_per_m: 0.03, provider: self-hosted, billing_mode: per_token }   # openrouter.ai/meta-llama/llama-3.1-8b-instruct
+  "qwen/qwen-2.5-72b-instruct@openrouter.ai": { input_per_m: 0.36, output_per_m: 0.40, provider: self-hosted, billing_mode: per_token }         # openrouter.ai/qwen/qwen-2.5-72b-instruct
+  # `deepseek/deepseek-chat-v3-0324` normalizes to `-v3` (NormalizeModel strips the
+  # trailing 4-digit `-0324`), so the key drops it; the moving `deepseek-chat` alias is
+  # intentionally not keyed.
+  "deepseek/deepseek-chat-v3@openrouter.ai": { input_per_m: 0.24, output_per_m: 0.90, provider: self-hosted, billing_mode: per_token }          # openrouter.ai/deepseek/deepseek-chat-v3-0324
+
+  # Together AI — api.together.ai (the .xyz host is a legacy alias; point --openai-target
+  # at .ai). Only the Llama 3.3 70B id string was confirmed on a live first-party page;
+  # Together's Llama 3.1 8B / Qwen2.5 72B / DeepSeek V3 / Mixtral rows are DEFERRED until
+  # their echoed id strings are confirmed via /v1/models (prices are first-party; it is
+  # the id-as-key that needs confirming).
+  "meta-llama/llama-3.3-70b-instruct-turbo@api.together.ai": { input_per_m: 1.04, output_per_m: 1.04, provider: self-hosted, billing_mode: per_token } # together.ai/models/llama-3-3-70b
+
+  # Fireworks AI — api.fireworks.ai. Priced by Fireworks' published parameter-size tiers
+  # (docs.fireworks.ai/serverless/pricing), its authoritative mechanism for these
+  # open-weights models (input=output within a tier); model ids confirmed from the catalog.
+  "accounts/fireworks/models/llama-v3p3-70b-instruct@api.fireworks.ai": { input_per_m: 0.90, output_per_m: 0.90, provider: self-hosted, billing_mode: per_token } # dense >16B tier
+  "accounts/fireworks/models/llama-v3p1-8b-instruct@api.fireworks.ai": { input_per_m: 0.20, output_per_m: 0.20, provider: self-hosted, billing_mode: per_token }  # dense 4-16B tier
+  "accounts/fireworks/models/qwen2p5-72b-instruct@api.fireworks.ai": { input_per_m: 0.90, output_per_m: 0.90, provider: self-hosted, billing_mode: per_token }    # dense >16B tier
+  "accounts/fireworks/models/mixtral-8x7b-instruct@api.fireworks.ai": { input_per_m: 0.50, output_per_m: 0.50, provider: self-hosted, billing_mode: per_token }   # MoE <=56B tier
+
+  # Groq — api.groq.com. First-party (groq.com/pricing). Groq does NOT serve DeepSeek V3
+  # or Mixtral 8x7B (deprecated), and its nearest Qwen is qwen3-32b, not Qwen2.5 72B.
+  "llama-3.3-70b-versatile@api.groq.com": { input_per_m: 0.59, output_per_m: 0.79, provider: self-hosted, billing_mode: per_token } # groq.com/pricing
+  "llama-3.1-8b-instant@api.groq.com": { input_per_m: 0.05, output_per_m: 0.08, provider: self-hosted, billing_mode: per_token }    # groq.com/pricing
+  "qwen/qwen3-32b@api.groq.com": { input_per_m: 0.29, output_per_m: 0.59, provider: self-hosted, billing_mode: per_token }          # groq.com/pricing
+
+  # DeepInfra — api.deepinfra.com. First-party (deepinfra.com model pages +
+  # api.deepinfra.com/models/list). Its served Llama 3.3 70B is the FP8 `-Turbo` id.
+  "meta-llama/llama-3.3-70b-instruct-turbo@api.deepinfra.com": { input_per_m: 0.10, output_per_m: 0.32, provider: self-hosted, billing_mode: per_token } # deepinfra.com/meta-llama/Llama-3.3-70B-Instruct-Turbo
+  "meta-llama/meta-llama-3.1-8b-instruct@api.deepinfra.com": { input_per_m: 0.02, output_per_m: 0.05, provider: self-hosted, billing_mode: per_token }    # deepinfra.com/meta-llama/Meta-Llama-3.1-8B-Instruct
+  "qwen/qwen2.5-72b-instruct@api.deepinfra.com": { input_per_m: 0.36, output_per_m: 0.40, provider: self-hosted, billing_mode: per_token }                # deepinfra.com/Qwen/Qwen2.5-72B-Instruct
+  "deepseek-ai/deepseek-v3@api.deepinfra.com": { input_per_m: 0.32, output_per_m: 0.89, provider: self-hosted, billing_mode: per_token }                  # deepinfra.com/deepseek-ai/DeepSeek-V3
+  "mistralai/mixtral-8x7b-instruct-v0.1@api.deepinfra.com": { input_per_m: 0.54, output_per_m: 0.54, provider: self-hosted, billing_mode: per_token }     # api.deepinfra.com/models/list

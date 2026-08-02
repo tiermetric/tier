@@ -1,0 +1,92 @@
+# Docker Compose example for tierd. Mirrors the hardened `docker run` line in the
+# Dockerfile's trailing comment (read-only rootfs, all caps dropped,
+# no-new-privileges) and adds the REQUIRED restart policy.
+#
+# Build the image first:  make docker    (tags tierd:latest)
+# Run:
+#   cp deploy/tierd.env.example deploy/tierd.env   # then fill in a real TIER_API_TOKEN
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/tierd.env up -d
+# Copy to the UNTRACKED tierd.env first (deploy/.gitignore ignores it) — never
+# fill a real secret into the git-tracked tierd.env.example.
+
+services:
+  tierd:
+    image: tierd:latest
+
+    # `serve` binds 0.0.0.0 so the published port below can reach it. A
+    # non-loopback bind is REFUSED without TIER_API_TOKEN (fail-closed), so the
+    # container will exit 1 and restart-loop until you set the token — that is
+    # the intended safe failure, not a bug.
+    # --aggregation is REQUIRED and has no default; it is set explicitly here so
+    # the container never fails to start on a missing reporting mode. Change to
+    # `developer` only where per-individual measurement is lawful and consented.
+    command: ["serve", "--addr", "0.0.0.0:8080", "--db", "/data/tier.db", "--aggregation", "team"]
+
+    # Secrets come from the interpolation env file (--env-file above), never a
+    # literal flag. TIER_API_TOKEN is required for the 0.0.0.0 bind;
+    # TIER_READ_TOKEN (optional) arms the read-only scope so Prometheus can scrape
+    # /metrics with a least-privilege credential — set it here or the read scope is
+    # never live and only the write token works. TIER_WEBHOOK_SECRET is optional
+    # (unset = POST /webhook/github is not mounted, fail-closed).
+    environment:
+      TIER_API_TOKEN: ${TIER_API_TOKEN}
+      TIER_READ_TOKEN: ${TIER_READ_TOKEN:-}
+      TIER_WEBHOOK_SECRET: ${TIER_WEBHOOK_SECRET:-}
+
+    ports:
+      - "8080:8080"
+
+    # --- hardening (matches the Dockerfile's documented `docker run` posture) ---
+    # Read-only root filesystem: tierd needs no writable rootfs, only the /data
+    # volume (HOME and WORKDIR are /data in the image, so SQLite temp files land
+    # there too).
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The image already runs as non-root uid 65532 (Chainguard static); the
+    # named volume is created writable for that user.
+    volumes:
+      - tier-data:/data
+
+    # Restart policy is REQUIRED, not optional. tierd exits 1 by design on
+    # terminal watcher failure (5 failures / 60s) or an HTTP listener crash — the
+    # in-process supervisor handles transient failures, terminal failure is
+    # delegated to this restart policy. Without it, live capture stays down until
+    # a human notices.
+    restart: unless-stopped
+
+    # NO in-container healthcheck. The runtime image is a Chainguard static base:
+    # no shell, no wget, no curl — and tierd has no self-probe subcommand — so a
+    # `test:` command that shells out cannot run inside this image. We rely on the
+    # restart policy above (Docker restarts the process on exit) plus EXTERNAL
+    # probing of the unauthenticated liveness endpoint, e.g. from the host or an
+    # orchestrator:
+    #   curl -fsS http://127.0.0.1:8080/api/v1/livez
+    # If you build a variant image that bundles wget, you can enable:
+    #   healthcheck:
+    #     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/livez"]
+    #     interval: 30s
+    #     timeout: 3s
+    #     retries: 3
+    #     start_period: 10s
+
+  # --- optional Prometheus sidecar -------------------------------------------
+  # Uncomment to scrape tierd's bearer-gated /metrics. Create prometheus.yml with
+  # the scrape_config from deploy/README.md (authorization.credentials_file
+  # pointing at a file that holds ONLY the read-only TIER_READ_TOKEN, chmod 0600).
+  #
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - tierd
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - ./tier-read-token:/etc/prometheus/tier-api-token:ro
+
+volumes:
+  tier-data:

@@ -1,0 +1,36 @@
+# Scheduled audit of the PUBLISHED mirror (#586).
+#
+# Why scheduled rather than a local gate, per THE LINE: local gates own what is
+# derivable from the working tree; a scheduler owns what changes when the tree
+# does not. The published mirror can change with no commit here at all -- the
+# same argument that justified the CVE re-scan (#560).
+#
+# Guarded to the development repo. On the mirror itself this is a no-op: it
+# would be auditing itself, and a repo that audits itself is not an independent
+# check. Note a fork also matches this guard; harmless, since GitHub disables
+# scheduled workflows in forks.
+name: Mirror audit
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.repository != 'tiermetric/tier'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Prove the harness works BEFORE trusting its verdict. A gate that has
+      # silently stopped firing reports CLEAN on every repo forever, and the
+      # audit alone cannot tell that apart from a genuinely clean mirror.
+      - name: Selftest the audit (fires on a violation planted in history)
+        run: make mirror-audit-selftest
+
+      - name: Audit the published mirror
+        run: make mirror-audit

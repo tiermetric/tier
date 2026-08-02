@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webhook setup — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="webhook-setup">Webhook setup</h1>
+<p>TIER records PR outcomes from a GitHub webhook. Without it, <code>tierd serve</code> still
+captures cost, but it computes no full TIER scores because it has no outcomes.</p>
+<h2 id="configure-the-webhook-in-github">Configure the webhook in GitHub</h2>
+<p>Repository (or organization) <strong>Settings → Webhooks → Add webhook</strong>:</p>
+<ul>
+<li>
+<p><strong>Payload URL:</strong> <code>https://&lt;tierd-host&gt;/webhook/github</code></p>
+</li>
+<li>
+<p><strong>Content type:</strong> <code>application/json</code></p>
+</li>
+<li>
+<p><strong>Secret:</strong> the value of <code>TIER_WEBHOOK_SECRET</code>. Generate one with:</p>
+<pre><code>openssl rand -hex 32
+</code></pre>
+</li>
+<li>
+<p><strong>Which events?</strong> Choose <strong>&#34;Let me select individual events&#34;</strong> and tick
+<strong>Pull requests</strong>, <strong>Pushes</strong>, and <strong>Workflow runs</strong>.</p>
+<p>TIER processes exactly three event types (<code>internal/webhook/handler.go</code>):</p>
+<ul>
+<li><code>pull_request</code> — a closed + merged PR becomes an outcome (quality <code>1.0</code>).</li>
+<li><code>workflow_run</code> — a CI <strong>failure</strong> on the merge commit within the 48h window
+floors that outcome&#39;s quality to <code>0.7</code>; a success records a clean CI signal.
+<strong>If you omit &#34;Workflow runs&#34; the CI-fail quality signal is silently
+disabled</strong> — an outcome that broke CI still scores as a clean <code>1.0</code>.</li>
+<li><code>push</code> — revert detection degrades the reverted change&#39;s quality: a
+code-problem (quality) revert floors to <code>0.1</code>, a business-decision
+(strategic) revert to <code>0.8</code>, within a 60-day window.</li>
+</ul>
+<p>Every other event is ignored, so subscribing to more only adds noise.</p>
+</li>
+</ul>
+<h2 id="configure-the-secret-on-the-tierd-side">Configure the secret on the tierd side</h2>
+<p>Provide the same secret to <code>tierd serve</code>, ideally without putting it on the
+command line:</p>
+<pre><code>export TIER_WEBHOOK_SECRET=@/etc/tier/webhook-secret   # read from a file
+# or:  ./bin/tierd serve --webhook-secret @/etc/tier/webhook-secret ...
+</code></pre>
+<p><strong>Fail-closed:</strong> if no secret is set, the <code>POST /webhook/github</code> route is <strong>not
+mounted at all</strong> — an unauthenticated webhook would let anyone who can reach the
+listener forge merged-PR outcomes or fake revert pushes. You will see this at
+startup:</p>
+<pre><code>WARN TIER_WEBHOOK_SECRET is not set — POST /webhook/github is disabled (fail closed, #60)
+</code></pre>
+<p>Every delivery is verified with an HMAC-SHA256 signature over the raw body,
+compared against the <code>X-Hub-Signature-256</code> header. A mismatch returns <code>403</code>.</p>
+<h2 id="pr-size-labels-and-outcome-weight">PR size labels and outcome weight</h2>
+<p>When a merged PR carries a size label, TIER weighs the outcome from that label
+(<code>weight_source=&#39;label&#39;</code>) instead of the diff-size heuristic. Out of the box it
+recognizes GitHub&#39;s <code>size/xs</code>..<code>size/xl</code> labels and the bare <code>xs</code>..<code>xl</code> forms,
+mapped onto the fixed outcome scale:</p>
+<table>
+<thead>
+<tr>
+<th>Label (case-insensitive)</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>size/xs</code>, <code>xs</code></td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><code>size/s</code>, <code>s</code></td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>size/m</code>, <code>m</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>size/l</code>, <code>l</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>size/xl</code>, <code>xl</code></td>
+<td>8</td>
+</tr>
+</tbody>
+</table>
+<p>A PR whose labels don&#39;t match any entry falls through to the git-diff heuristic
+(<code>weight_source=&#39;git-heuristic&#39;</code>) — nothing is lost, but a label is the more
+trustworthy signal.</p>
+<h3 id="remapping-the-label-names-outcomessize_labels">Remapping the label names (<code>outcomes.size_labels</code>)</h3>
+<p>If your org uses a different naming convention — <code>size: M</code> with a space, <code>size-l</code>,
+or an <code>S</code>-prefixed scheme common to pull-request-size bots — remap the names in the
+YAML config (<code>tierd serve --config</code>):</p>
+<pre><code>outcomes:
+  size_labels:
+    &#34;xs&#34;: 0.5
+    &#34;s&#34;: 1
+    &#34;m&#34;: 3
+    &#34;l&#34;: 5
+    &#34;xl&#34;: 8
+    &#34;xxl&#34;: 8   # extra names are fine — they just map onto the same fixed scale
+</code></pre>
+<p>Rules:</p>
+<ul>
+<li><strong>Only the names are configurable.</strong> Every weight must be one of the fixed scale
+<code>0.5, 1, 3, 5, 8</code> so scores stay comparable across orgs — an off-scale value (or
+a blank label name) makes <code>tierd serve</code> fail loud at startup.</li>
+<li><strong>Matching is case-insensitive.</strong></li>
+<li><strong>A custom table replaces the built-ins</strong> (it does not merge) — list every label
+you want recognized, including <code>size/*</code> forms if you still use them.</li>
+<li><strong>Absent or <code>{}</code></strong> keeps the built-in table above unchanged, so existing
+deployments are unaffected.</li>
+<li>A configured match still records <code>weight_source=&#39;label&#39;</code> — no new provenance.</li>
+<li><strong>Live webhook path only (today).</strong> <code>outcomes.size_labels</code> is honored when TIER scores
+a merged PR via the live webhook. <code>tierd backfill</code> (reconstructing historical outcomes)
+currently uses the <strong>built-in</strong> table, so an org with a custom map will see custom
+weights on live outcomes and built-in weights on backfilled ones. Unifying the two is
+tracked in #301; until then, run backfill before customizing, or expect that divergence
+on pre-config history.</li>
+</ul>
+<p>Work-type labels (<code>#187</code>) are a deliberately fixed taxonomy and are <strong>not</strong>
+configurable; this applies to <em>size</em> labels only.</p>
+<h2 id="delivery-semantics">Delivery semantics</h2>
+<ul>
+<li><strong>Signature:</strong> <code>X-Hub-Signature-256: sha256=&lt;hmac&gt;</code> — required; a mismatch is
+<code>403</code>.</li>
+<li><strong>Dedup:</strong> replays are deduped by the <code>X-GitHub-Delivery</code> GUID (combined with
+the event type), and merged-PR outcomes carry a durable merge-commit-SHA
+guard, so a redelivery is a safe no-op.</li>
+<li><strong>Retries:</strong> a transient handler failure returns <code>500</code>, which prompts GitHub to
+retry. A successful (including duplicate) delivery returns <code>204</code>.</li>
+</ul>
+<h2 id="verifying-it-works">Verifying it works</h2>
+<p>You can compute a signature by hand and post a synthetic merged-PR payload:</p>
+<pre><code>SECRET=your-secret
+PAYLOAD=&#39;{&#34;action&#34;:&#34;closed&#34;,&#34;pull_request&#34;:{&#34;number&#34;:42,&#34;merged&#34;:true,&#34;merge_commit_sha&#34;:&#34;abc123&#34;,&#34;user&#34;:{&#34;login&#34;:&#34;alice&#34;},&#34;body&#34;:&#34;closes #42&#34;,&#34;labels&#34;:[{&#34;name&#34;:&#34;size/m&#34;}],&#34;additions&#34;:10,&#34;deletions&#34;:2,&#34;changed_files&#34;:3}}&#39;
+SIG=&#34;sha256=$(printf &#39;%s&#39; &#34;$PAYLOAD&#34; | openssl dgst -sha256 -hmac &#34;$SECRET&#34; | awk &#39;{print $2}&#39;)&#34;
+curl -i -X POST https://&lt;tierd-host&gt;/webhook/github \
+  -H &#34;X-GitHub-Event: pull_request&#34; \
+  -H &#34;X-GitHub-Delivery: $(uuidgen)&#34; \
+  -H &#34;X-Hub-Signature-256: $SIG&#34; \
+  -H &#34;Content-Type: application/json&#34; \
+  -d &#34;$PAYLOAD&#34;
+# expect HTTP 204
+</code></pre>
+<p>GitHub&#39;s <strong>&#34;Redeliver&#34;</strong> button on any recorded delivery does the same against a
+real payload.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li><strong>&#34;PR merged but no outcome recorded.&#34;</strong> Almost always no issue reference was
+found on the branch or in the PR body, so the outcome could not be attributed
+to an issue. Check <a href="conventions.html" rel="nofollow">conventions.md</a> — the branch name or PR
+body must carry a recognizable issue reference.</li>
+<li><strong>Every delivery returns 403.</strong> Signature mismatch: the secret configured in
+GitHub differs from <code>TIER_WEBHOOK_SECRET</code> on the server.</li>
+<li><strong>Every delivery returns 404.</strong> No secret is set on the server, so the
+<code>POST /webhook/github</code> route is not mounted at all (fail-closed). Set
+<code>TIER_WEBHOOK_SECRET</code> and restart.</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

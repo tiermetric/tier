@@ -1,0 +1,2117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPT-2026: Complete Reference Price Table — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="rpt-2026-complete-reference-price-table">RPT-2026: Complete Reference Price Table</h1>
+<h2 id="tier-framework--token-impact--efficiency-ratio">TIER Framework — Token Impact &amp; Efficiency Ratio</h2>
+<p><strong>Narrative companion to <code>internal/store/prices.yaml</code></strong> — describing table <code>version: 9</code>, <code>effective_date: 2026-07-26</code>.</p>
+<p><strong>Status:</strong> Published reference. The authoritative, machine-readable table is <code>internal/store/prices.yaml</code>, which <code>tierd</code> embeds at build time and which this document describes. <strong>Where the two disagree, the YAML is correct</strong> — it is the single source of truth, and this page carries no independent version number precisely so the two cannot drift apart.</p>
+<p><strong>Purpose:</strong> Comprehensive, research-verified reference pricing for every major AI model used in software development, effective for all TIER score calculations during calendar year 2026.</p>
+<p><strong>Data sourced:</strong> Base rows captured March 26, 2026 from official provider pricing pages and verified third-party aggregators; subsequent revisions through <code>version: 9</code> (2026-07-26) added and re-verified individual rows — <code>version: 8</code> (#461) added the GPT-5.6 Codex family (<code>gpt-5.6-sol</code> $5/$30, <code>gpt-5.6-terra</code> $2.50/$15, <code>gpt-5.6-luna</code> $1/$6, OpenAI standard-tier list); <code>version: 9</code> added <code>claude-opus-5</code> at $5/$25, verified against the vendor catalog rather than inferred from the 4.x pattern. Per the table&#39;s own versioning rule, <code>effective_date</code> stamps when the table was last revised <strong>as a whole</strong> — it is not a guarantee that every row was re-captured on that date.</p>
+<hr>
+<h2 id="1-cloud-api-models-pay-per-token">1. Cloud API Models (Pay-Per-Token)</h2>
+<p>All prices are USD per million tokens ($/MTok) at standard list rates. Batch API discounts and enterprise negotiations are excluded per TIER specification (see cost normalization spec Section 2.1). <strong>Prompt caching multipliers are applied</strong> — see §8 below.</p>
+<h3 id="11-frontier-tier">1.1 Frontier Tier</h3>
+<p>Models representing the highest capability level. Used for architecture review, complex reasoning, and high-stakes code generation.</p>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Context</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpt-5.4-pro</code></td>
+<td>OpenAI</td>
+<td>30.00</td>
+<td>180.00</td>
+<td>1M</td>
+<td>OpenAI ultra-premium tier. Highest cost model on the market.</td>
+</tr>
+<tr>
+<td><code>o1</code></td>
+<td>OpenAI</td>
+<td>15.00</td>
+<td>60.00</td>
+<td>200K</td>
+<td>OpenAI reasoning model (legacy frontier).</td>
+</tr>
+<tr>
+<td><code>claude-opus-4</code></td>
+<td>Anthropic</td>
+<td>15.00</td>
+<td>75.00</td>
+<td>200K</td>
+<td>Legacy Anthropic flagship. Still available.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.1</code></td>
+<td>Anthropic</td>
+<td>15.00</td>
+<td>75.00</td>
+<td>200K</td>
+<td>Legacy Anthropic flagship. Still available.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.5</code></td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>1M</td>
+<td>Anthropic flagship (current gen). Major price reduction from Opus 4.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.6</code></td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>1M</td>
+<td>Anthropic Opus (current gen). Fast mode: $30/$150.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.7</code></td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>1M</td>
+<td>Anthropic Opus.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.8</code></td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>1M</td>
+<td>Anthropic Opus (previous generation).</td>
+</tr>
+<tr>
+<td><code>claude-opus-5</code></td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>1M</td>
+<td>Anthropic latest Opus flagship. Same $5/$25 as 4.8. Fast mode bills $10/$50 (not encoded — see §7).</td>
+</tr>
+<tr>
+<td><code>claude-fable-5</code></td>
+<td>Anthropic</td>
+<td>10.00</td>
+<td>50.00</td>
+<td>1M</td>
+<td>Anthropic most-capable model (distinct family, above Opus tier).</td>
+</tr>
+<tr>
+<td><code>claude-mythos-5</code></td>
+<td>Anthropic</td>
+<td>10.00</td>
+<td>50.00</td>
+<td>1M</td>
+<td>Same $10/$50 flagship rate as Fable 5 (Project Glasswing). Mid-year addendum (v7).</td>
+</tr>
+<tr>
+<td><code>gpt-5.4</code></td>
+<td>OpenAI</td>
+<td>2.50</td>
+<td>15.00</td>
+<td>1M</td>
+<td>OpenAI latest flagship (Mar 2026).</td>
+</tr>
+<tr>
+<td><code>grok-3-fast</code></td>
+<td>xAI</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>131K</td>
+<td>xAI premium speed tier.</td>
+</tr>
+<tr>
+<td><code>grok-4</code></td>
+<td>xAI</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>131K</td>
+<td>xAI latest flagship.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>RPT-2026 Frontier reference model:</strong> <code>claude-opus-4</code> at $15.00/$75.00 (set at RPT publication; not updated mid-year per spec Section 2.4).</p>
+<p><strong>Important note on Opus pricing evolution:</strong> Claude Opus 4 and 4.1 launched at $15/$75. Opus 4.5, 4.6, 4.7, 4.8, and 5 all dropped to $5/$25 -- a 67% price reduction. Note the reduction did NOT carry backwards: 4.1 remains $15/$75, so &#34;a newer Opus is cheaper&#34; is not a rule and each generation must be captured, not inferred. For RPT-2026, we retain the original <code>claude-opus-4</code> entry at $15/$75 as the frontier reference anchor (set January 2026). The Opus 4.5–4.8 and Opus 5 entries are mid-year addenda at their actual list prices. Note these minor versions do NOT share the base-family rate, so the code price table (<code>internal/store/prices.go</code>) lists each explicitly rather than inferring a family rate (#80). Claude Fable 5 is a distinct, more-capable family priced above Opus tier at $10/$50. Similarly, <code>gpt-4.5</code> at $75/$150 has been retired by OpenAI and replaced by the GPT-5.x series at dramatically lower prices.</p>
+<hr>
+<h3 id="12-standard-tier">1.2 Standard Tier</h3>
+<p>Primary workhorse models for day-to-day coding, code review, and feature implementation.</p>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Context</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-sonnet-4</code></td>
+<td>Anthropic</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>200K</td>
+<td>Anthropic primary coding model.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-4.5</code></td>
+<td>Anthropic</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>200K</td>
+<td>Anthropic updated Sonnet. 1M beta at $6/$22.50.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-4.6</code></td>
+<td>Anthropic</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>1M</td>
+<td>Anthropic latest Sonnet. Full 1M at standard rate.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-5</code></td>
+<td>Anthropic</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>1M</td>
+<td>Anthropic current Sonnet. LIST price; a $2/$10 intro promo runs through 2026-08-31 (not encoded — table is list-price). Mid-year addendum (v7).</td>
+</tr>
+<tr>
+<td><code>gpt-4o</code></td>
+<td>OpenAI</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>128K</td>
+<td>OpenAI established workhorse.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1</code></td>
+<td>OpenAI</td>
+<td>2.00</td>
+<td>8.00</td>
+<td>1M</td>
+<td>OpenAI standard (Apr 2025).</td>
+</tr>
+<tr>
+<td><code>gpt-5</code></td>
+<td>OpenAI</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>1M</td>
+<td>OpenAI GPT-5 base.</td>
+</tr>
+<tr>
+<td><code>gpt-5.1</code></td>
+<td>OpenAI</td>
+<td>0.625</td>
+<td>5.00</td>
+<td>1M</td>
+<td>OpenAI GPT-5.1.</td>
+</tr>
+<tr>
+<td><code>gpt-5.2</code></td>
+<td>OpenAI</td>
+<td>0.875</td>
+<td>7.00</td>
+<td>1M</td>
+<td>OpenAI GPT-5.2.</td>
+</tr>
+<tr>
+<td><code>gpt-5.3-codex</code></td>
+<td>OpenAI</td>
+<td>1.75</td>
+<td>14.00</td>
+<td>1M</td>
+<td>OpenAI Codex agentic coding model (Jan 2026).</td>
+</tr>
+<tr>
+<td><code>gpt-5.1-codex</code></td>
+<td>OpenAI</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>1M</td>
+<td>OpenAI Codex mid-tier coding model.</td>
+</tr>
+<tr>
+<td><code>o3</code></td>
+<td>OpenAI</td>
+<td>2.00</td>
+<td>8.00</td>
+<td>200K</td>
+<td>OpenAI reasoning model.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-pro</code></td>
+<td>Google</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>1M</td>
+<td>Google primary. &gt;200K input: $2.50/$15.00.</td>
+</tr>
+<tr>
+<td><code>gemini-3.1-pro</code></td>
+<td>Google</td>
+<td>2.00</td>
+<td>12.00</td>
+<td>1M</td>
+<td>Google latest. &gt;200K input: $4.00/$18.00.</td>
+</tr>
+<tr>
+<td><code>grok-3</code></td>
+<td>xAI</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>131K</td>
+<td>xAI standard model.</td>
+</tr>
+<tr>
+<td><code>deepseek-r1</code></td>
+<td>DeepSeek</td>
+<td>0.55</td>
+<td>2.19</td>
+<td>128K</td>
+<td>DeepSeek reasoning. Cache hit: $0.028/M input.</td>
+</tr>
+<tr>
+<td><code>command-a</code></td>
+<td>Cohere</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>256K</td>
+<td>Cohere enterprise flagship.</td>
+</tr>
+<tr>
+<td><code>command-r-plus</code></td>
+<td>Cohere</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>128K</td>
+<td>Cohere enterprise model.</td>
+</tr>
+<tr>
+<td><code>mistral-large-3</code></td>
+<td>Mistral</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>128K</td>
+<td>Mistral flagship. Unusually affordable for capability.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h3 id="13-efficient-tier">1.3 Efficient Tier</h3>
+<p>Cost-optimized models for high-volume tasks, simple code completions, test generation, and routine operations.</p>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Context</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-haiku-4.5</code></td>
+<td>Anthropic</td>
+<td>1.00</td>
+<td>5.00</td>
+<td>200K</td>
+<td>Anthropic current small model.</td>
+</tr>
+<tr>
+<td><code>claude-haiku-3.5</code></td>
+<td>Anthropic</td>
+<td>0.80</td>
+<td>4.00</td>
+<td>200K</td>
+<td>Anthropic legacy small. Still widely used.</td>
+</tr>
+<tr>
+<td><code>gpt-4o-mini</code></td>
+<td>OpenAI</td>
+<td>0.15</td>
+<td>0.60</td>
+<td>128K</td>
+<td>OpenAI legacy cost-optimized.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1-mini</code></td>
+<td>OpenAI</td>
+<td>0.40</td>
+<td>1.60</td>
+<td>1M</td>
+<td>OpenAI mini (Apr 2025).</td>
+</tr>
+<tr>
+<td><code>gpt-4.1-nano</code></td>
+<td>OpenAI</td>
+<td>0.05</td>
+<td>0.20</td>
+<td>1M</td>
+<td>OpenAI smallest legacy.</td>
+</tr>
+<tr>
+<td><code>gpt-5-mini</code></td>
+<td>OpenAI</td>
+<td>0.125</td>
+<td>1.00</td>
+<td>1M</td>
+<td>OpenAI GPT-5 mini.</td>
+</tr>
+<tr>
+<td><code>gpt-5-nano</code></td>
+<td>OpenAI</td>
+<td>0.05</td>
+<td>0.40</td>
+<td>1M</td>
+<td>OpenAI GPT-5 nano.</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-mini</code></td>
+<td>OpenAI</td>
+<td>0.75</td>
+<td>4.50</td>
+<td>1M</td>
+<td>OpenAI latest mini (Mar 2026).</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-nano</code></td>
+<td>OpenAI</td>
+<td>0.20</td>
+<td>1.25</td>
+<td>1M</td>
+<td>OpenAI latest nano (Mar 2026).</td>
+</tr>
+<tr>
+<td><code>gpt-5.1-codex-mini</code></td>
+<td>OpenAI</td>
+<td>0.25</td>
+<td>2.00</td>
+<td>1M</td>
+<td>OpenAI cheapest Codex.</td>
+</tr>
+<tr>
+<td><code>o3-mini</code></td>
+<td>OpenAI</td>
+<td>0.55</td>
+<td>2.20</td>
+<td>200K</td>
+<td>OpenAI reasoning mini (Jan 2025).</td>
+</tr>
+<tr>
+<td><code>o4-mini</code></td>
+<td>OpenAI</td>
+<td>1.10</td>
+<td>4.40</td>
+<td>200K</td>
+<td>OpenAI reasoning mini (Apr 2025).</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-flash</code></td>
+<td>Google</td>
+<td>0.30</td>
+<td>2.50</td>
+<td>1M</td>
+<td>Google fast model. Thinking: additional cost.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-flash-lite</code></td>
+<td>Google</td>
+<td>0.10</td>
+<td>0.40</td>
+<td>1M</td>
+<td>Google cheapest current model.</td>
+</tr>
+<tr>
+<td><code>gemini-2.0-flash</code></td>
+<td>Google</td>
+<td>0.10</td>
+<td>0.40</td>
+<td>1M</td>
+<td>Google prior-gen. Sunset June 2026.</td>
+</tr>
+<tr>
+<td><code>gemini-3-flash</code></td>
+<td>Google</td>
+<td>0.50</td>
+<td>3.00</td>
+<td>1M</td>
+<td>Google latest Flash.</td>
+</tr>
+<tr>
+<td><code>gemini-3.1-flash-lite</code></td>
+<td>Google</td>
+<td>0.25</td>
+<td>1.50</td>
+<td>1M</td>
+<td>Google latest lite.</td>
+</tr>
+<tr>
+<td><code>grok-3-mini</code></td>
+<td>xAI</td>
+<td>0.25</td>
+<td>0.50</td>
+<td>131K</td>
+<td>xAI cost-optimized.</td>
+</tr>
+<tr>
+<td><code>grok-4-fast</code></td>
+<td>xAI</td>
+<td>0.20</td>
+<td>0.50</td>
+<td>131K</td>
+<td>xAI latest fast/efficient.</td>
+</tr>
+<tr>
+<td><code>grok-4.1-fast</code></td>
+<td>xAI</td>
+<td>0.20</td>
+<td>0.50</td>
+<td>131K</td>
+<td>xAI latest fast variant.</td>
+</tr>
+<tr>
+<td><code>grok-code-fast-1</code></td>
+<td>xAI</td>
+<td>0.20</td>
+<td>1.50</td>
+<td>131K</td>
+<td>xAI dedicated coding model. Higher output cost.</td>
+</tr>
+<tr>
+<td><code>deepseek-v3</code></td>
+<td>DeepSeek</td>
+<td>0.28</td>
+<td>0.42</td>
+<td>128K</td>
+<td>DeepSeek-V3.2 chat. Cache hit: $0.028/M.</td>
+</tr>
+<tr>
+<td><code>command-r</code></td>
+<td>Cohere</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>128K</td>
+<td>Cohere standard.</td>
+</tr>
+<tr>
+<td><code>command-r7b</code></td>
+<td>Cohere</td>
+<td>0.0375</td>
+<td>0.15</td>
+<td>128K</td>
+<td>Cohere ultra-budget.</td>
+</tr>
+<tr>
+<td><code>codestral</code></td>
+<td>Mistral</td>
+<td>0.30</td>
+<td>0.90</td>
+<td>256K</td>
+<td>Mistral dedicated coding model.</td>
+</tr>
+<tr>
+<td><code>mistral-small-3.2</code></td>
+<td>Mistral</td>
+<td>0.075</td>
+<td>0.20</td>
+<td>128K</td>
+<td>Mistral 24B small.</td>
+</tr>
+<tr>
+<td><code>devstral-small</code></td>
+<td>Mistral</td>
+<td>0.07</td>
+<td>0.28</td>
+<td>128K</td>
+<td>Mistral coding agent model.</td>
+</tr>
+<tr>
+<td><code>amazon-nova-pro</code></td>
+<td>Amazon</td>
+<td>0.80</td>
+<td>3.20</td>
+<td>300K</td>
+<td>AWS Bedrock native.</td>
+</tr>
+<tr>
+<td><code>amazon-nova-lite</code></td>
+<td>Amazon</td>
+<td>0.06</td>
+<td>0.24</td>
+<td>300K</td>
+<td>AWS Bedrock budget.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h3 id="14-embedding-tier">1.4 Embedding Tier</h3>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text-embedding-3-large</code></td>
+<td>OpenAI</td>
+<td>0.13</td>
+<td>N/A</td>
+<td>OpenAI 3072-dim embedding.</td>
+</tr>
+<tr>
+<td><code>text-embedding-3-small</code></td>
+<td>OpenAI</td>
+<td>0.02</td>
+<td>N/A</td>
+<td>OpenAI 1536-dim embedding.</td>
+</tr>
+<tr>
+<td><code>voyage-3-large</code></td>
+<td>Voyage AI</td>
+<td>0.18</td>
+<td>N/A</td>
+<td>Used in Anthropic ecosystem.</td>
+</tr>
+<tr>
+<td><code>gemini-embedding-2</code></td>
+<td>Google</td>
+<td>0.20</td>
+<td>N/A</td>
+<td>Google text embedding.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h3 id="15-open-source-models-via-hosted-apis">1.5 Open-Source Models (via Hosted APIs)</h3>
+<p>These models are open-weight and can be self-hosted (see Section 2) or accessed via inference providers (Together AI, Fireworks, DeepInfra, Groq, etc.). Prices below reflect typical hosted API rates, NOT self-hosted costs.</p>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Provider(s)</th>
+<th>Params</th>
+<th>Typical Hosted $/M (in+out avg)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>llama-3.3-70b</code></td>
+<td>Meta (via providers)</td>
+<td>70B</td>
+<td>$0.20-0.60</td>
+<td>Primary open-source workhorse.</td>
+</tr>
+<tr>
+<td><code>llama-3.1-405b</code></td>
+<td>Meta (via providers)</td>
+<td>405B</td>
+<td>$1.00-3.00</td>
+<td>Largest open-source dense model.</td>
+</tr>
+<tr>
+<td><code>llama-3.2-8b</code></td>
+<td>Meta (via providers)</td>
+<td>8B</td>
+<td>$0.03-0.10</td>
+<td>Efficient small model.</td>
+</tr>
+<tr>
+<td><code>llama-4-maverick</code></td>
+<td>Meta (via providers)</td>
+<td>400B MoE</td>
+<td>$0.15-0.50</td>
+<td>MoE architecture, 17B active.</td>
+</tr>
+<tr>
+<td><code>qwen-2.5-72b</code></td>
+<td>Alibaba (via providers)</td>
+<td>72B</td>
+<td>$0.20-0.50</td>
+<td>Strong multilingual model.</td>
+</tr>
+<tr>
+<td><code>qwen-2.5-coder-32b</code></td>
+<td>Alibaba (via providers)</td>
+<td>32B</td>
+<td>$0.10-0.30</td>
+<td>Best open-source coding model for size.</td>
+</tr>
+<tr>
+<td><code>qwen-2.5-coder-7b</code></td>
+<td>Alibaba (via providers)</td>
+<td>7B</td>
+<td>$0.03-0.10</td>
+<td>Small but capable coder.</td>
+</tr>
+<tr>
+<td><code>qwen-3-8b</code></td>
+<td>Alibaba (via providers)</td>
+<td>8B</td>
+<td>$0.03-0.10</td>
+<td>Latest Qwen generation.</td>
+</tr>
+<tr>
+<td><code>qwen-3-32b</code></td>
+<td>Alibaba (via providers)</td>
+<td>32B</td>
+<td>$0.10-0.30</td>
+<td>Latest Qwen mid-size.</td>
+</tr>
+<tr>
+<td><code>qwen-3-235b</code></td>
+<td>Alibaba (via providers)</td>
+<td>235B MoE</td>
+<td>$0.30-0.80</td>
+<td>MoE, 22B active params.</td>
+</tr>
+<tr>
+<td><code>deepseek-coder-v2-236b</code></td>
+<td>DeepSeek</td>
+<td>236B MoE</td>
+<td>$0.30-0.80</td>
+<td>MoE coding specialist.</td>
+</tr>
+<tr>
+<td><code>deepseek-v3</code></td>
+<td>DeepSeek</td>
+<td>671B MoE</td>
+<td>$0.28-0.42</td>
+<td>Also available via DeepSeek API (see 1.3).</td>
+</tr>
+<tr>
+<td><code>codestral-22b</code></td>
+<td>Mistral</td>
+<td>22B</td>
+<td>$0.10-0.30</td>
+<td>Open-weight coding model.</td>
+</tr>
+<tr>
+<td><code>starcoder2-15b</code></td>
+<td>BigCode</td>
+<td>15B</td>
+<td>$0.05-0.15</td>
+<td>Open-source code completion.</td>
+</tr>
+<tr>
+<td><code>starcoder2-7b</code></td>
+<td>BigCode</td>
+<td>7B</td>
+<td>$0.03-0.08</td>
+<td>Small code completion.</td>
+</tr>
+<tr>
+<td><code>codellama-70b</code></td>
+<td>Meta</td>
+<td>70B</td>
+<td>$0.20-0.60</td>
+<td>Legacy coding model. Superseded by Llama 3.3 + Qwen Coder.</td>
+</tr>
+<tr>
+<td><code>codellama-34b</code></td>
+<td>Meta</td>
+<td>34B</td>
+<td>$0.10-0.30</td>
+<td>Legacy mid-size coder.</td>
+</tr>
+<tr>
+<td><code>nvidia-nemotron-70b</code></td>
+<td>NVIDIA</td>
+<td>70B</td>
+<td>$0.20-0.50</td>
+<td>NVIDIA&#39;s Llama-based model.</td>
+</tr>
+<tr>
+<td><code>gpt-oss-120b</code></td>
+<td>OpenAI</td>
+<td>120B</td>
+<td>$0.039-0.10</td>
+<td>OpenAI&#39;s open-weight model. Extremely cheap.</td>
+</tr>
+<tr>
+<td><code>gpt-oss-20b</code></td>
+<td>OpenAI</td>
+<td>20B</td>
+<td>$0.03-0.10</td>
+<td>OpenAI small open-weight.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="2-self-hosted-inference-cost-model">2. Self-Hosted Inference Cost Model</h2>
+<h3 id="21-reference-tier-pricing-for-tier-score-calculation">2.1 Reference Tier Pricing (For TIER Score Calculation)</h3>
+<p>Per the TIER cost normalization specification, self-hosted models use fixed reference tiers, NOT actual amortized costs. This ensures cross-organization comparability.</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Model Criteria</th>
+<th>Reference $/M tokens</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>self-hosted-frontier</code></td>
+<td>70B+ params at Q8/FP16, or 100B+ MoE at Q4+</td>
+<td><strong>$2.00</strong></td>
+<td>Amortized DGX-class hardware, 3yr, 50% util.</td>
+</tr>
+<tr>
+<td><code>self-hosted-standard</code></td>
+<td>7B-70B params at any quant, or 70B+ at Q4</td>
+<td><strong>$0.50</strong></td>
+<td>Mid-tier GPU infrastructure.</td>
+</tr>
+<tr>
+<td><code>self-hosted-efficient</code></td>
+<td>Sub-7B params, embeddings, rerankers</td>
+<td><strong>$0.10</strong></td>
+<td>Modest hardware, small models.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22-estimated-actual-self-hosted-costs-for-reference-only">2.2 Estimated Actual Self-Hosted Costs (For Reference Only)</h3>
+<p>These are NOT used in TIER calculations. They are provided for organizations evaluating build-vs-buy decisions.</p>
+<h4 id="cost-methodology">Cost Methodology</h4>
+<pre><code>Annual cost per GPU node =
+    (hardware_cost / amortization_years)
+    + (power_draw_kw * 8760h * PUE * electricity_rate)
+    + (hardware_cost / amortization_years * staffing_overhead)
+
+Cost per million tokens =
+    annual_cost / (tokens_per_second * 3600 * 8760 * utilization * 1_000_000)
+</code></pre>
+<h4 id="dgx-spark-128gb-unified-memory-4999-msrp">DGX Spark (128GB Unified Memory, ~$4,999 MSRP)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Quant</th>
+<th>Est. tok/s</th>
+<th>Est. $/M tokens</th>
+<th>TIER Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen 2.5 Coder 32B</td>
+<td>32B</td>
+<td>Q8</td>
+<td>25-35</td>
+<td>$0.08-0.12</td>
+<td>self-hosted-standard</td>
+</tr>
+<tr>
+<td>Qwen 2.5 72B</td>
+<td>72B</td>
+<td>Q4</td>
+<td>12-18</td>
+<td>$0.15-0.25</td>
+<td>self-hosted-standard*</td>
+</tr>
+<tr>
+<td>Llama 3.3 70B</td>
+<td>70B</td>
+<td>Q4</td>
+<td>12-18</td>
+<td>$0.15-0.25</td>
+<td>self-hosted-standard*</td>
+</tr>
+<tr>
+<td>Qwen 3 8B</td>
+<td>8B</td>
+<td>Q8</td>
+<td>60-80</td>
+<td>$0.02-0.04</td>
+<td>self-hosted-efficient</td>
+</tr>
+<tr>
+<td>Qwen3-Embedding 8B</td>
+<td>8B</td>
+<td>FP16</td>
+<td>N/A</td>
+<td>$0.01-0.03</td>
+<td>self-hosted-efficient</td>
+</tr>
+</tbody>
+</table>
+<p>*70B at Q4 = self-hosted-standard per tier assignment rules (Section 3.3 of cost normalization spec).</p>
+<p><strong>Assumptions:</strong> $4,999 hardware, 3-year amortization, 300W power draw, $0.12/kWh, PUE 1.1 (small deployment), 50% utilization, 10% staffing overhead.</p>
+<h4 id="single-h100-80gb-sxm-25000-35000">Single H100 80GB SXM (~$25,000-$35,000)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Quant</th>
+<th>Est. tok/s</th>
+<th>Est. $/M tokens</th>
+<th>TIER Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen 2.5 Coder 32B</td>
+<td>32B</td>
+<td>FP16</td>
+<td>80-120</td>
+<td>$0.03-0.05</td>
+<td>self-hosted-standard</td>
+</tr>
+<tr>
+<td>Llama 3.2 8B</td>
+<td>8B</td>
+<td>FP16</td>
+<td>200-300</td>
+<td>$0.01-0.02</td>
+<td>self-hosted-efficient</td>
+</tr>
+<tr>
+<td>StarCoder2 15B</td>
+<td>15B</td>
+<td>FP16</td>
+<td>120-180</td>
+<td>$0.02-0.03</td>
+<td>self-hosted-standard</td>
+</tr>
+<tr>
+<td>CodeLlama 34B</td>
+<td>34B</td>
+<td>FP16</td>
+<td>60-90</td>
+<td>$0.04-0.06</td>
+<td>self-hosted-standard</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Assumptions:</strong> $30,000 hardware, 3-year amortization, 700W TDP, $0.10/kWh, PUE 1.3, 50% utilization, 10% staffing.</p>
+<h4 id="8x-h100-dgx-h100-node-300000">8x H100 DGX H100 Node (~$300,000)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Quant</th>
+<th>Est. tok/s</th>
+<th>Est. $/M tokens</th>
+<th>TIER Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 3.3 70B</td>
+<td>70B</td>
+<td>FP16</td>
+<td>200-400</td>
+<td>$0.03-0.06</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>Qwen 2.5 72B</td>
+<td>72B</td>
+<td>FP16</td>
+<td>200-400</td>
+<td>$0.03-0.06</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>NVIDIA Nemotron 70B</td>
+<td>70B</td>
+<td>FP16</td>
+<td>200-400</td>
+<td>$0.03-0.06</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>DeepSeek Coder V2 236B</td>
+<td>236B MoE</td>
+<td>FP8</td>
+<td>80-150</td>
+<td>$0.08-0.15</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>Llama 3.1 405B</td>
+<td>405B</td>
+<td>FP16</td>
+<td>40-80</td>
+<td>$0.15-0.30</td>
+<td>self-hosted-frontier</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Assumptions:</strong> $300,000 hardware, 3-year amortization, 10.2kW TDP, $0.10/kWh, PUE 1.3, 50% utilization, 10% staffing.</p>
+<h4 id="8x-h200-dgx-h200-node-400000-500000">8x H200 DGX H200 Node (~$400,000-$500,000)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Quant</th>
+<th>Est. tok/s</th>
+<th>Est. $/M tokens</th>
+<th>TIER Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 3.3 70B</td>
+<td>70B</td>
+<td>FP16</td>
+<td>300-500</td>
+<td>$0.02-0.04</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>DeepSeek V3 671B</td>
+<td>671B MoE</td>
+<td>FP8</td>
+<td>50-100</td>
+<td>$0.10-0.25</td>
+<td>self-hosted-frontier</td>
+</tr>
+<tr>
+<td>Llama 3.1 405B</td>
+<td>405B</td>
+<td>FP16</td>
+<td>60-120</td>
+<td>$0.08-0.18</td>
+<td>self-hosted-frontier</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Assumptions:</strong> $450,000 hardware, 3-year amortization, 10.2kW TDP, $0.10/kWh, PUE 1.3, 50% utilization, 10% staffing.</p>
+<h4 id="consumerworkstation-gpus">Consumer/Workstation GPUs</h4>
+<table>
+<thead>
+<tr>
+<th>GPU</th>
+<th>VRAM</th>
+<th>Model</th>
+<th>Quant</th>
+<th>Est. tok/s</th>
+<th>Est. $/M tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RTX 4090 (24GB) ~$1,600</td>
+<td>24GB</td>
+<td>Qwen 2.5 Coder 7B</td>
+<td>Q8</td>
+<td>50-80</td>
+<td>$0.01-0.02</td>
+</tr>
+<tr>
+<td>RTX 4090 (24GB)</td>
+<td>24GB</td>
+<td>CodeLlama 13B</td>
+<td>Q4</td>
+<td>30-50</td>
+<td>$0.02-0.03</td>
+</tr>
+<tr>
+<td>RTX 6000 Ada (48GB) ~$6,800</td>
+<td>48GB</td>
+<td>Qwen 2.5 Coder 32B</td>
+<td>Q4</td>
+<td>25-40</td>
+<td>$0.05-0.08</td>
+</tr>
+<tr>
+<td>RTX 6000 Blackwell (96GB) ~TBD</td>
+<td>96GB</td>
+<td>Llama 3.3 70B</td>
+<td>Q4</td>
+<td>15-25</td>
+<td>$0.10-0.18</td>
+</tr>
+<tr>
+<td>Mac Studio M4 Ultra (192GB) ~$7,000</td>
+<td>192GB</td>
+<td>Qwen 2.5 72B</td>
+<td>Q4</td>
+<td>8-15</td>
+<td>$0.15-0.30</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="3-tiered-summary-for-rpt-2026">3. Tiered Summary for RPT-2026</h2>
+<h3 id="31-api-models-by-effective-cost-output-weighted">3.1 API Models by Effective Cost (Output-Weighted)</h3>
+<p>For coding workloads, output tokens dominate cost (typically 60-70% of spend). This ranking uses an approximate &#34;effective cost&#34; = 0.35 * input + 0.65 * output per MTok.</p>
+<h4 id="tier-1--frontier-10m-effective">TIER 1 — Frontier ($10+/M effective)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Effective $/M</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gpt-5.4-pro</td>
+<td>OpenAI</td>
+<td>30.00</td>
+<td>180.00</td>
+<td>127.50</td>
+</tr>
+<tr>
+<td>claude-opus-4 / 4.1</td>
+<td>Anthropic</td>
+<td>15.00</td>
+<td>75.00</td>
+<td>54.00</td>
+</tr>
+<tr>
+<td>o1</td>
+<td>OpenAI</td>
+<td>15.00</td>
+<td>60.00</td>
+<td>44.25</td>
+</tr>
+<tr>
+<td>claude-fable-5</td>
+<td>Anthropic</td>
+<td>10.00</td>
+<td>50.00</td>
+<td>36.00</td>
+</tr>
+<tr>
+<td>claude-opus-4.5 / 4.6 / 4.7 / 4.8 / 5</td>
+<td>Anthropic</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>18.00</td>
+</tr>
+<tr>
+<td>grok-3-fast</td>
+<td>xAI</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>18.00</td>
+</tr>
+<tr>
+<td>gpt-5.4</td>
+<td>OpenAI</td>
+<td>2.50</td>
+<td>15.00</td>
+<td>10.63</td>
+</tr>
+<tr>
+<td>claude-sonnet-4/4.5/4.6</td>
+<td>Anthropic</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>10.80</td>
+</tr>
+<tr>
+<td>grok-3 / grok-4</td>
+<td>xAI</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>10.80</td>
+</tr>
+<tr>
+<td>gpt-5.3-codex</td>
+<td>OpenAI</td>
+<td>1.75</td>
+<td>14.00</td>
+<td>9.71</td>
+</tr>
+<tr>
+<td>gemini-3.1-pro</td>
+<td>Google</td>
+<td>2.00</td>
+<td>12.00</td>
+<td>8.50</td>
+</tr>
+<tr>
+<td>command-a</td>
+<td>Cohere</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>7.38</td>
+</tr>
+</tbody>
+</table>
+<h4 id="tier-2--standard-1-10m-effective">TIER 2 — Standard ($1-10/M effective)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Effective $/M</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gpt-4o</td>
+<td>OpenAI</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>7.38</td>
+</tr>
+<tr>
+<td>gemini-2.5-pro</td>
+<td>Google</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>6.94</td>
+</tr>
+<tr>
+<td>gpt-5</td>
+<td>OpenAI</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>6.94</td>
+</tr>
+<tr>
+<td>gpt-5.1-codex</td>
+<td>OpenAI</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>6.94</td>
+</tr>
+<tr>
+<td>gpt-4.1 / o3</td>
+<td>OpenAI</td>
+<td>2.00</td>
+<td>8.00</td>
+<td>5.90</td>
+</tr>
+<tr>
+<td>gpt-5.2</td>
+<td>OpenAI</td>
+<td>0.875</td>
+<td>7.00</td>
+<td>4.86</td>
+</tr>
+<tr>
+<td>claude-haiku-4.5</td>
+<td>Anthropic</td>
+<td>1.00</td>
+<td>5.00</td>
+<td>3.60</td>
+</tr>
+<tr>
+<td>gpt-5.1</td>
+<td>OpenAI</td>
+<td>0.625</td>
+<td>5.00</td>
+<td>3.47</td>
+</tr>
+<tr>
+<td>gpt-5.4-mini</td>
+<td>OpenAI</td>
+<td>0.75</td>
+<td>4.50</td>
+<td>3.19</td>
+</tr>
+<tr>
+<td>o4-mini</td>
+<td>OpenAI</td>
+<td>1.10</td>
+<td>4.40</td>
+<td>3.25</td>
+</tr>
+<tr>
+<td>claude-haiku-3.5</td>
+<td>Anthropic</td>
+<td>0.80</td>
+<td>4.00</td>
+<td>2.88</td>
+</tr>
+<tr>
+<td>gemini-2.5-flash</td>
+<td>Google</td>
+<td>0.30</td>
+<td>2.50</td>
+<td>1.73</td>
+</tr>
+<tr>
+<td>gpt-5.1-codex-mini</td>
+<td>OpenAI</td>
+<td>0.25</td>
+<td>2.00</td>
+<td>1.39</td>
+</tr>
+<tr>
+<td>o3-mini</td>
+<td>OpenAI</td>
+<td>0.55</td>
+<td>2.20</td>
+<td>1.62</td>
+</tr>
+<tr>
+<td>deepseek-r1</td>
+<td>DeepSeek</td>
+<td>0.55</td>
+<td>2.19</td>
+<td>1.62</td>
+</tr>
+<tr>
+<td>gemini-3-flash</td>
+<td>Google</td>
+<td>0.50</td>
+<td>3.00</td>
+<td>2.13</td>
+</tr>
+<tr>
+<td>gpt-4.1-mini</td>
+<td>OpenAI</td>
+<td>0.40</td>
+<td>1.60</td>
+<td>1.18</td>
+</tr>
+<tr>
+<td>grok-code-fast-1</td>
+<td>xAI</td>
+<td>0.20</td>
+<td>1.50</td>
+<td>1.05</td>
+</tr>
+<tr>
+<td>mistral-large-3</td>
+<td>Mistral</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>1.15</td>
+</tr>
+<tr>
+<td>command-r</td>
+<td>Cohere</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>1.15</td>
+</tr>
+<tr>
+<td>gemini-3.1-flash-lite</td>
+<td>Google</td>
+<td>0.25</td>
+<td>1.50</td>
+<td>1.06</td>
+</tr>
+<tr>
+<td>gpt-5.4-nano</td>
+<td>OpenAI</td>
+<td>0.20</td>
+<td>1.25</td>
+<td>0.88</td>
+</tr>
+<tr>
+<td>gpt-5-mini</td>
+<td>OpenAI</td>
+<td>0.125</td>
+<td>1.00</td>
+<td>0.69</td>
+</tr>
+<tr>
+<td>codestral</td>
+<td>Mistral</td>
+<td>0.30</td>
+<td>0.90</td>
+<td>0.69</td>
+</tr>
+</tbody>
+</table>
+<h4 id="tier-3--efficient-1m-effective">TIER 3 — Efficient (&lt;$1/M effective)</h4>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Provider</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Effective $/M</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>amazon-nova-pro</td>
+<td>Amazon</td>
+<td>0.80</td>
+<td>3.20</td>
+<td>2.36</td>
+</tr>
+<tr>
+<td>gpt-4o-mini</td>
+<td>OpenAI</td>
+<td>0.15</td>
+<td>0.60</td>
+<td>0.44</td>
+</tr>
+<tr>
+<td>grok-3-mini</td>
+<td>xAI</td>
+<td>0.25</td>
+<td>0.50</td>
+<td>0.41</td>
+</tr>
+<tr>
+<td>grok-4-fast / 4.1-fast</td>
+<td>xAI</td>
+<td>0.20</td>
+<td>0.50</td>
+<td>0.40</td>
+</tr>
+<tr>
+<td>deepseek-v3</td>
+<td>DeepSeek</td>
+<td>0.28</td>
+<td>0.42</td>
+<td>0.37</td>
+</tr>
+<tr>
+<td>gemini-2.5-flash-lite</td>
+<td>Google</td>
+<td>0.10</td>
+<td>0.40</td>
+<td>0.30</td>
+</tr>
+<tr>
+<td>gemini-2.0-flash</td>
+<td>Google</td>
+<td>0.10</td>
+<td>0.40</td>
+<td>0.30</td>
+</tr>
+<tr>
+<td>devstral-small</td>
+<td>Mistral</td>
+<td>0.07</td>
+<td>0.28</td>
+<td>0.21</td>
+</tr>
+<tr>
+<td>amazon-nova-lite</td>
+<td>Amazon</td>
+<td>0.06</td>
+<td>0.24</td>
+<td>0.18</td>
+</tr>
+<tr>
+<td>gpt-5-nano</td>
+<td>OpenAI</td>
+<td>0.05</td>
+<td>0.40</td>
+<td>0.28</td>
+</tr>
+<tr>
+<td>gpt-4.1-nano</td>
+<td>OpenAI</td>
+<td>0.05</td>
+<td>0.20</td>
+<td>0.15</td>
+</tr>
+<tr>
+<td>mistral-small-3.2</td>
+<td>Mistral</td>
+<td>0.075</td>
+<td>0.20</td>
+<td>0.16</td>
+</tr>
+<tr>
+<td>command-r7b</td>
+<td>Cohere</td>
+<td>0.0375</td>
+<td>0.15</td>
+<td>0.11</td>
+</tr>
+<tr>
+<td>gpt-oss-120b</td>
+<td>OpenAI</td>
+<td>0.039</td>
+<td>0.10</td>
+<td>0.08</td>
+</tr>
+<tr>
+<td>gpt-oss-20b</td>
+<td>OpenAI</td>
+<td>0.03</td>
+<td>0.10</td>
+<td>0.08</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="4-corrections-to-existing-rpt-2026-in-cost-normalization-spec">4. Corrections to Existing RPT-2026 in Cost Normalization Spec</h2>
+<p>The following entries in the current <code>docs/cost-normalization-spec.md</code> Section 2.3 need updating based on verified March 2026 pricing:</p>
+<h3 id="entries-to-update">Entries to Update</h3>
+<table>
+<thead>
+<tr>
+<th>Entry</th>
+<th>Current Value</th>
+<th>Correct Value</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpt-4.5</code></td>
+<td>$75.00 / $150.00</td>
+<td><strong>Remove</strong></td>
+<td>GPT-4.5 retired. Replaced by GPT-5.x series.</td>
+</tr>
+<tr>
+<td><code>gemini-2.0-ultra</code></td>
+<td>$10.00 / $30.00</td>
+<td><strong>Remove</strong></td>
+<td>Never launched at this price. Gemini 3.1 Pro is the current Google flagship at $2.00/$12.00.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-flash</code></td>
+<td>$0.15 / $0.60</td>
+<td><strong>$0.30 / $2.50</strong></td>
+<td>Verified from Google&#39;s official pricing page.</td>
+</tr>
+<tr>
+<td><code>deepseek-r1</code> input</td>
+<td>$2.19</td>
+<td><strong>$0.55</strong></td>
+<td>$2.19 is the OUTPUT price. Input is $0.55. Prices were swapped.</td>
+</tr>
+<tr>
+<td><code>deepseek-v3</code></td>
+<td>$0.27 / $1.10</td>
+<td><strong>$0.28 / $0.42</strong></td>
+<td>DeepSeek V3.2 updated pricing. Significant output price decrease.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1-nano</code></td>
+<td>$0.10 / $0.40</td>
+<td><strong>$0.05 / $0.20</strong></td>
+<td>Verified from OpenAI pricing page and aggregators.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="entries-to-add-mid-year-addenda">Entries to Add (Mid-Year Addenda)</h3>
+<table>
+<thead>
+<tr>
+<th><code>model_family</code></th>
+<th>Tier</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-opus-4.5</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>New Opus generation, major price reduction.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.6</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>Opus generation. Fast mode available at $30/$150.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.7</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>Opus generation, same $5/$25 rate.</td>
+</tr>
+<tr>
+<td><code>claude-opus-4.8</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>Opus generation, same $5/$25 rate.</td>
+</tr>
+<tr>
+<td><code>claude-opus-5</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>Latest Opus flagship, same $5/$25 rate (v9).</td>
+</tr>
+<tr>
+<td><code>claude-fable-5</code></td>
+<td>frontier</td>
+<td>10.00</td>
+<td>50.00</td>
+<td>Most-capable model, distinct family above Opus tier.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-4.5</code></td>
+<td>standard</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>Updated Sonnet, 1M context beta.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-4.6</code></td>
+<td>standard</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>Latest Sonnet, full 1M context at standard rate.</td>
+</tr>
+<tr>
+<td><code>claude-haiku-4.5</code></td>
+<td>efficient</td>
+<td>1.00</td>
+<td>5.00</td>
+<td>Updated Haiku.</td>
+</tr>
+<tr>
+<td><code>gpt-5</code></td>
+<td>standard</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>OpenAI GPT-5 base.</td>
+</tr>
+<tr>
+<td><code>gpt-5.1</code></td>
+<td>standard</td>
+<td>0.625</td>
+<td>5.00</td>
+<td>OpenAI GPT-5.1.</td>
+</tr>
+<tr>
+<td><code>gpt-5.2</code></td>
+<td>standard</td>
+<td>0.875</td>
+<td>7.00</td>
+<td>OpenAI GPT-5.2.</td>
+</tr>
+<tr>
+<td><code>gpt-5.4</code></td>
+<td>frontier</td>
+<td>2.50</td>
+<td>15.00</td>
+<td>OpenAI latest flagship (Mar 2026).</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-pro</code></td>
+<td>frontier</td>
+<td>30.00</td>
+<td>180.00</td>
+<td>OpenAI ultra-premium.</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-mini</code></td>
+<td>efficient</td>
+<td>0.75</td>
+<td>4.50</td>
+<td>OpenAI latest mini.</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-nano</code></td>
+<td>efficient</td>
+<td>0.20</td>
+<td>1.25</td>
+<td>OpenAI latest nano.</td>
+</tr>
+<tr>
+<td><code>gpt-5.3-codex</code></td>
+<td>standard</td>
+<td>1.75</td>
+<td>14.00</td>
+<td>OpenAI Codex agentic model.</td>
+</tr>
+<tr>
+<td><code>gpt-5.1-codex</code></td>
+<td>standard</td>
+<td>1.25</td>
+<td>10.00</td>
+<td>OpenAI Codex mid-tier.</td>
+</tr>
+<tr>
+<td><code>gpt-5.1-codex-mini</code></td>
+<td>efficient</td>
+<td>0.25</td>
+<td>2.00</td>
+<td>OpenAI cheapest Codex.</td>
+</tr>
+<tr>
+<td><code>gpt-5-mini</code></td>
+<td>efficient</td>
+<td>0.125</td>
+<td>1.00</td>
+<td>OpenAI GPT-5 mini.</td>
+</tr>
+<tr>
+<td><code>gpt-5-nano</code></td>
+<td>efficient</td>
+<td>0.05</td>
+<td>0.40</td>
+<td>OpenAI GPT-5 nano.</td>
+</tr>
+<tr>
+<td><code>o4-mini</code></td>
+<td>efficient</td>
+<td>1.10</td>
+<td>4.40</td>
+<td>OpenAI reasoning mini.</td>
+</tr>
+<tr>
+<td><code>gpt-oss-120b</code></td>
+<td>efficient</td>
+<td>0.039</td>
+<td>0.10</td>
+<td>OpenAI open-source 120B.</td>
+</tr>
+<tr>
+<td><code>gpt-oss-20b</code></td>
+<td>efficient</td>
+<td>0.03</td>
+<td>0.10</td>
+<td>OpenAI open-source 20B.</td>
+</tr>
+<tr>
+<td><code>gemini-3.1-pro</code></td>
+<td>standard</td>
+<td>2.00</td>
+<td>12.00</td>
+<td>Google latest flagship.</td>
+</tr>
+<tr>
+<td><code>gemini-3-flash</code></td>
+<td>efficient</td>
+<td>0.50</td>
+<td>3.00</td>
+<td>Google Flash gen 3.</td>
+</tr>
+<tr>
+<td><code>gemini-3.1-flash-lite</code></td>
+<td>efficient</td>
+<td>0.25</td>
+<td>1.50</td>
+<td>Google latest lite.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-flash-lite</code></td>
+<td>efficient</td>
+<td>0.10</td>
+<td>0.40</td>
+<td>Google budget model.</td>
+</tr>
+<tr>
+<td><code>grok-3-fast</code></td>
+<td>frontier</td>
+<td>5.00</td>
+<td>25.00</td>
+<td>xAI premium speed.</td>
+</tr>
+<tr>
+<td><code>grok-4</code></td>
+<td>standard</td>
+<td>3.00</td>
+<td>15.00</td>
+<td>xAI latest.</td>
+</tr>
+<tr>
+<td><code>grok-4-fast</code></td>
+<td>efficient</td>
+<td>0.20</td>
+<td>0.50</td>
+<td>xAI efficient.</td>
+</tr>
+<tr>
+<td><code>grok-4.1-fast</code></td>
+<td>efficient</td>
+<td>0.20</td>
+<td>0.50</td>
+<td>xAI latest efficient.</td>
+</tr>
+<tr>
+<td><code>grok-code-fast-1</code></td>
+<td>efficient</td>
+<td>0.20</td>
+<td>1.50</td>
+<td>xAI dedicated coding.</td>
+</tr>
+<tr>
+<td><code>deepseek-v3.2</code></td>
+<td>efficient</td>
+<td>0.28</td>
+<td>0.42</td>
+<td>DeepSeek V3.2 update.</td>
+</tr>
+<tr>
+<td><code>mistral-large-3</code></td>
+<td>standard</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>Mistral flagship.</td>
+</tr>
+<tr>
+<td><code>codestral</code></td>
+<td>efficient</td>
+<td>0.30</td>
+<td>0.90</td>
+<td>Mistral coding model.</td>
+</tr>
+<tr>
+<td><code>devstral-small</code></td>
+<td>efficient</td>
+<td>0.07</td>
+<td>0.28</td>
+<td>Mistral coding agent.</td>
+</tr>
+<tr>
+<td><code>mistral-small-3.2</code></td>
+<td>efficient</td>
+<td>0.075</td>
+<td>0.20</td>
+<td>Mistral small.</td>
+</tr>
+<tr>
+<td><code>command-a</code></td>
+<td>standard</td>
+<td>2.50</td>
+<td>10.00</td>
+<td>Cohere flagship.</td>
+</tr>
+<tr>
+<td><code>command-r</code></td>
+<td>efficient</td>
+<td>0.50</td>
+<td>1.50</td>
+<td>Cohere standard.</td>
+</tr>
+<tr>
+<td><code>command-r7b</code></td>
+<td>efficient</td>
+<td>0.0375</td>
+<td>0.15</td>
+<td>Cohere ultra-budget.</td>
+</tr>
+<tr>
+<td><code>amazon-nova-pro</code></td>
+<td>efficient</td>
+<td>0.80</td>
+<td>3.20</td>
+<td>AWS native model.</td>
+</tr>
+<tr>
+<td><code>amazon-nova-lite</code></td>
+<td>efficient</td>
+<td>0.06</td>
+<td>0.24</td>
+<td>AWS budget model.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="5-cross-provider-defaults-design--not-implemented">5. Cross-Provider Defaults (Design — NOT Implemented)</h2>
+<blockquote>
+<p>⚠️ <strong>This tiered-default scheme is design intent, not shipped behavior.</strong> The
+code has no <code>frontier-default</code> / <code>standard-default</code> / <code>efficient-default</code> tier
+and does no provider/tier inference for unknown models. The shipped fallback
+(<code>internal/store/prices.go</code> <code>ComputeCost</code>) prices an unmatched model at a
+<strong>self-hosted reference rate</strong>: a size-class heuristic (<code>self-hosted-large</code>
+$2.00/M, <code>self-hosted-medium</code> $0.50/M, <code>self-hosted-small</code> $0.10/M) when the
+model string carries a parameter count, else the flat <code>self-hosted-medium</code>
+$0.50/M combined rate. Both paths emit a one-time <code>WARN</code> and bump the
+unknown-model event/cost counters (<code>tier_unknown_model_events_total</code> /
+<code>tier_unknown_model_cost_micro_total</code>, #267/#135). The rows below are retained
+as a target design; see <code>docs/cost-normalization-spec.md</code> (implementation-status
+banner) for the same clarification.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>When Used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>frontier-default</code></td>
+<td>5.00</td>
+<td>25.00</td>
+<td>Unknown model from known frontier-class provider. Updated from $15/$75 to reflect new Opus 4.5+ and GPT-5.4 pricing reality.</td>
+</tr>
+<tr>
+<td><code>standard-default</code></td>
+<td>2.00</td>
+<td>10.00</td>
+<td>Unknown model, unknown tier. Updated from $3/$12 to reflect market compression.</td>
+</tr>
+<tr>
+<td><code>efficient-default</code></td>
+<td>0.30</td>
+<td>1.50</td>
+<td>Unknown model tagged as small/mini/nano. Updated from $0.40/$1.60.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="6-key-market-observations-march-2026">6. Key Market Observations (March 2026)</h2>
+<h3 id="price-compression-is-accelerating">Price Compression Is Accelerating</h3>
+<ol>
+<li><strong>Anthropic&#39;s Opus 4.5/4.6 dropped 67%</strong> from Opus 4 ($15/$75 to $5/$25), making frontier models dramatically more accessible.</li>
+<li><strong>OpenAI&#39;s GPT-5.x series</strong> replaced GPT-4.5 ($75/$150) with models ranging from $0.05/$0.40 (nano) to $2.50/$15.00 (standard), a 10-50x cost reduction.</li>
+<li><strong>DeepSeek V3.2</strong> reduced output pricing from $1.10/M to $0.42/M -- a 62% drop.</li>
+<li><strong>Google&#39;s Gemini 2.5 Flash-Lite</strong> at $0.10/$0.40 and <strong>Amazon Nova Lite</strong> at $0.06/$0.24 are approaching commodity pricing.</li>
+<li><strong>xAI&#39;s Grok Fast variants</strong> at $0.20/$0.50 represent aggressive undercutting by a new entrant.</li>
+</ol>
+<h3 id="implications-for-tier">Implications for TIER</h3>
+<ul>
+<li>The frontier-default fallback of $15/$75 (based on Opus 4) is now overly conservative. Most &#34;frontier&#34; models are $3-5 input, $15-25 output.</li>
+<li>The efficient tier is being compressed toward near-zero. Models like GPT-OSS-120B at $0.039/$0.10 offer 120B-parameter performance at embedding-tier prices.</li>
+<li>Self-hosted reference tiers ($2.00/$0.50/$0.10) remain well-calibrated: they sit above actual self-hosted costs but below API prices, correctly reflecting the capital investment advantage.</li>
+<li>The RPT-2027 TPI will likely show significant deflation (TPI &lt; 0.60) given current trends.</li>
+</ul>
+<h3 id="coding-specific-model-recommendations">Coding-Specific Model Recommendations</h3>
+<p>For organizations choosing models specifically for coding tasks in the TIER framework:</p>
+<table>
+<thead>
+<tr>
+<th>Use Case</th>
+<th>Recommended API Model</th>
+<th>Recommended Self-Hosted</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Architecture review</td>
+<td>Claude Opus 4.6, GPT-5.4</td>
+<td>Llama 3.3 70B FP16</td>
+<td>Highest reasoning quality needed.</td>
+</tr>
+<tr>
+<td>Day-to-day coding</td>
+<td>Claude Sonnet 4.6, o3, GPT-4.1</td>
+<td>Qwen 2.5 Coder 32B Q8</td>
+<td>Best cost/quality balance for code gen.</td>
+</tr>
+<tr>
+<td>Code completion</td>
+<td>Codestral, GPT-5.1-Codex-Mini</td>
+<td>Qwen 2.5 Coder 7B</td>
+<td>Fast, cheap, good enough for completions.</td>
+</tr>
+<tr>
+<td>Test generation</td>
+<td>Gemini 2.5 Flash, GPT-4o-mini</td>
+<td>StarCoder2 15B</td>
+<td>High volume, lower quality threshold.</td>
+</tr>
+<tr>
+<td>Code review</td>
+<td>Claude Sonnet 4.6, o3</td>
+<td>Qwen 2.5 72B Q4</td>
+<td>Needs strong reasoning about code quality.</td>
+</tr>
+<tr>
+<td>Embedding/search</td>
+<td>text-embedding-3-large</td>
+<td>Qwen3-Embedding 8B</td>
+<td>Semantic code search.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="7-prompt-cache-multipliers">7. Prompt Cache Multipliers</h2>
+<p>Cache multipliers are <strong>per-model</strong>, stored in <code>prices.yaml</code> (<code>cache_read_mult</code> / <code>cache_write_5m_mult</code> / <code>cache_write_1h_mult</code>) and baked into the effective rate at parse time (#122). Each model omits them to inherit its <strong>provider default</strong> (below) or sets an explicit value to override that class. They are multipliers <strong>of the model&#39;s selected input rate</strong>, so under a long-context over-tier a cached read scales off the premium base too. <code>ComputeCost</code> reads the baked value directly — there is no per-provider branch anymore.</p>
+<p>Provider defaults (used when a model sets no explicit multiplier):</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Cache read</th>
+<th>5-minute cache write</th>
+<th>1-hour cache write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic</td>
+<td><strong>0.1×</strong></td>
+<td><strong>1.25×</strong></td>
+<td><strong>2.0×</strong></td>
+</tr>
+<tr>
+<td>OpenAI</td>
+<td><strong>0.5×</strong></td>
+<td>1.0× (no write SKU)</td>
+<td>1.0× (no write SKU)</td>
+</tr>
+<tr>
+<td>Google, xAI, DeepSeek</td>
+<td>1.0×</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td>Self-hosted</td>
+<td>combined rate, no discount</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>Per-model overrides in the current table:</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Field</th>
+<th>Multiplier on selected input rate</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gemini-2.5-pro</td>
+<td><code>cache_read_mult</code></td>
+<td><strong>0.25×</strong></td>
+<td>Gemini 2.5+ implicit caching — 75% discount on cached input.</td>
+</tr>
+<tr>
+<td>gemini-2.5-flash</td>
+<td><code>cache_read_mult</code></td>
+<td><strong>0.25×</strong></td>
+<td>&#34;</td>
+</tr>
+<tr>
+<td>gemini-3.1-pro</td>
+<td><code>cache_read_mult</code></td>
+<td><strong>0.25×</strong></td>
+<td>&#34;</td>
+</tr>
+<tr>
+<td>deepseek-v3</td>
+<td><code>cache_read_mult</code></td>
+<td><strong>0.1×</strong></td>
+<td>Absolute $0.028/M cache-hit ÷ $0.28/M input.</td>
+</tr>
+<tr>
+<td>deepseek-r1</td>
+<td><code>cache_read_mult</code></td>
+<td><strong>0.0509×</strong></td>
+<td>Absolute $0.028/M cache-hit ÷ $0.55/M input.</td>
+</tr>
+</tbody>
+</table>
+<p>Gemini&#39;s <code>cachedContentTokenCount</code> is a subset of <code>promptTokenCount</code> (carved out of Input, same shape as OpenAI&#39;s <code>cached_tokens</code>); <code>thoughtsTokenCount</code> is reasoning usage billed at the output rate and folded into Output (#122). The GPT-5.x entries <strong>are in the shipped table</strong> (<code>prices.yaml</code>, added in v5 per #135 and present through the current v7) and each carries an explicit <code>cache_read_mult: 0.10</code> — the 5-era discount differs from the 4-era 0.5× default (which the <code>gpt-4.x</code> / <code>o</code>-series rows inherit).</p>
+<p>Sources:</p>
+<ul>
+<li>Anthropic: <a href="https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching" rel="nofollow">https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching</a> (5m=1.25×, 1h=2.0×, hit=0.1×).</li>
+<li>OpenAI: cache-hit input is 50% off standard rate on caching-enabled models.</li>
+<li>Google Gemini: implicit caching on 2.5+ models discounts cached input tokens 75% (0.25×).</li>
+<li>DeepSeek: published cache-hit rate $0.028/M (<a href="https://api-docs.deepseek.com/quick_start/pricing)" rel="nofollow">https://api-docs.deepseek.com/quick_start/pricing)</a>.</li>
+</ul>
+<p>Legacy entries (rows / JSONL responses pre-dating the nested <code>cache_creation</code> object) bucket all cache writes into the 5m TTL — this matches Anthropic&#39;s pre-1h-feature default and is the safest historical assumption per the TIER cost-correctness decision matrix (issue #55).</p>
+<p>The 1h TTL premium pays off as a steady-state caching strategy when the cache is read more than twice within the hour (2 × 0.1× &lt; 1.0× fresh-read break-even); the 5m TTL pays off after a single read. Pricing decisions about cache TTL belong upstream (in the application calling Claude) — TIER reports what was actually charged.</p>
+<hr>
+<h2 id="8-data-sources">8. Data Sources</h2>
+<p>Base rows verified March 26, 2026, with later revisions through <code>version: 9</code> (2026-07-26), from the following authoritative sources:</p>
+<ul>
+<li><a href="https://platform.claude.com/docs/en/about-claude/pricing" rel="nofollow">Anthropic Official Pricing</a></li>
+<li><a href="https://openai.com/api/pricing/" rel="nofollow">OpenAI Official Pricing</a> and <a href="https://developers.openai.com/api/docs/pricing" rel="nofollow">Developer Docs</a></li>
+<li><a href="https://ai.google.dev/gemini-api/docs/pricing" rel="nofollow">Google Gemini API Pricing</a></li>
+<li><a href="https://x.ai/api" rel="nofollow">xAI Grok API</a></li>
+<li><a href="https://api-docs.deepseek.com/quick_start/pricing" rel="nofollow">DeepSeek API Pricing</a></li>
+<li><a href="https://mistral.ai/pricing" rel="nofollow">Mistral AI Pricing</a></li>
+<li><a href="https://cohere.com/pricing" rel="nofollow">Cohere Pricing</a></li>
+<li><a href="https://aws.amazon.com/nova/pricing/" rel="nofollow">Amazon Nova Pricing</a></li>
+<li><a href="https://developers.openai.com/codex/pricing" rel="nofollow">OpenAI Codex Pricing</a></li>
+<li><a href="https://pricepertoken.com" rel="nofollow">PricePerToken.com</a> (third-party aggregator, cross-verified)</li>
+<li><a href="https://openrouter.ai" rel="nofollow">OpenRouter</a> (provider marketplace pricing)</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

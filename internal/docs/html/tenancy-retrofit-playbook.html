@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tenancy Retrofit Playbook — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tenancy-retrofit-playbook">Tenancy Retrofit Playbook</h1>
+<blockquote>
+<p><strong>Status:</strong> Planning reference. <strong>No <code>tenant_id</code> column exists today</strong> — TIER is single-tenant with global developer identifiers (see the tenancy warning in root <code>CLAUDE.md</code>). This document is the map a future retrofit follows; it adds no code and changes no schema.</p>
+</blockquote>
+<blockquote>
+<p><strong>📌 Scope:</strong> This playbook enumerates exactly what a <code>tenant_id</code> retrofit touches in <code>internal/store</code>, grounded line-by-line in the current schema. It exists so the retrofit is budgeted correctly <em>before</em> production data accrues — because the cost of getting the budget wrong is a mid-migration surprise, not a rollback.</p>
+</blockquote>
+<hr>
+<h2 id="table-of-contents">Table of Contents</h2>
+<ul>
+<li><a href="#why-this-must-happen-before-production-data-accrues" rel="nofollow">Why this must happen before production data accrues</a></li>
+<li><a href="#the-one-way-door-at-a-glance" rel="nofollow">The one-way door, at a glance</a></li>
+<li><a href="#inventory-everything-a-retrofit-touches" rel="nofollow">Inventory: everything a retrofit touches</a>
+<ul>
+<li><a href="#1-two-pk-tables-need-full-rebuilds" rel="nofollow">1. Two PK tables need full REBUILDS</a></li>
+<li><a href="#2-six-unique-indexes-gain-tenant_id-as-the-leading-column" rel="nofollow">2. Six UNIQUE indexes gain <code>tenant_id</code> as the leading column</a></li>
+<li><a href="#3-six-coupled-on-conflict-targets-must-move-in-the-same-pass" rel="nofollow">3. Six coupled <code>ON CONFLICT</code> targets must move in the same pass</a></li>
+</ul>
+</li>
+<li><a href="#the-merge-sha-fork-collision-a-semantic-fix-not-a-prefix" rel="nofollow">The merge-SHA fork collision: a semantic fix, not a prefix</a></li>
+<li><a href="#the-rebuild-dance-precedent-in-tree" rel="nofollow">The rebuild dance (precedent in-tree)</a></li>
+<li><a href="#retrofit-sequence" rel="nofollow">Retrofit sequence</a></li>
+<li><a href="#what-stays-tenant-agnostic" rel="nofollow">What stays tenant-agnostic</a></li>
+<li><a href="#cross-references" rel="nofollow">Cross-references</a></li>
+</ul>
+<hr>
+<h2 id="why-this-must-happen-before-production-data-accrues">Why this must happen before production data accrues</h2>
+<p>The tenancy ordering constraint in root <code>CLAUDE.md</code> requires that <code>tenant_id</code> become the <strong>leading</strong> column of every unique key: today&#39;s <code>(developer, issue, …)</code> keys become <code>(tenant_id, developer, issue, …)</code>. As long as every new unique index is <em>shaped</em> so a <code>tenant_id</code> can prepend cleanly, the eventual retrofit stays <strong>mechanical</strong> — a schema transform, not a data-model redesign.</p>
+<p>The audit that produced issue #243 verified this claim across <strong>every</strong> unique key in the schema. The verdict is reassuring and precise:</p>
+<blockquote>
+<p>✅ <strong>No unique key forces a data-model redesign.</strong> Every reshape is mechanical.</p>
+</blockquote>
+<p>But &#34;mechanical&#34; is not &#34;free&#34;, and the in-tree comments understate the shape of the work in two ways this playbook corrects:</p>
+<ol>
+<li><strong>Two of the keys are PRIMARY KEYs, not indexes.</strong> SQLite cannot <code>ALTER</code> a primary key. Prepending <code>tenant_id</code> to a PK is a <strong>full table rebuild</strong> (create-copy-drop-rename), not a <code>DROP INDEX</code> / <code>CREATE INDEX</code> pair.</li>
+<li><strong>The <code>ON CONFLICT</code> clauses are coupled to the key shapes.</strong> Six <code>INSERT … ON CONFLICT(&lt;columns&gt;)</code> statements name their conflict target explicitly. Reshape a unique key without editing its paired <code>ON CONFLICT</code> and SQLite fails loudly: <code>ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint</code> (this failure mode is already acknowledged in the <code>insertTokenEventSQL</code> comment in <code>store.go</code>).</li>
+</ol>
+<blockquote>
+<p><strong>⚠️ The one-way door is planning-level.</strong> A retrofit budgeted as <em>&#34;recreate a handful of indexes&#34;</em> will discover <strong>two table rebuilds</strong> and <strong>six <code>ON CONFLICT</code> rewrites</strong> mid-migration. It is cheap to record that today, while it is documentation. It is expensive to discover it with production spend, attribution, and invoice data already on disk — at that point a rebuild is a data-migration risk, not a paragraph in a playbook.</p>
+</blockquote>
+<hr>
+<h2 id="the-one-way-door-at-a-glance">The one-way door, at a glance</h2>
+<pre><code>flowchart LR
+    A[&#34;Add tenant_id retrofit&#34;] --&gt; B{&#34;Key type?&#34;}
+    B --&gt;|&#34;UNIQUE index&lt;br/&gt;(6 keys)&#34;| C[&#34;DROP INDEX +&lt;br/&gt;CREATE INDEX&lt;br/&gt;(tenant_id leads)&#34;]
+    B --&gt;|&#34;PRIMARY KEY&lt;br/&gt;(2 tables)&#34;| D[&#34;FULL TABLE REBUILD&lt;br/&gt;create-copy-drop-rename&lt;br/&gt;SQLite can&#39;t ALTER a PK&#34;]
+    C --&gt; E[&#34;Edit the paired&lt;br/&gt;ON CONFLICT target&#34;]
+    D --&gt; E
+    E --&gt; F{&#34;All 6 ON CONFLICT&lt;br/&gt;targets updated?&#34;}
+    F --&gt;|No| G[&#34;SQLite error:&lt;br/&gt;&#39;ON CONFLICT clause does not&lt;br/&gt;match any PRIMARY KEY&lt;br/&gt;or UNIQUE constraint&#39;&#34;]
+    F --&gt;|Yes| H[&#34;Mechanical retrofit&lt;br/&gt;complete&#34;]
+
+    style D fill:#8b1a1a,color:#fff
+    style G fill:#8b1a1a,color:#fff
+    style H fill:#1a5c1a,color:#fff
+</code></pre>
+<hr>
+<h2 id="inventory-everything-a-retrofit-touches">Inventory: everything a retrofit touches</h2>
+<p>Every entry below is anchored to a <strong>durable symbol</strong> — an index name, an <code>ON CONFLICT</code> target-column set, or a function name — because <code>internal/store/store.go</code> is a ~4,000-line file under active change and absolute line numbers rot on the next edit. Where a line number still aids navigation it is given as <strong>approximate</strong> in <code>internal/store/store.go</code>, <code>internal/store/audit.go</code>, and <code>internal/store/checkpoint.go</code>; trust the symbol, not the number, if they disagree.</p>
+<h3 id="1-two-pk-tables-need-full-rebuilds">1. Two PK tables need full REBUILDS</h3>
+<p>SQLite has no <code>ALTER TABLE … ADD/ALTER PRIMARY KEY</code>. A <code>tenant_id</code>-leading PK means the table is recreated with the new key, its rows copied, the old table dropped, and the new one renamed into place.</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Current PK</th>
+<th>Anchor (<code>CREATE TABLE</code>)</th>
+<th>Target key</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>org_hierarchy</code></td>
+<td><code>developer TEXT PRIMARY KEY</code></td>
+<td><code>CREATE TABLE org_hierarchy</code> in <code>store.go</code> schema</td>
+<td><code>(tenant_id, developer)</code></td>
+<td><strong>Table rebuild.</strong> Authoritative data (team/division/org mapping) — the copy step is load-bearing.</td>
+</tr>
+<tr>
+<td><code>watcher_checkpoint</code></td>
+<td><code>path TEXT PRIMARY KEY</code></td>
+<td><code>CREATE TABLE watcher_checkpoint</code> in <code>store.go</code> schema</td>
+<td><code>(tenant_id, path)</code></td>
+<td><strong>Rebuild or drop.</strong> It is a documented derived cache (see its &#34;derived cache&#34; schema comment): safe to drop and let the <code>token_events</code> idempotency dedup rebuild it, so the copy step is optional and the cost is low.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>📌 Comment-accuracy note (from the #243 audit):</strong></p>
+<ul>
+<li><code>watcher_checkpoint</code> is a <strong>PK, not an index</strong>. Any comment describing its retrofit as index DDL overstates the mechanism — the correct framing is <em>rebuild-or-drop</em>, cheap precisely because the table is a derived cache.</li>
+<li><code>org_hierarchy</code> carries the same rebuild obligation but is <strong>authoritative</strong>, so its rebuild must copy rows; it cannot be dropped-and-rebuilt like the checkpoint cache.</li>
+</ul>
+</blockquote>
+<p>A third PK table — <code>tier_migrations</code> (<code>name TEXT PRIMARY KEY</code>, <code>CREATE TABLE tier_migrations</code> in the <code>store.go</code> schema) — is intentionally excluded; see <a href="#what-stays-tenant-agnostic" rel="nofollow">What stays tenant-agnostic</a>.</p>
+<h3 id="2-six-unique-indexes-gain-tenant_id-as-the-leading-column">2. Six UNIQUE indexes gain <code>tenant_id</code> as the leading column</h3>
+<p>Each of these is already column-ordered so <code>tenant_id</code> prepends without reordering the existing columns — the mechanical property the <code>CLAUDE.md</code> constraint requires. The retrofit is a <code>DROP INDEX IF EXISTS</code> + <code>CREATE UNIQUE INDEX</code> with the new leading column.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Unique index (durable anchor)</th>
+<th>Current columns</th>
+<th>Schema block</th>
+<th>Target key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>idx_developer_alias_alias</code></td>
+<td><code>(alias)</code></td>
+<td><code>schemaTables</code></td>
+<td><code>(tenant_id, alias)</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>idx_period_membership_open</code></td>
+<td><code>(developer, org)</code> partial <code>WHERE period_end IS NULL</code></td>
+<td><code>schemaTables</code></td>
+<td><code>(tenant_id, developer, org)</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>idx_quality_events_uq</code></td>
+<td><code>(outcome_id, event_type, source_ref)</code></td>
+<td><code>schemaTables</code></td>
+<td><code>(tenant_id, outcome_id, event_type, source_ref)</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>idx_token_events_idempotency</code></td>
+<td><code>(idempotency_key)</code> partial <code>WHERE idempotency_key IS NOT NULL</code></td>
+<td><code>schemaPostMigration</code></td>
+<td><code>(tenant_id, idempotency_key)</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>idx_outcomes_merge_commit_sha_uq</code></td>
+<td><code>(merge_commit_sha)</code> partial <code>WHERE merge_commit_sha IS NOT NULL</code></td>
+<td><code>schemaPostMigration</code></td>
+<td><code>(tenant_id, merge_commit_sha)</code> — see <a href="#the-merge-sha-fork-collision-a-semantic-fix-not-a-prefix" rel="nofollow">semantic note</a></td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>idx_outcomes_push_daily_repo</code></td>
+<td><code>(repo, issue_id, push_day)</code> partial <code>WHERE source = &#39;push&#39;</code></td>
+<td><code>schemaPostMigration</code></td>
+<td><code>(tenant_id, repo, issue_id, push_day)</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>💡 Note:</strong> Indexes 4–6 live in <code>schemaPostMigration</code> (the Phase-3 block), not <code>schemaTables</code>, because they reference columns added by <code>ALTER TABLE</code> on upgraded DBs (<code>idempotency_key</code>, <code>merge_commit_sha</code>, <code>repo</code>/<code>push_day</code>). A retrofit touches them in that same phase. Indexes 1–3 live in <code>schemaTables</code> (Phase 1); their columns exist at table creation.</p>
+</blockquote>
+<blockquote>
+<p><strong>✅ Already tenant-shaped (no reshape, listed for completeness):</strong> several <strong>non-unique</strong> indexes were pre-ordered for the same retrofit — <code>idx_token_events_ts_id</code>, <code>idx_outcomes_ts_id</code>, <code>idx_token_events_scores</code>, and <code>idx_webhook_payloads_event_delivery</code>. They impose no uniqueness, so they never <em>force</em> the ordering — but prepending <code>tenant_id</code> keeps scans tenant-local. They are a follow-on, not a correctness blocker.</p>
+</blockquote>
+<h3 id="3-six-coupled-on-conflict-targets-must-move-in-the-same-pass">3. Six coupled <code>ON CONFLICT</code> targets must move in the same pass</h3>
+<p>Every <code>INSERT … ON CONFLICT(&lt;columns&gt;)</code> names a conflict target that <strong>must</strong> match a live PK or unique constraint. When a key in the table above changes shape, its paired <code>ON CONFLICT</code> target must change <strong>in the same migration</strong>, or SQLite rejects the statement at execution time.</p>
+<p>The <code>ON CONFLICT(&lt;columns&gt;)</code> target-column set in the first column <strong>is</strong> the durable anchor — grep for it. Line numbers are approximate and will drift.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th><code>ON CONFLICT</code> target (durable anchor)</th>
+<th>File (approx. line)</th>
+<th>Bound to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL</code></td>
+<td><code>store.go</code> (~1528)</td>
+<td>Unique index #4 (<code>idx_token_events_idempotency</code>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>ON CONFLICT (repo, issue_id, push_day) WHERE source = &#39;push&#39;</code></td>
+<td><code>store.go</code> (~1947)</td>
+<td>Unique index #6 (<code>idx_outcomes_push_daily_repo</code>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>ON CONFLICT(developer)</code></td>
+<td><code>store.go</code> (~2284)</td>
+<td>PK table <code>org_hierarchy</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>ON CONFLICT(alias)</code></td>
+<td><code>store.go</code> (~3657)</td>
+<td>Unique index #1 (<code>idx_developer_alias_alias</code>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>ON CONFLICT (outcome_id, event_type, source_ref)</code></td>
+<td><code>audit.go</code> (~250)</td>
+<td>Unique index #3 (<code>idx_quality_events_uq</code>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>ON CONFLICT(path)</code></td>
+<td><code>checkpoint.go</code> (~62)</td>
+<td>PK table <code>watcher_checkpoint</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each target gains <code>tenant_id</code> as its leading conflict column, e.g. <code>ON CONFLICT(alias)</code> → <code>ON CONFLICT(tenant_id, alias)</code>, and the partial-index predicates (<code>WHERE …</code>) carry through unchanged.</p>
+<blockquote>
+<p><strong>⚠️ One <code>ON CONFLICT</code> is deliberately NOT in this list.</strong> The <code>merge_commit_sha</code> outcome dedup (#60) in <code>store.go</code> uses a <strong>target-less</strong> <code>ON CONFLICT DO NOTHING</code> (grep <code>ON CONFLICT DO NOTHING</code>). Because it names no columns, it matches <em>any</em> unique conflict and needs <strong>no edit</strong> on reshape. That is why the count is <strong>six</strong>, not seven — but it is the exception that proves the rule: the target-less form is the only one that survives a key reshape untouched.</p>
+</blockquote>
+<blockquote>
+<p><strong>📌 Provenance:</strong> the comment on <code>insertTokenEventSQL</code> in <code>store.go</code> already documents this exact coupling failure — SQLite&#39;s UPSERT requires the conflict target&#39;s columns (and partial-<code>WHERE</code>) to match the index <em>exactly</em>, &#34;otherwise the UPSERT silently doesn&#39;t fire and SQLite returns &#39;ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint.&#39;&#34; The retrofit inherits that requirement six times over.</p>
+</blockquote>
+<hr>
+<h2 id="the-merge-sha-fork-collision-a-semantic-fix-not-a-prefix">The merge-SHA fork collision: a semantic fix, not a prefix</h2>
+<p>For five of the six unique keys, <code>tenant_id</code> is a pure namespace prefix: it partitions otherwise-independent rows so two tenants&#39; <code>alice</code> or issue <code>#42</code> stop colliding. <code>idx_outcomes_merge_commit_sha_uq</code> is different.</p>
+<p>That index keys on <code>merge_commit_sha</code> <strong>alone</strong> — one merged PR ↔ one merge commit (#60). But a git merge SHA is content-addressed: <strong>two tenants tracking forks of the same upstream repository will legitimately observe the identical merge SHA.</strong> Under today&#39;s single-tenant, tenant-blind unique key, tenant B&#39;s merged-PR outcome would collide with tenant A&#39;s and be <strong>silently dropped</strong> by the <code>ON CONFLICT DO NOTHING</code> guard — one tenant&#39;s delivered work erased from its TIER score.</p>
+<blockquote>
+<p><strong>⚠️ For this key, <code>(tenant_id, merge_commit_sha)</code> is a correctness fix, not merely isolation.</strong> The composite key is what makes the SHA unique <em>per tenant</em> rather than <em>globally</em>. It belongs to the same family of collision fixes as the <code>repo</code>-qualification of <code>idx_outcomes_push_daily_repo</code> (#231), where two repos sharing low issue numbers collided until <code>repo</code> joined the key. Treating it as a cosmetic prefix would under-scope the change and re-introduce the silent-drop bug at the tenant boundary.</p>
+</blockquote>
+<hr>
+<h2 id="the-rebuild-dance-precedent-in-tree">The rebuild dance (precedent in-tree)</h2>
+<p>The two PK-table rebuilds have a working precedent: the <code>dropActualSpendNonNegativeCheck()</code> function in <code>store.go</code>, which drops a <code>CHECK</code> constraint SQLite cannot <code>ALTER</code> away. It is the exact create-copy-drop-rename sequence a PK reshape needs, and a retrofit should mirror its structure:</p>
+<pre><code>sequenceDiagram
+    participant Tx as BEGIN IMMEDIATE (Serializable)
+    participant New as __new_&amp;lt;table&amp;gt;
+    participant Old as &amp;lt;table&amp;gt;
+    Tx-&gt;&gt;New: CREATE TABLE with new (tenant_id, …) PK
+    Tx-&gt;&gt;New: INSERT … SELECT (copy every row, seed tenant_id)
+    Tx-&gt;&gt;Old: DROP TABLE
+    Tx-&gt;&gt;New: ALTER TABLE RENAME TO &amp;lt;table&amp;gt;
+    Tx-&gt;&gt;Tx: COMMIT (all-or-nothing)
+</code></pre>
+<p>Key properties inherited from the precedent (<code>dropActualSpendNonNegativeCheck()</code> in <code>store.go</code>):</p>
+<ul>
+<li><strong><code>BEGIN IMMEDIATE</code></strong> (<code>sql.LevelSerializable</code>) takes the <code>RESERVED</code> lock up front so <code>busy_timeout=5000</code> can retry instead of racing to <code>SQLITE_BUSY</code>.</li>
+<li><strong>Idempotent guard:</strong> the precedent inspects <code>sqlite_master</code> and no-ops if the constraint is already gone. A retrofit must likewise no-op once <code>tenant_id</code> is present, so re-running <code>Open()</code> is safe.</li>
+<li><strong>All-or-nothing:</strong> the whole dance is one transaction; a failure mid-rename rolls back to the pre-migration table.</li>
+</ul>
+<blockquote>
+<p><strong>💡 For <code>org_hierarchy</code> the <code>INSERT … SELECT</code> copy is mandatory</strong> (authoritative rows). For <code>watcher_checkpoint</code> the copy is optional — dropping the derived cache and letting the <code>token_events</code> idempotency dedup rebuild tail state is a legitimate, cheaper path.</p>
+</blockquote>
+<hr>
+<h2 id="retrofit-sequence">Retrofit sequence</h2>
+<pre><code>flowchart TD
+    P1[&#34;Phase 1 — schemaTables&lt;br/&gt;Reshape indexes #1-3&lt;br/&gt;+ rebuild watcher_checkpoint PK&#34;]
+    P25[&#34;Phase 2.5 — table rebuilds&lt;br/&gt;Rebuild org_hierarchy PK&lt;br/&gt;(mirror dropActualSpendNonNegativeCheck)&#34;]
+    P3[&#34;Phase 3 — schemaPostMigration&lt;br/&gt;Reshape indexes #4-6&lt;br/&gt;(columns added by ALTER TABLE)&#34;]
+    OC[&#34;Same pass — edit all 6&lt;br/&gt;ON CONFLICT targets&lt;br/&gt;store.go x3, audit.go, checkpoint.go&#34;]
+    SV[&#34;Bump schemaVersion&lt;br/&gt;(unique-key reshape changes dedup&lt;br/&gt;— old binary would misread)&#34;]
+
+    P1 --&gt; P25 --&gt; P3 --&gt; OC --&gt; SV
+
+    style OC fill:#7a5c00,color:#fff
+    style SV fill:#7a5c00,color:#fff
+</code></pre>
+<blockquote>
+<p><strong>⚠️ <code>schemaVersion</code> must bump.</strong> A <code>tenant_id</code>-leading unique-key reshape changes dedup behavior — exactly the case the <code>schemaVersion</code> bump-convention comment in <code>store.go</code> calls out as &#34;a unique-index reshape that changes dedup behavior.&#34; An old binary opening a tenant-partitioned DB would misread it, so the refuse-if-newer gate must lock it out.</p>
+</blockquote>
+<hr>
+<h2 id="what-stays-tenant-agnostic">What stays tenant-agnostic</h2>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Durable anchor</th>
+<th>Why it is excluded</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tier_migrations</code> (<code>name TEXT PRIMARY KEY</code>)</td>
+<td><code>CREATE TABLE tier_migrations</code> in <code>store.go</code></td>
+<td>Records which one-shot data migrations ran <strong>on this database file</strong>. Migration identity is a property of the file, not a tenant — every tenant in one DB shares one migration ledger. It never gains <code>tenant_id</code>.</td>
+</tr>
+<tr>
+<td>Target-less <code>ON CONFLICT DO NOTHING</code> (merge_commit_sha dedup)</td>
+<td>grep <code>ON CONFLICT DO NOTHING</code> in <code>store.go</code></td>
+<td>Names no columns, matches any unique conflict, survives a key reshape untouched.</td>
+</tr>
+<tr>
+<td>Non-unique indexes (ts/id, scores, webhook lookup)</td>
+<td><code>idx_token_events_ts_id</code>, <code>idx_outcomes_ts_id</code>, <code>idx_token_events_scores</code>, <code>idx_webhook_payloads_event_delivery</code></td>
+<td>Impose no uniqueness, so they never <em>force</em> the ordering. Prepending <code>tenant_id</code> is a scan-locality follow-on, not a correctness blocker.</td>
+</tr>
+<tr>
+<td><code>session_id</code> (a future grouping key, not yet indexed)</td>
+<td><code>session_id</code> column in the <code>token_events</code> <code>CREATE TABLE</code></td>
+<td>If a grouping index lands for the cost-composition consumer (#234), it must lead with <code>tenant_id</code> → <code>(tenant_id, session_id, ts)</code> — recorded here so that retrofit also stays mechanical.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="cross-references">Cross-references</h2>
+<ul>
+<li><strong>Issue #243</strong> — the structural audit that produced this playbook. Documentation only; honors the #65 YAGNI deferral.</li>
+<li><strong>Issue #65</strong> — the honesty pass establishing that multi-tenancy (like CockroachDB and NATS JetStream) is <em>aspirational enterprise-tier design intent</em>, not current capability. The <code>tenant_id</code> column is deferred until a real driving requirement exists.</li>
+<li><strong>Issue #275 (ruling B)</strong> — the productization-posture decision: ship <strong>self-hosted, single-tenant now, tenancy-ready</strong> rather than building multi-tenancy today. Tenancy-<em>ready</em> is precisely the discipline this playbook preserves: keep every unique key shaped so the eventual retrofit stays mechanical, so that self-hosted-now does not foreclose SaaS-later. Auth (#271), the GitHub App (#272), and member management (#273) all create tenant-shaped state, so build order against tenancy is the one-way door this document keeps cheap.</li>
+<li><strong>Root <code>CLAUDE.md</code></strong> — the authoritative tenancy ordering constraint (<code>tenant_id</code> leads every unique key) and the &#34;no tenant isolation exists today&#34; warning.</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

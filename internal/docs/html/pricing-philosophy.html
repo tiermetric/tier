@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER Pricing Philosophy — What the Denominator Measures — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier-pricing-philosophy--what-the-denominator-measures">TIER Pricing Philosophy — What the Denominator Measures</h1>
+<blockquote>
+<p><strong>Status:</strong> Resolution memo, 2026-07. Formalizes the decision already shipped in
+#55 (see <code>docs/reference-price-table.md</code> §7) as written policy, and <strong>supersedes</strong>
+<code>docs/cost-normalization-spec.md</code> §2.5&#39;s &#34;cached tokens priced at full input rate&#34;
+paragraph. This is a documentation of an existing decision surfaced under the
+spec-contradiction rule, not a new choice. Flagged for maintainer review in the
+PR for #140 as overturnable.</p>
+</blockquote>
+<h2 id="why-this-memo-exists">Why this memo exists</h2>
+<p>The TIER denominator is <code>total_effective_cost</code> — the dollar value of AI inference
+consumed (<code>docs/cost-normalization-spec.md</code> §1). Two authorities disagreed on how that
+dollar value is computed:</p>
+<ul>
+<li><strong>The shipped code</strong> applies real cache-mechanics multipliers. <code>ComputeCost</code>
+(<code>internal/store/prices.go:624-629</code>) prices cache reads at <code>anthropicReadMult = 0.10</code>,
+5-minute writes at <code>1.25</code>, 1-hour writes at <code>2.00</code>, and OpenAI cache reads at
+<code>openAIReadMult = 0.50</code> (<code>prices.go:163-166</code>), scaled off the model&#39;s selected input
+rate.</li>
+<li><strong><code>docs/cost-normalization-spec.md</code> §2.5</strong> said the opposite: &#34;Cached tokens are
+priced at the model&#39;s standard <strong>input</strong> rate, not the discounted cache-hit rate&#34;
+because &#34;cache efficiency is an infrastructure optimization, not a developer
+productivity signal.&#34;</li>
+</ul>
+<p>Nobody adjudicated the conflict; each artifact claimed authority. This memo resolves it.</p>
+<h2 id="1-the-rule">1. The rule</h2>
+<p><strong>TIER prices what the provider would charge at published list rates — &#34;actual-charge
+mechanics at RPT list prices.&#34;</strong></p>
+<p>Token-class mechanics that change what a call <em>costs</em> — cache reads/writes
+(<code>prices.go:624-627</code>), long-context over-tier re-pricing (<code>prices.go:610-622</code>, #4),
+thinking tokens where surfaced (priced at the output rate) — are applied exactly as the
+provider&#39;s public price sheet defines them. They live <strong>in the denominator</strong>.</p>
+<p>Commercial arrangements that change what <em>you pay</em> for the same mechanics — enterprise
+discounts, batch-window discounts, subscription flat fees — are <strong>not</strong> applied to the
+denominator. They belong to <code>actual_spend</code> and surface through Spend Leverage (§5).</p>
+<p>The dividing question is: <em>does this change the list price of the compute, or does it
+change our procurement of that compute?</em> The former is mechanics; the latter is
+procurement.</p>
+<h2 id="2-mechanics-vs-procurement">2. Mechanics vs. procurement</h2>
+<table>
+<thead>
+<tr>
+<th>Cost factor</th>
+<th>Class</th>
+<th>Where it lands</th>
+<th>Authority</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cache read / write multipliers</td>
+<td>mechanics</td>
+<td>denominator</td>
+<td><code>prices.go:624-627</code>; RPT §7</td>
+</tr>
+<tr>
+<td>Long-context over-tier (&gt;threshold re-price)</td>
+<td>mechanics</td>
+<td>denominator</td>
+<td><code>prices.go:610-622</code> (#4)</td>
+</tr>
+<tr>
+<td>Thinking / reasoning tokens</td>
+<td>mechanics (output rate)</td>
+<td>denominator</td>
+<td>cost-norm §2.5; <code>prices.go</code> output rate</td>
+</tr>
+<tr>
+<td>Enterprise / negotiated discount</td>
+<td>procurement</td>
+<td><code>actual_spend</code> → Spend Leverage</td>
+<td>cost-norm §2.1</td>
+</tr>
+<tr>
+<td><strong>Batch API discount</strong></td>
+<td><strong>procurement</strong></td>
+<td><strong><code>actual_spend</code> → Spend Leverage</strong></td>
+<td>see below</td>
+</tr>
+<tr>
+<td>Subscription flat fee</td>
+<td>procurement</td>
+<td>pending #113 / P2-09 ruling</td>
+<td>cross-ref only — not decided here</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Batch API is priced at list, and this is a rule, not an accident.</strong> The batch
+discount is a latency-tolerance discount on <em>identical</em> compute — same model, same
+tokens, same capability consumed — so it is procurement, not mechanics. The pipeline
+carries <strong>no batch-token field</strong> (grep <code>batch</code> across <code>internal/</code> yields zero pricing
+hits), so batch traffic is already priced at list. That outcome is now the intended
+rule, matching the original §2.5 batch rationale (&#34;a billing discount for latency
+tolerance ... does not reflect a different level of AI capability consumed&#34;), not an
+oversight to be closed.</p>
+<h2 id="3-what-this-supersedes">3. What this supersedes</h2>
+<p><code>docs/cost-normalization-spec.md</code> §2.5, &#34;Cached input tokens&#34;:</p>
+<blockquote>
+<p>Cached tokens are priced at the model&#39;s standard <strong>input</strong> rate, not the discounted
+cache-hit rate. [...] Cache efficiency is an infrastructure optimization, not a
+developer productivity signal.</p>
+</blockquote>
+<p>This paragraph is <strong>superseded</strong>. Cache multipliers are real list-price mechanics and
+are applied per RPT §7. The §2.5 batch and thinking-token paragraphs stand (batch now
+explicitly grounded as procurement; thinking tokens unchanged at the output rate). The
+cost-normalization spec carries a dated <code>Superseded 2026-07</code> changelog line pointing
+here rather than a silent rewrite.</p>
+<h2 id="4-known-consequence-accepted">4. Known consequence, accepted</h2>
+<p>Two orgs with identical developer behavior but different cache-hit rates get different
+TIER scores. §2.5&#39;s original rationale said this must not happen — we accept it anyway,
+deliberately:</p>
+<ul>
+<li>Cache hits are <strong>real cost mechanics the developer&#39;s workflow controls</strong> (loop
+structure, context reuse, prompt stability), not an opaque infrastructure setting.</li>
+<li>Refusing them would misstate spend by up to <strong>10×</strong> on cache-heavy agentic traffic
+(a 0.10× read billed at 1.0×), violating the &#34;dollar value, not token count&#34; mandate
+(<code>docs/cost-normalization-spec.md</code> §1).</li>
+</ul>
+<p><strong>Cross-org comparability guidance:</strong> read a team&#39;s cache-read share alongside its TIER
+score — the per-request data is in <code>token_events</code> (cache_read / cache_write columns) —
+so a low-TIER, high-cache-reuse team is not mistaken for an inefficient one.</p>
+<h2 id="5-spend-leverage-is-counterfactual">5. Spend Leverage is counterfactual</h2>
+<p>Spend Leverage (<code>internal/scoring/engine.go:172,199</code>) is
+<code>TotalCostUSD / ActualPaidUSD</code>: the list-price cost of observed usage over what finance
+actually paid. On pay-as-you-go billing it sits near <strong>1×</strong> (you pay list); it climbs
+only on flat or subsidized plans, so it is a diagnostic of your billing plan, not a
+company-typical figure. It is routinely 20–30× on subsidized traffic, which invites a
+misreading — that the org &#34;saved&#34; 30×.</p>
+<blockquote>
+<p>Spend Leverage compares what your usage would have cost at published list rates
+against what you actually paid. It is a <em>counterfactual</em> -- at list prices you would
+likely have used fewer tokens, so leverage above ~5x describes the value of your
+procurement, not a savings figure you could have banked by switching to list-rate
+billing.</p>
+</blockquote>
+<p>Nobody would actually buy 20–30× the tokens at list; the number is a leverage
+indicator, not a bankable saving. The dashboard tile itself is labeled plan-neutrally
+(<code>internal/dashboard/</code>, &#34;metered cost / paid spend&#34;, #453) so the figure is never
+presented as output value or a bankable saving; this counterfactual caveat is documented
+here and in the public docs rather than in a tile tooltip.</p>
+<h2 id="6-quality-penalty-scoping-resolved-in-134--p2-03">6. Quality-penalty scoping (resolved in #134 / P2-03)</h2>
+<p>Historical note, for readers of older review findings (§C9): the revert quality penalty
+was <strong>previously issue-wide</strong>. <code>DB.UpdateQuality</code> degraded every outcome sharing a
+<code>(developer, issue_id)</code> (<code>internal/store/store.go</code>, <code>WHERE developer = ? AND issue_id = ?</code>), so multiple PRs on one issue all took the revert penalty.</p>
+<p>This <strong>was fixed in #134 / P2-03</strong>. The event-derived path now targets the specific
+reverted / CI-failed outcome row: <code>DB.UpdateQualityForOutcome</code> writes <code>WHERE id = ?</code>
+(<code>internal/store/store.go</code>), and the revert detector routes through it
+(<code>internal/webhook/handler.go</code>). The issue-wide <code>UpdateQuality</code> is retained only for
+back-compat callers and is documented as superseded for event-driven degradation. No
+action remains here — this section records the resolution, it does not open work.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

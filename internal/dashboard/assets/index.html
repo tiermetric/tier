@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TIER — Engineering Yield Dashboard</title>
+  <style>
+    /* ------------------------------------------------------------------ *
+     * TIER — Engineering Yield Dashboard (#274)
+     *
+     * "Instrument" aesthetic: this is a measurement panel, not a webpage.
+     * Every DATUM is set in a tabular-numeral monospace so digits align in
+     * columns and can be read like a gauge; chrome/labels stay in the system
+     * sans. GREEN is reserved exclusively for YIELD (TIER, spend leverage,
+     * ranked bars) so the eye equates "green" with "return on token" and
+     * nothing else. AMBER is the trust colour (capture fidelity, data-quality
+     * strip) -- a signal to investigate, never a page-level error (red).
+     *
+     * CSP: no external fonts/CDN/images are referenced (default-src 'none'
+     * blocks them). style-src keeps 'unsafe-inline' for THIS <style> block and
+     * for the width/offset styles the script sets on bars from computed
+     * numbers -- never from user-supplied strings. All behaviour lives in the
+     * external /dashboard.js asset; the page carries no inline script element
+     * and no inline event handler, so an HTML-injection bug has no in-page code
+     * to hijack and cannot reach the stored API token. See the SECURITY
+     * INVARIANTS block in dashboard.go.
+     * ------------------------------------------------------------------ */
+
+    :root {
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+      /* Dark theme (default) -- the instrument's resting state. */
+      --bg: #0d0f11;
+      --surface: #16191d;
+      --surface-2: #1d2126;
+      --border: #2a2f36;
+      --grid: #23272d;
+      --text: #e8eaed;
+      --text-muted: #8b939c;
+      --text-faint: #5c646d;
+      --yield: #3ddc84;        /* GREEN -- yield only */
+      --yield-dim: #1f6b43;    /* below-floor / track fill for yield */
+      --trust: #f0a935;        /* AMBER -- fidelity, data quality */
+      --trust-bg: #2a1f0a;
+      --trust-border: #6b4a12;
+      --accent: #5aa2ff;       /* links, interactive */
+      --accent-strong: #3b82f6;
+      --danger: #f4736b;       /* errors, net credit, LOW attribution coverage */
+      --danger-bg: #2a1210;
+      --danger-border: #6b2b26;
+      --shadow: rgba(0, 0, 0, 0.35);
+    }
+
+    :root[data-theme="light"] {
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-2: #f0f3f6;
+      --border: #d8dee5;
+      --grid: #e6eaef;
+      --text: #10151b;
+      --text-muted: #5a636d;
+      --text-faint: #99a2ac;
+      --yield: #1a8f4e;
+      --yield-dim: #a9e2c2;
+      --trust: #b56a06;
+      --trust-bg: #fdf4e3;
+      --trust-border: #e8c383;
+      --accent: #2563eb;
+      --accent-strong: #1d4ed8;
+      --danger: #c23a30;
+      --danger-bg: #fdecea;
+      --danger-border: #f0b4ae;
+      --shadow: rgba(20, 30, 45, 0.08);
+    }
+
+    /* Respect the OS preference on first paint when the page has not pinned a
+       theme; the toggle then stamps data-theme and wins in both directions. */
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme]) {
+        --bg: #f4f6f8; --surface: #ffffff; --surface-2: #f0f3f6;
+        --border: #d8dee5; --grid: #e6eaef; --text: #10151b;
+        --text-muted: #5a636d; --text-faint: #99a2ac; --yield: #1a8f4e;
+        --yield-dim: #a9e2c2; --trust: #b56a06; --trust-bg: #fdf4e3;
+        --trust-border: #e8c383; --accent: #2563eb; --accent-strong: #1d4ed8;
+        --danger: #c23a30; --danger-bg: #fdecea; --danger-border: #f0b4ae;
+        --shadow: rgba(20, 30, 45, 0.08);
+      }
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1.75rem clamp(1rem, 4vw, 3rem) 4rem;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Any element carrying a measured value opts into aligned tabular digits. */
+    .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+    /* --- Masthead ---------------------------------------------------- */
+    header.masthead {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem;
+      margin-bottom: 0.35rem;
+    }
+    h1 {
+      font-size: 1.4rem; font-weight: 700; letter-spacing: 0.02em;
+    }
+    h1 .glyph { color: var(--yield); }
+    .subtitle { color: var(--text-muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+
+    /* --- Controls ---------------------------------------------------- */
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+      margin-bottom: 1.5rem;
+    }
+    .controls label { font-size: 0.78rem; color: var(--text-muted); }
+    input[type=date], input[type=password] {
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text); border-radius: 6px; padding: 0.4rem 0.55rem;
+      font-size: 0.82rem; font-family: var(--font-mono);
+    }
+    input[type=date]:focus, input[type=password]:focus,
+    button:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 1px;
+    }
+    button {
+      background: var(--accent-strong); color: #fff; border: none;
+      border-radius: 6px; padding: 0.4rem 0.85rem; cursor: pointer;
+      font-size: 0.82rem; font-weight: 500;
+    }
+    button:hover { filter: brightness(1.08); }
+    button.ghost {
+      background: transparent; color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    button.ghost:hover { color: var(--text); }
+    .spacer { flex: 1 1 auto; }
+
+    /* Preset range chips (#278): compact ghost buttons that set the primary
+       window's From. Not "active"-stateful -- they are one-shot setters, so no
+       pressed styling (the date inputs are the source of truth). */
+    .presets { display: flex; gap: 0.3rem; }
+    button.chip {
+      background: transparent; color: var(--text-muted);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.35rem 0.6rem; font-size: 0.76rem; font-weight: 500;
+    }
+    button.chip:hover { color: var(--text); border-color: var(--text-muted); }
+    /* Compare toggle: a plain checkbox + label, sized to match the controls. */
+    .compare-toggle {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.78rem; color: var(--text-muted); cursor: pointer;
+      user-select: none;
+    }
+    .compare-toggle input { accent-color: var(--accent-strong); cursor: pointer; }
+    /* The baseline ("compared to") controls row: a second controls line the
+       compare toggle reveals. Left-accented so it reads as subordinate to the
+       primary period line above it. */
+    .controls.compare-row {
+      margin-top: -0.75rem; margin-bottom: 1.5rem;
+      padding-left: 0.75rem; border-left: 3px solid var(--border);
+    }
+
+    /* --- DATA-QUALITY BAND (#520) ------------------------------------ */
+    /* ONE shell for every check. The band owns the border, radius, background
+       and the single bottom margin that four sibling cards each used to carry;
+       a row inside it owns only its severity colour. Nothing is removed but
+       chrome: no caveat gets shorter and none gets hidden.
+
+       NET RECLAIM, MEASURED in Chrome against a main-baseline build with
+       identical injected content (document-coordinate KPI-row bottom):
+         four checks showing: 695px -> 634px  (~61px)
+         two checks (the common case on real data): 494px -> 494px  (~0px)
+       Both measured at a ~1726px-wide viewport. Width matters and is not a
+       detail: caveat prose wraps more as the viewport narrows, so a NARROWER
+       window puts the KPI row LOWER than these figures, never higher.
+
+       ⚠️ MOBILE IS DELIBERATELY A SCROLL EXPERIENCE — Steve ruled 2026-07-29.
+       At 390px the band alone measures ~497px (same Chrome method), so the KPI row cannot be brought above
+       the fold on a phone by any amount of chrome tuning; the only lever left is
+       folding caveat sub-prose, and that is exactly what
+       TestDashboard_EvidenceFoldedButCaveatsVisible forbids. The ruling is that a
+       reader on a phone SCROLLS to the number rather than the instrument hiding
+       what qualifies it. So: do NOT add a narrow-viewport carve-out that collapses
+       caveats, and do not treat "the KPI row is below the fold on mobile" as a
+       bug. A caveat that only appears when the viewport is wide enough is the
+       #516 defect wearing a media query.
+
+       The two-check case is a WASH, and that is a deliberate trade rather than a
+       disappointment. Review fixes bought correctness with pixels: the band now
+       stays visible on a clean window (hiding it made "checked and clean"
+       indistinguishable from "failed to render"), and the frame line got a rule
+       and full-contrast text so it is read BEFORE the rows it governs. An earlier
+       cut measured -12px here by omitting both, and its frame line could assert
+       "None need attention" above a row itemising flagged outcomes.
+       The band adds a FIXED cost (its border, padding and frame line) and saves
+       a PER-ROW cost, so the saving scales with row count. ~200px is the GROSS
+       card chrome removed and is NOT the reclaim -- #520 predicted that figure
+       as the net, which is why these numbers are measured here rather than
+       restated from the issue. (A ratio between the two is deliberately NOT
+       written down: it has to be recomputed every time the measurement moves,
+       and an earlier draft of this comment carried one derived from a superseded
+       figure.)
+
+       The band is display:none at rest and revealed by renderDataQualityBand
+       (#516 invariant). A band that were always visible would draw an empty
+       bordered box on a clean window. */
+    /* Chrome here is MEASURED, not styled to taste. The band adds a fixed cost
+       (its own padding, border and frame line) and saves a per-row cost, so at a
+       low row count it can cost more than the four cards it replaced -- measured
+       at +16px with two checks showing before this was tightened, which is the
+       COMMON case on real data. Keep this padding tight; a comfortable 0.75rem
+       shell makes the consolidation a regression exactly when fewest things are
+       wrong. */
+    #dq-band {
+      display: none;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.55rem 0.85rem 0.6rem; margin-bottom: 1.1rem;
+    }
+    /* The collective frame line: what turns four alarms into one instrument
+       reporting on itself. Never faint -- it is the sentence that reclassifies
+       everything below it, and --text-faint fails WCAG AA in both themes. */
+    #dq-frame {
+      margin: 0 0 0.5rem; padding-bottom: 0.45rem;
+      font-size: 0.78rem; color: var(--text);
+      font-weight: 600; letter-spacing: 0.01em;
+      border-bottom: 1px solid var(--border);
+    }
+    /* Visually-hidden severity text. The frame line asserts a COUNT; without a
+       non-visual mapping the only channel saying WHICH rows it means is the red
+       left rule, which is a WCAG 1.4.1 (Level A) failure on a claim this change
+       introduced. Each row's span is first in its aria-labelledby, so the region
+       announces "Needs attention. Cost horizon — ...". Not display:none, which
+       would remove it from the accessibility tree entirely. */
+    .dq-sr {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip-path: inset(50%); white-space: nowrap;
+    }
+    /* A row is a flex line with a severity rule down its left edge. No border,
+       no background, no radius: the band already provides the shell.
+
+       ⚠️ SELECTED BY ID, NOT BY A SHARED CLASS, and that is load-bearing.
+       renderAttributionCoverage and renderCostHorizon assign `banner.className`
+       WHOLESALE (`className = low ? 'warn' : ''`), so any class in the HTML's
+       class attribute is wiped on the first render. A `.dq-row` base rule looked
+       correct in the markup and in every Go test — which read structure — while
+       the browser showed border-left-width: 0px and padding-left: 0px on every
+       row: the severity colour was being set on a border that no longer existed.
+       Measured, not reasoned. If you add a fifth check, add its id here too, or
+       give the render functions classList.toggle semantics first. */
+    #unjoined-strip, #attr-coverage, #cost-horizon, #trust-strip {
+      display: none; align-items: flex-start; gap: 0.6rem;
+      border-left: 3px solid var(--trust);
+      padding: 0.25rem 0 0.25rem 0.65rem;
+    }
+    /* Separator between CONSECUTIVE VISIBLE rows. A sibling combinator would draw
+       a rule above a HIDDEN row, leaving a stray line whenever a check does not
+       run, so renderDataQualityBand stamps .dq-first on whichever row actually
+       rendered first and only the others carry the divider. .dq-first survives the
+       className overwrite above because the band renders LAST, after every check
+       has set its own class. */
+    #unjoined-strip:not(.dq-first), #attr-coverage:not(.dq-first),
+    #cost-horizon:not(.dq-first), #trust-strip:not(.dq-first) {
+      margin-top: 0.4rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.5rem;
+    }
+    /* ATTENTION rows keep a fill. Dropping the fill AND the shouted caps in one
+       change flattened the loudness hierarchy exactly where this project wants it
+       loudest -- "the TIER above is inflated" ended up in the same shell as an
+       amber row saying everything is fine. The fill costs ZERO vertical pixels
+       (it paints an existing box), keeps non-attention rows flat so the band still
+       reads as one shell, and adds a second non-hue channel for readers who cannot
+       separate this amber from this red. */
+    #unjoined-strip, #attr-coverage.warn, #cost-horizon.warn {
+      background: var(--danger-bg);
+    }
+    /* .calm collides with the divider rule at equal specificity (both 1,1,0) and
+       wins on source order, which crowded the one row meant to read quietest
+       against its own separator. Restate it so the next .calm edit does not
+       silently retune the divider. */
+    #cost-horizon.calm:not(.dq-first) { padding-top: 0.5rem; }
+
+    /* --- Data-quality trust strip (#136) ----------------------------- */
+    /* Amber, not red: a flagged outcome is a "look here" signal, not a failure. */
+    #trust-strip {
+      border-left-color: var(--trust);
+    }
+    #trust-strip .dq-icon { color: var(--trust); font-weight: 700; line-height: 1.3; }
+    #trust-strip .dq-title { color: var(--trust); font-weight: 600; font-size: 0.85rem; }
+    #trust-strip .dq-list { margin-top: 0.35rem; padding-left: 1.1rem; font-size: 0.78rem;
+                            color: var(--trust); }
+    #trust-strip .dq-list li { margin: 0.1rem 0; }
+
+    /* --- Honest-coverage banners (#354) ------------------------------ */
+    /* Attribution coverage is the HONEST headline: what fraction of the window's
+       spend TIER can actually tie to an issue. It is a DIFFERENT metric from the
+       amber Capture-Fidelity meter below (recorded-vs-estimated of the spend we
+       did record) -- the two must never read as the same number (#351/#354). */
+    #attr-coverage .dq-icon, #unjoined-strip .dq-icon { font-weight: 700; line-height: 1.3; }
+    #attr-coverage .dq-title, #unjoined-strip .dq-title { font-weight: 600; font-size: 0.85rem; }
+    #attr-coverage .dq-sub, #unjoined-strip .dq-sub { font-size: 0.78rem; margin-top: 0.25rem; }
+    #unjoined-strip .dq-list { margin-top: 0.35rem; padding-left: 1.1rem; font-size: 0.78rem;
+                               color: var(--danger); }
+    #unjoined-strip .dq-list li { margin: 0.1rem 0; }
+
+    /* Calm state: attribution coverage is healthy -- amber trust framing, the
+       same weight as the fidelity meter, a "look here" not a "failure".
+       Inside the band (#520) severity is carried by the LEFT RULE and the text
+       colour, not by a per-row background and border: the band already draws the
+       shell, and four nested boxes inside one box is the visual noise the
+       consolidation exists to remove. The red/amber distinction is unchanged --
+       it moved from the box to the rule. */
+    #attr-coverage { border-left-color: var(--trust); }
+    #attr-coverage .dq-icon, #attr-coverage .dq-title, #attr-coverage .dq-sub { color: var(--trust); }
+    /* Loud state: attribution coverage is LOW (below threshold) -- red WARNING so
+       the coverage caveat is never a quiet stat next to a clean-looking headline. */
+    #attr-coverage.warn { border-left-color: var(--danger); }
+    #attr-coverage.warn .dq-icon,
+    #attr-coverage.warn .dq-title,
+    #attr-coverage.warn .dq-sub { color: var(--danger); }
+
+    /* --- Cost-horizon banner (#512) ---------------------------------- */
+    /* The COST HORIZON is the date this installation began capturing spend.
+       Outcomes backfill freely, cost does not -- so a window reaching back past
+       the horizon divides a FULL window of outcomes by a PARTIAL window of cost
+       and silently INFLATES TIER (measured at about twice on a real multi-repo install).
+       This is NOT log retention and must never be styled or worded as a
+       transient condition: no amount of retention moves the horizon, and a
+       brand-new install has a horizon of TODAY.
+
+       Unlike its siblings this banner renders in BOTH states. The calm state is
+       load-bearing, not decoration: "we checked and the window is covered" must
+       be visually distinguishable from "no signal rendered", or an operator
+       reads a silently-missing check as a clean bill of health -- the exact
+       failure the server-side explicit `false` exists to end. */
+    #cost-horizon { border-left-color: var(--trust); }
+    #cost-horizon .dq-icon { font-weight: 700; line-height: 1.3; }
+    #cost-horizon .dq-title { font-weight: 600; font-size: 0.85rem; }
+    #cost-horizon .dq-sub { font-size: 0.78rem; margin-top: 0.25rem; }
+    #cost-horizon .dq-icon, #cost-horizon .dq-title, #cost-horizon .dq-sub { color: var(--trust); }
+    /* Calm state (#519): a clearance, not a caveat. Strips the card entirely so
+       good news costs ~20px instead of ~110px and cannot be mistaken for one of
+       the alarms above it. The line STAYS rendered -- that is load-bearing: the
+       API emits an explicit `false` precisely so "checked and covered" remains
+       distinguishable from "no signal", and hiding it here would throw away the
+       distinction the server went to trouble to preserve. */
+    #cost-horizon.calm {
+      border-left-color: transparent;
+      padding-top: 0.2rem; padding-bottom: 0.2rem;
+    }
+    #cost-horizon.calm .dq-icon { display: none; }
+    #cost-horizon.calm .dq-title {
+      font-weight: 400; font-size: 0.74rem; color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    #cost-horizon.calm .dq-sub { display: none; }
+
+    /* Loud state: the window PREDATES the horizon, so the TIER shown above this
+       banner is inflated by a known mechanism. Red, matching #attr-coverage.warn
+       -- a number that is wrong for a structural reason is not a footnote. */
+    #cost-horizon.warn { border-left-color: var(--danger); }
+    #cost-horizon.warn .dq-icon,
+    #cost-horizon.warn .dq-title,
+    #cost-horizon.warn .dq-sub { color: var(--danger); }
+    /* Identity-mismatch callout: always danger -- an unjoined developer is a
+       silent TIER=0, an active data-quality defect the operator must fix. */
+    #unjoined-strip { border-left-color: var(--danger); }
+    #unjoined-strip .dq-icon, #unjoined-strip .dq-title, #unjoined-strip .dq-sub { color: var(--danger); }
+
+    /* Evidence disclosure (#519). The row-by-row lists are EVIDENCE; the count in
+       each strip's title is the SIGNAL -- which is these strips' own argument in
+       their source comments. Folding the rows away keeps every banner, its
+       headline, its colour and its warning state visible with no interaction --
+       a caveat must never become hidden -- while putting the yield number back on
+       the first screen. Plain <details>: no JS, nothing for the CSP to allow, and
+       it matches this file's ES5-era idiom. */
+    .dq-evidence { margin-top: 0.35rem; }
+    .dq-evidence > summary {
+      cursor: pointer; font-size: 0.76rem;
+      /* list-style:none, NOT list-style-position:outside. `outside` pushed the
+         UA's disclosure triangle out of the summary box and into the 0.6rem flex
+         gap right beside the banner's decorative dq-icon, putting two triangles
+         ~10px apart -- one interactive, one not, in the same colour family. The
+         marker is drawn explicitly below so we control it. */
+      list-style: none;
+      color: var(--accent); text-decoration: underline;
+      display: inline-block;
+    }
+    .dq-evidence > summary::-webkit-details-marker { display: none; }
+    /* Explicit, controlled disclosure marker. */
+    .dq-evidence > summary::before { content: "\25B8 "; text-decoration: none; display: inline-block; }
+    .dq-evidence[open] > summary::before { content: "\25BE "; }
+    .dq-evidence > summary:hover { filter: brightness(1.15); }
+    .dq-evidence > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* --- Unattributed-spend breakdown (#360) ------------------------- */
+    /* The honest continuation of the attribution-coverage banner: WHERE the
+       non-attributed spend goes. Calm TRUST (amber) framing, deliberately NOT
+       danger -- most of this is legitimate exploratory/overhead work (on main
+       with no issue) that TIER keeps in the denominator on purpose and merely
+       SHOWS. It keeps the 8px radius and 3px AMBER left-accent of the trust-banner
+       family even though #519 moved it BELOW the KPI row, next to #cost-comp: the
+       amber is now a subject cue rather than a proximity cue -- this panel is the
+       answer to the attribution-coverage banner's question ("where did the
+       unattributed spend go?"), so it stays in that colour family wherever it
+       sits. It is deliberately NOT danger-styled: most of this is legitimate
+       exploratory work TIER keeps in the denominator on purpose. The inner bars
+       reuse the cost-composition (#234) row/track/fill language for a consistent
+       spend visual, which is why it also sits comfortably beside that panel. */
+    #unattr-breakdown {
+      display: none;
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--trust);
+      border-radius: 8px; padding: 0.85rem 1rem 1rem; margin-bottom: 1.5rem;
+      box-shadow: 0 1px 2px var(--shadow);
+    }
+    .ub-head { margin-bottom: 0.5rem; }
+    .ub-title { font-size: 0.9rem; font-weight: 600; color: var(--text); }
+    /* Prominent but calm: a large NEUTRAL numeral (prominence from size, not a
+       warning colour) with a muted explanatory caption. Green stays reserved for
+       yield, red for errors -- exploratory overhead is neither. */
+    .ub-exploratory {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem 0.6rem;
+      margin-bottom: 0.85rem;
+    }
+    .ub-exploratory-value { font-size: 1.5rem; font-weight: 700; line-height: 1; color: var(--text); }
+    .ub-exploratory-sub { font-size: 0.76rem; color: var(--text-muted); }
+    .ub-buckets { display: flex; flex-direction: column; gap: 0.1rem; }
+    .ub-row {
+      display: grid; grid-template-columns: minmax(120px, 32%) 1fr auto;
+      align-items: center; gap: 0.55rem; padding: 0.28rem 0;
+    }
+    /* Bucket labels are server sentinels ("unattributed:main", ...) shown in the
+       mono face so they align and read as data. Set via textContent (#360). */
+    .ub-label {
+      font-size: 0.8rem; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; min-width: 0;
+      font-family: var(--font-mono); color: var(--text);
+    }
+    .ub-track {
+      position: relative; height: 14px; background: var(--grid);
+      border-radius: 4px; overflow: hidden;
+    }
+    .ub-fill {
+      position: absolute; top: 0; left: 0; height: 100%;
+      border-radius: 4px; background: var(--trust); min-width: 2px;
+    }
+    .ub-value { font-size: 0.8rem; font-weight: 600; text-align: right; min-width: 3.2ch; color: var(--text-muted); }
+
+    /* --- KPI tiles --------------------------------------------------- */
+    #kpi-row {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem; margin-bottom: 1.75rem;
+    }
+    .kpi {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1rem 1.1rem; box-shadow: 0 1px 2px var(--shadow);
+      display: flex; flex-direction: column; gap: 0.35rem; min-width: 0;
+    }
+    .kpi .kpi-label {
+      font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .kpi .kpi-value { font-size: 1.9rem; font-weight: 700; line-height: 1; }
+    .kpi .kpi-value.yield { color: var(--yield); }
+    .kpi .kpi-sub { font-size: 0.72rem; color: var(--text-muted); }
+    .kpi .kpi-sub.credit { color: var(--danger); }
+    /* Low-attribution-coverage headline treatment (#354 re-validation item a): when
+       TIER is computed over a thin attributed base (attributed_cost_share below
+       ATTR_WARN_THRESHOLD) the number is DE-EMPHASIZED, never hidden -- reduced
+       opacity plus a danger-toned "provisional" qualifier so an EM does not over-
+       trust a headline drawn from a small slice of spend. Complements, does not
+       replace, the red #354 coverage banner. */
+    .kpi .kpi-value.provisional { opacity: 0.45; }
+    /* NO SCORE headline: spend but no accepted outcome. Reads as a faint label,
+       not a green number, so it can never be mistaken for a yield of zero. Drops
+       the oversized numeric scale and the --yield green (both inherited from
+       .kpi-value.yield). */
+    .kpi .kpi-value.kpi-noscore { font-size: 1.0rem; font-weight: 600;
+      letter-spacing: 0.06em; color: var(--text-faint); }
+    .kpi .kpi-sub.provisional-note { color: var(--danger); }
+
+    /* Capture-fidelity meter -- amber, because fidelity is a trust metric. */
+    .meter-track {
+      height: 8px; border-radius: 4px; background: var(--grid);
+      overflow: hidden; margin-top: 0.15rem;
+    }
+    .meter-fill { height: 100%; background: var(--trust); border-radius: 4px; }
+
+    /* --- Small-multiples grid (#187) --------------------------------- */
+    /* One self-contained panel per work type. Each panel has its OWN horizontal
+       scale, so a bar's length is only ever comparable WITHIN its type -- the UI
+       makes cross-type TIER comparison structurally impossible. */
+    #segments {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+      gap: 1.25rem;
+    }
+    .panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.1rem 1.15rem 1.25rem;
+      box-shadow: 0 1px 2px var(--shadow); min-width: 0;
+    }
+    .panel-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 0.5rem; margin-bottom: 0.9rem; padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title { font-size: 0.98rem; font-weight: 600; text-transform: capitalize; }
+    .panel-count { font-size: 0.72rem; color: var(--text-muted); }
+
+    /* --- Ranked horizontal yield bars (#133) ------------------------- */
+    .ybar-row {
+      display: grid; grid-template-columns: minmax(72px, 34%) 1fr auto;
+      align-items: center; gap: 0.55rem; padding: 0.28rem 0;
+    }
+    .ybar-label {
+      font-size: 0.8rem; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; min-width: 0;
+    }
+    .ybar-label a.dev-link { color: var(--accent); text-decoration: none; }
+    .ybar-label a.dev-link:hover { text-decoration: underline; }
+    .ybar-label.below { color: var(--text-muted); }
+
+    .ybar-track {
+      position: relative; height: 16px; background: var(--grid);
+      border-radius: 4px; overflow: visible;
+    }
+    .ybar-fill {
+      position: absolute; top: 0; left: 0; height: 100%;
+      border-radius: 4px; background: var(--yield); min-width: 2px;
+    }
+    /* Below the ranking floor: muted fill so a low-evidence number can never be
+       mistaken for a ranked, green yield. */
+    .ybar-fill.below { background: var(--text-faint); }
+
+    /* 95%-CI whisker: end caps + connecting rule, positioned from ci_low/ci_high
+       on the SAME scale as the bar. Only ranked developer rows carry a CI. */
+    .ybar-whisker {
+      position: absolute; top: 50%; height: 9px; transform: translateY(-50%);
+      border-left: 2px solid var(--text); border-right: 2px solid var(--text);
+      opacity: 0.75; pointer-events: none;
+    }
+    .ybar-whisker::before {
+      content: ""; position: absolute; top: 50%; left: 0; right: 0;
+      height: 2px; background: var(--text); transform: translateY(-50%);
+    }
+    /* The value cell stacks two readings: the TIER number (green yield) on top and
+       the interpretable cost-per-point unit ($/pt, #239) beneath it. cost_per_point
+       is TIER's inverse dual -- "your cost per weighted point", comparable across
+       label cultures on a matched rubric/price version -- so it rides with every
+       row (developer, team, and per-work-type segment). */
+    .ybar-value {
+      display: flex; flex-direction: column; align-items: flex-end;
+      min-width: 3.2ch; gap: 0.05rem;
+    }
+    .ybar-tier { font-size: 0.82rem; font-weight: 600; line-height: 1.15; color: var(--yield); }
+    /* Below the ranking floor: the TIER reading is muted so a low-evidence number
+       never reads as a ranked, green yield (the $/pt sub-line is already muted). */
+    .ybar-value.below .ybar-tier { color: var(--text-muted); font-weight: 400; }
+    /* NO SCORE: a window with spend but no accepted outcome. It is the ABSENCE
+       of a score, not a low one, so it reads as a faint uppercase label rather
+       than a number — never a "0.0" that would rank as the worst row.
+       Scoped under .ybar-value.below because a no-score row is ALWAYS below the
+       ranking floor (no accepted outcomes => not ranked), and the below-floor
+       rule above (.ybar-value.below .ybar-tier, specificity 0,3,0) would
+       otherwise win the color/weight cascade over a bare .ybar-noscore (0,1,0)
+       and mute the label back to a number's styling. */
+    .ybar-value.below .ybar-noscore,
+    .ybar-noscore { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+                    text-transform: uppercase; color: var(--text-faint); }
+    .ybar-cpp { font-size: 0.68rem; line-height: 1.1; color: var(--text-muted); }
+
+    /* Explicit ranking-floor divider (#133): everything below is muted and
+       excluded from the ranking for want of evidence. */
+    .floor-line {
+      display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0 0.35rem;
+    }
+    .floor-line::before, .floor-line::after {
+      content: ""; flex: 1; height: 1px; background: var(--border);
+    }
+    .floor-label {
+      font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--text-faint); white-space: nowrap;
+    }
+    .panel-empty { font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0; }
+
+    /* --- Compare view (#278): before/after two-window comparison ----- */
+    /* Shown only in compare mode; the single-window panels above are hidden.
+       Δ is always (selected period − comparison period) = window B − window A,
+       matching the /scores/compare contract (delta = B - A). */
+    #compare-view { display: none; }
+
+    /* Compare header: the two windows being compared + the aggregation mode. */
+    .cmp-windows {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem;
+      font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1.25rem;
+      font-family: var(--font-mono);
+    }
+    .cmp-windows .cmp-win-b { color: var(--text); }
+    .cmp-windows .cmp-arrow { color: var(--text-faint); }
+    .cmp-windows .cmp-mode {
+      font-family: var(--font-sans); font-size: 0.7rem; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--text-faint);
+      border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem;
+    }
+    /* Per-window data-quality caveat (amber trust colour): mixed price versions,
+       low attribution coverage, or zero-token outcomes in that window -- a "read
+       this comparison with care" signal, never a page error. */
+    .cmp-windows .cmp-caveat {
+      font-family: var(--font-sans); font-size: 0.7rem;
+      color: var(--trust); border: 1px solid var(--trust-border);
+      border-radius: 4px; padding: 0 0.35rem;
+    }
+
+    /* Org-level delta card: the name-free grand rollup (present in both modes). */
+    #cmp-total {
+      display: none; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.1rem 1.15rem; margin-bottom: 1.5rem;
+      box-shadow: 0 1px 2px var(--shadow);
+    }
+    .cmp-total-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem; align-items: end;
+    }
+    .cmp-total-cell { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+    .cmp-total-label {
+      font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .cmp-total-value { font-size: 1.6rem; font-weight: 700; line-height: 1; }
+    .cmp-total-sub { font-size: 0.72rem; color: var(--text-muted); }
+    /* Δ direction: green only for an INCREASE in yield (green stays yield-only);
+       danger for a decrease; muted for flat. Applied to the delta cell only. */
+    .cmp-delta.up { color: var(--yield); }
+    .cmp-delta.down { color: var(--danger); }
+    .cmp-delta.flat { color: var(--text-muted); }
+
+    /* Dumbbell rows: one per developer (dev mode) or per team (anonymized). */
+    #cmp-dumbbells {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.1rem 1.15rem 1.25rem;
+      box-shadow: 0 1px 2px var(--shadow);
+    }
+    .cmp-db-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 0.5rem; margin-bottom: 0.4rem; padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .cmp-db-title { font-size: 0.98rem; font-weight: 600; }
+    /* Legend for the two dots so before/after is unambiguous without colour. */
+    .cmp-legend { display: flex; gap: 0.9rem; font-size: 0.72rem; color: var(--text-muted); }
+    .cmp-legend .lg { display: inline-flex; align-items: center; gap: 0.3rem; }
+    .cmp-legend .lg-dot {
+      width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+    }
+    .cmp-legend .lg-a { background: transparent; border: 2px solid var(--text-faint); }
+    .cmp-legend .lg-b { background: var(--accent); }
+
+    .cmp-db-row {
+      display: grid; grid-template-columns: minmax(72px, 22%) 1fr minmax(96px, auto);
+      align-items: center; gap: 0.6rem; padding: 0.4rem 0;
+    }
+    .cmp-db-label {
+      font-size: 0.8rem; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; min-width: 0;
+    }
+    /* Compare rows render the developer/team name as plain text (no cross-window
+       drill-down in v1), so there is deliberately no dev-link anchor style here. */
+    .cmp-db-label.below { color: var(--text-muted); }
+
+    /* The dumbbell track: a shared horizontal scale across all rows. Both dots
+       are positioned from tier/scale; a connecting rule joins them. overflow is
+       visible so the dots (which sit on the line) are not clipped. */
+    .cmp-db-track {
+      position: relative; height: 18px; background: var(--grid);
+      border-radius: 4px; overflow: visible;
+    }
+    /* The connecting segment between the A and B dots (left/width set inline from
+       the two positions). Accent + solid when the move is significant; faint +
+       dashed when it is not (within-CI or below-floor), so a non-significant move
+       never reads as a confident change. */
+    .cmp-db-connect {
+      position: absolute; top: 50%; height: 3px; transform: translateY(-50%);
+      background: var(--accent); border-radius: 2px; pointer-events: none;
+    }
+    .cmp-db-connect.insignificant {
+      height: 0; background: transparent;
+      border-top: 2px dashed var(--text-faint);
+    }
+    /* The two dots. A = before (hollow, neutral reference); B = after (filled).
+       B is green when the move is a SIGNIFICANT improvement (yield up), danger
+       when a significant regression, accent when present-but-not-significant,
+       and muted when below the ranking floor. Positioned inline via left. */
+    .cmp-db-dot {
+      position: absolute; top: 50%; width: 12px; height: 12px;
+      border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;
+    }
+    .cmp-db-dot.a { background: var(--bg); border: 2px solid var(--text-faint); }
+    .cmp-db-dot.b { background: var(--accent); }
+    .cmp-db-dot.b.up { background: var(--yield); }
+    .cmp-db-dot.b.down { background: var(--danger); }
+    .cmp-db-dot.b.below { background: var(--text-faint); }
+
+    /* The value cell: the Δ TIER on top, and a significance/status tag beneath. */
+    .cmp-db-value {
+      display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem;
+    }
+    .cmp-db-delta { font-size: 0.82rem; font-weight: 600; line-height: 1.15; }
+    .cmp-db-delta.up { color: var(--yield); }
+    .cmp-db-delta.down { color: var(--danger); }
+    .cmp-db-delta.flat { color: var(--text-muted); }
+    /* Significance / status tag: muted, small, never a colour that competes with
+       the yield/danger delta. "not significant", "below ranking floor", "only in
+       <window>", or "aggregate — not tested" (team mode). */
+    .cmp-db-tag { font-size: 0.66rem; color: var(--text-faint); line-height: 1.1; }
+    .cmp-db-ab {
+      font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono);
+      line-height: 1.1;
+    }
+    .cmp-empty { font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 0; }
+    /* A small note under the dumbbells clarifying the Δ direction convention and
+       the significance test, so the chart is self-explaining. */
+    .cmp-note { font-size: 0.74rem; color: var(--text-muted); margin-top: 0.9rem; line-height: 1.5; }
+
+    /* --- Detail card (developer drill-down) -------------------------- */
+    #detail-card {
+      display: none; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.1rem 1.15rem; margin-top: 1.5rem;
+      box-shadow: 0 1px 2px var(--shadow);
+    }
+    #detail-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 0.5rem; margin-bottom: 0.6rem;
+    }
+    #detail-title { font-size: 0.95rem; font-weight: 600; }
+    #detail-json {
+      font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.5;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.75rem; overflow-x: auto;
+      white-space: pre; color: var(--text);
+    }
+
+    /* --- Status / notes --------------------------------------------- */
+    #segments-note { font-size: 0.76rem; color: var(--text-muted); margin: 1rem 0 0; }
+
+    /* --- Provenance stamp (#239) ------------------------------------- */
+    /* Which rubric (weights) and price table (dollars) produced every number on
+       the page. A matched rubric.version + price_table.version is the NECESSARY
+       condition for comparing a TIER / cost_per_point across responses, so the
+       stamp is the caveat that makes the comparison well-founded. Muted, never a
+       band or verdict (no absolute quality banding -- #239=C). Hidden until data
+       loads; filled by renderProvenance via textContent. */
+    #provenance {
+      display: none; font-size: 0.72rem; color: var(--text-faint);
+      margin: 0 0 1.5rem; font-family: var(--font-mono);
+    }
+
+    /* --- Cost-composition panel (#234) -------------------------------- */
+    #cost-comp {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.1rem 1.15rem 1.25rem;
+      box-shadow: 0 1px 2px var(--shadow); margin-bottom: 1.5rem;
+    }
+    .cc-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 0.5rem; margin-bottom: 0.9rem; padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .cc-title { font-size: 0.98rem; font-weight: 600; }
+    .cc-total { font-size: 0.82rem; color: var(--text-muted); }
+    .cc-head-right { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    #cc-export { font-size: 0.74rem; padding: 0.3rem 0.6rem; white-space: nowrap; }
+    /* Retro-prompt copy (#419): reframes the name-free levers + work-type panels
+       as an active team-retro discussion surface. Muted body, emphasised lead. */
+    .retro-prompt {
+      font-size: 0.78rem; color: var(--text-muted); line-height: 1.5;
+      margin: 0 0 1rem;
+    }
+    .retro-prompt strong { color: var(--text); font-weight: 600; }
+    .cc-levers {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.9rem; margin-bottom: 1.1rem;
+    }
+    .cc-lever { display: flex; flex-direction: column; gap: 0.15rem; }
+    .cc-lever-label { font-size: 0.72rem; color: var(--text-muted); }
+    .cc-lever-value { font-size: 1.15rem; font-weight: 600; }
+    .cc-lever-sub { font-size: 0.72rem; color: var(--text-muted); }
+    .cc-models-label { font-size: 0.72rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .cc-row {
+      display: grid; grid-template-columns: minmax(120px, 32%) 1fr auto;
+      align-items: center; gap: 0.55rem; padding: 0.28rem 0;
+    }
+    .cc-row-label {
+      font-size: 0.8rem; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; min-width: 0;
+    }
+    .cc-badge {
+      font-size: 0.62rem; font-weight: 600; text-transform: uppercase;
+      color: var(--trust); border: 1px solid var(--trust);
+      border-radius: 4px; padding: 0 0.3rem; margin-left: 0.4rem;
+    }
+    .cc-track {
+      position: relative; height: 16px; background: var(--grid);
+      border-radius: 4px; overflow: hidden;
+    }
+    .cc-fill {
+      position: absolute; top: 0; left: 0; height: 100%;
+      border-radius: 4px; background: var(--accent); min-width: 2px;
+    }
+    .cc-fill.premium { background: var(--trust); }
+    .cc-value { font-size: 0.82rem; font-weight: 600; text-align: right; min-width: 3.2ch; }
+    #status-msg { font-size: 0.85rem; margin-top: 1.25rem; }
+    .loading-msg { color: var(--text-muted); }
+    .error-msg { color: var(--danger); }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <h1><span class="glyph">&#9646;</span> TIER</h1>
+    <span class="spacer"></span>
+    <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle colour theme">Theme</button>
+  </header>
+  <p class="subtitle">Engineering Yield Dashboard &mdash; developer output per $1,000 of AI spend. Higher is better.</p>
+
+  <main>
+
+  <div class="controls">
+    <label for="since-input">From</label>
+    <input type="date" id="since-input">
+    <label for="until-input">To</label>
+    <input type="date" id="until-input">
+    <div class="presets" role="group" aria-label="Range presets">
+      <button id="preset-30" class="chip" type="button">30d</button>
+      <button id="preset-90" class="chip" type="button">90d</button>
+      <button id="preset-quarter" class="chip" type="button">Quarter</button>
+    </div>
+    <label class="compare-toggle" for="compare-toggle">
+      <input type="checkbox" id="compare-toggle"> Compare periods
+    </label>
+    <span class="spacer"></span>
+    <input type="password" id="token-input" placeholder="API token" autocomplete="current-password" style="display:none">
+    <button id="refresh-btn" type="button">Refresh</button>
+  </div>
+
+  <!-- Compare baseline row (#278): the "compared to" window (window A / "before").
+       The primary controls row above is the selected period (window B / "after");
+       Δ shown throughout the compare view is B − A. Revealed only when the compare
+       toggle is checked. "vs previous period" fills this window as the adjacent-
+       earlier window of the same length as the primary period. -->
+  <div class="controls compare-row" id="compare-controls" style="display:none">
+    <label for="baseline-since-input">Compare against — From</label>
+    <input type="date" id="baseline-since-input">
+    <label for="baseline-until-input">To</label>
+    <input type="date" id="baseline-until-input">
+    <button id="preset-prev" class="chip" type="button">vs previous period</button>
+  </div>
+
+  <!-- DATA-QUALITY BAND (#520) ------------------------------------------------
+       ONE band, not four sibling cards. Four identically-shelled boxes read as
+       "four separate things are wrong with this dashboard"; one framed band reads
+       as "this instrument checks itself" -- the same content and the same
+       honesty, reclassified from symptom to output. See the CSS block for the
+       MEASURED net reclaim (~61px at four checks, ~0 at two); it does NOT clear
+       the fold at 1280x720 and does not reach mobile, both of which #520 stays
+       open for.
+
+       DOM ORDER IS THE TIE-BREAK, NOT THE RANKING. renderDataQualityBand reorders
+       these nodes at render time by OBSERVED state, because severity is decided
+       per window: #attr-coverage and #cost-horizon each swing amber<->red
+       independently, so a static rank puts a calm amber row above a red one --
+       which is main's own amber -> red -> amber -> red defect restated. The
+       source order below is the stable tie-break WITHIN a state.
+
+       It reorders by moving the actual nodes, never with flex `order`, which
+       would desynchronise keyboard and screen-reader order from the visual
+       ranking. The previous order was issue history (#136, #354, #512, #354) and
+       produced amber -> red -> amber -> red,
+       which teaches a reader within two banners that position means nothing, so
+       they must read all four titles before reaching a number. Ordered in the DOM
+       rather than with flex `order` on purpose: `order` desynchronises keyboard
+       and screen-reader order from the visual ranking, which is worse than no
+       ranking at all.
+
+       Ranking rationale: #unjoined-strip is ALWAYS red and is the only one naming
+       an operator action (map the identity). #attr-coverage and #cost-horizon can
+       both go red; attribution coverage comes first because it qualifies the
+       headline number directly ("TIER reflects only this fraction"), while the
+       horizon qualifies the WINDOW. #trust-strip is always amber -- a "look here",
+       never a failure -- so it ranks last.
+
+       The band's own reveal obeys the #516 invariant like every other panel: it
+       carries display:none at rest and renderDataQualityBand sets an explicit
+       value. An always-visible band would render an empty bordered box on a clean
+       window, which is chrome asserting nothing. -->
+  <div id="dq-band" role="region" aria-labelledby="dq-frame">
+    <h2 id="dq-frame"></h2>
+
+    <!-- Identity-mismatch callout (#354/#351): developers present on only ONE side
+         of the cost/outcome join (cost but no outcomes, or outcomes but no cost)
+         read a silent TIER=0 until their identity is mapped. Named in developer
+         mode; name-free counts in team-aggregation mode (#185). Always danger-
+         styled -- it is an active data-quality defect. Filled by
+         renderUnjoinedDevelopers via textContent; hidden when the block is absent. -->
+    <div id="unjoined-strip" role="region" aria-labelledby="unjoined-attn unjoined-title">
+      <span id="unjoined-attn" class="dq-sr"></span>
+      <span class="dq-icon" aria-hidden="true">&#9650;</span>
+      <div>
+        <h3 id="unjoined-title" class="dq-title"></h3>
+        <div id="unjoined-sub" class="dq-sub"></div>
+        <details class="dq-evidence">
+          <summary>Show the unjoined developers</summary>
+          <ul id="unjoined-list" class="dq-list"></ul>
+        </details>
+      </div>
+    </div>
+
+    <!-- Attribution-coverage banner (#354): the HONEST headline coverage -- what
+         fraction of the window's spend TIER can actually attribute to an issue
+         (attributed_cost_share). Distinct from the amber Capture-Fidelity meter
+         below, which only measures recorded-vs-estimated of the spend we DID
+         record. Calm (amber) when coverage is high; a red WARNING when it is low,
+         because the headline TIER only reflects the attributed fraction. Filled by
+         renderAttributionCoverage via textContent; hidden when the window has no
+         spend (field absent). -->
+    <div id="attr-coverage" role="region" aria-labelledby="attr-coverage-attn attr-coverage-title">
+      <span id="attr-coverage-attn" class="dq-sr"></span>
+      <span class="dq-icon" aria-hidden="true">&#9650;</span>
+      <div>
+        <h3 id="attr-coverage-title" class="dq-title"></h3>
+        <div id="attr-coverage-sub" class="dq-sub"></div>
+      </div>
+    </div>
+
+    <!-- Cost-horizon banner (#512): says how far back this installation can see
+         COST at all, and shouts when the selected window starts before that. The
+         API emits an explicit `false` for a covered window rather than omitting
+         the field, so this banner renders in both states deliberately. -->
+    <div id="cost-horizon" role="region" aria-labelledby="cost-horizon-attn cost-horizon-title">
+      <span id="cost-horizon-attn" class="dq-sr"></span>
+      <span class="dq-icon" aria-hidden="true">&#9650;</span>
+      <div>
+        <h3 id="cost-horizon-title" class="dq-title"></h3>
+        <div id="cost-horizon-sub" class="dq-sub"></div>
+      </div>
+    </div>
+
+    <!-- Data-quality trust strip (#136): amber, because a flagged outcome is a
+         "look here" signal and not a failure. Hidden until the server flags an
+         outcome; team-aggregation mode ships a name-free count instead of a list. -->
+    <div id="trust-strip" role="region" aria-labelledby="trust-attn trust-title">
+      <span id="trust-attn" class="dq-sr"></span>
+      <span class="dq-icon" aria-hidden="true">&#9650;</span>
+      <div>
+        <h3 id="trust-title" class="dq-title"></h3>
+        <details class="dq-evidence">
+          <summary>Show the flagged outcomes</summary>
+          <ul id="trust-list" class="dq-list"></ul>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPI tiles: the org-level instrument reading. Org TIER is the headline
+       yield; AI spend and spend leverage are the CFO framing; capture fidelity
+       is the amber trust meter that tells you how much to believe the rest. -->
+  <div id="kpi-row" style="display:none">
+    <div class="kpi">
+      <span class="kpi-label">Org TIER</span>
+      <span class="kpi-value yield num" id="kpi-tier">&mdash;</span>
+      <span class="kpi-sub num" id="kpi-tier-ci"></span>
+      <!-- Provisional qualifier (#354 re-validation item a): shown only when
+           attribution coverage is below ATTR_WARN_THRESHOLD, when the headline
+           number above is also dimmed. Empty/hidden at healthy coverage. -->
+      <span class="kpi-sub provisional-note" id="kpi-tier-provisional" style="display:none"></span>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">AI Spend</span>
+      <span class="kpi-value num" id="kpi-spend">&mdash;</span>
+      <span class="kpi-sub num" id="kpi-spend-sub"></span>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">Spend Leverage</span>
+      <span class="kpi-value yield num" id="kpi-leverage">&mdash;</span>
+      <span class="kpi-sub num" id="kpi-leverage-sub"></span>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">Capture Fidelity</span>
+      <span class="kpi-value num" id="kpi-fidelity">&mdash;</span>
+      <div class="meter-track"><div class="meter-fill" id="kpi-fidelity-meter" style="width:0%"></div></div>
+      <!-- Static caption (no server data): pins that this meter is recorded-vs-
+           estimated CAPTURE, not the attribution coverage shown in the banner
+           above -- the two must never be read as the same number (#351/#354). -->
+      <span class="kpi-sub" id="kpi-fidelity-sub">recorded vs. estimated spend &mdash; not attribution</span>
+    </div>
+  </div>
+
+  <!-- Provenance stamp (#239): which rubric (weights) and price table (dollars)
+       produced every figure on the page. A matched rubric.version + price_table
+       .version is the necessary condition for comparing a TIER / cost_per_point
+       across responses; the stamp is the caveat that makes that comparison sound.
+       Filled by renderProvenance via textContent; hidden until data loads. -->
+  <p id="provenance" class="num"></p>
+
+  <!-- Reading order (#519): this spend-BREAKDOWN panel sits BELOW the KPI row,
+       beside the cost-composition panel it belongs with. It is content, not a
+       caveat -- the data-quality banners above the KPIs still qualify every
+       number before it is read. Keeping it above pushed the yield number the
+       dashboard exists to show off the first screen entirely. -->
+  <!-- Unattributed-spend breakdown (#360, completes the #354/#360 honesty UI):
+       WHERE the non-attributed spend goes. The prominent exploratory readout is
+       the honest framing of WHY coverage is below 100% -- most of the gap is
+       legitimate work on main with no issue, overhead TIER keeps in the
+       denominator and merely SHOWS (not an alarm). The bucket bars are the
+       labeled split of that unattributed mass. Filled by
+       renderUnattributedBreakdown via textContent -- the bucket LABEL is a
+       pass-through server string (#360 k-anon review) and must never be parsed
+       as markup. Hidden when the window is fully attributed (fields absent). -->
+  <div id="unattr-breakdown">
+    <div class="ub-head">
+      <h2 class="ub-title">Where the unattributed spend goes</h2>
+    </div>
+    <div class="ub-exploratory">
+      <span id="unattr-exploratory" class="ub-exploratory-value num"></span>
+      <span id="unattr-exploratory-sub" class="ub-exploratory-sub"></span>
+    </div>
+    <div id="unattr-buckets" class="ub-buckets"></div>
+  </div>
+
+  <!-- Cost-composition panel (#234): WHERE the window's spend went. The JS fills
+       the levers and the by-model bars via textContent; hidden until the server
+       ships a cost_composition block. Answers the optimization question the raw
+       TIER score cannot: model routing (premium share), cache reuse (cache-read
+       share), and unattributed exploration burn. -->
+  <div id="cost-comp" style="display:none">
+    <div class="cc-head">
+      <h2 class="cc-title">Cost composition</h2>
+      <div class="cc-head-right">
+        <div id="cc-total" class="cc-total num"></div>
+        <button id="cc-export" class="ghost" type="button">Download levers summary (CSV)</button>
+      </div>
+    </div>
+    <p class="retro-prompt">
+      <strong>Talk about it in your next retro.</strong>
+      What&rsquo;s driving our yield? These levers are team-wide and name no one &mdash;
+      use them to improve together, not to grade anyone.
+    </p>
+    <div id="cc-levers" class="cc-levers"></div>
+    <div class="cc-models-label">By model</div>
+    <div id="cc-models" class="cc-models"></div>
+  </div>
+
+  <!-- Per-work-type small multiples (#187): the JS builds one self-contained
+       panel per work type here. There is deliberately NO single cross-type
+       leaderboard -- comparing a security TIER to a feature TIER is a category
+       error, so the panels never share a scale. -->
+  <p id="segments-retro" class="retro-prompt" style="display:none">
+    <strong>Per work type &mdash; a retro lens.</strong>
+    Which kinds of work yield the most per token? Discuss the patterns, not the people.
+  </p>
+  <div id="segments"></div>
+  <p id="segments-note" style="display:none">Panels are scoped per work type and each has its own scale &mdash; comparing TIER <em>across</em> types (e.g. security vs. feature) is unsupported by design.</p>
+
+  <!-- Compare view (#278): the before/after two-window comparison. Built by
+       renderCompare via textContent; shown only in compare mode (the single-window
+       panels above are hidden then). Δ = selected period − comparison period. In
+       team-aggregation mode the dumbbell rows are k-anonymized teams (no names) and
+       significance is not asserted (aggregates carry no confidence interval). -->
+  <div id="compare-view">
+    <div id="cmp-windows" class="cmp-windows"></div>
+    <div id="cmp-total">
+      <div id="cmp-total-grid" class="cmp-total-grid"></div>
+    </div>
+    <div id="cmp-dumbbells">
+      <div class="cmp-db-head">
+        <h3 class="cmp-db-title">Per-row change</h3>
+        <div class="cmp-legend">
+          <span class="lg"><span class="lg-dot lg-a"></span>before</span>
+          <span class="lg"><span class="lg-dot lg-b"></span>after</span>
+        </div>
+      </div>
+      <div id="cmp-rows"></div>
+      <p id="cmp-note" class="cmp-note"></p>
+    </div>
+  </div>
+
+  <div id="detail-card">
+    <div id="detail-head">
+      <span id="detail-title"></span>
+      <button id="detail-close" class="ghost" type="button">Close</button>
+    </div>
+    <pre id="detail-json" class="num"></pre>
+  </div>
+
+  <p id="status-msg" class="loading-msg" role="status" aria-live="polite">Loading&hellip;</p>
+
+</main>
+
+  <script src="/dashboard.js" defer></script>
+</body>
+</html>

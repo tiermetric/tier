@@ -1,0 +1,1009 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER Cost Normalization Specification — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier-cost-normalization-specification">TIER Cost Normalization Specification</h1>
+<h2 id="version-10--issued-march-26-2026-last-revised-2026-07-13">Version 1.0 — issued March 26, 2026; last revised 2026-07-13</h2>
+<p><strong>Status:</strong> Published specification. It describes the <strong>target</strong> design; <code>tierd</code> implements a subset, itemized in the implementation-status banner below.</p>
+<p><strong>Scope:</strong> Defines how the TIER denominator converts raw token consumption into cost-normalized dollars, ensuring comparability across API providers, self-hosted infrastructure, hybrid environments, and time periods.</p>
+<blockquote>
+<p>⚠️ <strong>Implementation status (as of 2026-07-13, <code>main</code>).</strong> This document specifies
+the <strong>full, target</strong> cost-normalization design. <code>tierd</code> implements a <strong>subset</strong>,
+and two areas below describe behavior that <strong>no code enforces today</strong>. Ground
+truth is <code>internal/store/prices.go</code> (<code>ComputeCost</code>) + <code>internal/store/prices.yaml</code>
+(<code>version: 9</code>, <code>effective_date: 2026-07-26</code>).</p>
+<p><strong>Unknown-model fallback — shipped reality (NOT the tiered design in §2.2 / §2.3 / §7.1).</strong>
+There is <strong>no</strong> <code>frontier-default</code> / <code>standard-default</code> / <code>efficient-default</code>
+tier, <strong>no</strong> <code>standard-default 3.00/12.00</code> &#34;ultimate fallback&#34;, <strong>no</strong>
+<code>infer_tier_from_model_name</code>, and <strong>no</strong> <code>price_confidence</code> column. When a
+normalized model string has <strong>no exact <code>prices.yaml</code> entry</strong>, <code>ComputeCost</code>
+prices it at a <strong>self-hosted reference rate</strong>:</p>
+<ul>
+<li><strong>Size-class heuristic</strong> — if the string carries a parameter count,
+<code>selfHostedClass</code> maps it to <code>self-hosted-large</code> <strong>$2.00/M</strong>, <code>self-hosted-medium</code>
+<strong>$0.50/M</strong>, or <code>self-hosted-small</code> <strong>$0.10/M</strong> (e.g. <code>...70b...</code> matches large).</li>
+<li><strong>Flat fallback</strong> — nothing matched -&gt; the single <code>self-hosted-medium</code>
+<strong>$0.50/M</strong> combined rate.</li>
+</ul>
+<p>Both paths emit a <strong>one-time-per-model <code>WARN</code></strong> and bump the unknown-model
+<strong>event + cost counters</strong> (<code>tier_unknown_model_events_total</code> /
+<code>tier_unknown_model_cost_micro_total</code>, #267/#135), so mispriced spend is
+<strong>observable</strong> rather than silent. Only an <strong>exact</strong> table hit is silent.</p>
+<p><strong>Governance / RPT publication is aspirational.</strong> No official RPT has ever been
+published, and no release has been cut. The &#34;published annually, pinned
+to January 1 / community review Dec 15-31&#34; language in §2.2, §2.4, and §8 is
+<strong>target governance, not current fact</strong>. The shipped table is the embedded
+<code>internal/store/prices.yaml</code> (v7, effective <strong>2026-07-13</strong>).</p>
+<p><strong>RPT-2026 table errata.</strong> Several rows in §2.3 below carry <strong>known-wrong</strong>
+prices (retired / never-launched models, swapped in/out rates). They are <strong>kept
+for provenance</strong> and each is annotated with a pointer to the corrected
+authority: <code>docs/reference-price-table.md</code> <strong>§4</strong>. Do not price against the
+uncorrected rows.</p>
+</blockquote>
+<hr>
+<h2 id="1-governing-principle">1. Governing Principle</h2>
+<p>The TIER denominator must answer one question: <strong>&#34;How many dollars of AI inference did it cost to produce this outcome?&#34;</strong></p>
+<p>Raw token counts fail this test because 1M tokens of Claude Opus ($75 output) is not equivalent to 1M tokens of GPT-4o Mini ($0.60 output). A developer who uses an expensive model judiciously should not be penalized relative to one who burns cheap tokens wastefully. Cost normalization makes the denominator unit-consistent: dollars spent, regardless of how those dollars were spent.</p>
+<h3 id="the-formula">The Formula</h3>
+<pre><code>TIER = Sigma(outcome_weight * quality_multiplier) / (total_effective_cost / $1,000)
+</code></pre>
+<ul>
+<li><strong>Numerator:</strong> Weighted, quality-adjusted outcomes (unchanged from prior specification)</li>
+<li><strong>Denominator:</strong> Total effective cost in dollars, divided by $1,000 for readability</li>
+<li><strong>Unit:</strong> Outcome points per $1,000 of AI inference spend</li>
+</ul>
+<hr>
+<h2 id="2-the-reference-price-table-rpt">2. The Reference Price Table (RPT)</h2>
+<h3 id="21-why-reference-prices-not-actual-prices">2.1 Why Reference Prices, Not Actual Prices</h3>
+<p>TIER uses a <strong>published Reference Price Table</strong>, not the actual billed amount. This is a deliberate design choice for three reasons:</p>
+<p><strong>Reason 1: Enterprise discount distortion.</strong> Company A negotiates a 40% discount on Claude API. Company B pays list price. If TIER uses actual billed amounts, Company A&#39;s developers appear 67% more efficient than Company B&#39;s developers for identical work. This is not a productivity signal -- it is a procurement signal.</p>
+<p><strong>Reason 2: Internal transfer pricing distortion.</strong> Self-hosted inference has no invoice. The &#34;cost&#34; depends on how the organization amortizes CapEx, allocates shared clusters, and accounts for electricity. These are accounting decisions, not engineering productivity signals.</p>
+<p><strong>Reason 3: Temporal comparability.</strong> If TIER uses actual prices and prices drop 50% year-over-year, a developer&#39;s TIER score doubles without any change in behavior. The metric must isolate the developer&#39;s efficiency from the market&#39;s price dynamics.</p>
+<h3 id="22-the-reference-price-table-structure">2.2 The Reference Price Table Structure</h3>
+<blockquote>
+<p><strong>Target governance, not current fact.</strong> The annual-publication / January-1
+pinning described here is the intended governance model. No RPT has been
+published to date; the shipped reference table is the embedded
+<code>internal/store/prices.yaml</code> (v7, <code>effective_date: 2026-07-13</code>). See the
+implementation-status banner at the top of this document.</p>
+</blockquote>
+<p>The TIER project intends to publish an official RPT annually, pinned to January 1 of each year. The RPT for a given year is called <strong>RPT-YYYY</strong> (e.g., RPT-2026).</p>
+<p>Each RPT entry contains:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>model_family</code></td>
+<td>Canonical family name (e.g., <code>claude-opus-4</code>, <code>gpt-4o</code>)</td>
+</tr>
+<tr>
+<td><code>tier</code></td>
+<td>Capability tier: <code>frontier</code>, <code>standard</code>, <code>efficient</code>, <code>embedding</code>, <code>image-gen</code></td>
+</tr>
+<tr>
+<td><code>input_per_million</code></td>
+<td>Reference price per 1M input tokens, in USD</td>
+</tr>
+<tr>
+<td><code>output_per_million</code></td>
+<td>Reference price per 1M output tokens, in USD</td>
+</tr>
+<tr>
+<td><code>effective_date</code></td>
+<td>Date this entry takes effect (always January 1)</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>Where the price was derived from (provider list price page URL + date accessed)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Model matching rules:</strong></p>
+<ul>
+<li>Token events carry the model string from the API response (e.g., <code>claude-opus-4-20250514</code>).</li>
+<li>The cost engine strips date suffixes to match against <code>model_family</code>.</li>
+<li>If no match is found, the event is priced at the <code>standard</code> tier default for that provider.</li>
+<li>If no provider match is found, the event is priced at the cross-provider <code>standard</code> tier median.</li>
+<li>All fallback matches are flagged with <code>price_confidence: &#34;estimated&#34;</code> in the database.</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>The three fallback bullets above are TARGET design — not shipped.</strong> There
+is no per-provider <code>standard</code> tier default, no cross-provider median, and no
+<code>price_confidence</code> column. The shipped fallback (<code>internal/store/prices.go</code>
+<code>ComputeCost</code>) prices an unmatched model at a <strong>self-hosted reference rate</strong> —
+a size-class heuristic (<code>self-hosted-large</code> $2.00/M, <code>self-hosted-medium</code>
+$0.50/M, <code>self-hosted-small</code> $0.10/M) when the string carries a parameter
+count, else the flat <code>self-hosted-medium</code> $0.50/M — with a one-time <code>WARN</code> and
+the unknown-model event/cost counters (#267/#135). See the implementation-status
+banner at the top of this document. <code>NormalizeModel</code> strips date suffixes only;
+it does <strong>not</strong> strip a single trailing minor-version digit, so each minor
+version needs its own <code>prices.yaml</code> row.</p>
+</blockquote>
+<h3 id="23-rpt-2026-reference-price-table-effective-january-1-2026">2.3 RPT-2026: Reference Price Table (Effective January 1, 2026)</h3>
+<p>These prices are derived from publicly listed API prices as of March 2026, representing the price landscape at the start of the TIER measurement year.</p>
+<h4 id="frontier-tier-most-capable-models-highest-cost">Frontier Tier (Most capable models, highest cost)</h4>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-opus-4</code></td>
+<td>15.00</td>
+<td>75.00</td>
+<td>Anthropic flagship. Extended thinking billable separately (see Section 2.5).</td>
+</tr>
+<tr>
+<td><code>gpt-4.5</code></td>
+<td>75.00</td>
+<td>150.00</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4): RETIRED.</strong> Removed from the shipped table; OpenAI replaced it with the GPT-5.x series. Not in <code>prices.yaml</code> v7.</td>
+</tr>
+<tr>
+<td><code>gemini-2.0-ultra</code></td>
+<td>10.00</td>
+<td>30.00</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4): NEVER LAUNCHED at this price.</strong> Google&#39;s current flagship is <code>gemini-3.1-pro</code> at $2.00/$12.00. Not in <code>prices.yaml</code> v7.</td>
+</tr>
+<tr>
+<td><code>deepseek-r1</code></td>
+<td>2.19</td>
+<td>8.19</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4): input/output SWAPPED.</strong> Correct is <strong>$0.55 in / $2.19 out</strong> ($2.19 is the output rate); the $8.19 output shown here is wrong. <code>prices.yaml</code> v7: 0.55 / 2.19.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="standard-tier-primary-workhorse-models">Standard Tier (Primary workhorse models)</h4>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-sonnet-4</code></td>
+<td>3.00</td>
+<td>15.00</td>
+<td>Anthropic primary coding model.</td>
+</tr>
+<tr>
+<td><code>gpt-4o</code></td>
+<td>2.50</td>
+<td>10.00</td>
+<td>OpenAI primary model.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1</code></td>
+<td>2.00</td>
+<td>8.00</td>
+<td>OpenAI newer standard model.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-pro</code></td>
+<td>1.25</td>
+<td>10.00</td>
+<td>Google primary model. Thinking tokens: $3.50 in / $10 out.</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-flash</code></td>
+<td>0.15</td>
+<td>0.60</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4).</strong> Correct is <strong>$0.30 in / $2.50 out</strong> (verified from Google&#39;s pricing page). <code>prices.yaml</code> v7: 0.30 / 2.50.</td>
+</tr>
+<tr>
+<td><code>deepseek-v3</code></td>
+<td>0.27</td>
+<td>1.10</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4).</strong> Correct is <strong>$0.28 in / $0.42 out</strong> (DeepSeek V3.2 updated pricing). <code>prices.yaml</code> v7: 0.28 / 0.42.</td>
+</tr>
+<tr>
+<td><code>claude-sonnet-3.5</code></td>
+<td>3.00</td>
+<td>15.00</td>
+<td>Prior-gen Anthropic, still widely used.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="efficient-tier-cost-optimized-smaller-models">Efficient Tier (Cost-optimized, smaller models)</h4>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude-haiku-3.5</code></td>
+<td>0.80</td>
+<td>4.00</td>
+<td>Anthropic cost-optimized.</td>
+</tr>
+<tr>
+<td><code>gpt-4o-mini</code></td>
+<td>0.15</td>
+<td>0.60</td>
+<td>OpenAI cost-optimized.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1-mini</code></td>
+<td>0.40</td>
+<td>1.60</td>
+<td>OpenAI newer mini.</td>
+</tr>
+<tr>
+<td><code>gpt-4.1-nano</code></td>
+<td>0.10</td>
+<td>0.40</td>
+<td>⚠️ <strong>ERRATA (see reference-price-table.md §4).</strong> Correct is <strong>$0.05 in / $0.20 out</strong> (verified from OpenAI pricing page). <code>prices.yaml</code> v7: 0.05 / 0.20.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="embedding-tier">Embedding Tier</h4>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text-embedding-3-large</code></td>
+<td>0.13</td>
+<td>N/A</td>
+<td>OpenAI embedding.</td>
+</tr>
+<tr>
+<td><code>text-embedding-3-small</code></td>
+<td>0.02</td>
+<td>N/A</td>
+<td>OpenAI small embedding.</td>
+</tr>
+<tr>
+<td><code>voyage-3-large</code></td>
+<td>0.18</td>
+<td>N/A</td>
+<td>Voyage AI (used by Anthropic ecosystem).</td>
+</tr>
+</tbody>
+</table>
+<h4 id="self-hosted-tier">Self-Hosted Tier</h4>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>Cost $/M tokens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>self-hosted-frontier</code></td>
+<td>2.00</td>
+<td>70B+ parameter models on dedicated GPU infrastructure.</td>
+</tr>
+<tr>
+<td><code>self-hosted-standard</code></td>
+<td>0.50</td>
+<td>7B-70B parameter models on dedicated or shared GPU infrastructure.</td>
+</tr>
+<tr>
+<td><code>self-hosted-efficient</code></td>
+<td>0.10</td>
+<td>Sub-7B models, embeddings, rerankers on any infrastructure.</td>
+</tr>
+</tbody>
+</table>
+<p>Self-hosted tiers are explained in detail in Section 3.</p>
+<h4 id="cross-provider-defaults-fallbacks">Cross-Provider Defaults (Fallbacks)</h4>
+<blockquote>
+<p>⚠️ <strong>NOT IMPLEMENTED — target design only.</strong> These tiered defaults (and the
+<code>standard-default 3.00/12.00</code> &#34;ultimate fallback&#34;) do <strong>not</strong> exist in the code.
+The shipped fallback (<code>internal/store/prices.go</code> <code>ComputeCost</code>) prices an
+unmatched model at a <strong>self-hosted reference rate</strong>: the size-class heuristic
+(<code>self-hosted-large</code> $2.00/M, <code>self-hosted-medium</code> $0.50/M, <code>self-hosted-small</code>
+$0.10/M) or the flat <code>self-hosted-medium</code> $0.50/M, each with a one-time <code>WARN</code>
+and the unknown-model counters (#267/#135). See the implementation-status banner
+at the top and <code>docs/reference-price-table.md</code> §5.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Input $/M</th>
+<th>Output $/M</th>
+<th>When Used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>frontier-default</code></td>
+<td>15.00</td>
+<td>75.00</td>
+<td>Unknown model from known frontier-class provider.</td>
+</tr>
+<tr>
+<td><code>standard-default</code></td>
+<td>3.00</td>
+<td>12.00</td>
+<td>Unknown model, unknown tier. <strong>This is the ultimate fallback.</strong></td>
+</tr>
+<tr>
+<td><code>efficient-default</code></td>
+<td>0.40</td>
+<td>1.60</td>
+<td>Unknown model explicitly tagged as small/mini/nano.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="24-rpt-update-cadence">2.4 RPT Update Cadence</h3>
+<blockquote>
+<p>⚠️ <strong>Target cadence, not current practice.</strong> No RPT has been published on this
+cadence to date. Today the reference table ships embedded in the binary
+(<code>internal/store/prices.yaml</code>, v7, effective 2026-07-13) and is updated by
+editing that file, not by an annual January-1 publication.</p>
+</blockquote>
+<ul>
+<li><strong>Annual publication:</strong> A new RPT is intended to be published each January 1. It is the sole reference for all TIER scores computed during that calendar year.</li>
+<li><strong>Mid-year addenda:</strong> When a major new model launches mid-year (e.g., a new frontier model from a new provider), a supplemental entry is published as an addendum to the current RPT. Addenda only ADD entries; they never modify existing prices.</li>
+<li><strong>No retroactive changes:</strong> Once a score is computed against RPT-2026, it is never recomputed against RPT-2027. Year-over-year comparisons are explicitly acknowledged as being against different price baselines (see Section 5).</li>
+</ul>
+<h3 id="25-special-token-types">2.5 Special Token Types</h3>
+<p><strong>Extended thinking / chain-of-thought tokens (Claude, Gemini):</strong>
+Some models bill &#34;thinking&#34; tokens at different rates than standard output tokens. For TIER RPT purposes:</p>
+<ul>
+<li>Thinking tokens are priced at the model&#39;s standard <strong>output</strong> rate.</li>
+<li>Rationale: Thinking tokens are compute the model performs to improve quality. They are functionally output tokens that the developer chose to enable. Pricing them differently would penalize developers who use reasoning modes, even when reasoning produces better outcomes (which the quality multiplier already rewards).</li>
+</ul>
+<p><strong>Cached input tokens:</strong></p>
+<blockquote>
+<p><strong>Superseded 2026-07</strong> by <code>docs/pricing-philosophy.md</code> (formalizes #55; see <code>docs/reference-price-table.md</code> §7). The rule below priced cached tokens at the full standard input rate; the shipped cost engine instead applies the provider&#39;s real cache-mechanics multipliers (Anthropic 0.1x read / 1.25x-2.0x writes, OpenAI 0.5x read), because those multipliers are published list-price mechanics, not a procurement discount. The original text is kept struck-through for provenance.</p>
+</blockquote>
+<ul>
+<li><del>Cached tokens are priced at the model&#39;s standard <strong>input</strong> rate, not the discounted cache-hit rate.</del></li>
+<li>Cached tokens are priced at the provider&#39;s published cache-mechanics rate (read/write multipliers applied off the selected input rate) — see <code>docs/pricing-philosophy.md</code> §1-2 and <code>docs/reference-price-table.md</code> §7. Only <em>procurement</em> discounts (enterprise, batch, subscription) are excluded; cache multipliers are mechanics that change the list cost of the call, so they stay in the denominator.</li>
+</ul>
+<p><strong>Batch API tokens (Anthropic, OpenAI):</strong></p>
+<ul>
+<li>Priced at the standard (non-batch) rate — a <strong>procurement discount</strong> on identical compute, excluded from the denominator by rule (not by pipeline omission). See <code>docs/pricing-philosophy.md</code> §2.</li>
+<li>Rationale: Batch pricing is a billing discount for latency tolerance. It does not reflect a different level of AI capability consumed.</li>
+</ul>
+<p><strong>Image generation tokens:</strong></p>
+<ul>
+<li>Image generation models (DALL-E, FLUX) are priced per image, not per token. Convert to effective cost directly: one image generation = the model&#39;s list price per image.</li>
+<li>RPT carries a <code>cost_per_image</code> field for image models rather than per-million-token pricing.</li>
+</ul>
+<hr>
+<h2 id="3-self-hosted-inference-cost-model">3. Self-Hosted Inference Cost Model</h2>
+<h3 id="31-the-problem">3.1 The Problem</h3>
+<p>Self-hosted inference has no per-token invoice. The cost is buried in hardware amortization, electricity, cooling, networking, staffing, and utilization rates. TIER must define a standard method to convert these into an effective cost-per-token that is comparable to API pricing.</p>
+<h3 id="32-design-decision-reference-tiers-not-actual-amortization">3.2 Design Decision: Reference Tiers, Not Actual Amortization</h3>
+<p>TIER does <strong>not</strong> require organizations to calculate their actual amortized cost-per-token. This would be:</p>
+<ul>
+<li>Extremely complex (shared clusters, variable utilization, multi-tenant scheduling)</li>
+<li>Non-comparable (one org&#39;s 3-year amortization vs. another&#39;s 5-year)</li>
+<li>Gameable (claim high amortized cost to lower your TIER denominator)</li>
+</ul>
+<p>Instead, TIER assigns self-hosted inference to one of three <strong>reference tiers</strong> based on the model&#39;s parameter count and quantization:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Model Criteria</th>
+<th>Reference Cost</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>self-hosted-frontier</code></td>
+<td>70B+ params at Q8/FP16, or 100B+ MoE at Q4+</td>
+<td>$2.00 / M tokens</td>
+<td>Approximates the cost of running Llama 3.3 70B or Nemotron 120B on DGX-class hardware, amortized over 3 years at 50% utilization. Deliberately set below API frontier pricing to reflect the capital investment advantage, but high enough that self-hosted is not &#34;free&#34; in the metric.</td>
+</tr>
+<tr>
+<td><code>self-hosted-standard</code></td>
+<td>7B-70B params at any quantization, or 70B+ at Q4</td>
+<td>$0.50 / M tokens</td>
+<td>Approximates mid-tier models on workstation or cloud GPU infrastructure.</td>
+</tr>
+<tr>
+<td><code>self-hosted-efficient</code></td>
+<td>Sub-7B params, embeddings, rerankers, classifiers</td>
+<td>$0.10 / M tokens</td>
+<td>Small models that run on modest hardware. Deliberately non-zero: even cheap inference has a cost.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-self-hosted-tier-assignment">3.3 Self-Hosted Tier Assignment</h3>
+<p>The TIER token collector must tag each self-hosted token event with the model name. The cost engine maps the model to a tier using this logic:</p>
+<pre><code>function assign_self_hosted_tier(model_name, model_metadata):
+    params = model_metadata.parameter_count  # from model card or config
+    quant  = model_metadata.quantization      # e.g., &#34;Q4_K_M&#34;, &#34;FP16&#34;, &#34;Q8&#34;
+    arch   = model_metadata.architecture      # &#34;dense&#34; or &#34;moe&#34;
+
+    if arch == &#34;moe&#34; and params &gt;= 100_000_000_000:
+        return &#34;self-hosted-frontier&#34;
+    elif params &gt;= 70_000_000_000 and quant in [&#34;FP16&#34;, &#34;Q8&#34;, &#34;FP8&#34;]:
+        return &#34;self-hosted-frontier&#34;
+    elif params &gt;= 7_000_000_000:
+        return &#34;self-hosted-standard&#34;
+    else:
+        return &#34;self-hosted-efficient&#34;
+</code></pre>
+<h3 id="34-why-not-actual-amortization">3.4 Why Not Actual Amortization?</h3>
+<p>Consider two organizations running identical Llama 3.3 70B workloads:</p>
+<ul>
+<li><strong>Org A:</strong> DGX Spark cluster, purchased 2025, 3-year amortization, 60% utilization, includes electricity at $0.12/kWh. Calculated cost: $0.85/M tokens.</li>
+<li><strong>Org B:</strong> Leased cloud GPUs (A100 spot instances), variable pricing, 30% utilization due to bursty workload. Calculated cost: $3.20/M tokens.</li>
+</ul>
+<p>If TIER used actual costs, Org B&#39;s developers would appear 3.8x less efficient than Org A&#39;s developers for identical work. This is an infrastructure procurement signal, not a developer efficiency signal.</p>
+<p>The reference tier approach treats both as <code>self-hosted-frontier</code> at $2.00/M tokens, isolating the developer productivity signal from infrastructure economics.</p>
+<h3 id="35-organizational-override-optional-flagged">3.5 Organizational Override (Optional, Flagged)</h3>
+<p>Organizations MAY override the reference tier cost with their actual calculated cost-per-token. When they do:</p>
+<ul>
+<li>The override is recorded in the TIER database alongside the reference tier cost.</li>
+<li>Dashboard displays show both: &#34;Reference TIER&#34; (using RPT) and &#34;Actual-Cost TIER&#34; (using org-specific pricing).</li>
+<li><strong>Only Reference TIER is used for cross-organization benchmarking.</strong> Actual-Cost TIER is for internal cost management only.</li>
+<li>Overrides are flagged with <code>cost_basis: &#34;org_override&#34;</code> so they are never silently mixed with reference-priced scores.</li>
+</ul>
+<hr>
+<h2 id="4-hybrid-environment-cost-rollup">4. Hybrid Environment Cost Rollup</h2>
+<h3 id="41-the-scenario">4.1 The Scenario</h3>
+<p>A developer working on Issue TIER-42 uses three AI tools:</p>
+<ol>
+<li><strong>Local Llama 3.3 70B</strong> on DGX Spark for exploratory prompting (self-hosted-frontier)</li>
+<li><strong>Claude Sonnet 4</strong> via API for code generation (standard API)</li>
+<li><strong>Claude Opus 4</strong> via API for architecture review (frontier API)</li>
+</ol>
+<h3 id="42-cost-computation">4.2 Cost Computation</h3>
+<p>Each token event is priced independently using the RPT for the current year:</p>
+<pre><code>Event 1: Local Llama exploration
+    150,000 input + 50,000 output = 200,000 total tokens
+    Cost = 200,000 * ($2.00 / 1,000,000) = $0.40
+
+Event 2: Claude Sonnet code generation
+    80,000 input + 120,000 output tokens
+    Cost = (80,000 * $3.00/M) + (120,000 * $15.00/M) = $0.24 + $1.80 = $2.04
+
+Event 3: Claude Opus architecture review
+    60,000 input + 15,000 output tokens
+    Cost = (60,000 * $15.00/M) + (15,000 * $75.00/M) = $0.90 + $1.125 = $2.025
+
+Total effective cost for TIER-42: $0.40 + $2.04 + $2.025 = $4.465
+</code></pre>
+<h3 id="43-the-tier-score">4.3 The TIER Score</h3>
+<p>If TIER-42 is a weight-8 issue shipped at quality 1.0:</p>
+<pre><code>TIER for this issue = (8 * 1.0) / ($4.465 / $1,000) = 8.0 / 0.004465 = 1,791.6
+</code></pre>
+<p>This tells us: the developer produced 1,791.6 outcome points per $1,000 of AI inference. Alternatively: <strong>it cost $4.47 in AI to ship this feature.</strong></p>
+<h3 id="44-key-properties-of-hybrid-rollup">4.4 Key Properties of Hybrid Rollup</h3>
+<ol>
+<li>
+<p><strong>Additive across tools:</strong> Costs from different tools simply sum. No special weighting or normalization between API and self-hosted.</p>
+</li>
+<li>
+<p><strong>Model choice is visible:</strong> The per-event cost breakdown shows that 45% of the cost came from the Opus review. This is actionable intelligence -- was the Opus review worth 45% of the budget?</p>
+</li>
+<li>
+<p><strong>Self-hosted is not free:</strong> The local Llama exploration cost $0.40 at reference rates. This prevents the gaming vector where developers route all exploration to &#34;free&#34; self-hosted and only use the API for the final answer.</p>
+</li>
+<li>
+<p><strong>Unattributed tokens:</strong> Any token events not attributed to an issue are summed into the developer&#39;s total cost denominator at the developer level. They inflate the denominator without adding to any issue&#39;s numerator, naturally penalizing unfocused usage.</p>
+<ul>
+<li><strong>Per-message attribution:</strong> attribution is resolved for each assistant message by the branch it <em>actually happened on</em>, not one branch latched for the whole session. A session that opens on <code>main</code> and later checks out <code>feature/&lt;N&gt;</code> has its main messages bucketed as exploratory and its feature messages attributed to <code>#N</code> — the single latched branch no longer routes an entire mixed session to one verdict.</li>
+<li><strong>No mis-attribution of exploratory <code>main</code>:</strong> a message on a mainline branch (or a detached HEAD) never <em>inherits</em> a nearby merge commit&#39;s <code>closes #N</code>. That cost is real exploratory/planning work, and a false attribution is worse than an honest one, so it stays unattributed.</li>
+<li><strong>Labeled buckets (honest split):</strong> unattributed spend is NOT excluded from the denominator — it stays in as overhead — but the single <code>unattributed</code> mass is split into labeled buckets so the overhead is <em>visible</em> rather than a silent hole: <code>unattributed:main</code> (exploratory on a mainline branch), <code>unattributed:detached-head</code>, and <code>unattributed:branch-without-issue</code>. Producers that see no branch (the proxy, org-level pollers) keep the base <code>unattributed</code> label. Every read path that splits attributed vs. unattributed treats the whole family as unattributed; the buckets surface on <code>/scores</code> (<code>data_quality.unattributed_buckets</code>, <code>data_quality.exploratory_cost_share</code>, and a per-developer <code>exploratory_cost_share</code>), in <code>tierd doctor</code>&#39;s attribution line, and in <code>tierd score</code>&#39;s cost-by-issue report. The split changes only the <em>labeling</em> of the remainder — total spend, and therefore TIER, is unchanged.</li>
+<li><strong>Trunk-based development:</strong> work committed directly to <code>main</code> (rather than through a feature branch) is bucketed as <code>unattributed:main</code>, not attributed via its merge commit — the deliberate consequence of the no-mis-attribution rule above. Trunk-based teams should expect a higher exploratory share and can raise attribution by naming branches <code>feature/&lt;issue-number&gt;-slug</code>.</li>
+<li><strong>Attribution reflects commit state at ingest time:</strong> a stored token event&#39;s <code>issue_id</code> is pinned when it is first ingested (the store&#39;s idempotency upsert updates token counts, never <code>issue_id</code>). A commit that lands <em>after</em> a message was ingested does not retroactively re-attribute the stored row. Consequently, a fresh parse (<code>tierd score</code> / <code>tierd doctor</code>, which re-resolve against the current commit set) can report a different bucket split than <code>/scores</code> and the dashboard (which read the stored, ingest-time attribution) when commits arrive between ingests — a staleness gap, not a bug.</li>
+</ul>
+</li>
+</ol>
+<hr>
+<h2 id="5-the-temporal-problem-year-over-year-comparability">5. The Temporal Problem: Year-Over-Year Comparability</h2>
+<h3 id="51-the-problem">5.1 The Problem</h3>
+<p>Token prices drop approximately 30-60% year-over-year. Claude Sonnet launched at $3/$15 per M tokens; a successor might launch at $1.50/$7.50. If TIER scores are computed against current prices, a TIER score of 500 in 2026 is not comparable to 500 in 2027 -- the 2027 score was computed against cheaper tokens.</p>
+<h3 id="52-solution-rpt-year-tagging">5.2 Solution: RPT-Year Tagging</h3>
+<p>Every TIER score carries an RPT version tag:</p>
+<pre><code>{
+    &#34;developer&#34;: &#34;alice&#34;,
+    &#34;tier_score&#34;: 1791.6,
+    &#34;rpt_version&#34;: &#34;RPT-2026&#34;,
+    &#34;period&#34;: &#34;2026-W13&#34;,
+    &#34;cost_basis&#34;: &#34;reference&#34;
+}
+</code></pre>
+<p><strong>Rules for comparison:</strong></p>
+<ul>
+<li>Scores computed against the same RPT version are directly comparable.</li>
+<li>Scores computed against different RPT versions are <strong>not directly comparable</strong> without adjustment.</li>
+<li>The TIER dashboard displays the RPT version alongside every score.</li>
+<li>Cross-year trend charts include a disclaimer: &#34;Scores across RPT boundaries reflect both developer efficiency changes and reference price changes.&#34;</li>
+</ul>
+<h3 id="53-the-tier-price-index-tpi">5.3 The TIER Price Index (TPI)</h3>
+<p>To enable approximate cross-year comparison, TIER publishes a <strong>TIER Price Index</strong> alongside each RPT. The TPI is analogous to CPI -- it measures how the average cost of a &#34;basket of AI inference&#34; has changed relative to a base year.</p>
+<p><strong>Base year:</strong> RPT-2026 = TPI 1.000</p>
+<p><strong>TPI computation:</strong></p>
+<p>The &#34;basket&#34; is a weighted mix of token consumption representing typical AI-augmented development:</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Weight</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard-tier output tokens</td>
+<td>40%</td>
+<td>Most development AI spend is on workhorse model output.</td>
+</tr>
+<tr>
+<td>Standard-tier input tokens</td>
+<td>25%</td>
+<td>Context loading is a major cost driver.</td>
+</tr>
+<tr>
+<td>Frontier-tier output tokens</td>
+<td>15%</td>
+<td>Architecture, review, and complex reasoning tasks.</td>
+</tr>
+<tr>
+<td>Frontier-tier input tokens</td>
+<td>10%</td>
+<td>Large context for frontier models.</td>
+</tr>
+<tr>
+<td>Efficient-tier output tokens</td>
+<td>5%</td>
+<td>Cheap models for simple tasks.</td>
+</tr>
+<tr>
+<td>Self-hosted-standard tokens</td>
+<td>5%</td>
+<td>Local inference component.</td>
+</tr>
+</tbody>
+</table>
+<pre><code>TPI_YYYY = Sigma(weight_i * RPT_YYYY_price_i) / Sigma(weight_i * RPT_2026_price_i)
+</code></pre>
+<p><strong>Example:</strong> If standard-tier output tokens drop from $15.00/M (RPT-2026) to $7.50/M (RPT-2027) and all other prices halve similarly:</p>
+<pre><code>TPI_2027 ~ 0.50
+</code></pre>
+<p><strong>Adjusted comparison:</strong></p>
+<pre><code>TIER_adjusted = TIER_raw * TPI_current / TPI_target
+
+# &#34;What would Alice&#39;s 2027 score be at 2026 prices?&#34;
+TIER_2026_equivalent = 1791.6 * (0.50 / 1.00) = 895.8
+</code></pre>
+<p>This means: if Alice&#39;s raw TIER in 2027 is 1791.6 (computed against cheaper RPT-2027 prices), her efficiency in 2026-equivalent terms is 895.8. She is actually less efficient than someone who scored 1791.6 in 2026.</p>
+<h3 id="54-what-tpi-does-not-do">5.4 What TPI Does NOT Do</h3>
+<ul>
+<li>TPI does not retroactively change historical scores. Alice&#39;s 2026 score stays 1791.6 forever.</li>
+<li>TPI is an approximation for trend analysis, not a precise conversion. The basket weights are stylized, not measured per-organization.</li>
+<li>TPI is published by the TIER project, not by individual organizations. Organizations may publish their own internal price indices, but cross-org benchmarking uses the official TPI.</li>
+</ul>
+<hr>
+<h2 id="6-the-1000-normalization-constant">6. The $1,000 Normalization Constant</h2>
+<h3 id="61-why-1000">6.1 Why $1,000?</h3>
+<p>The denominator divides total effective cost by $1,000 to produce human-readable scores. The choice of $1,000 is calibrated to produce scores in a range where:</p>
+<ol>
+<li><strong>Individual developers land in the hundreds to low thousands.</strong> A typical developer shipping 2-3 medium issues per week at ~$5-15 in AI cost per issue produces a weekly TIER of roughly 300-2,000.</li>
+<li><strong>The number is large enough to feel meaningful</strong> but not so large that differences are invisible.</li>
+<li><strong>$1,000 has intuitive meaning:</strong> &#34;How many outcome points does this developer produce per $1,000 of AI spend?&#34; is a natural question for a CFO or VP of Engineering.</li>
+</ol>
+<h3 id="62-calibration-analysis">6.2 Calibration Analysis</h3>
+<p>Using the worked examples from the project overview (re-priced with RPT-2026):</p>
+<table>
+<thead>
+<tr>
+<th>Developer</th>
+<th>Issues</th>
+<th>Weighted Outcome</th>
+<th>Estimated Weekly AI Cost</th>
+<th>TIER (per $1K)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bob</td>
+<td>2</td>
+<td>21.0</td>
+<td>~$4.50</td>
+<td>4,667</td>
+</tr>
+<tr>
+<td>Eve</td>
+<td>2</td>
+<td>13.0</td>
+<td>~$3.80</td>
+<td>3,421</td>
+</tr>
+<tr>
+<td>Alice</td>
+<td>2</td>
+<td>12.8</td>
+<td>~$6.20</td>
+<td>2,065</td>
+</tr>
+<tr>
+<td>Charlie</td>
+<td>2</td>
+<td>12.5</td>
+<td>~$9.50</td>
+<td>1,316</td>
+</tr>
+<tr>
+<td>Diana</td>
+<td>2</td>
+<td>6.5</td>
+<td>~$18.00</td>
+<td>361</td>
+</tr>
+<tr>
+<td>Frank</td>
+<td>2</td>
+<td>7.0</td>
+<td>~$25.00</td>
+<td>280</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Score range: 280 to 4,667.</strong> This is a clean, readable range with clear separation between high and low performers.</p>
+<h3 id="63-alternative-constants-considered-and-rejected">6.3 Alternative Constants Considered and Rejected</h3>
+<table>
+<thead>
+<tr>
+<th>Constant</th>
+<th>Score Range</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$1</td>
+<td>280,000 - 4,667,000</td>
+<td>Scores in the millions. Unreadable. Rejected.</td>
+</tr>
+<tr>
+<td>$100</td>
+<td>2,800 - 46,670</td>
+<td>Reasonable but less intuitive. &#34;$100 of AI&#34; is too small for executive framing.</td>
+</tr>
+<tr>
+<td><strong>$1,000</strong></td>
+<td><strong>280 - 4,667</strong></td>
+<td><strong>Clean range. Intuitive unit. Selected.</strong></td>
+</tr>
+<tr>
+<td>$10,000</td>
+<td>28 - 467</td>
+<td>Compresses the low end. A score of 28 vs 35 is hard to reason about.</td>
+</tr>
+<tr>
+<td>$100,000</td>
+<td>2.8 - 46.7</td>
+<td>Too small. Feels like a percentage, not a productivity metric.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="64-the-normalization-constant-is-fixed">6.4 The Normalization Constant Is Fixed</h3>
+<p>$1,000 is part of the TIER specification. It does not change between RPT versions. This ensures that a TIER score of 1,500 always means &#34;1,500 outcome points per $1,000 of AI inference&#34; regardless of measurement year.</p>
+<hr>
+<h2 id="7-cost-engine-implementation">7. Cost Engine Implementation</h2>
+<h3 id="71-event-processing-pipeline">7.1 Event Processing Pipeline</h3>
+<blockquote>
+<p>⚠️ <strong>Illustrative pseudocode — the fallback branch is target design.</strong> The
+<code>infer_tier_from_model_name</code> / <code>RPT[tier + &#34;-default&#34;]</code> lookup and the
+<code>price_confidence</code> enrichment below are <strong>not</strong> what ships. The real
+<code>ComputeCost</code> (<code>internal/store/prices.go</code>) resolves an unmatched model to a
+self-hosted reference rate (size-class heuristic or flat <code>self-hosted-medium</code>
+$0.50/M) with a one-time <code>WARN</code> and the unknown-model event/cost counters
+(#267/#135); there is no <code>-default</code> tier and no <code>price_confidence</code> column. See
+the implementation-status banner at the top.</p>
+</blockquote>
+<pre><code>For each token_event arriving at the cost engine:
+
+1. EXTRACT model string from event
+   model_raw = event.model  # e.g., &#34;claude-sonnet-4-20250514&#34;
+
+2. NORMALIZE model string
+   model_family = strip_date_suffix(strip_version_patch(model_raw))
+   # &#34;claude-sonnet-4-20250514&#34; -&gt; &#34;claude-sonnet-4&#34;
+
+3. DETERMINE source type
+   if event.source in [&#34;self_hosted&#34;, &#34;vllm&#34;, &#34;llama_server&#34;, &#34;ollama&#34;, &#34;tgi&#34;]:
+       source_type = &#34;self_hosted&#34;
+   else:
+       source_type = &#34;api&#34;
+
+4. LOOK UP reference price
+   if source_type == &#34;api&#34;:
+       if model_family in RPT:
+           input_price  = RPT[model_family].input_per_million
+           output_price = RPT[model_family].output_per_million
+           confidence   = &#34;exact&#34;
+       else:
+           tier = infer_tier_from_model_name(model_family)
+           input_price  = RPT[tier + &#34;-default&#34;].input_per_million
+           output_price = RPT[tier + &#34;-default&#34;].output_per_million
+           confidence   = &#34;estimated&#34;
+   else:  # self_hosted
+       sh_tier    = assign_self_hosted_tier(model_family, event.model_metadata)
+       cost_rate  = RPT[sh_tier].cost_per_million
+       confidence = &#34;reference_tier&#34;
+
+5. COMPUTE effective cost
+   if source_type == &#34;api&#34;:
+       cost = (event.input_tokens * input_price / 1_000_000)
+            + (event.output_tokens * output_price / 1_000_000)
+   else:
+       total_tokens = event.input_tokens + event.output_tokens
+       cost = total_tokens * cost_rate / 1_000_000
+
+6. STORE enriched event
+   event.effective_cost    = cost
+   event.rpt_version       = &#34;RPT-2026&#34;
+   event.price_confidence  = confidence
+   event.model_family      = model_family
+   event.self_hosted_tier  = sh_tier if self_hosted else null
+   store(event)
+</code></pre>
+<h3 id="72-tier-score-computation">7.2 TIER Score Computation</h3>
+<pre><code>function compute_tier(entity, period, rpt_version):
+    # entity = developer | team | division | org
+    # period = week | month | quarter
+
+    events = get_events(entity, period, rpt_version)
+
+    total_cost = SUM(event.effective_cost for event in events)
+
+    outcomes = get_outcomes(entity, period)
+    weighted_outcome = SUM(o.weight * o.quality_multiplier for o in outcomes)
+
+    if total_cost == 0:
+        return null  # No AI usage in period; TIER is undefined, not infinity
+
+    tier_score = weighted_outcome / (total_cost / 1000.0)
+
+    return {
+        &#34;score&#34;: tier_score,
+        &#34;total_cost&#34;: total_cost,
+        &#34;weighted_outcome&#34;: weighted_outcome,
+        &#34;rpt_version&#34;: rpt_version,
+        &#34;period&#34;: period,
+        &#34;event_count&#34;: len(events),
+        &#34;price_confidence&#34;: min_confidence(events)  # lowest confidence in the set
+    }
+</code></pre>
+<h3 id="73-edge-cases">7.3 Edge Cases</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero tokens in period</td>
+<td>TIER = null (undefined). Not zero, not infinity. Displayed as &#34;No data.&#34;</td>
+</tr>
+<tr>
+<td>Zero outcomes in period</td>
+<td>TIER = 0.0. The developer consumed AI but shipped nothing. This is a legitimate and informative score.</td>
+</tr>
+<tr>
+<td>All events have <code>confidence: &#34;estimated&#34;</code></td>
+<td>TIER is computed but flagged with a warning: &#34;Score based on estimated pricing -- model identification may be incomplete.&#34;</td>
+</tr>
+<tr>
+<td>Self-hosted with no model metadata</td>
+<td>Default to <code>self-hosted-standard</code> ($0.50/M). Log a warning to improve model tagging.</td>
+</tr>
+<tr>
+<td>Image generation events</td>
+<td>Use <code>cost_per_image</code> from RPT instead of per-token pricing. Sum into total_cost normally.</td>
+</tr>
+<tr>
+<td>Token events with only total_tokens (no input/output split)</td>
+<td>For API models: assume a 60/40 input/output split (industry average). For self-hosted: use total tokens at the combined rate. Flag as <code>confidence: &#34;estimated&#34;</code>.</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="8-governance-and-maintenance">8. Governance and Maintenance</h2>
+<h3 id="81-rpt-publication-process">8.1 RPT Publication Process</h3>
+<blockquote>
+<p>⚠️ <strong>Proposed process, not yet operating.</strong> No RPT has been published through
+this process, and no release has been cut; the community-review and
+January-1 publication steps below are the intended governance model, not a
+record of anything that has happened. Today the table ships embedded
+(<code>internal/store/prices.yaml</code>, v7, effective 2026-07-13).</p>
+</blockquote>
+<ol>
+<li><strong>Data collection (December):</strong> The TIER project scrapes current list prices from all major providers&#39; public pricing pages.</li>
+<li><strong>Self-hosted tier calibration (December):</strong> Review GPU pricing trends, update the three self-hosted tier rates if hardware costs have shifted materially (&gt;20% change from prior year).</li>
+<li><strong>Community review (December 15-31):</strong> Proposed RPT is published as a GitHub PR for community comment.</li>
+<li><strong>Publication (January 1):</strong> RPT-YYYY is merged and tagged. It becomes the sole reference for the new year.</li>
+<li><strong>Mid-year addenda:</strong> New model entries are proposed via PR and merged after 7-day review. Existing entries are never modified mid-year.</li>
+</ol>
+<h3 id="82-self-hosted-tier-calibration-methodology">8.2 Self-Hosted Tier Calibration Methodology</h3>
+<p>The self-hosted reference costs are derived from a reference configuration:</p>
+<p><strong>Reference hardware:</strong> NVIDIA DGX-class system (H200 or equivalent generation)
+<strong>Amortization:</strong> 3 years, straight-line
+<strong>Utilization:</strong> 50% (accounts for idle time, maintenance, burst headroom)
+<strong>Electricity:</strong> $0.10/kWh (US average commercial rate)
+<strong>Staffing overhead:</strong> 10% of hardware cost (1 part-time ML engineer per 5 GPU nodes)
+<strong>PUE (Power Usage Effectiveness):</strong> 1.3 (modern data center)</p>
+<pre><code>Annual cost per GPU node =
+    (hardware_cost / 3)           # amortization
+    + (power_draw_kw * 8760 * PUE * electricity_rate)  # electricity
+    + (hardware_cost / 3 * 0.10)  # staffing
+
+Cost per token =
+    annual_cost / (tokens_per_second * 3600 * 8760 * utilization)
+</code></pre>
+<p>This calculation is published alongside the RPT for transparency. Organizations can see exactly how the self-hosted tiers were derived and raise objections if the assumptions are materially wrong.</p>
+<h3 id="83-what-happens-when-a-provider-changes-pricing-mid-year">8.3 What Happens When a Provider Changes Pricing Mid-Year</h3>
+<p>Nothing. The RPT-2026 prices remain in effect for all of 2026. If Anthropic halves Claude Sonnet pricing in June 2026, TIER scores for H2 2026 will still use the January 2026 reference prices. The actual billing savings are captured in the organization&#39;s finance systems, not in TIER.</p>
+<p>This is intentional. TIER measures developer efficiency against a stable benchmark. If a developer&#39;s TIER improves in H2 2026, it is because they became more efficient, not because their provider dropped prices.</p>
+<hr>
+<h2 id="9-frequently-anticipated-objections">9. Frequently Anticipated Objections</h2>
+<h3 id="reference-prices-penalize-organizations-that-invest-in-self-hosted-infrastructure">&#34;Reference prices penalize organizations that invest in self-hosted infrastructure.&#34;</h3>
+<p>No. Self-hosted tiers are deliberately priced below API equivalents. Running Llama 70B locally costs $2.00/M tokens in TIER vs $15.00/M for Claude Sonnet output via API. A developer who achieves the same outcome with self-hosted inference gets a higher TIER score. The investment in infrastructure is rewarded, not penalized.</p>
+<h3 id="our-enterprise-discount-means-we-actually-pay-5m-for-opus-output-not-75m-tier-makes-us-look-expensive">&#34;Our enterprise discount means we actually pay $5/M for Opus output, not $75/M. TIER makes us look expensive.&#34;</h3>
+<p>TIER is not measuring your procurement efficiency. It is measuring your developer efficiency at a standardized price point. Your $5/M actual cost is relevant to your CFO&#39;s ROI analysis, not to your VP of Engineering&#39;s productivity analysis. Use the &#34;Actual-Cost TIER&#34; organizational override for internal cost management.</p>
+<h3 id="self-hosted-at-200m-is-too-high-our-actual-cost-is-030m-after-amortization">&#34;Self-hosted at $2.00/M is too high. Our actual cost is $0.30/M after amortization.&#34;</h3>
+<p>The reference tier is designed for cross-organization comparability, not internal cost accounting. $2.00/M represents the amortized cost at 50% utilization for organizations that have not yet fully optimized their GPU utilization. If your utilization is 90% and your amortization is complete, your actual cost is lower -- and you can track that via the organizational override for internal dashboards.</p>
+<h3 id="why-not-just-use-actual-costs-every-other-financial-metric-uses-actual-costs">&#34;Why not just use actual costs? Every other financial metric uses actual costs.&#34;</h3>
+<p>Because TIER is not a financial metric. It is a productivity metric. Financial metrics answer &#34;how much did we spend?&#34; Productivity metrics answer &#34;what did we get per unit of effort?&#34; Using actual costs conflates procurement skill with engineering skill. Standardized pricing isolates the developer signal. This is the same reason DORA does not adjust deployment frequency by the cost of the CI/CD platform.</p>
+<h3 id="the-1000-constant-is-arbitrary">&#34;The $1,000 constant is arbitrary.&#34;</h3>
+<p>Yes, in the same way that &#34;per million tokens&#34; in the original formula was arbitrary. The constant exists solely for readability. It could be $500 or $2,000 and the relative rankings would be identical. $1,000 was chosen because it produces scores in the hundreds-to-thousands range and has intuitive meaning in business conversations about AI spend.</p>
+<hr>
+<h2 id="10-summary-of-design-decisions">10. Summary of Design Decisions</h2>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Decision</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>List price or actual price?</td>
+<td><strong>Reference price (RPT)</strong></td>
+<td>Isolates developer efficiency from procurement.</td>
+</tr>
+<tr>
+<td>Price at time of consumption or fixed?</td>
+<td><strong>Fixed per calendar year (RPT-YYYY)</strong></td>
+<td>Enables within-year comparability.</td>
+</tr>
+<tr>
+<td>Self-hosted cost calculation?</td>
+<td><strong>Reference tiers, not actual amortization</strong></td>
+<td>Comparable across orgs. Not gameable.</td>
+</tr>
+<tr>
+<td>Amortization period?</td>
+<td><strong>3 years at 50% utilization (for tier calibration only)</strong></td>
+<td>Used only to derive reference tier prices.</td>
+</tr>
+<tr>
+<td>Shared cluster allocation?</td>
+<td><strong>Irrelevant -- reference tiers eliminate this</strong></td>
+<td>No per-org amortization math needed.</td>
+</tr>
+<tr>
+<td>Utilization rate impact?</td>
+<td><strong>No -- reference tier absorbs this</strong></td>
+<td>50% utilization baked into tier pricing.</td>
+</tr>
+<tr>
+<td>Hybrid cost rollup?</td>
+<td><strong>Simple addition across all sources</strong></td>
+<td>Each event priced independently, then summed.</td>
+</tr>
+<tr>
+<td>Year-over-year comparability?</td>
+<td><strong>TPI (TIER Price Index) for adjustment</strong></td>
+<td>Analogous to CPI. Base year = 2026.</td>
+</tr>
+<tr>
+<td>Normalization constant?</td>
+<td><strong>$1,000 (fixed, never changes)</strong></td>
+<td>Produces readable scores in 280-4,667 range.</td>
+</tr>
+<tr>
+<td>Mid-year price changes?</td>
+<td><strong>Ignored until next RPT</strong></td>
+<td>Stability over accuracy for productivity measurement.</td>
+</tr>
+</tbody>
+</table>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

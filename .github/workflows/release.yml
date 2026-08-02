@@ -1,0 +1,387 @@
+# release.yml -- TIER signed-release lane (self-contained; #92=A / #385).
+#
+# Triggers ONLY on a version tag (`v*`) push or an explicit manual dispatch, so
+# it can never run on a pull request or an ordinary branch push. No tag exists
+# until the first release is cut.
+#
+# This lane is self-contained -- it does NOT call any reusable workflow from
+# another repository or org, so it runs on the free public-repo GitHub Actions
+# and works identically for forkers. TIER has zero private dependencies (go.mod
+# is 100% public and the Dockerfile is a plain `go mod download` + `go build`),
+# so the build needs no registry credentials or private-module tokens beyond the
+# GITHUB_TOKEN used to push to GHCR.
+#
+# Jobs:
+#   1. publish-image -- Buildx build -> load locally -> Trivy CVE gate
+#      (CRITICAL,HIGH) -> push to ghcr.io/tiermetric/tierd ONLY on a clean gate
+#      -> CycloneDX+SPDX SBOMs signed as OCI referrers -> SLSA Build L3
+#      provenance. Scan-before-push means no FIXABLE CRITICAL/HIGH image is ever
+#      published (the gate sets ignore-unfixed, so an as-yet-unfixable CVE is not
+#      a hard block -- near-zero exposure on the static chainguard base + single
+#      static Go binary). All on the GitHub-internal Sigstore trust root (free on
+#      public repos; no cosign, no public Rekor).
+#   2. create-release -- creates the GitHub Release once (avoids a race between
+#      the binaries matrix legs).
+#   3. binaries -- cross-compiles the 5-platform matrix (darwin/arm64,
+#      darwin/amd64, linux/amd64, linux/arm64, windows/amd64), checksums each,
+#      attests build provenance over the archives, and uploads them to the
+#      Release. Windows binaries carry the .exe suffix inside the archive.
+#
+# SHA-PINNING: every action is pinned to a 40-char commit SHA, never a mutable
+# tag, so a tag re-cut cannot silently re-point this lane at attacker content
+# (cf. the tj-actions tag-rewrite supply-chain compromise, Mar 2025). The
+# trailing `# vX.Y.Z` preserves the human-readable version; each SHA was verified
+# to peel to that tag upstream (2026-07-17).
+#
+# NOTE: the image publishes to `ghcr.io/tiermetric/tierd`. The GitHub org owns
+# that GHCR namespace (it is the repo owner). The container image is linux/amd64
+# only for now; the downloadable binaries below cover arm64 and the other
+# platforms. A multi-arch image is a fast-follow.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual re-run only. On a non-tag dispatch the image builds and scans (a
+  # validation pass) but is NOT pushed, and the release-artifact jobs are skipped.
+  workflow_dispatch:
+
+# Least privilege at the top; each job narrows further.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-image:
+    name: Build, scan, sign + publish image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read # checkout
+      packages: write # push to ghcr.io/tiermetric/tierd
+      id-token: write # OIDC for attest-sbom + attest-build-provenance (GitHub-internal Sigstore)
+      attestations: write # attest-sbom + attest-build-provenance
+      security-events: write # upload the Trivy SARIF to the Security tab
+    env:
+      # Push (and sign/attest) only on a real tag push; a manual dispatch on a
+      # non-tag ref builds and scans (validation) but does not push.
+      PUSH: ${{ startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/tiermetric/tierd
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          # Reproducible builds: pin the per-run/per-commit config labels
+          # (created/version/revision) to constants so an unchanged build yields
+          # a stable digest. The real version rides the image TAGS (not part of
+          # the content-addressed digest). metadata-action does NOT honor
+          # SOURCE_DATE_EPOCH for `created` (docker/metadata-action#403), so it
+          # is pinned explicitly here.
+          labels: |
+            org.opencontainers.image.title=tierd
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=reproducible
+            org.opencontainers.image.version=reproducible
+            org.opencontainers.image.created=1970-01-01T00:00:00Z
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=tiermetric
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        # Default docker-container driver on the GitHub-hosted runner (no remote
+        # BuildKit endpoint -- that was the private lane's self-hosted setup).
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The image exporter's `name=` needs a COMMA-separated tag list;
+      # docker/metadata-action emits newline-separated. Pass via env (not inline
+      # ${{ }}) to avoid shell script injection.
+      - name: Tags to CSV (for image exporter)
+        id: tags-csv
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          CSV=$(printf '%s' "$META_TAGS" | paste -sd, -)
+          echo "tags=${CSV}" >> "$GITHUB_OUTPUT"
+
+      # SCAN BEFORE PUSH. Build once and LOAD into the local docker store (no
+      # push) so Trivy can gate the exact image content before anything reaches
+      # the public registry. A CRITICAL/HIGH finding fails the run here, so the
+      # push step below never executes -- a vulnerable image is never published.
+      # Single-platform (linux/amd64), which `load: true` requires.
+      - name: Build image for scan (load, no push)
+        id: build-local
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ghcr.io/tiermetric/tierd:scan
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # TIER's Dockerfile declares only ARG VERSION (FROM lines are pinned; no
+          # GO_VERSION/BASE_IMAGE/COMMIT args), so pass only VERSION. It stamps
+          # main.version via -ldflags, matching `tierd version` / /api/v1/livez.
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+
+      # Trivy CVE gate on the LOCAL image (before push). scanners:vuln only
+      # (secret scanning is redundant with the gitleaks pre-commit standard and
+      # false-positive-prone on built images). limit-severities-for-sarif:'true'
+      # is REQUIRED -- without it the trivy-action wrapper unsets the severity
+      # filter in SARIF mode and the gate fails on LOW/MEDIUM/UNKNOWN findings the
+      # CRITICAL,HIGH filter was meant to exclude.
+      - name: Trivy CVE scan (gate, pre-push)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (ships Trivy >= 0.70.0)
+        with:
+          image-ref: ghcr.io/tiermetric/tierd:scan
+          scanners: vuln
+          format: sarif
+          output: /tmp/trivy-results.sarif
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          limit-severities-for-sarif: 'true'
+
+      # Table format for CVE visibility in the job log. Runs ONLY when the gate
+      # above failed (SARIF output otherwise traps the CVE details in /tmp).
+      - name: Trivy CVE table (log visibility on gate failure)
+        if: failure()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (same SHA as gate step)
+        with:
+          image-ref: ghcr.io/tiermetric/tierd:scan
+          scanners: vuln
+          format: table
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+
+      # Best-effort publish of the Trivy findings to the Security tab. Code
+      # scanning is free on public repos; continue-on-error keeps a 403 (e.g. if
+      # it is not enabled) from failing the build. The Trivy gate above
+      # (exit-code:1) is the load-bearing gate; this only surfaces the findings.
+      - name: Upload Trivy SARIF to GitHub Security tab
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: /tmp/trivy-results.sarif
+          category: 'trivy-tierd'
+
+      # PUSH only after a clean scan (this step is implicitly gated on the gate's
+      # success()) and only on a real tag. Reuses the cached layers from the scan
+      # build, so this is a fast re-export. The image-exporter form (not
+      # push:/tags: shorthand) lets rewrite-timestamp normalize layer mtimes for a
+      # reproducible digest.
+      - name: Build and push (clean gate only)
+        id: build
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          outputs: type=image,"name=${{ steps.tags-csv.outputs.tags }}",push=true,rewrite-timestamp=true
+          labels: ${{ steps.meta.outputs.labels }}
+          # Inline BuildKit provenance/sbom DROPPED (they wrap the build in an
+          # image index whose attestation manifest embeds a timestamp, churning the
+          # digest every build). SLSA provenance + SBOMs are attached below as OCI
+          # referrers that do NOT change the image digest.
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+
+      - name: Generate CycloneDX SBOM
+        if: env.PUSH == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/tiermetric/tierd@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-cyclonedx.json
+          output-file: /tmp/sbom-cyclonedx.json
+          upload-artifact: false
+
+      - name: Generate SPDX SBOM
+        if: env.PUSH == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/tiermetric/tierd@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: sbom-spdx.json
+          output-file: /tmp/sbom-spdx.json
+          upload-artifact: false
+
+      # Sign the SBOMs as OCI referrers on the GitHub-internal Sigstore (same
+      # trust root as the provenance attestation below). Verify with:
+      #   gh attestation verify oci://ghcr.io/tiermetric/tierd@<digest> \
+      #     --repo tiermetric/tier --predicate-type https://cyclonedx.org/bom
+      - name: Sign CycloneDX SBOM (attestation)
+        if: env.PUSH == 'true'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ghcr.io/tiermetric/tierd
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: /tmp/sbom-cyclonedx.json
+          push-to-registry: true
+
+      - name: Sign SPDX SBOM (attestation)
+        if: env.PUSH == 'true'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ghcr.io/tiermetric/tierd
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: /tmp/sbom-spdx.json
+          push-to-registry: true
+
+      # SLSA Build L3 provenance attestation (OCI referrer; does not change the
+      # image digest). Verify with:
+      #   gh attestation verify oci://ghcr.io/tiermetric/tierd@<digest> --repo tiermetric/tier
+      - name: Attest build provenance (SLSA Build L3)
+        if: env.PUSH == 'true'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ghcr.io/tiermetric/tierd
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Print published image references
+        if: env.PUSH == 'true'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          echo "Published to GHCR:"
+          echo "Tags:"
+          printf '%s\n' "$IMAGE_TAGS" | sed 's/^/  /'
+          echo "Digest (immutable; pin this):"
+          echo "  $IMAGE_DIGEST"
+
+  create-release:
+    name: Create the GitHub Release
+    # Only when a version tag is pushed. Runs once so the binaries matrix legs
+    # below never race to create the same release.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if ! gh release view "${version}" >/dev/null 2>&1; then
+            gh release create "${version}" --title "${version}" --generate-notes
+          fi
+
+  binaries:
+    name: Cross-platform binaries + checksums
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload assets to the Release
+      id-token: write # OIDC for attest-build-provenance over the archives
+      attestations: write # attest-build-provenance
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0 # tags needed for `git describe`
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          # These are the binaries users download from the Release page -- they are
+          # NOT built from the Dockerfile. GO-2026-5856 (crypto/tls ECH privacy
+          # leak) is fixed in 1.26.5, so this pin is what makes the published
+          # artifact clean. check-latest:false means the pin is authoritative.
+          go-version: "1.26.5"
+          check-latest: false
+
+      - name: Build binary + checksum
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          out="tierd-${version}-${GOOS}-${GOARCH}"
+          # Windows executables need the .exe suffix; every other platform has
+          # none. The tarball/.sha256 names are GOOS/GOARCH-based and unchanged.
+          ext=""
+          if [ "${GOOS}" = "windows" ]; then
+            ext=".exe"
+          fi
+          go build -trimpath -ldflags "-X main.version=${version}" -o "${out}/tierd${ext}" ./cmd/tierd
+          tar -czf "${out}.tar.gz" "${out}"
+          sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
+
+      # Sign the downloadable archive with SLSA build provenance so an adopter can
+      # `gh attestation verify <file> --repo tiermetric/tier` before trusting a
+      # binary they pulled from the Release page (matches the container's posture).
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'tierd-*.tar.gz'
+
+      - name: Upload binaries to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          # --clobber makes the upload idempotent on re-run.
+          gh release upload "${version}" tierd-*.tar.gz tierd-*.tar.gz.sha256 --clobber

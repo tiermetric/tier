@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER — Quickstart — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier--quickstart">TIER — Quickstart</h1>
+<p><strong>Audience:</strong> anyone who wants to run TIER against a repository for the first time.</p>
+<p><strong>Every command on this page was run against the released binary.</strong> Where a step has a caveat, it is stated inline rather than discovered later.</p>
+<hr>
+<h2 id="table-of-contents">Table of contents</h2>
+<ol>
+<li><a href="#1-install" rel="nofollow">Install</a></li>
+<li><a href="#2-see-it-work-in-one-command" rel="nofollow">See it work in one command</a></li>
+<li><a href="#3-point-it-at-your-own-repository" rel="nofollow">Point it at your own repository</a></li>
+<li><a href="#4-the-free-cost-view" rel="nofollow">The free cost view</a></li>
+<li><a href="#5-the-full-tier-score" rel="nofollow">The full TIER score</a></li>
+<li><a href="#6-capturing-openai-codex-spend" rel="nofollow">Capturing OpenAI Codex spend</a></li>
+<li><a href="#7-viewing-the-dashboard-from-another-machine" rel="nofollow">Viewing the dashboard from another machine</a></li>
+<li><a href="#8-running-on-a-different-port" rel="nofollow">Running on a different port</a></li>
+<li><a href="#9-what-each-command-actually-needs" rel="nofollow">What each command actually needs</a></li>
+</ol>
+<hr>
+<h2 id="1-install">1. Install</h2>
+<pre><code>go install github.com/tiermetric/tier/cmd/tierd@latest
+</code></pre>
+<p><code>@latest</code> resolves to the newest tagged release — it does <strong>not</strong> track <code>main</code>,
+so you always get a published, reproducible version. Pin an exact tag instead
+(<code>@v0.2.0</code>) when you need a build that never moves, e.g. in CI.</p>
+<p>Or download a signed release binary from
+<a href="https://github.com/tiermetric/tier/releases" rel="nofollow">github.com/tiermetric/tier/releases</a>.</p>
+<p>Confirm the build:</p>
+<pre><code>tierd version        # also: tierd -version / --version / -v
+</code></pre>
+<h2 id="2-see-it-work-in-one-command">2. See it work in one command</h2>
+<p>No configuration, no database, no repository — synthetic data:</p>
+<pre><code>tierd demo           # then open http://127.0.0.1:8080
+</code></pre>
+<p>Everything on that dashboard is invented (developers named <code>demo-*</code>, issues
+<code>DEMO-*</code>). It is the fastest way to see what TIER produces before pointing it at
+anything real.</p>
+<h2 id="3-point-it-at-your-own-repository">3. Point it at your own repository</h2>
+<p>Before measuring anything, check that capture works on your machine:</p>
+<pre><code>cd ~/src/your-repo
+tierd doctor --repo .
+</code></pre>
+<p><code>doctor</code> reports what it can and cannot capture. A common first result is an
+<strong>attribution FAIL</strong> — TIER telling you that a large share of your AI spend
+cannot be tied to any issue. That is the tool working, not breaking: name
+branches <code>feature/&lt;issue-number&gt;-slug</code> so cost can be linked to an outcome, or
+lower <code>--min-attribution</code> if partial coverage is acceptable for this install.</p>
+<h2 id="4-the-free-cost-view">4. The free cost view</h2>
+<pre><code>tierd score --repo . --since 2026-05-01
+</code></pre>
+<p>This reads your local Claude Code session logs and prints <strong>cost per issue</strong> —
+no server, no token, no GitHub access. It is the day-one view: where the money
+went, before any outcomes are recorded.</p>
+<p><strong><code>score</code> shows cost, not a full TIER score.</strong> A TIER score is cost per
+<em>accepted</em> outcome, and outcomes come from merged-PR history — the next step.</p>
+<h2 id="5-the-full-tier-score">5. The full TIER score</h2>
+<p>A TIER score needs outcomes. Reconstruct them from merged PRs, then serve:</p>
+<pre><code># 1. Reconstruct outcomes from merged-PR history (do this BEFORE serve —
+#    SQLite is single-writer).
+tierd backfill --repo owner/name --token @/path/to/github-token
+
+# 2. Run the server: it records new PR outcomes and serves the dashboard.
+tierd serve --db ~/.tier/tier.db --aggregation developer --watch-repo ~/src/your-repo
+</code></pre>
+<p><code>--aggregation</code> is <strong>required and has no default</strong> — <code>serve</code> refuses to start
+without it, so an existing deployment&#39;s privacy posture never changes silently:</p>
+<ul>
+<li><code>developer</code> — named per-developer rows (solo use, or where that is permitted).</li>
+<li><code>team</code> — team-level aggregates only, k-anonymized, never naming an individual.</li>
+<li><code>division</code> — one level higher again.</li>
+</ul>
+<p>Then open <code>http://127.0.0.1:8080</code>.</p>
+<h2 id="6-capturing-openai-codex-spend">6. Capturing OpenAI Codex spend</h2>
+<p>TIER captures Codex, but through a different path than Claude Code, and it is
+<strong>off by default</strong>:</p>
+<pre><code>tierd serve --aggregation developer \
+  --watch-repo ~/src/your-repo \
+  --codex-rollout
+</code></pre>
+<p>Two things to know:</p>
+<ul>
+<li><strong><code>--codex-rollout</code> requires <code>--watch-repo</code>.</strong> Codex spend is attributed to
+the watched repositories; with no watched repo there is nothing to attribute
+it to, and <code>serve</code> now refuses to start rather than silently capturing
+nothing.</li>
+<li><strong><code>tierd score</code> does not capture Codex</strong> — it reads Claude Code sessions
+only. Codex is captured by <code>serve</code> and by <code>ship</code> (below), from Codex&#39;s own
+local rollout logs. The reverse proxy cannot capture it at all, because Codex
+speaks the OpenAI Responses API rather than Chat Completions.</li>
+</ul>
+<p><strong>If the server runs centrally and Codex runs on a laptop,</strong> the same flag goes
+on the shipper — it is off by default there too:</p>
+<pre><code>tierd ship --server https://tier.example --repo ~/src/your-repo \
+  --codex-rollout --api-token @/path/to/token
+</code></pre>
+<p>Without that flag, a central deployment records the laptop&#39;s Codex <strong>outcomes</strong>
+(they arrive by webhook, whichever model did the work) while none of its
+<strong>per-developer cost</strong> ever lands. That does not read as &#34;Codex is missing&#34; — it
+reads as &#34;Codex work was free&#34;, which inflates the score of exactly the
+developers moving onto the cheaper path (#492).</p>
+<p>⚠️ <strong>Pass <code>--repo</code> explicitly on <code>ship</code>.</strong> It defaults to <code>.</code>, and a cron or
+launchd job usually runs from <code>$HOME</code>. If <code>$HOME</code> is not a git checkout the run
+fails loudly — exit 1, <em>&#34;does not appear to be a git repository&#34;</em>. But if <code>$HOME</code>
+<strong>is</strong> a checkout, such as a dotfiles repo, every Codex session belonging to
+another repository falls outside the scope, nothing ships, and the run <strong>exits
+0</strong>. Unlike <code>serve</code>, which refuses to start when <code>--codex-rollout</code> has no
+repository to attribute to, that case is silent.</p>
+<h2 id="7-viewing-the-dashboard-from-another-machine">7. Viewing the dashboard from another machine</h2>
+<p><strong>The demo is safe to expose directly</strong> — it is read-only and every row is
+synthetic:</p>
+<pre><code>tierd demo --addr 0.0.0.0:8124      # then http://&lt;this-host&gt;:8124
+</code></pre>
+<p><strong>A real <code>serve</code> deployment must not be exposed unauthenticated.</strong> It carries
+real spend, so a non-loopback bind requires a token:</p>
+<pre><code>tierd serve --addr 0.0.0.0:8124 \
+  --api-token @/path/to/token \
+  --aggregation team \
+  --watch-repo ~/src/your-repo
+</code></pre>
+<p>If you would rather not open a port at all, tunnel over SSH from the machine you
+are browsing on — nothing is exposed to the network:</p>
+<pre><code>ssh -N -L 8080:127.0.0.1:8080 you@the-host   # then http://127.0.0.1:8080 locally
+</code></pre>
+<h2 id="8-running-on-a-different-port">8. Running on a different port</h2>
+<p>Every server command takes <code>--addr host:port</code>:</p>
+<pre><code>tierd demo  --addr 127.0.0.1:8123
+tierd serve --addr 127.0.0.1:9000 --aggregation developer --watch-repo ~/src/your-repo
+</code></pre>
+<h2 id="9-what-each-command-actually-needs">9. What each command actually needs</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Needs a repo?</th>
+<th>Needs a token?</th>
+<th>Produces</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tierd demo</code></td>
+<td>no</td>
+<td>no</td>
+<td>synthetic dashboard</td>
+</tr>
+<tr>
+<td><code>tierd doctor</code></td>
+<td>yes (<code>--repo</code>)</td>
+<td>no</td>
+<td>a capture health check</td>
+</tr>
+<tr>
+<td><code>tierd score</code></td>
+<td>yes (<code>--repo</code>)</td>
+<td>no</td>
+<td>cost per issue (Claude Code only)</td>
+</tr>
+<tr>
+<td><code>tierd backfill</code></td>
+<td>yes (<code>--repo owner/name</code>)</td>
+<td>GitHub token</td>
+<td>reconstructed outcomes</td>
+</tr>
+<tr>
+<td><code>tierd serve</code></td>
+<td>for live capture (<code>--watch-repo</code>)</td>
+<td>for non-loopback binds</td>
+<td>the full TIER score + dashboard</td>
+</tr>
+</tbody>
+</table>
+<p>Run any command with <code>-h</code> for its full flag list.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

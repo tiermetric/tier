@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peer Learning with TIER: Move Practices, Not Scores — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="peer-learning-with-tier-move-practices-not-scores">Peer Learning with TIER: Move Practices, Not Scores</h1>
+<blockquote>
+<p><strong>The one rule.</strong> A team gets better together by sharing <em>what someone
+changed and what happened</em> -- a practice -- not by comparing frozen
+individual numbers. TIER already ships every surface this workflow needs.
+There is no new feature here: it is a way of using <code>/scores</code>, the dashboard,
+and <code>/scores/compare</code> that stays name-free and coercion-free by construction.</p>
+</blockquote>
+<p>TIER grades the <strong>work, not the worker</strong> (see the
+<a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">project README</a> and
+<a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a>). This page shows a team lead
+how to run peer learning on that principle: read the name-free levers as
+discussion prompts, agree one practice change, then measure honestly whether it
+helped.</p>
+<h2 id="table-of-contents">Table of contents</h2>
+<ul>
+<li><a href="#what-this-is" rel="nofollow">What this is</a></li>
+<li><a href="#the-levers-retro" rel="nofollow">The levers retro</a></li>
+<li><a href="#the-beforeafter-practice-experiment" rel="nofollow">The before/after practice experiment</a></li>
+<li><a href="#capture-the-practice" rel="nofollow">Capture the practice</a></li>
+<li><a href="#anti-coercion-policy" rel="nofollow">Anti-coercion policy</a></li>
+<li><a href="#what-not-to-do" rel="nofollow">What NOT to do</a></li>
+</ul>
+<hr>
+<h2 id="what-this-is">What this is</h2>
+<p>Practice transfer, not number transfer. When one part of a team has learned to
+get more yield per $1,000 -- higher cache reuse, less premium-model spend on
+routine work, less undirected exploration -- the thing worth spreading is the
+<em>habit that produced it</em>, described in words, not a leaderboard cell.</p>
+<p>TIER supports this with three shipped surfaces and nothing else:</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>What it gives the retro</th>
+<th>Names anyone?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/v1/scores</code> + the dashboard</td>
+<td>The name-free <strong>levers</strong> and work-type segments</td>
+<td>No -- whole-window, name-free</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/scores/compare</code> (#277)</td>
+<td>A before/after <strong>delta</strong> with a CI-honest <code>significant</code> flag</td>
+<td>Not in team/division mode</td>
+</tr>
+<tr>
+<td>Your team&#39;s own runbook</td>
+<td>The <strong>narrative</strong>: what changed, why, what happened</td>
+<td>Written by humans, not TIER</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Positioning guardrail.</strong> TIER&#39;s served unit is the team/quarter. A
+per-developer number exists, but it is a <strong>private self-diagnostic</strong> for an
+individual to raise their <em>own</em> yield -- never a ranking input. Keep every
+step below name-free or self-only.</p>
+</blockquote>
+<hr>
+<h2 id="the-levers-retro">The levers retro</h2>
+<p>Run this as a standing team retro (monthly or per-cycle). It uses only the
+<strong>name-free levers</strong> on <code>GET /api/v1/scores</code> -- the same numbers the dashboard
+renders in its cost-composition panel. None of them names an individual, so
+they are safe to project on a shared screen in any aggregation mode.</p>
+<p><strong>The levers, and the question each one prompts:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Lever (field on <code>/scores</code>)</th>
+<th>Reads as</th>
+<th>Discussion prompt</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cost_composition.cache_read_share</code></td>
+<td>Cache-hit share of input-side tokens</td>
+<td>Are we re-reading context we could cache? Who has a workflow that keeps this high?</td>
+</tr>
+<tr>
+<td><code>cost_composition.premium_model_share</code></td>
+<td>Spend share on frontier/reasoning models</td>
+<td>Are we reaching for a premium model on routine work a cheaper one handles?</td>
+</tr>
+<tr>
+<td><code>data_quality.exploratory_cost_share</code></td>
+<td>Share of spend that was exploratory (mainline, no issue)</td>
+<td>How much is undirected exploration, and is that deliberate or drift?</td>
+</tr>
+<tr>
+<td><code>work_types[]</code></td>
+<td>Yield <strong>within</strong> one work category (#187)</td>
+<td>Compared like-for-like (bugfix vs bugfix), where is the practice gap?</td>
+</tr>
+</tbody>
+</table>
+<p><strong>How to run it:</strong></p>
+<ol>
+<li>Open the dashboard (served at <code>http://127.0.0.1:8080/</code> by default) or fetch
+<code>GET /api/v1/scores</code> for the window, and read the cost-composition panel plus
+the work-type segments.</li>
+<li>Treat each lever as a <strong>prompt, not a verdict</strong>. A high
+<code>premium_model_share</code> is not &#34;bad&#34; -- it is a question: is the premium spend
+buying premium outcomes, or is it habit?</li>
+<li>Compare <strong>within a work type</strong> (<code>work_types[]</code>), never across types. The
+pooled top-level <code>total</code> is back-compat only and is explicitly <strong>not</strong> a
+cross-type ranking.</li>
+<li>Agree <strong>one</strong> practice change to try -- e.g. &#34;route routine refactors to the
+cheaper model,&#34; or &#34;start sessions from a cached project brief.&#34; One change,
+so the next step can actually attribute the effect.</li>
+</ol>
+<blockquote>
+<p><strong>Honesty caveat.</strong> Yield reflects task mix and context, not raw talent. A
+senior on a legacy module can show a lower lever than a junior on greenfield.
+Read the levers to find <em>practices to copy</em>, never to rank people. There is
+deliberately no absolute good/bad band (see <a href="rubric.html" rel="nofollow">docs/rubric.md</a>).</p>
+</blockquote>
+<p>Because <code>cost_composition</code> and the <code>data_quality</code> shares are name-free, they
+carry <strong>identically in developer and anonymized (team/division) mode</strong> -- they
+do not defeat k-anonymity, so this retro works even when the deployment never
+emits per-developer rows.</p>
+<hr>
+<h2 id="the-beforeafter-practice-experiment">The before/after practice experiment</h2>
+<p>You changed one practice. Did it help? Test it with
+<code>GET /api/v1/scores/compare</code> (#277): two half-open windows -- <strong>A = before</strong>,
+<strong>B = after</strong> -- and read the result honestly.</p>
+<p>Every delta is <strong>B - A</strong>. The endpoint reuses the exact windowed computation as
+<code>/scores</code>, so a compared number never diverges from what <code>/scores</code> reports for
+the same window.</p>
+<p><strong>Worked example (illustrative).</strong> Say the team adopted &#34;cheaper model for
+routine refactors&#34; on 2026-06-01. Compare the month before against the month
+after:</p>
+<pre><code>GET /api/v1/scores/compare?since_a=2026-05-01&amp;until_a=2026-06-01\
+&amp;since_b=2026-06-01&amp;until_b=2026-07-01
+</code></pre>
+<pre><code># read-only viewer token (--read-token, #190) is enough for this GET
+curl -sS -H &#34;Authorization: Bearer $TIER_READ_TOKEN&#34; \
+  &#34;http://127.0.0.1:8080/api/v1/scores/compare?since_a=2026-05-01&amp;until_a=2026-06-01&amp;since_b=2026-06-01&amp;until_b=2026-07-01&#34;
+</code></pre>
+<p><strong>Reading the result honestly</strong> is the whole point:</p>
+<ul>
+<li>Each row carries <code>delta_tier</code>, <code>delta_weighted_points</code>,
+<code>delta_total_cost_usd</code>, and a <code>significant</code> flag.</li>
+<li><code>significant</code> is <code>true</code> <strong>only</strong> when the two 95% bootstrap TIER confidence
+intervals do <strong>not</strong> overlap (and the row is <code>ranked</code> in both windows).</li>
+<li><strong>Overlapping CIs, or a window below the ranking floor, means
+<code>significant: false</code> -- the move is within sampling noise. Do not over-read
+it.</strong> A positive <code>delta_tier</code> with <code>significant: false</code> is &#34;promising, keep
+watching,&#34; not &#34;it worked.&#34;</li>
+<li>Watch the honest windowing skew too: a recent window B reads artificially low
+because cost books up front and outcomes land at merge time. See
+<a href="interpreting-the-number.html" rel="nofollow">docs/interpreting-the-number.md</a> before trusting
+a short after-window.</li>
+</ul>
+<p><strong>It works in team/division mode too</strong> -- the endpoint is an aggregate view, so
+in anonymized mode it returns <code>200</code> with k-anonymized group deltas (k-anonymity
+is a two-window <strong>intersection</strong>: a group must clear the floor in <em>both</em> windows
+to appear as a named row). One honest caveat there:</p>
+<blockquote>
+<p><strong>In team/division mode, <code>significant</code> is always <code>false</code>.</strong> Group aggregates
+carry no bootstrap CI, so the significance test is simply <em>not computed</em> at
+group grain -- absence of a significant flag is <strong>not</strong> evidence of &#34;no
+effect.&#34; In anonymized mode, read the delta as <strong>directional only</strong>: the sign
+and rough size of the move, not a pass/fail verdict.</p>
+</blockquote>
+<hr>
+<h2 id="capture-the-practice">Capture the practice</h2>
+<p>TIER stores the numbers. <strong>Humans store the narrative.</strong> The learning does not
+live in the database -- it lives in the sentence a teammate can read next
+quarter and copy.</p>
+<p>After the experiment, write the practice into the team&#39;s <strong>own</strong> shared doc or
+runbook -- not into TIER, which has no field for it. A good entry is four lines:</p>
+<pre><code>### Practice: cheaper model for routine refactors  (adopted 2026-06-01)
+- Change: route bugfix/refactor sessions to the standard model; reserve the
+  premium model for design and hard reasoning.
+- Signal watched: premium_model_share on /scores; delta_total_cost_usd on
+  /scores/compare (May vs June).
+- Result: premium share fell, delta_tier positive but significant:false after
+  one month -- directional, re-check next cycle.
+- Keep / drop: keep; revisit at the next levers retro.
+</code></pre>
+<p>That entry is what actually transfers between people. The TIER surfaces told you
+<em>where to look</em> and <em>whether the move cleared noise</em>; your runbook says <em>what to
+do</em>.</p>
+<hr>
+<h2 id="anti-coercion-policy">Anti-coercion policy</h2>
+<p>TIER measures the <strong>work, not the worker</strong>. This policy is a hard line for any
+team using this workflow, and it is consistent with
+<a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a>, which states TIER numbers
+<strong>should not be fed into individual performance reviews, compensation,
+promotion, ranking-and-yanking, or disciplinary processes</strong>.</p>
+<p>Concretely:</p>
+<ul>
+<li><strong>A manager may never request that an individual&#39;s number be shared or
+screenshotted.</strong> Not in a standup, not in a review, not in a DM. The request
+itself is out of bounds, regardless of the answer.</li>
+<li><strong>Individual numbers are self-view / opt-in only.</strong> A per-developer TIER
+number is a private self-diagnostic, surfaced for the individual to raise
+their <em>own</em> yield. Whether to look at it, and whether to discuss it, is the
+individual&#39;s choice.</li>
+<li><strong>Transparency is the safeguard, not exposure.</strong> When a team does run in
+developer mode, both the individual and their manager see the <em>same</em>
+transparent number -- and its purpose is to <strong>coach and optimize token
+spend, never to rank or appraise</strong>.</li>
+<li><strong>The honest caveat travels with every number.</strong> Yield reflects task mix and
+context, not raw talent. No pay, promotion, or ranking language attaches to a
+TIER number, ever.</li>
+</ul>
+<p>Deployments in co-determined jurisdictions have a <em>legal</em> reason for this too --
+see <a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a> for works-council, DPIA,
+and GDPR Article 22 guidance. The anonymized <code>--aggregation team|division</code> modes
+(k-anonymity floor default 5, hard minimum 3) exist precisely so an organization
+can run this workflow without ever naming an individual.</p>
+<hr>
+<h2 id="what-not-to-do">What NOT to do</h2>
+<table>
+<thead>
+<tr>
+<th>Do NOT</th>
+<th>Do instead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rank teammates against each other by TIER</td>
+<td>Compare the <strong>name-free levers</strong> and copy the practice behind the better one</td>
+</tr>
+<tr>
+<td>Tie a tier, or any lever, to pay, promotion, or a review</td>
+<td>Use it to coach token-spend habits; keep it out of appraisal entirely</td>
+</tr>
+<tr>
+<td>Ask for, share, or screenshot another developer&#39;s number</td>
+<td>Keep individual numbers self-view / opt-in; project only name-free aggregates</td>
+</tr>
+<tr>
+<td>Read a <code>significant: false</code> (or a team-mode delta) as proof a change worked</td>
+<td>Treat it as directional; re-check next cycle before claiming an effect</td>
+</tr>
+<tr>
+<td>Compare yield across different work types</td>
+<td>Compare <strong>within</strong> a <code>work_type</code> segment (#187)</td>
+</tr>
+<tr>
+<td>Trust a short, recent after-window at face value</td>
+<td>Account for the windowing skew (<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>)</td>
+</tr>
+</tbody>
+</table>
+<p>Every example on this page is <strong>name-free or self-only</strong>. If a step would put
+one developer&#39;s number in front of anyone but that developer, it is not part of
+this workflow.</p>
+<hr>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="interpreting-the-number.html" rel="nofollow">docs/interpreting-the-number.md</a> -- read the number honestly; the windowing skew.</li>
+<li><a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a> -- the labor-law basis for the anti-coercion policy.</li>
+<li><a href="api-compatibility.html" rel="nofollow">docs/api-compatibility.md</a> -- the exact <code>/scores</code> and <code>/scores/compare</code> contract.</li>
+<li><a href="rubric.html" rel="nofollow">docs/rubric.md</a> -- why there is no absolute good/bad band.
+
+</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

@@ -1,0 +1,800 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER — How It Works Today — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier--how-it-works-today">TIER — How It Works Today</h1>
+<p><strong>Grounded in:</strong> the source in this repository. Every behavior below is anchored to a named file, symbol, or issue number rather than a line number or commit hash, so each claim stays checkable against the code you have checked out.</p>
+<p><strong>Audience:</strong> engineers evaluating whether TIER is ready to run on their own repository.</p>
+<p><strong>Tone:</strong> what it does, what it doesn&#39;t, no marketing.</p>
+<hr>
+<h2 id="table-of-contents">Table of contents</h2>
+<ol>
+<li><a href="#1-what-this-tool-does-in-one-sentence" rel="nofollow">What this tool does in one sentence</a></li>
+<li><a href="#2-what-llms-it-works-for" rel="nofollow">What LLMs it works for</a></li>
+<li><a href="#3-how-it-captures-the-amount-of-tokens-being-used" rel="nofollow">How it captures the amount of tokens being used</a></li>
+<li><a href="#4-how-it-assigns-functionality-outcome-attribution" rel="nofollow">How it assigns functionality (outcome attribution)</a></li>
+<li><a href="#5-how-it-gives-purpose-linking-cost--outcome" rel="nofollow">How it gives purpose (linking cost ↔ outcome)</a></li>
+<li><a href="#6-how-it-says-this-many-tokens--this-much-code--this-much-value" rel="nofollow">How it says &#34;this many tokens + this much code = this much value&#34;</a></li>
+<li><a href="#7-how-it-scores-task-size-and-complexity" rel="nofollow">How it scores task size and complexity</a></li>
+<li><a href="#8-how-it-all-comes-together" rel="nofollow">How it all comes together</a></li>
+<li><a href="#9-is-it-ready-to-dogfood" rel="nofollow">Is it ready to dogfood?</a></li>
+</ol>
+<hr>
+<h2 id="1-what-this-tool-does-in-one-sentence">1. What this tool does in one sentence</h2>
+<p>TIER captures the dollar cost of every AI API call a developer makes, attributes each call to a GitHub issue via the branch name, and (once outcomes flow in from GitHub) divides shipped outcomes by AI dollars spent to produce a per-developer &#34;TIER score.&#34;</p>
+<blockquote>
+<p><strong>Verdict today:</strong> Per-developer <strong>cost attribution</strong> works end-to-end on this repo. As of #18, <code>tierd serve --watch-repo &lt;path&gt; --aggregation developer</code> ingests Claude Code JSONL live via fsnotify, so the dashboard updates as you work. (<code>--aggregation team|developer</code> is <strong>required</strong> — serve refuses to start without it, #185.) The outcomes side still needs three manual ops steps before live TIER scores flow: stand up <code>tierd serve</code> on a public URL (ngrok / Tailscale-funnel), configure the GitHub webhook on the target repo, set <code>TIER_WEBHOOK_SECRET</code>. So today: live <strong>cost</strong> attribution is dogfoodable as-is; live <strong>TIER scores</strong> are one ops session away.</p>
+</blockquote>
+<hr>
+<h2 id="2-what-llms-it-works-for">2. What LLMs it works for</h2>
+<p>Two axes matter: which provider, and which capture path.</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Local session logs</th>
+<th>Reverse proxy</th>
+<th>Manual REST</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic (Claude API)</td>
+<td>Yes — Claude Code JSONL (default)</td>
+<td>Yes (JSON + SSE on #14)</td>
+<td>Yes</td>
+<td><strong>Works in v1</strong></td>
+</tr>
+<tr>
+<td>Codex CLI (OpenAI)</td>
+<td>Yes — rollout logs ¶</td>
+<td><strong>No</strong> — Responses API, unreadable by the proxy ¶</td>
+<td>Yes</td>
+<td><strong>Works in v1</strong> (<code>collectors.codex_rollout</code> / <code>--codex-rollout</code>, #464)</td>
+</tr>
+<tr>
+<td>OpenAI / xAI / DeepSeek</td>
+<td>n/a</td>
+<td>Yes (JSON; SSE on #14) †</td>
+<td>Yes</td>
+<td><strong>Works in v1</strong></td>
+</tr>
+<tr>
+<td>Google Gemini</td>
+<td>n/a</td>
+<td>No route — parser only ‡</td>
+<td>Yes</td>
+<td><strong>Not capturable via proxy</strong> (parser present, unrouted)</td>
+</tr>
+<tr>
+<td>Self-hosted (vLLM etc.)</td>
+<td>n/a</td>
+<td>Yes via OpenAI-compat †</td>
+<td>Yes</td>
+<td><strong>Works in v1</strong></td>
+</tr>
+<tr>
+<td>Anthropic Admin API</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td><strong>Works in v1</strong> (org-level poller, <code>collectors.anthropic_admin</code>, #138)</td>
+</tr>
+<tr>
+<td>OpenAI Usage API</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td><strong>Works in v1</strong> (org-level poller, <code>collectors.openai_usage</code>, #139)</td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>Deferred to v1.5</td>
+</tr>
+<tr>
+<td>GitHub Copilot</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>Deferred to v1.5</td>
+</tr>
+<tr>
+<td>ChatGPT Team / Plus</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>Deferred to v1.5</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>† One OpenAI-compatible upstream at a time.</strong> The proxy exposes a single <code>/openai/</code> mount backed by one <code>openai_target</code>. Capturing xAI, DeepSeek, or a self-hosted OpenAI-compatible endpoint means <strong>repointing</strong> that single <code>openai_target</code> at it — not running it <em>alongside</em> OpenAI on a second route.</p>
+<p><strong>‡ Gemini is not captured today.</strong> A <code>parseGemini</code> unmarshaller exists (<code>internal/proxy/proxy.go</code>), but <code>tierd serve</code> mounts <strong>only</strong> <code>/anthropic/</code> and <code>/openai/</code> (<code>cmd/tierd/main.go</code>) — there is no <code>/gemini/</code> route or flag, so live Gemini API traffic is <strong>not capturable via the proxy</strong>. The parser is dormant until a route is wired. (Manual REST <code>POST /api/v1/costs</code> can still import Gemini spend.)</p>
+<p><strong>Admin / Usage pollers are org-level.</strong> The two poller rows (#138 / #139) are opt-in <code>collectors:</code> config blocks that poll each provider&#39;s org usage/cost API on a settled-day cadence, write coverage-remainder <code>token_events</code> (the gap between realtime capture and the provider aggregate) and reconcile <code>org_actual_spend</code> deltas. They are org-spend reconciliation feeds, <strong>not</strong> per-developer real-time capture.</p>
+<p><strong>¶ Codex is captured from local logs, and only from local logs.</strong> The proxy <strong>cannot</strong> capture Codex: Codex speaks the OpenAI <strong>Responses</strong> API (<code>input_tokens</code> / <code>output_tokens</code>), while <code>parseOpenAI</code> reads the <strong>Chat Completions</strong> usage shape (<code>prompt_tokens</code> / <code>completion_tokens</code>), so a Codex response routed through <code>/openai/</code> yields <strong>no</strong> <code>TokenEvent</code> at all (#463). That gap is closed from the other side: Codex writes per-session rollout logs to <code>~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl</code>, and <code>collectors.codex_rollout</code> (or <code>--codex-rollout</code>) reads them directly — local, per-developer, per-call, no credential and no env-var change (#464). Routing Codex through the proxy remains pointless until a Responses-API parser is wired; the local path is the supported one.</p>
+</blockquote>
+<p><strong>Why Claude is special.</strong> Claude Code writes a per-session JSONL log to <code>~/.claude/projects/**/*.jsonl</code> automatically. TIER reads those files — zero configuration, no proxy in front, no env-var change for the developer. That&#39;s the &#34;Day 1&#34; capture path.</p>
+<p><strong>Codex works the same way.</strong> Codex also writes local session logs, so it gets the same zero-configuration treatment: enable <code>--codex-rollout</code> and TIER reads <code>~/.codex/sessions/**/rollout-*.jsonl</code> directly (#464). It is scoped to the same repository targets as the Claude Code watcher — <code>--watch-repo</code> under <code>serve</code>, <code>--repo</code> under <code>ship</code> — so a Codex session run in another repo on the same machine is dropped rather than mis-attributed. It inherits the same <code>--repo-slug</code> overrides too (#231), which is what keeps a fork&#39;s Codex and Claude Code rows on one repo identity instead of splitting its cost in two.</p>
+<p><strong>Why everything else needs the proxy.</strong> Cursor (when using API keys) and any custom OpenAI/Anthropic SDK consumer don&#39;t emit local logs. To capture them you point <code>ANTHROPIC_BASE_URL</code> / <code>OPENAI_BASE_URL</code> at <code>tierd serve</code>, which acts as a transparent reverse proxy and reads <code>usage</code> blocks off the wire. (Gemini CLI traffic is <strong>not</strong> capturable this way today — the Gemini response parser exists but no <code>/gemini/</code> route is mounted; see the ‡ note above. Codex is <strong>not</strong> capturable this way either; see ¶.)</p>
+<p><strong>What the org-level pollers cover.</strong> The Anthropic Admin and OpenAI Usage pollers (#138 / #139) <strong>shipped</strong>: opt-in <code>collectors:</code> config blocks poll each provider&#39;s org usage/cost API, backfill coverage-remainder <code>token_events</code>, and reconcile <code>org_actual_spend</code>. Cursor/Copilot/ChatGPT Team remain deferred — they don&#39;t expose per-developer real-time token counts, only seat invoices, so seat-cost imputation is still a separate, contained ticket on the roadmap.</p>
+<hr>
+<h2 id="3-how-it-captures-the-amount-of-tokens-being-used">3. How it captures the amount of tokens being used</h2>
+<p>Four capture paths feed one table: <code>token_events</code>. The schema is at <code>internal/store/store.go:16-30</code>.</p>
+<h3 id="3a-jsonl-claude-code-default">3a. JSONL (Claude Code, default)</h3>
+<p>Two entry points share <code>parseSessionFile</code> / <code>joinSessionsToCommits</code>, so both produce byte-identical rows for the same input:</p>
+<ul>
+<li><strong>On-demand scan</strong> — <code>JSONLCollector.Collect</code> at <code>internal/collector/jsonl.go</code>, invoked by <code>tierd score</code>. Walks <code>~/.claude/projects/</code> once, parses every file under <code>since</code>, exits. As of #27 this is a thin wrapper around <code>JSONLCollector.Run(ctx, since, ingester)</code> — the push form new collectors should follow. The shared <code>collector.Ingester</code> interface (<code>internal/collector/collector.go</code>) has one method <code>Ingest(ctx, TokenEvent) error</code>; the production adapter <code>ingester.Store(*store.DB)</code> lives in <code>internal/ingester</code> and forwards each event to <code>InsertTokenEvent</code> after a field-by-field copy. The shipped org-level pollers (Anthropic Admin #138, OpenAI Usage #139) plug in this way — they implement <code>Run(ctx, since, ingester)</code> and reuse the same store adapter; the deferred Copilot/Cursor collectors will follow the same shape. Today Run materialises the full event slice before forwarding — at JSONL scale that&#39;s fine; a future streaming collector (paginated admin-API polling) would emit events as they&#39;re produced.</li>
+<li><strong>Live tail</strong> — <code>collector.Watcher.Run</code> in <code>internal/collector/watcher.go</code>, started by <code>tierd serve --watch-repo &lt;path&gt; --aggregation developer</code> (closes #18; <code>--watch-repo</code> is repeatable for multi-repo developers; <code>--aggregation</code> is required, #185). Subscribes to <code>~/.claude/projects/</code> via fsnotify, attaches new subdirs dynamically as Claude Code creates them, debounces rapid writes (1 second; a single streaming response writes 30-50 times per second), parses the affected file on quiescence. Re-parses are safe because the SQLite INSERT uses <code>ON CONFLICT DO UPDATE</code> with per-field <code>MAX</code>, so a session&#39;s growing totals replace the prior row&#39;s smaller values instead of being silently dropped (this also lets the proxy and JSONL paths share the same INSERT statement without behavior change).</li>
+<li><strong>Incremental tailing</strong> (closes #30). The watcher caches <code>{offset, inode, head-CRC, sessionMetadata}</code> per file across debounces and reads only the bytes appended since the last parse (<code>parseSessionFileFromOffset</code> in <code>internal/collector/jsonl.go</code>). On a 10 MB session, per-debounce cost drops from <strong>~79 ms / 51 MB allocated / 605k allocs</strong> (full reparse, <code>BenchmarkParseSession_FullReparse</code>) to <strong>~11 µs / 5.7 KB / 28 allocs</strong> (incremental, <code>BenchmarkParseSession_Incremental</code>) — a ~7,000× speedup on the development machine; the order-of-magnitude story is the point, exact ratios vary with hardware. Full re-parse triggers on inode change (log rotation), size shrink (truncation), or first-<code>headFingerprintBytes</code> CRC32 mismatch (truncate-and-rewrite-to-similar-size that would otherwise sneak past the size check). Partial trailing lines (writer mid-flush) are not consumed; the cached offset stays put until the terminating <code>\n</code> arrives on the next debounce. Per-path serialization in the debounce timer prevents two callbacks for the same path from racing on the cached offset. Incremental tailing state is in-memory only — a <code>tierd serve</code> restart full-re-parses every file; the store&#39;s per-message <code>IdempotencyKey</code> (#19) + <code>MAX</code>-on-conflict UPSERT (#18) absorb the re-emitted events. The CLI&#39;s on-demand <code>parseSessionFile</code> wrapper bypasses tail-mode trimming so static log inspection still consumes a final line that lacks a trailing newline.</li>
+</ul>
+<p>Both paths share these guarantees:</p>
+<ul>
+<li><code>bufio.Scanner</code> with a 10 MB line buffer so an oversized line can&#39;t stall or infinite-loop the file (fix for #7).</li>
+<li><strong>Dedup by <code>message.id</code></strong> inside each session file. Claude Code emits one assistant entry per streaming chunk <em>and</em> a final post-stream entry, all sharing the same <code>message.id</code>. The placeholder chunks carry partial/zero token counts. Largest-total wins; ties resolve later-wins. This fixes the 10-17x output undercount documented by gille.ai in April 2026 (closes #6).</li>
+<li><strong>Cross-repo bleed filter</strong>: <code>filterSessionsByRepo</code> keeps only sessions whose <code>cwd</code> is at or beneath a target repo path (closes #15). The watcher uses the same four-way symlink-aware match in <code>cwdMatchesAnyTarget</code> (<code>watcher.go</code>). Without this filter, every Claude Code session on the machine got attributed to whichever repo <code>tierd score</code> was pointed at — the bug that made this repo report $35,251 of fake cost vs. the real $45.97.</li>
+<li><strong>Branch → issue id</strong> via <code>issueref.FromBranch</code>. The on-demand path additionally joins to the git log within a ±30 min window; the live path skips the git lookup because a session is usually mid-stream when it lands, before any commit exists yet.</li>
+<li><strong>Per-message TokenEvents</strong> (closes #19). <code>joinSessionsToCommits</code> emits one event per assistant <code>message.id</code>, not one per session. Each event carries <code>IdempotencyKey = MessageIdempotencyKey(&#34;anthropic&#34;, message_id)</code> — the exact format the proxy uses for the same upstream call. A Claude session captured by both JSONL and the proxy emits identical keys and dedupes on the partial unique index in SQLite.</li>
+</ul>
+<h3 id="3b-codex-rollout-logs-codex-cli-opt-in">3b. Codex rollout logs (Codex CLI, opt-in)</h3>
+<ul>
+<li>Entry point under <code>serve</code>: <code>codexrollout.Collector.Run</code> at <code>internal/collector/codexrollout/</code>, enabled by <code>--codex-rollout</code> (env <code>TIER_CODEX_ROLLOUT</code>) or the <code>collectors.codex_rollout</code> config block. Re-scans <code>~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl</code> every <code>scan_interval</code> (default 5 m, floor 30 s). No credential; no env-var change for the developer. The <strong>first</strong> pass backfills every rollout log on disk; after that a <strong>scan cursor</strong> bounds each pass to the files touched since the previous one (plus a two-interval safety overlap), so the per-tick work tracks what changed rather than how much Codex history the machine has. The cursor advances only after a pass&#39;s events have all been ingested — an aborted ingest re-scans rather than dropping the tail.</li>
+<li>Entry point under <code>ship</code>: <code>Collector.Collect</code>, <strong>not</strong> <code>Run</code> — one stateless pass over the whole <code>--since</code> window, no interval and no cursor, because <code>Run</code> loops until cancellation and would hang a cron job forever. A <code>ship --codex-rollout</code> tick therefore re-walks the entire sessions tree every time and relies on server-side idempotency to dedup, which is the same stateless contract the Claude Code leg of <code>ship</code> already has (#492). <code>Collect</code> returns the events from the files that parsed <strong>alongside</strong> an error naming those that did not; <code>ship</code> forwards the good events and only then exits non-zero, so one corrupt rollout log cannot zero out a laptop&#39;s whole Codex spend.</li>
+<li><strong>This is the only Codex capture path.</strong> See the ¶ note in §2. <strong>Both</strong> proxy paths read Chat Completions and neither reads Responses: <code>parseOpenAI</code> on the JSON path, and <code>openAIStreamParser</code> (<code>internal/proxy/sse.go</code>) on the SSE path Codex actually uses, since Codex streams by default and Responses SSE nests usage under the response object. Proxying Codex therefore captures nothing (#463).</li>
+<li><strong>Per-call usage is DERIVED BY DIFFERENCING, never summed.</strong> Each <code>token_count</code> event carries both a cumulative <code>total_token_usage</code> and a per-call <code>last_token_usage</code>. Summing the per-call field is wrong: Codex sometimes <strong>re-emits</strong> a <code>token_count</code> event, double-counting it. Measured on a real captured session (<code>internal/collector/codexrollout/testdata/rollout-duplicate-token-count.jsonl</code>), the cumulative series is <code>[17129, 37728, 58507, 58507, 80154, 101922, 124386]</code> — <code>58507</code> repeats. Summing <code>last_token_usage</code> gives <strong>145,165</strong> tokens against a true total of <strong>124,386</strong>: a 20,779-token, <strong>17 % overcount</strong> straight into the cost figure. Differencing consecutive cumulative snapshots gives per-call granularity, exactness (the deltas telescope to the cumulative total by construction), and automatic dedup (a re-emitted snapshot differences to zero) in one move. This is the same defect class as the Claude Code streaming-chunk duplication in §3a (#6), inverted. Guarded by <code>TestDuplicateTokenCountEventIsNotDoubleCounted</code>.</li>
+<li><strong>Containment invariants are FATAL, not warnings</strong> — matching <code>score.py</code> in the <code>tiermetric/model-bench</code> repository, the reference implementation that priced the Codex half of the TIER Model Report. <code>total_tokens == input_tokens + output_tokens</code>; <code>cached_input_tokens ⊆ input_tokens</code>; <code>reasoning_output_tokens ⊆ output_tokens</code>; the cumulative series is non-decreasing; the cached <em>delta</em> never outruns the input <em>delta</em>; and — the one invariant that is absolute rather than relational — no cumulative count exceeds a 10¹²-token sanity ceiling, since a self-consistent but absurd snapshot would otherwise price to a clamped <code>MaxInt64</code> cost and overflow SQLite&#39;s integer <code>SUM()</code> on the read path. A log that violates any of them contributes <strong>zero</strong> events and is named in an error — a silently-wrong cost figure is worse than no figure. Healthy sibling sessions in the same scan are unaffected. A rollout that never names a model is likewise refused rather than priced at the self-hosted guess rate.</li>
+<li><strong>Token classes never overlap.</strong> <code>cached_input_tokens</code> is carved out of <code>input_tokens</code> (<code>InputTok = input − cached</code>, <code>CacheRead = cached</code>), exactly as <code>parseOpenAI</code> does. <code>reasoning_output_tokens</code> is a <strong>subset</strong> of output and is never added on top. OpenAI publishes no cache-write SKU, so both write buckets stay zero; a nonzero <code>cache_write_input_tokens</code> warns once and is billed at the input rate it is already inside.</li>
+<li><strong>Idempotency</strong>: <code>IdempotencyKey(&#34;codex-rollout&#34;, &#34;openai&#34;, session_id, ordinal)</code>, where the ordinal is the <code>token_count</code> event&#39;s position in the file — stable across re-scans of an append-only log, including across the skipped zero-delta duplicates. Re-scanning collides on the partial unique index and stores one row per call.</li>
+<li><strong>Cross-repo bleed filter</strong>: shares <code>collector.RepoScope</code> with <strong>both</strong> Claude Code paths — the batch scan (<code>filterSessionsByRepo</code>) and the live watcher (<code>matchTarget</code>) — so all three agree byte-for-byte on which sessions are in scope, including the four-way symlink match, the git-worktree fallback, and the multi-target precedence (<code>MatchScopes</code>: every target&#39;s direct containment is tried before any target&#39;s worktree fallback). Issue attribution shares <code>collector.IssueResolver</code> with the JSONL join, so a Codex event and a Claude event on the same branch resolve identically. A rollout captured outside a git checkout keeps its spend in the developer&#39;s denominator under a labeled unattributed bucket rather than dropping it.</li>
+<li>Malformed lines are skipped, not fatal — and because the collector differences <em>cumulative</em> snapshots, a dropped <code>token_count</code> line merges into the next delta, so the session <strong>token</strong> total stays exact and only the per-call split coarsens. Summing per-call values could never offer that. (Exactness is a token property, not a cost one: if the session switched models across a dropped snapshot, the merged delta is priced entirely at the later model&#39;s rate.) An <strong>unterminated final line</strong> is treated as a writer mid-flush and skipped silently — a live Codex session is always mid-write, and warning about it every scan would bury the warning that means real damage. A file that exceeds the 64 MB read cap is <strong>failed</strong>, not truncated: a prefix would be a silent under-report.</li>
+</ul>
+<h3 id="3c-reverse-proxy-openai--claude-api-direct">3c. Reverse proxy (OpenAI / Claude API direct)</h3>
+<ul>
+<li>Entry point: <code>proxy.New</code> at <code>internal/proxy/proxy.go</code>; mounted under <strong>only</strong> <code>/anthropic/</code> and <code>/openai/</code> by <code>tierd serve</code> (<code>cmd/tierd/main.go</code>). There is <strong>no</strong> <code>/gemini/</code> route.</li>
+<li><strong>JSON path</strong>: <code>handleJSON</code>. Buffers the response (10 MB cap), parses with the per-provider unmarshaller, emits one <code>TokenEvent</code>. Two mounted parsers, plus one dormant:
+<ul>
+<li><code>parseAnthropic</code> — <code>msg_*</code> id, <code>usage.input_tokens</code> / <code>output_tokens</code> / cache fields. <strong>Routed</strong> (<code>/anthropic/</code>).</li>
+<li><code>parseOpenAI</code> — <code>chatcmpl-*</code> id, <code>usage.prompt_tokens</code> / <code>completion_tokens</code>, optional <code>prompt_tokens_details.cached_tokens</code>. <strong>Routed</strong> (<code>/openai/</code>). Chat Completions <strong>only</strong> — the Responses shape (<code>usage.input_tokens</code> / <code>output_tokens</code>) is unparsed here and in <code>openAIStreamParser</code>, which is why Codex needs the rollout-log collector (§3b).</li>
+<li><code>parseGemini</code> — <code>responseId</code>, <code>usageMetadata.promptTokenCount</code> / <code>candidatesTokenCount</code>. <strong>Present but NOT routed</strong>: the unmarshaller is written and unit-tested, but no <code>/gemini/</code> mount or flag exists in <code>cmd/tierd</code>, so no live Gemini traffic ever reaches it. Gemini capture is a wiring task, not a shipped path.</li>
+</ul>
+</li>
+<li><strong>SSE streaming path</strong>: <code>internal/proxy/sse.go</code> (PR #14, merged). Without this the proxy captures <strong>zero</strong> real-world traffic from Claude Code or Codex because they default to <code>text/event-stream</code>. The framer normalises <code>\r\n</code> / <code>\r</code> / <code>\n</code> line endings, concatenates multi-line <code>data:</code> fields, and emits at body Close with a 10 MB pending-buffer cap.</li>
+<li><strong>Per-response IdempotencyKey</strong> (closes #9, refined in #19). Each response carries a stable id (Anthropic <code>msg_*</code>, OpenAI <code>chatcmpl-*</code>, and Gemini <code>responseId</code> — parser only, unrouted; no Gemini traffic reaches the proxy). The proxy hashes <code>(provider, id)</code> via <code>collector.MessageIdempotencyKey</code> — the same helper the JSONL collector uses for the same upstream call. The two paths emit identical keys, so a Claude call captured by both is stored exactly once.</li>
+</ul>
+<h3 id="3d-manual-rest">3d. Manual REST</h3>
+<ul>
+<li>
+<p><code>POST /api/v1/costs</code> (<code>internal/api/handler.go</code>). Plain JSON in, validated, written to <code>token_events</code>. Useful for batch imports, scripts, or systems that can&#39;t sit behind the proxy.</p>
+</li>
+<li>
+<p>Optional <code>idempotency_key</code> field on the request (closes #21). When supplied, retries with the same key dedupe on the partial unique index — identical re-submissions land as one row. When omitted, the row stores NULL and re-posts will duplicate (the previous behaviour, retained for back-compat with scripts that don&#39;t track keys).</p>
+</li>
+<li>
+<p>Body capped at 1 MiB via <code>http.MaxBytesReader</code>. <code>DisallowUnknownFields</code> rejects typo&#39;d field names (e.g. <code>IdempotencyKey</code> instead of <code>idempotency_key</code>) so misnamed inputs surface as 400s rather than silently dropping.</p>
+</li>
+<li>
+<p><strong>Auth</strong> (closes #22, #59): bearer-token gated. When <code>TIER_API_TOKEN</code> is set (or <code>--api-token</code> passed to <code>tierd serve</code>), the write endpoints (<code>POST /api/v1/costs</code>, <code>POST /api/v1/actual_spend</code>, <code>POST /api/v1/org_actual_spend</code>, <code>POST /api/v1/outcomes</code>, <code>POST</code>/<code>DELETE /api/v1/developer_alias</code>, <code>PUT</code>/<code>POST</code>/<code>GET /api/v1/org_hierarchy</code>, <code>POST /api/v1/period_membership/{developer}/end</code>, <code>DELETE /api/v1/developer/{id}</code>, <code>GET /api/v1/developer/{id}/export</code>) AND the sensitive score GETs (<code>GET /scores</code>, <code>/scores/{dev}</code>, <code>/metrics</code>, <code>GET /api/v1/org_actual_spend</code>, <code>GET /api/v1/developer_alias</code>) must carry <code>Authorization: Bearer &lt;token&gt;</code> — per-developer spend and the ranking are sensitive (#59). Constant-time compare; mismatched length and missing-header paths produce identical timing. Only the liveness/health probes (<code>/health</code>, <code>/healthz</code>, <code>/livez</code>) stay open. When the token is unset, the endpoints stay open and a startup warning logs — and <code>tierd serve</code> refuses any non-loopback bind in that state, so this is a loopback-only mode fine for laptop testing.</p>
+</li>
+<li>
+<p><strong>Read-only viewer token</strong> (closes #190): <code>--read-token</code> (env <code>TIER_READ_TOKEN</code>, or <code>@/path/to/file</code>) is a SECOND bearer credential scoped to reads only. It is accepted on <code>GET /scores</code>, <code>/scores/{dev}</code>, <code>/metrics</code>, and the dashboard data, and rejected with <code>403</code> on every write endpoint and the reverse proxies. Hand it to a CFO/VP-Eng who needs the dashboard without the write/erase power the api-token confers — the least-privilege step short of SSO/OIDC (deferred with multi-tenancy, #65). It shares the api-token&#39;s secret provisioning exactly (flag, env, <code>@file</code>, and the <code>read_token</code> YAML key) and the same failed-auth lockout. Two safety rules: it must <strong>differ</strong> from the api-token (equal values are refused at startup, since a read token equal to the write token would grant writes), and a read token <strong>alone does not</strong> satisfy the fail-closed bind check — a non-loopback listener still requires the write api-token. Startup logs which scopes are armed (<code>API auth scopes write_armed=… read_armed=…</code>).</p>
+</li>
+<li>
+<p><strong>Brute-force lockout</strong> (closes #36): defence-in-depth on top of the bearer gate. A per-IP failed-auth counter trips a <code>429 Too Many Requests</code> (with <code>Retry-After</code>) once an IP exceeds <code>--auth-max-failures</code> (default <strong>10</strong>) within <code>--auth-failure-window</code> (default <strong>60s</strong>); the IP stays locked for <code>--auth-lockout</code> (default <strong>15m</strong>). A <em>successful</em> auth clears that IP&#39;s counter, so an operator fat-fingering a token a few times is never affected. The gate sits in the shared auth middleware, so it protects <strong>every</strong> auth-gated route (the POST writes <em>and</em> the score GETs share one token — limiting only the POSTs would leave <code>GET /scores</code> as an unthrottled brute-force oracle). State is in-memory and resets on restart (sufficient for v1). Client IP is the TCP peer (<code>RemoteAddr</code>); <code>X-Forwarded-For</code> is deliberately <strong>not</strong> trusted — honoring it would let an attacker mint a fresh bucket per request. Set <code>--auth-max-failures 0</code> to disable. Behind a trusted reverse proxy, also rate-limit at the proxy.</p>
+</li>
+<li>
+<p><strong>Attribution integrity</strong> (closes #34, #82): a manual REST row can only attribute itself to what it actually is. <code>source</code> is forced to <code>&#34;api&#34;</code> (an explicit <code>&#34;jsonl&#34;</code>/<code>&#34;proxy&#34;</code> is rejected with 400) so a client can&#39;t forge automated-capture provenance. <code>fidelity</code> may be <code>&#34;daily&#34;</code> or <code>&#34;estimated&#34;</code> and <strong>defaults to <code>&#34;estimated&#34;</code></strong>; <code>&#34;realtime&#34;</code> is rejected with 400 because realtime attests a per-request exact capture that only the JSONL collector and proxy perform — letting a batch import claim it would fabricate high-fidelity capture and inflate the <code>fidelity=&#39;realtime&#39;</code>-keyed Coverage % / Spend Leverage metrics. <em>Metric-correction note:</em> before #82 an omitted fidelity defaulted to <code>&#34;realtime&#34;</code>, so manual rows were mis-counted as realtime; Coverage % will legitimately <strong>drop</strong> for any caller that relied on that default.</p>
+</li>
+<li>
+<p><strong>Secret provisioning</strong> (closes #37): never pass a literal secret as a flag value — <code>--api-token mytoken</code> / <code>--webhook-secret mysecret</code> leak the value to <code>ps aux</code> (any user on the host), shell history, and process-accounting logs. Use one of, in order of preference: (1) the <code>TIER_API_TOKEN</code> / <code>TIER_WEBHOOK_SECRET</code> env vars; (2) <strong><code>@file</code> indirection</strong> — <code>tierd serve --api-token @/run/secrets/tier-token --webhook-secret @/run/secrets/tier-webhook</code> reads each secret from the named file (trailing CR/LF is trimmed, so <code>echo &#34;$TOKEN&#34; &gt; file</code> works). The <code>@</code> prefix is what triggers the file read; a bare <code>@</code>, an unreadable/missing path, a non-regular file (directory, <code>/dev/*</code>), or a file that trims to empty is a fatal startup error — never a silently-empty (auth-disabling) secret. The literal-value form still works for throwaway laptop testing but is flagged in <code>--help</code>.</p>
+</li>
+<li>
+<p><strong><code>/scores</code> always returns a <code>total</code> block</strong> (closes #25): rollup computed server-side via <code>scoring.RollupTeam</code> across every developer in the response. Includes <code>tier</code>, <code>weighted_points</code>, <code>total_cost_usd</code>, <code>actual_paid_usd</code>, <code>spend_leverage</code>, <code>coverage_pct</code>. The dashboard reads it directly — no client-side reconstruction of team aggregates from rounded per-developer percentages (which the pre-#25 code did, losing precision on <code>coverage_pct</code>). When <code>?team=NAME</code> is set, a separate <code>team</code> block is added alongside <code>total</code> for the filtered subset; back-compat with the pre-#25 scoped-team workflow.</p>
+</li>
+<li>
+<p><strong>Team-only aggregation mode with a k-anonymity floor</strong> (closes #185): a <strong>REQUIRED</strong> <code>--aggregation team|developer</code> setting (env <code>TIER_AGGREGATION</code>, config key <code>aggregation</code>) on <code>tierd serve</code> — there is <strong>no silent default</strong>, so serve refuses to start until an operator explicitly chooses, and an existing deployment&#39;s reporting posture can never change on upgrade by accident. In <code>team</code> mode, <code>GET /api/v1/scores</code>, the dashboard, and <code>GET /api/v1/scores/{developer}</code> <strong>never</strong> surface an individual developer name: <code>/scores</code> replaces the named <code>developers</code> rows with a <code>teams</code> array of <code>scoring.RollupTeam</code> aggregates (and emits <code>developers: []</code>), <code>/scores/{developer}</code> is blanket-<code>404</code>ed (identical for every path value, so it is not an existence oracle), and the plain-text <code>FormatReport</code> prints only the aggregate total. Any team with fewer than the k floor of <strong>contributing</strong> developers (non-zero outcomes/cost/paid — an idle allocated seat does not pad the count) collapses into an aggregate <strong>&#34;other&#34;</strong> bucket whose spend and outcomes stay in the totals (rolled into &#34;other&#34;, <strong>never dropped</strong>, so the grand total is unchanged from developer mode). The floor is <code>--k-anonymity</code> (env <code>TIER_K_ANONYMITY</code>, config key <code>k_anonymity</code>), <strong>default 5, hard minimum 3</strong> — serve refuses a smaller value. This is DORA-style posture for EU works-council / GDPR Art. 22 co-determination regimes (see <a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a>). The local <code>tierd score</code> CLI is a deliberate carve-out (single-operator, reads your own JSONL) and is <strong>not</strong> gated. <strong>Composition with the #133 ranking floor:</strong> the two suppressions are orthogonal and both apply — #133 suppresses a low-<strong>sample</strong> developer from the ranked leaderboard (a data-confidence signal), while #185 suppresses a sub-k <strong>cohort identity</strong> (a privacy signal). A developer can be both low-sample and in a sub-k cohort; in team mode their contribution still rolls into &#34;other&#34; (so totals hold) while their name and their per-developer ranked/CI signal are not emitted at all. The #136 zero-token data-quality signal survives in team mode as a name-free aggregate <code>zero_token_outcome_count</code> (the per-developer list is suppressed).</p>
+</li>
+<li>
+<p><strong>Org-hierarchy write surface</strong> (closes #232): populating <code>org_hierarchy</code> is a <strong>REQUIRED onboarding step for <code>team</code> mode</strong> — without it, every developer resolves to the unnamed team <code>&#34;&#34;</code>, the k-anonymity floor renders the whole company as one anonymous row, and <code>org_actual_spend</code> allocation opens no <code>period_membership</code> seat and reads 0. Four bearer-gated (write-scope) admin endpoints, all of which resolve the developer through the <code>developer_alias</code> map first so hierarchy keys match the score-join&#39;s canonical keys (#125):</p>
+<ul>
+<li><code>PUT /api/v1/org_hierarchy/{developer}</code> — upsert one developer&#39;s <code>{team, division?, org?}</code>; <code>team</code> is required. Returns <code>200</code> with the stored (canonicalized) row.</li>
+<li><code>POST /api/v1/org_hierarchy</code> — <strong>bulk import</strong> a JSON array in <strong>one all-or-nothing transaction</strong> (mirrors <code>POST /api/v1/events</code>: the whole batch is validated first, any bad element <code>400</code>s naming its index, and nothing is written), so a 50-developer onboarding is one call. Returns <code>201 {&#34;accepted&#34;: N}</code>.</li>
+<li><code>GET /api/v1/org_hierarchy</code> — list every assignment, developer-ordered.</li>
+<li><code>POST /api/v1/period_membership/{developer}/end</code> — close a departed developer&#39;s open seat in an org effective a <code>YYYY-MM</code> period (<code>{&#34;org&#34;: &#34;...&#34;, &#34;period_end&#34;: &#34;...&#34;}</code>), so they stop diluting active members&#39; <code>org_total</code> allocation for later periods. Idempotent (<code>200</code>; no-op when there is no open membership).
+These are org <strong>structure</strong>, not per-developer <strong>score</strong> data, so — like the GDPR admin endpoints below (#185 carve-out) — they stay available in <code>team</code> mode: they are how an operator configures that mode, never a surface that names an individual in a report. On boot, <code>tierd serve</code> in <code>team</code> mode logs a startup WARN when <code>org_hierarchy</code> is empty.</li>
+</ul>
+</li>
+<li>
+<p><strong>GDPR data-subject rights — erasure + export</strong> (closes #184): two bearer-gated admin endpoints let an operator honour a GDPR Art. 17 (erasure) or Art. 15 (access) request without hand-editing SQLite.</p>
+<ul>
+<li><code>DELETE /api/v1/developer/{id}</code> — <strong>right to erasure</strong>. Resolves <code>{id}</code> through the <code>developer_alias</code> map (single-hop), computes the full identifier set (canonical id + every raw login that aliases to it), then deletes every row keyed by any of those identifiers across <strong>all</strong> developer-PII tables — <code>token_events</code>, <code>outcomes</code>, <code>actual_spend</code>, <code>org_hierarchy</code>, <code>period_membership</code>, <code>quality_events</code>, <code>quality_history</code> — plus the <code>developer_alias</code> rows themselves, in <strong>one transaction</strong> (all-or-nothing; a partial erasure would be a compliance failure). Returns per-table deleted-row counts: <code>{&#34;deleted&#34;: {&#34;token_events&#34;: N, …, &#34;developer_alias&#34;: M}, &#34;total_deleted&#34;: T}</code>. <strong>Idempotent</strong>: a second call (or an unknown id) deletes nothing and returns <code>404</code> — so replays are safe.</li>
+<li><code>GET /api/v1/developer/{id}/export</code> — <strong>right of access (DSAR artifact)</strong>. Returns every stored row for the resolved identifier set as JSON, grouped by table, with an <code>identifiers</code> list showing which raw logins were merged. <code>404</code> when the developer has no data.</li>
+<li><strong>Authorization (#190):</strong> both are <strong>write/admin-scoped</strong> — the read-only viewer token is rejected <code>403</code>. Export discloses a full individual PII record and erasure is destructive, so neither is a dashboard-viewer operation (stricter than the score GETs, which the read token can reach).</li>
+<li><strong>Team-mode carve-out (#185):</strong> unlike <code>GET /scores/{developer}</code> (blanket-<code>404</code> in team-aggregation mode), these two endpoints <strong>stay available</strong> to the admin token in team mode — they are compliance tooling, not a reporting surface, and an operator must be able to fulfil a DSAR/erasure regardless of the dashboard&#39;s reporting posture.</li>
+<li><strong>Residual (<code>webhook_payloads</code>):</strong> raw GitHub webhook bodies may embed a contributor name/email and are <strong>not</strong> erased by this path; they are retention-bounded (90-day / 50k-row cap, <code>PruneWebhookPayloads</code>) and documented as a known gap in <a href="privacy.html" rel="nofollow">docs/privacy.md</a>. <code>org_actual_spend</code> is org-level (no developer column) and is correctly out of scope.</li>
+</ul>
+</li>
+<li>
+<p><strong><code>--config &lt;file&gt;</code></strong> (closes #29): <code>tierd serve --config /etc/tier/tier.yaml</code> reads a YAML file whose schema mirrors the flags one-to-one. Useful before v1.5 adds more knobs and the CLI becomes unmanageable. Schema:</p>
+<pre><code>http:
+  addr: &#34;:8080&#34;
+  webhook_secret: &#34;...&#34;   # see note on secrets below
+  api_token: &#34;...&#34;        # write/admin scope
+  read_token: &#34;...&#34;       # read-only viewer scope (#190); must differ from api_token
+  auth:                   # per-IP failed-auth lockout (#36); mirrors --auth-* flags (#85)
+    max_failures: 10      # bad auths per IP within failure_window before a 429 lockout; 0 disables
+    failure_window: &#34;60s&#34; # Go duration STRING (not a bare int — that would be nanoseconds)
+    lockout: &#34;15m&#34;        # Go duration STRING; how long a tripped IP stays locked out
+db: /var/lib/tier/tier.db
+proxy:
+  anthropic_target: &#34;https://api.anthropic.com&#34;
+  openai_target: &#34;https://api.openai.com&#34;
+watch:
+  repos:                  # any --watch-repo on the CLI discards this entire list (no partial merge)
+    - /Users/foo/gitrepos/tier
+zero_outcome_window_days: 7   # zero-outcome tripwire look-back (#189); mirrors --zero-outcome-window-days; must be &gt;= 1
+aggregation: team             # REQUIRED reporting mode (#185): team | developer — no silent default, serve fails to start if unset
+k_anonymity: 5                # k-anonymity cohort floor for team mode (#185); default 5, hard minimum 3
+</code></pre>
+<p>Precedence: <strong>CLI flag &gt; env var &gt; config file &gt; builtin default</strong>. Unknown YAML keys are rejected at startup (typo&#39;d <code>webook_secret</code> won&#39;t silently fall back to a default). Missing config file is a fatal error — <code>--config</code> is explicit; misconfiguration is worse than no config.</p>
+<p><strong>Durations are strings.</strong> <code>http.auth.failure_window</code> and <code>http.auth.lockout</code> must be Go duration <strong>strings</strong> (<code>&#34;60s&#34;</code>, <code>&#34;15m&#34;</code>, <code>&#34;1h&#34;</code>) — a bare integer would be read as <strong>nanoseconds</strong>, silently mis-configuring the lockout. They are parsed by the same <code>time.ParseDuration</code> the CLI flags use, so a malformed value fails loud at startup. <code>http.auth.max_failures: 0</code> disables the limiter, and the resolved values are held to the same rule as the flags — a non-zero <code>max_failures</code> with a zero/negative window or lockout refuses to start, whether the offending value came from the file or the command line.</p>
+<p><strong>Secrets caveat.</strong> <code>webhook_secret</code>, <code>api_token</code>, and <code>read_token</code> are credentials. The safer pattern is the <code>TIER_WEBHOOK_SECRET</code> / <code>TIER_API_TOKEN</code> / <code>TIER_READ_TOKEN</code> env vars (the config wiring honours env over config so even a committed YAML can&#39;t override them) or a file-mounted secret path that the deployment reads. A <code>config.yaml</code> checked into a repository that contains these fields leaks them to every viewer of that repo, forever. Treat the YAML fields as a last resort for laptop-only testing.</p>
+</li>
+<li>
+<p><strong><code>/healthz</code> + supervised watcher</strong> (closes #28, extensible body #48): <code>GET /api/v1/healthz</code> returns subsystem state via a <code>health.Registry</code> that subsystems register into. Body shape: <code>{&#34;subsystems&#34;: {&#34;watcher&#34;: {&#34;healthy&#34;: true, &#34;detail&#34;: {&#34;status&#34;: &#34;running&#34;|&#34;restarting&#34;|&#34;stopped&#34;|&#34;not_configured&#34;, &#34;last_error&#34;: &#34;...&#34;, &#34;last_event_ts&#34;: &#34;...&#34;, &#34;started_at&#34;: &#34;...&#34;, &#34;restart_count&#34;: N, &#34;next_retry_at&#34;: &#34;...&#34;, &#34;watch_add_failures&#34;: N}}}, &#34;healthy&#34;: true, &#34;watcher&#34;: { ...same WatcherSnapshot as subsystems.watcher.detail... }}</code>. The top-level <code>watcher</code> block is <strong>retained for backward compatibility</strong> (deprecated; pre-#48 consumers read it) and duplicates <code>subsystems.watcher.detail</code>; new consumers read the <code>subsystems</code> map so v1.5 collectors (Anthropic Admin, OpenAI Usage, ...) add a key without a schema break. Time fields are omitted from JSON when unset rather than serializing as zero values. Status code is 200 when every subsystem is healthy (running or not_configured), 503 when at least one is restarting or stopped-with-error; the top-level <code>healthy</code> bool mirrors the code. <code>last_event_ts</code> is stamped on every event the live watcher successfully ingests (closes #50, via the <code>ingester.RecordingStore</code> decorator wired in <code>cmd/tierd</code>) — a zero/absent value with <code>status: running</code> means &#34;watcher up, no data yet&#34;.</p>
+<ul>
+<li><strong>Three probe endpoints, three audiences</strong> (closes #49):
+<ul>
+<li><code>GET /api/v1/livez</code> — <strong>k8s liveness</strong>. Always 200 as long as the process can answer HTTP (reaching the handler proves it can). Body: <code>{&#34;status&#34;: &#34;alive&#34;, &#34;uptime_s&#34;: N, &#34;version&#34;: &#34;...&#34;}</code>. Never 503s on watcher backoff: a liveness failure means &#34;kill the pod&#34;, and a restarting watcher is exactly what the in-process supervisor exists to handle.</li>
+<li><code>GET /api/v1/healthz</code> — <strong>k8s readiness</strong> (above). 503s while the watcher is restarting so the pod drops out of Service endpoints until it recovers. Do <strong>not</strong> wire a liveness probe here — it would restart the pod every backoff cycle and defeat the supervisor.</li>
+<li><code>GET /api/v1/health</code> — basic <code>{&#34;status&#34;: &#34;ok&#34;}</code> smoke test (200/ok), the older minimal endpoint.</li>
+</ul>
+</li>
+<li>The watcher runs under <code>health.Supervisor</code> (<code>internal/health/supervisor.go</code>): restarts transient failures with exponential backoff (1s → 32s, capped) and only gives up after 5 failures inside a 60-second window. A successful run lasting ≥ <code>ResetThreshold</code> resets the backoff but <strong>not</strong> the failure count — flapping subsystems still progress toward terminal stop instead of restarting forever.</li>
+</ul>
+</li>
+<li>
+<p><strong>Structured logging + access logs</strong> (closes #67): <code>tierd serve</code> logs via <code>slog</code>. <code>--log-format</code> (env <code>TIER_LOG_FORMAT</code>) is <code>auto</code> (default), <code>json</code>, or <code>text</code> — <code>auto</code> emits JSON unless stderr is a terminal, so a container/systemd service gets structured logs with no config while a developer at a TTY gets readable output (TTY detection is stdlib <code>os.ModeCharDevice</code>, no <code>go-isatty</code> dependency). <code>--log-level</code> (env <code>TIER_LOG_LEVEL</code>) is <code>debug|info|warn|error</code> (default <code>info</code>). A <code>requestLogger</code> middleware wraps the whole mux and emits one line per request (<code>method</code>, <code>path</code>, <code>status</code>, <code>duration_ms</code>, <code>bytes</code>, <code>remote</code>); health-probe paths (<code>/health</code>, <code>/healthz</code>, <code>/livez</code>) log at <code>debug</code> so routine scrapes don&#39;t flood the access log. The middleware&#39;s <code>ResponseWriter</code> wrapper forwards <code>Flush</code>/<code>Unwrap</code>, so the reverse proxy&#39;s SSE streaming is unaffected.</p>
+</li>
+<li>
+<p><strong>Prometheus <code>/metrics</code></strong> (closes #67): <code>GET /metrics</code> exposes a small fixed metric set in the text exposition format (v0.0.4) — <code>tier_http_requests_total{method,route,status}</code>, <code>tier_http_request_duration_seconds{method,route}</code> (histogram), <code>tier_watcher_events_total</code>, <code>tier_proxy_writes_total{provider,outcome}</code>, and <code>tier_build_info{version}</code>. It is <strong>hand-rolled</strong> (<code>internal/metrics</code>, ~250 lines, golden-tested) rather than pulling <code>prometheus/client_golang</code>: the metric set is small and static, so the library&#39;s registry/cardinality/collector machinery would be 6–10 transitive dependencies of unused weight against tier&#39;s lean, digest-pinned static binary. Labels are deliberately low-cardinality — the HTTP route label is the <strong>matched ServeMux pattern</strong> (e.g. <code>/api/v1/scores/{developer}</code>), never the concrete developer/issue, so a scrape can&#39;t blow up cardinality or leak per-developer identity. <code>/metrics</code> is <strong>bearer-gated</strong> like the score GETs (it exposes internal counters and, via labels, spend-activity signal) and logs at Debug to avoid scrape spam. <code>tier_proxy_writes_total{provider,outcome}</code> (#70) makes a failed capture store-write observable: the proxy already logged the error, but <code>outcome=&#34;error&#34;</code> is what a scrape/alert can watch, with <code>outcome=&#34;ok&#34;</code> as the denominator. Those writes are synchronous within the request lifecycle (the JSON path inside <code>modifyResponse</code>, the SSE path inside <code>streamCapture.Close</code>), so <code>srv.Shutdown</code>&#39;s in-flight-request drain already flushes them on SIGTERM — no separate write registry is needed.</p>
+</li>
+<li>
+<p><strong>Zero-outcome tripwire</strong> (closes #189): <code>tierd serve</code> fails <strong>loud</strong> when AI cost accrued but <strong>no outcomes</strong> were recorded — the silent-TIER-0 case for trunk-based teams (direct pushes behind feature flags never fire a <code>pull_request</code> merged event) or a broken/misconfigured GitHub webhook. A background check runs once at startup and then hourly: it queries <code>store.WindowActivity</code> over the last <code>--zero-outcome-window-days</code> (env-less flag, config key <code>zero_outcome_window_days</code>, default <strong>7</strong>, must be ≥ 1) and trips when <code>cost_micro &gt; 0</code> <strong>and</strong> <code>outcomes == 0</code> in that window. When tripped it emits a WARN log (naming the accrued dollar figure and the window) <strong>and</strong> sets the <code>tier_zero_outcome_tripwire</code> gauge to <code>1</code> (a scrape/alert target); the gauge returns to <code>0</code> once an outcome lands, and a transient DB-query error keeps the gauge&#39;s last value rather than flapping. The check goroutine is cancelled with the rest of serve on shutdown. #189 ships the <strong>detection</strong>; the push-to-default-branch outcome CAPTURE path that lets those teams earn TIER instead of just being warned is <strong>#196</strong> (below, opt-in via <code>outcomes.push_capture</code>).</p>
+</li>
+</ul>
+<h4 id="trunk-based-support-push-to-default-branch-capture-closes-196">Trunk-based support: push-to-default-branch capture (closes #196)</h4>
+<p>Teams that commit straight to the default branch behind feature flags never fire a <code>pull_request</code> merged event, so without this their AI cost scores ~0 (exactly what the #189 tripwire warns about). With <code>outcomes.push_capture</code> enabled (<code>--push-capture</code> / <code>TIER_PUSH_CAPTURE</code> / config <code>outcomes.push_capture</code>; <strong>OFF by default</strong>), a qualifying direct commit to the default branch becomes an outcome via the same signature-verified <code>push</code> webhook. HMAC verification runs first, exactly as on every other webhook path — capture never sees an unverified body.</p>
+<p><strong>What qualifies and how it is scored (the LOCKED contract):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Push commit on the default branch</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>closes #N</code> / tracker key / <code>#N</code> in the message</td>
+<td>Captured as <strong>one</strong> outcome per <code>(issue, UTC day)</code></td>
+</tr>
+<tr>
+<td>Second commit, same issue, same UTC day</td>
+<td>Folds into that <strong>same one</strong> outcome (idempotent upsert — never <code>0.5×N</code>)</td>
+</tr>
+<tr>
+<td>Squash-merge push whose SHA == a stored <code>merge_commit_sha</code></td>
+<td><strong>Skipped</strong> — the PR webhook already captured it (constraint #1)</td>
+</tr>
+<tr>
+<td>2-parent merge commit (<code>Merge …</code> subject)</td>
+<td><strong>Skipped</strong> — arrives via the PR webhook (constraint #2)</td>
+</tr>
+<tr>
+<td><code>Revert …</code></td>
+<td><strong>Skipped</strong> by capture — the revert path degrades the <em>original</em> outcome instead</td>
+</tr>
+<tr>
+<td>No resolvable issue id (or no GitHub author login)</td>
+<td><strong>Not scored, but observable</strong>: INFO log + <code>tier_push_unattributed_total</code> counter (never a silent drop)</td>
+</tr>
+<tr>
+<td>Any commit on a non-default branch</td>
+<td><strong>Ignored</strong> — captured, if at all, when its PR merges</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Weight-source (degraded fixed weight, zero new dependencies).</strong> A GitHub push payload carries no diff stats and the webhook has no local clone, so a push outcome takes the honest degraded floor <code>weight = 0.5</code> (<code>store.GitHeuristic(0,0)</code>) with <strong>no outbound GitHub API call</strong>. Its provenance is recorded as <code>weight_source=&#39;push&#39;</code> — deliberately distinct from <code>git-heuristic</code> so a <em>capture-fidelity</em> 0.5 is never pooled with a <em>measured</em> tiny-diff 0.5.</p>
+<p><strong>Aggregation grain (per-issue-per-UTC-day).</strong> All qualifying direct commits sharing an issue within one UTC calendar day collapse into a single 0.5-weight outcome, enforced by an idempotent upsert keyed on <code>(issue_id, push_day)</code> (partial unique index <code>WHERE source=&#39;push&#39;</code>). This closes the commit-splitting inflation vector at the capture layer — direct commits have no PR/<code>merge_commit_sha</code> backstop, so summing <code>0.5×N-commits</code> would let a developer farm points by splitting work into many commits. Replaying the same day&#39;s push writes nothing.</p>
+<p><strong>Comparability caveat.</strong> Push-grain outcomes are <strong>NOT directly comparable</strong> to PR-grain outcomes: they carry a degraded (0.5) weight and per-issue-per-day granularity rather than a per-PR label/diff weight. Scoring and audit views can segment on <code>outcomes.source</code> (<code>github-webhook</code> / <code>api-outcome</code> / <code>push</code>) to keep the grains apart; mixing them in one leaderboard column would under-represent trunk-based work relative to PR-based work of the same size.</p>
+<p><strong>Known quality gap (documented).</strong> #134 CI signals (<code>workflow_run</code>) resolve their target outcome by <code>merge_commit_sha</code>, which push outcomes leave NULL, so CI pass/fail floors do <strong>not</strong> reach a push-captured outcome. Revert degradation still applies via the issue-id tier. Closing the CI gap — and upgrading a push outcome&#39;s <code>weight_source: push → push_enriched</code> from a later periodic diff-enrichment reconciler (<strong>Option C</strong>) — is a deliberately <strong>deferred future upgrade</strong>, strictly additive, and not built here.</p>
+<p><strong>Coexistence with the <code>merge_commit_sha</code> UNIQUE (#60).</strong> A push outcome aggregates several commits and has no single merge commit, so it stores <code>merge_commit_sha = NULL</code> and lives entirely outside the <code>idx_outcomes_merge_commit_sha_uq</code> partial index. Its idempotency rests instead on the disjoint <code>(issue_id, push_day) WHERE source=&#39;push&#39;</code> partial unique index — the two dedup domains never overlap. Both indexes are shaped so a future <code>tenant_id</code> can become their leading column without a redesign.</p>
+<h3 id="3e-dedup-model">3e. Dedup model</h3>
+<p>The <code>idempotency_key</code> column has a <strong>partial unique index</strong> over non-NULL values (<code>store.go:60-62</code>):</p>
+<ul>
+<li><strong>Same-source duplicates</strong> (e.g. JSONL re-scan, proxy retry, the live watcher&#39;s per-debounce re-parse) compute the same key and collide on the index. The INSERT uses <code>ON CONFLICT ... DO UPDATE SET &lt;field&gt; = MAX(&lt;field&gt;, excluded.&lt;field&gt;)</code> (<code>store.go:140</code>), which lets a session&#39;s totals grow toward the final value (the watcher&#39;s case) while leaving immutable proxy responses unchanged (<code>MAX(x, x) = x</code>).</li>
+<li><strong>Cross-source duplicates</strong> (a Claude Code call captured by both JSONL and the proxy) compute the SAME <code>MessageIdempotencyKey(&#34;anthropic&#34;, msg_id)</code> from either path. The partial unique index collapses them to one row (closes #19).</li>
+<li><strong>Migration note for pre-#19 DBs</strong>: rows inserted under the previous code carry one row per session keyed as <code>IdempotencyKey(SourceJSONL, sessionID)</code>. The new code emits N rows per session keyed by message id. A re-scan of the same session will <strong>not</strong> dedup against the legacy row, so historical totals can double-count. The cleanest fix is to wipe and rebuild: <code>DELETE FROM token_events WHERE source = &#39;jsonl&#39; AND idempotency_key NOT LIKE &#39;%&#39;;</code> (or just <code>rm ~/.tier/tier.db</code> and let <code>tierd score</code> repopulate). For an under-development POC this is the right tradeoff; a more careful migration is filed in #27.</li>
+<li><strong>Empty keys</strong> (legacy rows, Vertex Gemini without <code>responseId</code>) are stored as SQL NULL and bypass the index entirely. They can double-insert. Acceptable for v1.</li>
+</ul>
+<h3 id="3f-cost-calculation">3f. Cost calculation</h3>
+<p><code>ComputeCost</code> in <code>internal/store/prices.go</code>. The reference price table is the embedded <code>internal/store/prices.yaml</code> (<code>//go:embed</code>, the single source of truth per #68), currently <strong>version 9 with 77 models</strong>, parsed once at startup and overridable at runtime with <code>tierd --prices /path/to/prices.yaml</code>. <code>NormalizeModel</code> strips date/version suffixes (<code>claude-sonnet-4-20250514</code> → <code>claude-sonnet-4</code>) before the lookup. Unknown models hit a <strong>self-hosted-medium fallback at $0.50/M combined</strong> plus a one-time WARN per model (closes #3). The WARN exists precisely so a new minor version like <code>claude-opus-4-8</code> shipping before the table is updated doesn&#39;t quietly bill at the wrong rate.</p>
+<h3 id="3g-bulk-export-of-raw-rows--paginated-json--csv-closes-191">3g. Bulk export of raw rows — paginated JSON / CSV (closes #191)</h3>
+<p><code>/scores</code> returns only the computed roll-up. A CFO reconciling spend against an invoice, or a BI pipeline loading a warehouse, needs the <strong>underlying rows</strong> — but an all-rows dump would be unbounded for a 500-developer org. Four read endpoints add a bounded, paginated export:</p>
+<ul>
+<li><code>GET /api/v1/events</code> — the raw <code>token_events</code> rows.</li>
+<li><code>GET /api/v1/outcomes</code> — the raw <code>outcomes</code> rows.</li>
+<li><code>GET /api/v1/quality_events</code> — the raw <code>quality_events</code> rows: the append-only CI/revert signal log (#242).</li>
+<li><code>GET /api/v1/quality_history</code> — the raw <code>quality_history</code> rows: the append-only quality transition log (#242).</li>
+</ul>
+<p>(The <code>POST</code> halves of the events/outcomes paths are the ingest endpoints in 3d; Go&#39;s <code>net/http</code> ServeMux routes by method+path, so the <code>GET</code> export and <code>POST</code> ingest coexist on one path.)</p>
+<p>The two <strong>quality</strong> exports (#242) make the multiplier chain re-derivable from a BI export — <code>quality == last new_quality</code> — closing the gap where the audit chain was only reachable via the erasure-scoped DSAR export (<code>GET /api/v1/developer/{id}/export</code>), which is subject-scoped, not BI-scoped. They share the auth, team-mode, windowing, keyset, page-size, and content-negotiation rules below. <code>quality_history.ts</code> is written by SQLite <code>CURRENT_TIMESTAMP</code> (second precision) rather than in Go form, so its export keysets on that column with second-precision bounds; this is internal and invisible to the client, which still just echoes the opaque cursor.</p>
+<p><strong>Auth (#190):</strong> both are <strong>read-scoped</strong> — the read-only viewer token is accepted alongside the write/admin token (this is the CFO/BI <em>read</em> use case), so a viewer can pull the data without the write/erase power the api-token confers. No token → <code>401</code>; a wrong token → <code>401</code>.</p>
+<p><strong>Team-aggregation mode (#185) → <code>403</code>.</strong> Raw rows carry a per-developer <code>developer</code> column. In <code>team</code> mode the deployment has committed (works-council / GDPR) to <strong>not</strong> exposing individual-level data, and a row-level export cannot be k-anonymized while staying a useful export — so <strong>both endpoints return <code>403</code> in team mode</strong>, checked before any query. In <code>developer</code> mode they work normally. (Do not &#34;fix&#34; this by filtering/aggregating the developer column — that silently breaks the same guarantee <code>/scores</code> and <code>/scores/{developer}</code> enforce.)</p>
+<p><strong>Windowing.</strong> <code>?since=</code> and <code>?until=</code> accept <code>YYYY-MM-DD</code>, <code>YYYY-MM</code>, or <code>YYYY</code> and are interpreted as <strong>UTC</strong> (the same <code>since</code>-window handling as <code>/scores</code>, #180). The window is <strong>half-open <code>[since, until)</code></strong> — a row exactly at <code>since</code> is included, a row exactly at <code>until</code> is excluded. <code>since</code> omitted defaults to 90 days ago; <code>until</code> omitted is an open upper bound (all newer rows).</p>
+<p><strong>Keyset (cursor) pagination.</strong> Rows are returned in strict <code>(ts, id)</code> order. Each response carries an <strong>opaque <code>next_cursor</code></strong> (JSON body field <code>next_cursor</code> <em>and</em> the <code>X-Next-Cursor</code> response header on both JSON and CSV); pass it back as <code>?cursor=</code> to fetch the next page. An <strong>empty</strong> cursor means the window is exhausted — stop paging. Keyset (not limit/offset) is used deliberately: these are append-heavy tables, so a cursor is stable under concurrent inserts and never does a deep-offset scan (a <code>(ts, id)</code> covering index backs the scan). A malformed cursor is a <code>400</code>, never a <code>500</code> or a full-table scan.</p>
+<p><strong>Page size.</strong> <code>?limit=</code> defaults to <strong>1000</strong> and is hard-capped at <strong>10000</strong>. A request over the cap is <strong>rejected with <code>400</code></strong> (loud, not silently clamped); <code>limit=0</code>, a negative, or a non-integer is also <code>400</code>. The store enforces the cap again server-side, so a single page never buffers more than 10000 rows in memory regardless of the request.</p>
+<p><strong>Content negotiation.</strong> <code>Accept: text/csv</code> yields CSV (RFC 4180, with a header row; commas/quotes/newlines in any field are escaped by the standard encoder). Anything else — including no <code>Accept</code> header — yields JSON, the default. CSV clients read the next cursor from the <code>X-Next-Cursor</code> header.</p>
+<p><strong>CSV column order (a stable compatibility contract — columns are only ever appended, never reordered or removed).</strong> <code>ts</code> is RFC3339 UTC; <code>cost_micro</code> is integer micro-dollars (<code>1 USD = 1_000_000</code>).</p>
+<p><code>GET /api/v1/events</code>:</p>
+<pre><code>id, ts, developer, issue_id, model, input_tokens, output_tokens,
+cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+cost_micro, source, fidelity, idempotency_key, repo, session_id,
+price_version, host, billing_mode
+</code></pre>
+<p><code>GET /api/v1/outcomes</code>:</p>
+<pre><code>id, ts, developer, issue_id, pr_number, weight, weight_source, quality,
+merge_commit_sha, additions, deletions, changed_files, source,
+work_type, work_type_source, repo, push_day
+</code></pre>
+<p>On the events header, <code>repo</code> (#231) and <code>session_id</code> (#238) are likewise <strong>appended at the end</strong> — a consumer pinned to the earlier columns is unbroken. <code>session_id</code> is the opaque Claude Code session UUID and is empty for rows a session-blind producer (proxy / poller) captured.</p>
+<p>On the outcomes header, <code>repo</code> (#231) and <code>push_day</code> (#242) are the trailing <strong>append-only</strong> columns. <code>push_day</code> is the UTC calendar day a <code>source=&#39;push&#39;</code> outcome aggregates to — the per-issue-per-day dedup key the #196 partial unique index is built on — and is <strong>empty</strong> for a PR outcome (the NULL column), matching <code>merge_commit_sha</code>. Without it a push row exported with <code>pr_number=0</code> and <code>merge_commit_sha=&#34;&#34;</code> had no visible aggregation key, so an external org running trunk-based capture could not verify the one-outcome-per-day dedup from its own export.</p>
+<p><code>price_version</code> (#233), <code>host</code>, and <code>billing_mode</code> (#304) are the newest <strong>append-only trailing columns</strong> — a consumer pinned to any earlier column index keeps reading the same field. <code>price_version</code> is the price-provenance column (which price table produced <code>cost_micro</code>); <code>host</code> and <code>billing_mode</code> are the host-aware pricing discriminator (the serving host that priced the row, and whether <code>cost_micro</code> is canonical per-token or a derived/approximate figure).</p>
+<p><code>work_type</code> and <code>work_type_source</code> (#187) are <strong>appended at the end</strong> of the existing order — the append-only contract means a consumer pinned to the pre-#187 columns is unbroken. The GDPR data-subject export (<code>ExportDeveloper</code>, #184) carries the same two fields on every outcome row.</p>
+<p><code>GET /api/v1/quality_events</code> (#242) — <code>event_ts</code> and <code>recorded_at</code> are RFC3339 UTC:</p>
+<pre><code>id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at
+</code></pre>
+<p><code>GET /api/v1/quality_history</code> (#242) — <code>ts</code> is RFC3339 UTC; <code>old_quality</code>/<code>new_quality</code> are the multiplier before/after the transition:</p>
+<pre><code>id, outcome_id, developer, issue_id, old_quality, new_quality, reason, source_ref, ts
+</code></pre>
+<p>The JSON row objects carry the same fields under the same names (e.g. <code>input_tokens</code>, <code>cost_micro</code>), plus the top-level <code>next_cursor</code>; the row arrays are keyed <code>events</code> / <code>outcomes</code> respectively.</p>
+<hr>
+<p></p>
+<h2 id="4-how-it-assigns-functionality-outcome-attribution">4. How it assigns functionality (outcome attribution)</h2>
+<p>The outcomes side runs on GitHub webhooks. Handler at <code>internal/webhook/handler.go</code>.</p>
+<p>The handler processes <strong>three</strong> GitHub event types (<code>internal/webhook/handler.go</code> — <code>pull_request</code>, <code>push</code>, <code>workflow_run</code>); every other delivery is ignored.</p>
+<table>
+<thead>
+<tr>
+<th>GitHub event</th>
+<th>Trigger</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pull_request</code> closed+merged</td>
+<td>PR merged into base</td>
+<td>Inserts an <code>outcomes</code> row: weight from PR labels (or git heuristic fallback), quality = 1.0</td>
+</tr>
+<tr>
+<td><code>workflow_run</code> completed</td>
+<td>A CI run finishes on the merge commit&#39;s default-branch pipeline (#134)</td>
+<td>A <strong>failure</strong> within the 48h observation window appends a <code>ci_fail</code> event that floors that outcome&#39;s quality to <strong>0.7</strong>; a success is recorded as <code>ci_pass</code> (no penalty), and a same-SHA success within the flaky-rerun window neutralises an earlier failure.</td>
+</tr>
+<tr>
+<td><code>push</code> (revert)</td>
+<td>A commit whose subject starts with <code>Revert ...</code></td>
+<td>Resolves the original outcome (by the <code>merge_commit_sha</code> footer, then by issue-id) and appends a revert quality event within a 60-day window (#134): a <strong>quality</strong> revert floors to <strong>0.1</strong>, a <strong>strategic</strong> revert (keyword-classified as a business decision) floors to <strong>0.8</strong>.</td>
+</tr>
+<tr>
+<td><code>push</code> (default branch, <strong>opt-in</strong> <code>outcomes.push_capture</code>)</td>
+<td>A qualifying direct commit to the default branch (#196)</td>
+<td>Captures a <strong>degraded</strong> outcome so trunk-based teams aren&#39;t scored ~0: weight <code>0.5</code> (<code>weight_source=&#39;push&#39;</code>), <code>source=&#39;push&#39;</code>, aggregated to <strong>one outcome per (issue, UTC day)</strong>. Skips reverts, 2-parent merge commits, and squash-merge pushes already captured by the PR path (SHA dedup). Unattributed commits are logged + counted (<code>tier_push_unattributed_total</code>).</td>
+</tr>
+</tbody>
+</table>
+<p><strong>HMAC signature.</strong> When <code>TIER_WEBHOOK_SECRET</code> is set, every request must carry <code>X-Hub-Signature-256</code> validated via <code>verifySignature</code> (<code>handler.go</code>). When unset, the handler logs a startup warning (<code>handler.go</code>) and accepts all requests — fine for laptop testing, unsafe for any public endpoint.</p>
+<p><strong>Weight assignment.</strong> <code>handlePR</code> extracts <code>weight</code> in two steps (<code>handler.go:153-156</code>):</p>
+<ol>
+<li>
+<p>Look at PR labels. <code>labelWeight</code> (<code>handler.go:171</code>) maps <code>size/xs … size/xl</code> (or <code>xs … xl</code>) to:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>size/xs</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td>size/s</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>size/m</td>
+<td>3.0</td>
+</tr>
+<tr>
+<td>size/l</td>
+<td>5.0</td>
+</tr>
+<tr>
+<td>size/xl</td>
+<td>8.0</td>
+</tr>
+</tbody>
+</table>
+</li>
+<li>
+<p><strong>If no recognised label</strong>, fall back to <code>gitHeuristic(lines+files*10+1)</code> in <code>handler.go</code>. Formula: <code>min(8, ceil(log2(lines + files*10 + 1)))</code>, floor of 0.5. A 50-line PR touching 3 files weighs <code>ceil(log2(50 + 30 + 1)) = ceil(log2(81)) = 7</code>. A 1-line README tweak weighs 0.5.</p>
+</li>
+</ol>
+<blockquote>
+<p><strong>The diff-size heuristic is a fallback PROXY, not a measure of value (won&#39;t-fix, #287).</strong> The <strong>PR size-label path is the defensible weight source</strong>: when a <code>size/*</code> label is present, <code>ResolveWeight</code> (<code>internal/store</code>) takes the label weight verbatim and stamps <code>weight_source=&#39;label&#39;</code>, and the raw diff numbers are ignored entirely. Only an <strong>unlabeled</strong> PR falls through to <code>GitHeuristic(additions+deletions, changed_files)</code>, stamped <code>weight_source=&#39;git-heuristic&#39;</code> -- the honest fallback for a PR nobody sized by hand.</p>
+<p><strong>Accepted trade-off:</strong> on the unlabeled path, generated or vendored churn inflates the weight, because the fallback buckets on the PR&#39;s <em>aggregate</em> <code>additions</code>/<code>deletions</code>/<code>changed_files</code> and cannot subtract generated lines it never sees. The <code>pull_request</code> webhook payload carries <strong>only</strong> those aggregates -- no per-file line data -- and TIER makes <strong>no outbound GitHub API call</strong> and keeps <strong>no local clone by design</strong> (it never fetches <code>GET /pulls/{n}/files</code>), so the heuristic physically has no per-file breakdown to exclude generated paths from. Fetching per-file data was considered (#287 Option A) and <strong>rejected</strong>: it would add an outbound-API dependency (auth, rate limits, failure modes) that TIER deliberately avoids.</p>
+<p><strong>Mitigation:</strong> an operator applies a <code>size/*</code> label. That moves the outcome onto the <code>weight_source=&#39;label&#39;</code> path above, which discards the diff entirely -- so a human-sized PR is immune to generated-churn inflation regardless of how much boilerplate the diff contains. The label path is the intended weight source for any PR whose diff size is not a faithful proxy for its value; the diff-size heuristic is only the floor for PRs left unlabeled.</p>
+</blockquote>
+<p><strong>Quality is DERIVED, not mutated (#134).</strong> Every merged PR starts at quality <strong>1.0</strong>. Each CI and revert signal is appended to the append-only <code>quality_events</code> log, and the affected outcome&#39;s quality is recomputed as the <strong>worst-of</strong> the applicable floors (<code>internal/quality.Resolve</code>). The unique <code>(outcome_id, event_type, source_ref)</code> key makes replayed deliveries idempotent — re-deriving the same event set yields the same quality. The shipped floors are:</p>
+<table>
+<thead>
+<tr>
+<th>Signal (quality event)</th>
+<th>Floor</th>
+<th>Window</th>
+<th>Trigger event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Clean merge (<code>ci_pass</code>, or no signal)</td>
+<td>1.0</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>CI failure on the merge commit (<code>ci_fail</code>)</td>
+<td>0.7</td>
+<td>48h</td>
+<td><code>workflow_run</code></td>
+</tr>
+<tr>
+<td>Strategic revert — business decision (<code>revert_strategic</code>)</td>
+<td>0.8</td>
+<td>60d</td>
+<td><code>push</code></td>
+</tr>
+<tr>
+<td>Quality revert — code problem (<code>revert_quality</code>)</td>
+<td>0.1</td>
+<td>60d</td>
+<td><code>push</code></td>
+</tr>
+</tbody>
+</table>
+<p>When several floors apply to one outcome, the <strong>minimum</strong> wins; the result is clamped to <code>[0.1, 1.0]</code>. There is no path to 0.0 in v1. (This is a <em>subset</em> of the full 8-event model in <a href="quality-degradation-spec.html" rel="nofollow">quality-degradation-spec.md</a> — follow-up fixes, partial reverts, incidents, hotfixes, and downstream-CI penalties are specified but <strong>not</strong> yet enforced.)</p>
+<p><strong>Revert targeting.</strong> <code>handlePush</code> resolves <em>which</em> outcome a revert degrades in two resolution tiers, plus a fallback (#20), then classifies the revert reason (strategic vs quality) by keyword before appending the event:</p>
+<ol>
+<li><strong>&#34;This reverts commit &lt;sha&gt;&#34; footer</strong> — <code>git revert</code> adds this footer to every auto-generated revert message. The handler matches it against <code>revertsCommitRE</code> (full 40-char lowercase SHA only) and looks up the original outcome via <code>store.OutcomeByMergeCommit</code>.</li>
+<li><strong>Issue id in the revert message</strong> — fires when the original commit subject contained <code>(closes #N)</code> and <code>git revert</code> propagated it. The handler looks up the most recent outcome for that issue via <code>store.LatestOutcomeByIssue</code>.</li>
+</ol>
+<p><strong>Fallback (no resolution).</strong> When neither tier succeeds, the handler logs the revert commit hash, subject, and author via <code>slog.Info</code> so the gap is at least discoverable. Previously this case no-opped silently.</p>
+<p><strong>The penalty target is always the developer who shipped the bug, never the developer who reverted it.</strong> Before #20 the handler called <code>UpdateQuality(c.Author.Username, issueID, 0.5)</code> — passing the reverter&#39;s username — and the UPDATE silently matched no row because the outcome row was owned by the original author. Both lookup paths now resolve through the original outcome explicitly.</p>
+<p>The merge commit SHA is captured at PR-merge time from <code>pull_request.merge_commit_sha</code> and stored in <code>outcomes.merge_commit_sha</code> (#20). A partial index on the column makes the lookup O(log N).</p>
+<h3 id="work-type-taxonomy-and-type-scoped-scoring-closes-187">Work-type taxonomy and type-scoped scoring (closes #187)</h3>
+<p>An output-per-token metric with only a &#34;feature&#34; notion scores whole job families near zero: a security engineer, an SRE on-call, or a researcher spends many tokens and ships few merge-shaped &#34;features&#34;, so their TIER craters against feature developers. That is a <strong>category error</strong> — their work is a different category, not worse feature work. Every outcome therefore carries a <code>work_type</code> drawn from a <strong>fixed taxonomy</strong>, and scores are compared <em>within</em> a type, never across types.</p>
+<p><strong>The taxonomy (fixed enum):</strong> <code>feature | bug | security | incident | tech-debt | research | compliance</code>. This set is closed — every ingress validates against it (<code>store.ValidWorkType</code>), and adding a member is a schema + docs change, not a config toggle.</p>
+<p><strong>How <code>work_type</code> is derived, with provenance (<code>work_type_source</code>):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Derivation</th>
+<th><code>work_type_source</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GitHub webhook (merged PR)</td>
+<td>From the PR labels — see the label convention below</td>
+<td><code>label</code> (matched) / <code>default</code> (no match → <code>feature</code>)</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/outcomes</code></td>
+<td>Optional <code>work_type</code> field, validated against the enum (invalid → <strong>400</strong>)</td>
+<td><code>api</code> (set) / <code>default</code> (absent → <code>feature</code>)</td>
+</tr>
+<tr>
+<td>Push-to-default-branch capture (#196)</td>
+<td>Bare commits carry no labels → always <code>feature</code></td>
+<td><code>default</code></td>
+</tr>
+<tr>
+<td>Pre-#187 rows (migration backfill)</td>
+<td>Category unknowable → <code>feature</code></td>
+<td><code>legacy</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Label convention.</strong> A PR label maps to a category when it equals a canonical type name (<code>security</code>) <strong>or</strong> carries a <code>type:&lt;name&gt;</code> / <code>kind:&lt;name&gt;</code> prefix (<code>type:incident</code>, <code>kind:research</code>), matched case-insensitively after trimming whitespace. When several type labels are present, a <strong>fixed impact precedence</strong> breaks the tie deterministically (regardless of the order GitHub serialises the labels), so a PR labelled both <code>security</code> and <code>feature</code> is scored as security:</p>
+<blockquote>
+<p><strong>security &gt; incident &gt; compliance &gt; bug &gt; tech-debt &gt; research &gt; feature</strong></p>
+</blockquote>
+<p><code>feature</code> sits last, so it only wins as the sole type label — indistinguishable in score terms from the no-label default.</p>
+<p><strong>Type-scoped reads.</strong> <code>GET /api/v1/scores</code> returns a <code>work_types[]</code> array: one segment per category present, each a self-contained leaderboard whose TIER denominator is the cost of <strong>only that category&#39;s</strong> <code>(developer, issue)</code> pairs (cost is attributed at issue grain, so a security engineer&#39;s security TIER divides their security points by the cost of their security issues, not their whole-window spend). <code>?work_type=&lt;type&gt;</code> restricts the response to one segment (an invalid value is a <strong>400</strong>). Each segment composes with team-aggregation mode (#185): in team mode a segment&#39;s rows are k-anonymized <strong>team</strong> aggregates within the type — a developer who is sub-k within a category collapses into <code>other</code> and is never re-exposed by the segmentation. The dashboard renders these as per-type sections rather than one global sort.</p>
+<blockquote>
+<p><strong>Cross-type TIER comparison is UNSUPPORTED — by design.</strong> There is deliberately no single cross-type leaderboard. The top-level <code>developers</code> / <code>teams</code> list is retained for backward compatibility and drives only the org-total summary; it is <strong>not</strong> a cross-type ranking. Comparing a security TIER to a feature TIER is a category error the taxonomy exists to prevent. The org <code>total</code> block is a legitimate whole-org aggregate (all categories), not a comparison.</p>
+</blockquote>
+<hr>
+<h2 id="5-how-it-gives-purpose-linking-cost--outcome">5. How it gives purpose (linking cost ↔ outcome)</h2>
+<p>The shared key on both sides is the <strong>issue id</strong>. Extraction lives in one place — <code>internal/issueref/extract.go</code> — so all data paths agree.</p>
+<pre><code>Branch  &#34;fix/15-jsonl-cwd-filter&#34;       → FromBranch → &#34;issue-15&#34;
+Branch  &#34;feature/TIER-42-auth&#34;          → FromBranch → &#34;TIER-42&#34;
+PR body &#34;closes #11&#34;                    → FromPRBody → &#34;issue-11&#34;
+PR body &#34;## Section&#34; (markdown heading) → FromPRBody → &#34;&#34;        (correctly rejected)
+</code></pre>
+<p>Functions used:</p>
+<ul>
+<li><code>FromBranch</code> at <code>extract.go:30</code> — numeric segment, prefixed key (<code>TIER-42</code>), or empty.</li>
+<li><code>FromPRBody</code> at <code>extract.go:51</code> — <code>closes/fixes/resolves #N</code> preferred over bare <code>#N</code>.</li>
+<li><code>FromBranchOrBody</code> at <code>extract.go:66</code> — branch first, body fallback. Used by the webhook (<code>webhook/handler.go:147</code>).</li>
+<li><code>ClosedIssues</code> — every issue a PR body closes, deterministic left-to-right, deduplicated. Used to log the un-credited secondaries of a multi-issue PR (see below).</li>
+</ul>
+<p><strong>Multi-issue PR attribution rule (#189).</strong> A PR can close several issues at once — <code>closes #12, #15</code>, <code>fixes #12 and #15</code>, <code>closes #12, closes #15</code>. TIER attributes the one merged PR to a single <strong>PRIMARY</strong> issue, chosen deterministically: the branch-derived id if the branch carries one, else the <strong>leftmost</strong> close directive in the body (<code>FromBranchOrBody</code> == <code>ClosedIssues(body)[0]</code>). The remaining closed issues are <strong>not</strong> each given their own outcome — one merged PR yields exactly one outcome because <code>outcomes.merge_commit_sha</code> is UNIQUE (#60), and crediting full outcome weight to every closed issue would multiply a single PR&#39;s contribution to team TIER. So the secondaries are not silently dropped: when a PR closes more than one issue the webhook logs an INFO line (<code>PR closes multiple issues; outcome attributed to the primary only (#189)</code>) naming the primary and the full closed set, so the un-credited issues are observable. If you want each issue scored independently, open a separate PR per issue.</p>
+<p>The <strong>same function set</strong> is called from the JSONL collector&#39;s <code>gitLog</code> (<code>jsonl.go:481-489</code>) — meaning a JSONL session and a webhook event will land in <code>token_events</code> and <code>outcomes</code> carrying byte-identical <code>issue_id</code> values. That is what allows the scoring engine to do its join.</p>
+<hr>
+<h2 id="6-how-it-says-this-many-tokens--this-much-code--this-much-value">6. How it says &#34;this many tokens + this much code = this much value&#34;</h2>
+<p>The formula is one line, in <code>internal/scoring/engine.go:58</code>:</p>
+<pre><code>TIER = Σ(outcome_weight × quality_multiplier) / (total_AI_cost_USD / $1,000)
+</code></pre>
+<p>A team that ships 100 weighted outcome points on $1,000 of AI spend scores <strong>TIER = 100</strong>. Spend $10,000 for the same outcomes and they score 10. Same outcomes for $250 and they score 400.</p>
+<blockquote>
+<p><strong>Before you trust a TIER number, read <a href="interpreting-the-number.html" rel="nofollow">Interpreting the Number</a>.</strong> The numerator (outcome) and denominator (cost) are windowed <strong>independently</strong>: cost is timestamped when tokens are spent, but an outcome is timestamped when its issue <strong>closes</strong> -- days or weeks later. So a recent or short window shows cost that has already landed against outcomes that have not been credited yet, and the score reads <strong>artificially low</strong> until that work closes. This is a measurement-timing artifact, not a productivity signal -- trust wide, settled windows; distrust recent, short ones.</p>
+</blockquote>
+<p><strong>Why dollars, not tokens:</strong></p>
+<ul>
+<li>An Opus call and a Haiku call producing the same tokens cost wildly different amounts. Tokens are not comparable across models.</li>
+<li>An OpenAI call and an Anthropic call producing the same tokens cost wildly different amounts. Tokens are not comparable across vendors.</li>
+<li>Dollars normalise both axes. Two teams using different models can be compared honestly.</li>
+</ul>
+<p><strong>Why this exact formula:</strong></p>
+<ul>
+<li>It&#39;s outcome-per-spend, which is what an engineering leader actually cares about.</li>
+<li>It&#39;s scale-invariant: a one-person team and a thousand-person team produce numbers on the same scale (because both numerator and denominator scale with team size).</li>
+<li>It uses summed outcomes / summed cost at the team level (<code>engine.go:71-83</code>) — <strong>not</strong> an average of individual TIERs, because averaging ratios hides the contribution of high-spend / low-output developers.</li>
+</ul>
+<h3 id="sidecars--coverage--and-spend-leverage">Sidecars — Coverage % and Spend Leverage</h3>
+<p>Two CFO-facing numbers ship next to TIER itself (added in #17):</p>
+<p><strong>Coverage %</strong> (<code>internal/scoring/engine.go</code>, <code>CoveragePercent</code>) is the fraction of <code>total_cost_usd</code> that came from realtime sources (JSONL + proxy) vs. imputed/extrapolated sources. &#34;Realtime&#34; is keyed strictly on <code>fidelity=&#39;realtime&#39;</code>, which only the collector and proxy can assert — manual REST imports land as <code>estimated</code> and never count toward Coverage (#82). With JSONL-only collection it is always 100%. It becomes meaningful once the org-level Admin/Usage pollers (#138 / #139, shipped) backfill provider-aggregate remainder, or when v1.5 seat-cost imputation for opaque tools (Cursor, Copilot) lands — at that point a developer whose TIER score is &#34;good&#34; but whose Coverage is 40% is making a claim that rests on 60% extrapolation. The dashboard surfaces this next to TIER so the trust line is visible.</p>
+<p><strong>Spend Leverage</strong> (<code>internal/scoring/engine.go</code>, <code>SpendLeverage</code> = <code>total_cost_usd / actual_paid_usd</code>) is the multiplier between Reference-Price-Table list value and the enterprise-contract invoice total. Finance posts the per-month invoice via <code>POST /api/v1/actual_spend</code> (<code>internal/api/handler.go:137</code>, period as <code>YYYY-MM</code>). If list value is $1,000 and the contract billed $400, Spend Leverage is 2.5× — that&#39;s the number the CFO compares to retail Claude pricing.</p>
+<ul>
+<li>When no <code>actual_spend</code> row exists for a developer in the window, <code>SpendLeverage</code> is <code>0</code> (not NaN — JSON-safe), and the dashboard renders &#34;—&#34;.</li>
+<li>Team Spend Leverage is <code>Σ(total_cost) / Σ(actual_paid)</code>, not an average of individual ratios — same principle as team TIER (<code>internal/scoring/engine.go:86</code>).</li>
+<li>Two grains, with per-developer winning when both exist (closes #23):
+<ul>
+<li><strong>Per-developer</strong>: <code>actual_spend(developer, period)</code>. Used by tools that emit per-seat invoices (Cursor Business, etc.). Posted via <code>POST /api/v1/actual_spend</code>.</li>
+<li><strong>Org-level fallback</strong>: <code>org_actual_spend(org, period)</code>. Used by the common enterprise pattern of one contract for N seats (Anthropic / OpenAI). Posted via <code>POST /api/v1/org_actual_spend</code>. The store resolves a developer&#39;s allocated spend as <code>org_total / seat count</code>, where the <strong>seat count is the developers whose <code>period_membership</code> is active in the queried window</strong> (#41) — not the all-time <code>org_hierarchy</code> roster. A developer who left the org (their membership&#39;s <code>period_end</code> is set before the window) no longer counts as a seat <em>and</em> receives no slice, so departed employees stop diluting active members&#39; allocations. Membership is opened automatically when a developer is enrolled through the hierarchy write surface (<code>PUT</code>/<code>POST /api/v1/org_hierarchy</code>, #232) and closed via <code>POST /api/v1/period_membership/{developer}/end</code>; pre-#41 rows were backfilled as active since the beginning of time. <strong>So an org running the org-level fallback MUST populate <code>org_hierarchy</code> (#232) or every allocation reads 0.</strong> Developers with no active-in-window membership, or whose org has no invoice for the period, get 0 — the dashboard renders &#34;—&#34; rather than guessing.</li>
+<li><strong>Mixed-tier reconciliation</strong> (closes #40): when an org has both per-developer (tier-1) rows and an org-level (tier-2) invoice in the same period, the org-fallback members split the <strong>remainder</strong> — <code>(org_total[p] − Σ tier-1 of active members in p) / (active seats in p − tier-1 members in p)</code> — so that, for the org&#39;s <strong>active members</strong>, tier-1 allocations + org-fallback slices sum back to <code>org_total</code> (the Option-A accounting identity) instead of leaving the pre-#40 gap. (A per-developer invoice from a non-member is independent spend, outside that identity by design — <strong>#94 item 1, decision A</strong>: <code>actual_spend</code> has no org column, so a non-member&#39;s invoice has no org to reconcile against; the identity is active-member-scoped, not a gap.) Resolution is per-period: a developer is tier-1 in periods they have a per-dev row and org-fallback in the rest. <code>MAX(remainder,0)</code>/<code>NULLIF(seats,0)</code> keep it non-negative and division-safe; when active members&#39; tier-1 sum exceeds <code>org_total</code> the org-fallback share clamps to 0 (<code>store.OverBudgetPeriods</code> + a WARN logged at ingestion surface that clamp as a finance data-quality signal — <strong>#94 item 2</strong>).</li>
+<li><strong>Team/total rollup over all in-period seats</strong> (closes #39): <code>/scores</code> surfaces active members who hold an allocated slice but logged zero token events this period as zero-cost rows (TIER 0, leverage 0), so team and total <code>ActualPaidUSD</code> include every in-period seat. Without this, team Spend Leverage inflated by <code>seats / active_count</code>.</li>
+</ul>
+</li>
+<li><strong>Accumulating rows + credit memos</strong> (closes #24): both <code>actual_spend</code> and <code>org_actual_spend</code> accept multiple rows per period; the SUM at query time yields the net. Credit memos and refunds enter as negative-amount rows; corrections enter as deltas. The audit trail lives in row history rather than being overwritten. Existing pre-#24 DBs are migrated on next <code>Open()</code> to drop the prior <code>CHECK (actual_paid_usd &gt;= 0)</code> constraint (table-rebuild migration in <code>internal/store/store.go</code>).</li>
+<li><strong>Over-credited rendering rule</strong>: when the net <code>actual_paid_usd</code> for a developer or org is ≤ 0 (credit memos exceeded invoices), <code>SpendLeverage</code> stays 0 and the dashboard renders &#34;—&#34;. The negative actual_paid value itself IS rendered truthfully in the Paid column — finance should see the net credit balance — but the derived leverage multiplier doesn&#39;t have a meaningful interpretation in the over-credited case (a negative ratio is mathematically real but operationally confusing). Product decision documented during #24 review; revisit if any user wants to surface &#34;over-credited&#34; as an explicit dashboard label.</li>
+</ul>
+<hr>
+<h2 id="7-how-it-scores-task-size-and-complexity">7. How it scores task size and complexity</h2>
+<p><strong>v1 today.</strong> Two signals, in order:</p>
+<ol>
+<li><strong>PR size labels</strong> (<code>size/xs</code> … <code>size/xl</code>) if a human applied one. Fibonacci-ish weights 0.5 / 1.0 / 3.0 / 5.0 / 8.0.</li>
+<li><strong>Git heuristic</strong> otherwise: <code>ceil(log2(lines + files*10 + 1))</code>, capped at 8, floor 0.5.</li>
+</ol>
+<p>That&#39;s the whole &#34;complexity model&#34; today. <strong>No semantic understanding, no AST diff, no churn analysis, no test-coverage weighting.</strong> A subtle 5-line concurrency fix that prevents a data race scores the same as a 5-line typo fix. This is a known approximation.</p>
+<p><strong>v2 (deferred).</strong> <code>tier-outcome-weight-algorithm.md</code> specifies a 10-signal auto-scorer (code complexity, blast radius, novelty, test coverage delta, etc.) and a separate Context Complexity Index sidecar. Not in v1.</p>
+<p><strong>Practical implication for dogfooding.</strong> Either label every PR with <code>size/*</code> or accept that small-but-hard PRs will under-weight. The label path takes ~2 seconds per PR and is the cleanest input you can give the system.</p>
+<hr>
+<h2 id="8-how-it-all-comes-together">8. How it all comes together</h2>
+<pre><code>flowchart LR
+    subgraph DEV[&#34;Developer machine&#34;]
+        CC[Claude Code&lt;br/&gt;writes JSONL]
+        TC[tierd score&lt;br/&gt;CLI]
+    end
+    subgraph FS[&#34;~/.claude/projects/&#34;]
+        JSONL[(*.jsonl&lt;br/&gt;per-session)]
+    end
+    subgraph GH[&#34;GitHub&#34;]
+        PR[PR merged]
+        REV[Revert push]
+    end
+    subgraph TIERD[&#34;tierd serve&#34;]
+        WATCH[fsnotify watcher&lt;br/&gt;internal/collector/watcher.go]
+        WH[webhook handler]
+        API[REST API]
+        DB[(SQLite&lt;br/&gt;token_events&lt;br/&gt;+ outcomes&lt;br/&gt;+ actual_spend)]
+        SCORE[scoring engine]
+    end
+
+    CC --&gt; JSONL
+    JSONL --&gt; TC
+    JSONL --&gt; WATCH
+    TC --&gt;|on-demand scan&lt;br/&gt;filter by CWD| DB
+    WATCH --&gt;|live ingest&lt;br/&gt;debounced 1s&lt;br/&gt;filter by CWD| DB
+
+    PR --&gt;|HMAC POST| WH
+    REV --&gt;|HMAC POST| WH
+    WH --&gt;|InsertOutcome| DB
+
+    DB --&gt;|cost + outcomes&lt;br/&gt;joined on issue_id| SCORE
+    SCORE --&gt;|TIER per developer| API
+    API --&gt; DASH[Dashboard / JSON]
+
+    style SCORE fill:#e6f3ff
+</code></pre>
+<p>The watcher node is the live path (<code>tierd serve --watch-repo &lt;path&gt;</code>); the <code>tierd score</code> CLI is the on-demand path. Both share <code>parseSessionFile</code> and <code>joinSessionsToCommits</code>, so a session ingested either way produces the same row. <code>actual_spend</code> enters via <code>POST /api/v1/actual_spend</code> (omitted from the diagram for brevity; see section 6).</p>
+<p>Sequence of a single Claude Code session through to a TIER score:</p>
+<pre><code>sequenceDiagram
+    participant Dev as Developer
+    participant CC as Claude Code
+    participant FS as JSONL file
+    participant T as tierd serve
+    participant GH as GitHub
+    participant DB as SQLite
+
+    Dev-&gt;&gt;CC: prompt on branch fix/15-foo
+    CC-&gt;&gt;FS: append assistant entry&lt;br/&gt;(streaming chunks + final)
+    T-&gt;&gt;FS: fsnotify tail (live, 1s debounce)
+    T-&gt;&gt;T: dedup by message.id&lt;br/&gt;filter by CWD&lt;br/&gt;extract issue_id from branch
+    T-&gt;&gt;DB: InsertTokenEvent&lt;br/&gt;(idempotency_key on message_id or client key)
+    Dev-&gt;&gt;GH: open PR, merge
+    GH-&gt;&gt;T: webhook pull_request closed+merged
+    T-&gt;&gt;T: weight = labelWeight or gitHeuristic&lt;br/&gt;issue_id from branch or body
+    T-&gt;&gt;DB: InsertOutcome (quality=1.0)
+    Dev-&gt;&gt;T: GET /api/v1/scores/{dev}
+    T-&gt;&gt;DB: join token_events + outcomes on issue_id
+    T--&gt;&gt;Dev: TIER score, cost, weighted points, coverage
+</code></pre>
+<hr>
+<h2 id="9-is-it-ready-to-dogfood">9. Is it ready to dogfood?</h2>
+<p>Short answer: <strong>yes for cost attribution, not yet for TIER scores.</strong></p>
+<h3 id="works-today">Works today</h3>
+<ul>
+<li><code>tierd score --repo .</code> from this repo produces a per-developer <strong>cost attribution</strong> report (<code>cmd/tierd/main.go:44-124</code>).</li>
+<li>The cross-repo bleed fix (closes #15) lands in <code>filterSessionsByRepo</code> (<code>jsonl.go:224</code>). The same scan on this repo dropped from a reported $35,251 (cross-contaminated) to $45.97 (real) — verified yesterday.</li>
+<li>The streaming-placeholder dedup (closes #6) means output-token counts are now accurate, not the 10-17x undercount from naive summing.</li>
+<li>Reverse proxy captures Anthropic / OpenAI JSON responses (SSE streaming, PR #14, merged). Gemini has a response parser but <strong>no mounted route</strong>, so Gemini traffic is not captured today.</li>
+<li>HMAC webhook validation works when <code>TIER_WEBHOOK_SECRET</code> is set.</li>
+<li><code>POST /api/v1/costs</code>, <code>POST /api/v1/actual_spend</code>, <code>POST /api/v1/org_actual_spend</code>, <code>GET /api/v1/scores</code>, <code>GET /api/v1/scores/{dev}</code> all live.</li>
+<li>Org-level Anthropic Admin (#138) and OpenAI Usage (#139) pollers — opt-in <code>collectors:</code> config blocks that reconcile <code>org_actual_spend</code> and backfill coverage-remainder <code>token_events</code>.</li>
+<li>Embedded dashboard at <code>/</code> (server-rendered HTML).</li>
+</ul>
+<h3 id="required-before-tier-produces-actual-scores-not-just-costs">Required before TIER produces actual scores (not just costs)</h3>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tierd serve</code> running somewhere with a public URL</td>
+<td>You need ngrok / tailscale-funnel; not yet set up</td>
+</tr>
+<tr>
+<td>GitHub webhook configured on the target repo(s)</td>
+<td>Manual step in repo settings</td>
+</tr>
+<tr>
+<td><code>TIER_WEBHOOK_SECRET</code> set in <code>tierd serve</code> env</td>
+<td>Manual</td>
+</tr>
+<tr>
+<td><code>TIER_API_TOKEN</code> set if exposing POST endpoints beyond loopback</td>
+<td>Manual; closes #22</td>
+</tr>
+<tr>
+<td><code>size/*</code> labels on PRs, or accept the gitHeuristic</td>
+<td>Workflow choice</td>
+</tr>
+<tr>
+<td>Finance posts per-month <code>actual_spend</code> (for Spend Leverage)</td>
+<td>New endpoint live as of #17</td>
+</tr>
+<tr>
+<td>JSONL live tailer (fsnotify) feeding <code>tierd serve</code> directly</td>
+<td><strong>Done</strong> — issue #18</td>
+</tr>
+<tr>
+<td>Coverage % / Spend Leverage metric visible in the dashboard</td>
+<td><strong>Done</strong> — issue #17</td>
+</tr>
+</tbody>
+</table>
+<p>Live ingestion: pass one or more <code>--watch-repo &lt;path&gt;</code> flags to <code>tierd serve</code> (along with the required <code>--aggregation team|developer</code>, #185). The watcher (<code>internal/collector/watcher.go</code>) attaches to <code>~/.claude/projects/</code> via fsnotify, debounces rapid writes (1 second by default — a single streaming Claude Code response writes 30-50 times per second, and we want one re-parse after the stream settles), filters incoming sessions by CWD against the configured repos (the #15 cross-repo bleed protection), and inserts via the same SQLite path the proxy uses. Session-id keyed <code>IdempotencyKey</code> collapses re-parses of the same file into one row via the partial unique index. New project subdirs created after the watcher starts are picked up dynamically; backfilling historical files is out of scope (use <code>tierd score</code> for that).</p>
+<h3 id="not-in-v1-at-all">Not in v1 at all</h3>
+<ul>
+<li>Cursor (no per-call telemetry available without their admin API)</li>
+<li>GitHub Copilot (seat-based, no per-call dollars)</li>
+<li>ChatGPT Team / Plus (no token telemetry exposed)</li>
+<li>Semantic complexity scoring (v2)</li>
+<li>Context Complexity Index (v2)</li>
+<li>Rework Rate / Work Type Distribution sidecars (v2)</li>
+</ul>
+<h3 id="honest-recommendation-for-adopting-tier">Honest recommendation for adopting TIER</h3>
+<ol>
+<li>Run <code>tierd serve --watch-repo . --aggregation developer</code> on the dev box. JSONL is now ingested live. (<code>--aggregation team|developer</code> is <strong>required</strong> — serve will not start without it, #185.)</li>
+<li>Apply <code>size/*</code> labels on PRs as you merge them.</li>
+<li>Expose the listener via Tailscale-funnel with <code>TIER_WEBHOOK_SECRET</code> and <code>TIER_API_TOKEN</code> both set; point the GitHub webhook at it. Outcomes start flowing on merge. Without <code>TIER_API_TOKEN</code>, <code>tierd serve</code> will log a startup warning and the POST endpoints stay unauthenticated — fine on loopback, not fine on the funnel.</li>
+<li>Open <code>http://localhost:8080/</code> (or the tunnel address). Coverage % and Spend Leverage render once finance posts an invoice — either per-developer via <code>POST /api/v1/actual_spend</code> (Cursor-style per-seat bills) or org-level via <code>POST /api/v1/org_actual_spend</code> (the common Anthropic/OpenAI one-bill-for-N-seats pattern; the store divides by the active-in-period seat count automatically, #41).</li>
+<li><code>tierd score --repo .</code> still works for ad-hoc historical scans without the server.</li>
+</ol>
+<p>The honest framing: TIER&#39;s measurement primitives are correct on <code>main</code>. The wiring that makes them produce a live TIER score with zero setup is two tickets away.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How TIER Relates to DORA, SPACE, and DX Core 4 — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="how-tier-relates-to-dora-space-and-dx-core-4">How TIER Relates to DORA, SPACE, and DX Core 4</h1>
+<p><strong>Audience:</strong> anyone evaluating TIER who already runs (or is considering) an
+engineering-metrics framework and asks the natural first question: <em>&#34;How does
+this sit alongside DORA / SPACE / DX Core 4 — does it replace them?&#34;</em></p>
+<p><strong>Short answer:</strong> it complements them. TIER measures one axis none of the three
+frameworks covers — the <strong>dollar efficiency of AI token spend</strong> — and it is
+deliberately narrow. It is not a delivery-throughput metric, not a
+developer-experience or well-being metric, and not a holistic-productivity
+score. Run TIER <em>next to</em> your existing framework, never fused into it.</p>
+<hr>
+<h2 id="the-one-thing-tier-measures">The one thing TIER measures</h2>
+<p>TIER is a single ratio (<code>internal/scoring/engine.go</code>):</p>
+<pre><code>TIER = Σ(outcome_weight × quality_multiplier) / (list-price AI cost / $1,000)
+</code></pre>
+<ul>
+<li><strong>outcome_weight</strong> — the size of a merged outcome, from a PR <code>size/*</code> label,
+or a lines/files git heuristic when no label is set.</li>
+<li><strong>quality_multiplier</strong> — a within-formula discount on that outcome: <code>1.0</code> for
+a clean merge, reduced when the work is later reverted or fails CI (floors
+<code>0.7</code> ci-fail, <code>0.8</code> strategic revert, <code>0.1</code> quality revert).</li>
+<li><strong>list-price AI cost</strong> — the AI spend attributed to that work, priced from a
+versioned reference price table (list price, not your negotiated invoice).</li>
+</ul>
+<p>So TIER answers exactly one question: <strong>&#34;How much shipped outcome did we get per
+$1,000 of AI compute?&#34;</strong> Two sidecars travel with it — <strong>Coverage %</strong> (the share
+of that cost we actually measured vs. inferred, the trust line on the number)
+and <strong>Spend Leverage</strong> (list price ÷ your actual invoice, a CFO discount signal).
+Neither changes what TIER <em>is</em>: a trailing efficiency diagnostic on the AI-cost
+axis.</p>
+<h3 id="trailing-and-diagnostic--chosen-words">&#34;Trailing&#34; and &#34;diagnostic&#34; — chosen words</h3>
+<ul>
+<li><strong>Trailing.</strong> TIER is computed <em>after</em> work merges. Outcomes enter on a
+<code>pull_request</code> merge webhook; the quality multiplier is revised later when a
+revert or CI-failure event arrives. It reports on realized cost and realized
+outcomes — it does not predict, forecast, or steer work in flight.</li>
+<li><strong>Diagnostic, not a target.</strong> TIER is a lagging indicator you read to
+investigate (&#34;why did our AI spend per outcome jump this month?&#34;), not a KPI
+to maximize. The ranking floor in the engine (<code>MinRankedOutcomes = 3</code>,
+<code>MinRankedCostUSD = $5.00</code>) exists precisely because tiny samples produce
+absurd ratios; below-floor rows are listed but never ranked. That is a
+diagnostic posture, not a scoreboard posture.</li>
+</ul>
+<hr>
+<h2 id="what-tier-does-not-claim">What TIER does NOT claim</h2>
+<p>Stated plainly, so no adopter over-reads the number:</p>
+<ul>
+<li><strong>Not delivery throughput.</strong> TIER says nothing about how often you deploy, how
+fast changes reach production, or how much you ship in absolute terms. A team
+that ships more is not &#34;better TIER&#34;; a team that ships the same for less AI
+spend is.</li>
+<li><strong>Not developer happiness or experience.</strong> TIER has no signal for
+satisfaction, well-being, flow, cognitive load, or friction. It never surveys
+a human.</li>
+<li><strong>Not holistic productivity.</strong> TIER is one ratio on one axis. It is not a
+productivity index and cannot stand in for one. &#34;Good TIER&#34; and &#34;productive
+team&#34; are different claims; treating them as the same is the misuse this
+document exists to prevent.</li>
+<li><strong>Not a semantic quality or complexity measure.</strong> The <code>outcome_weight</code> is a
+size proxy (label or lines/files), and the <code>quality_multiplier</code> is a revert /
+CI-failure discount — <strong>not</strong> a change-failure <em>rate</em> and <strong>not</strong> an
+assessment of how hard or how good the code is. A subtle 5-line concurrency
+fix and a 5-line typo fix weigh the same today.</li>
+</ul>
+<hr>
+<h2 id="dimension-by-dimension-mapping">Dimension-by-dimension mapping</h2>
+<p>For each dimension of each framework: does TIER measure it? The honest answer is
+almost always <strong>no — and that is the point.</strong> TIER adds a column those
+frameworks do not have.</p>
+<h3 id="dora--the-four-keys">DORA — the four keys</h3>
+<p>DORA measures software <em>delivery</em> performance. Its four keys:</p>
+<table>
+<thead>
+<tr>
+<th>DORA key</th>
+<th>What it measures</th>
+<th>Does TIER measure it?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deployment Frequency</td>
+<td>How often you release to production</td>
+<td>No. TIER has no deploy signal.</td>
+</tr>
+<tr>
+<td>Lead Time for Changes</td>
+<td>Commit → production latency</td>
+<td>No. TIER is not a latency metric.</td>
+</tr>
+<tr>
+<td>Change Failure Rate</td>
+<td>% of deployments causing a failure</td>
+<td>No. TIER&#39;s revert/CI discount adjusts an outcome&#39;s <em>weight</em> inside the ratio; it is not reported as a failure rate and must not be read as one.</td>
+</tr>
+<tr>
+<td>Time to Restore Service</td>
+<td>How fast you recover from a failure</td>
+<td>No. TIER has no incident or recovery signal.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Relationship:</strong> orthogonal. DORA tells you how well you <em>deliver</em>; TIER tells
+you how efficiently AI <em>dollars</em> convert into delivered outcomes. Neither
+substitutes for the other.</p>
+<h3 id="space--the-five-dimensions">SPACE — the five dimensions</h3>
+<p>SPACE is a framework for reasoning about developer productivity across multiple
+dimensions (deliberately resisting a single number). Its five:</p>
+<table>
+<thead>
+<tr>
+<th>SPACE dimension</th>
+<th>What it captures</th>
+<th>Does TIER measure it?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>S</strong>atisfaction &amp; well-being</td>
+<td>How developers feel about work, tools, team</td>
+<td>No. TIER never measures humans.</td>
+</tr>
+<tr>
+<td><strong>P</strong>erformance</td>
+<td>Outcomes of work (quality, reliability, impact)</td>
+<td>Partially adjacent: TIER&#39;s numerator is a size-weighted outcome count discounted for reverts — a narrow slice, not a performance judgment.</td>
+</tr>
+<tr>
+<td><strong>A</strong>ctivity</td>
+<td>Counts of actions (commits, PRs, reviews)</td>
+<td>No, as an end. TIER counts merged outcomes only as the numerator of an efficiency ratio, never as an activity score.</td>
+</tr>
+<tr>
+<td><strong>C</strong>ommunication &amp; collaboration</td>
+<td>How work and information flow between people</td>
+<td>No. TIER has no collaboration signal.</td>
+</tr>
+<tr>
+<td><strong>E</strong>fficiency &amp; flow</td>
+<td>Ability to do work with minimal interruption</td>
+<td>Adjacent in name only. SPACE efficiency is about <em>human</em> flow; TIER efficiency is about <em>dollar</em> yield of AI compute. Do not conflate them.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Relationship:</strong> SPACE&#39;s own thesis — never collapse the dimensions into one
+number — is exactly TIER&#39;s posture. TIER is a specialized reading on a
+cost-efficiency axis SPACE does not include; it belongs <em>beside</em> a SPACE
+picture, not <em>inside</em> a fused score.</p>
+<h3 id="dx-core-4--the-four-top-level-dimensions">DX Core 4 — the four top-level dimensions</h3>
+<p>DX Core 4 unifies DORA, SPACE, and DevEx into four dimensions with a
+per-engineer normalization:</p>
+<table>
+<thead>
+<tr>
+<th>DX Core 4 dimension</th>
+<th>What it captures</th>
+<th>Does TIER measure it?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Speed</td>
+<td>Throughput / delivery velocity (e.g. diffs per engineer, lead time)</td>
+<td>No. TIER is not a velocity metric.</td>
+</tr>
+<tr>
+<td>Effectiveness</td>
+<td>Developer experience — ability to do work well (DXI)</td>
+<td>No. TIER has no experience signal.</td>
+</tr>
+<tr>
+<td>Quality</td>
+<td>Change failure rate, failed-deployment recovery, operational health</td>
+<td>No. As with DORA, TIER&#39;s revert/CI discount is a weight adjustment inside the ratio, not a quality dimension.</td>
+</tr>
+<tr>
+<td>Impact</td>
+<td>Business value / share of time on valuable work</td>
+<td>No. TIER measures cost efficiency of outcomes, not their downstream business impact.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Relationship:</strong> DX Core 4 deliberately spans speed, experience, quality, and
+impact — and deliberately does <strong>not</strong> include &#34;AI-spend efficiency.&#34; That is
+the gap TIER fills. If you run DX Core 4, add TIER as a companion cost lens; do
+not try to graft it onto one of the four dimensions.</p>
+<hr>
+<h2 id="why-none-of-the-three-covers-tiers-axis">Why none of the three covers TIER&#39;s axis</h2>
+<p>DORA, SPACE, and DX Core 4 all predate the era where a large and <em>variable</em>
+fraction of engineering cost is metered AI token spend. They measure delivery,
+experience, and outcomes — all valuable — but none of them asks <em>what the AI
+compute cost to produce that delivery, and whether that cost is trending
+efficiently.</em> That is a new axis, and it is the only axis TIER measures. That is
+why TIER is a complement: it adds a column, it does not overwrite one.</p>
+<hr>
+<h2 id="anti-patterns-do-not-do-these">Anti-patterns (do not do these)</h2>
+<p>These are the misuse modes that turn a useful diagnostic into an actively
+harmful one. The third is the specific Goodhart failure the project&#39;s
+adversarial analysis warns about.</p>
+<ol>
+<li>
+<p><strong>TIER as a sole (or primary) performance input.</strong> Do not put TIER in a
+performance review, a stack-rank, or a compensation formula. TIER measures
+dollar-efficiency of AI spend on merged work — it is blind to difficulty,
+collaboration, mentoring, on-call, design, and everything else that makes an
+engineer valuable. As a <em>sole</em> input it rewards exactly the wrong behaviors
+(cheap, high-label-weight, low-difficulty work).</p>
+</li>
+<li>
+<p><strong>Cross-cohort leaderboards.</strong> Do not rank developers, teams, or
+organizations against each other on TIER. Model mix, task mix, labeling
+discipline, and capture coverage differ across cohorts, so the comparison is
+apples-to-oranges. TIER is also <strong>single-tenant with no org isolation today</strong>
+(see the README status section), so cross-org comparison is not even
+technically meaningful. Compare a cohort <em>to its own past</em>, never to another
+cohort.</p>
+</li>
+<li>
+<p><strong>Composite fusion into a single performance number (the Goodhart trap).</strong> Do
+not blend TIER into a DORA/SPACE/DX Core 4 composite or any &#34;one number&#34;
+dashboard that purports to rate performance. <em>When a measure becomes a
+target, it ceases to be a good measure.</em> Fusing TIER into a performance score
+makes it a target, and the gaming paths are obvious and cheap: inflate PR
+<code>size/*</code> labels to raise the numerator; avoid hard-but-small work that weighs
+little; or — worst of all — move AI usage onto tools TIER cannot capture,
+which lowers measured cost, inflates the ratio, <em>and</em> silently craters
+Coverage %, destroying the very trust line that made the number worth reading.
+Keep TIER standalone and paired with its Coverage % so it stays diagnostic.</p>
+</li>
+</ol>
+<hr>
+<h2 id="the-one-line-takeaway">The one-line takeaway</h2>
+<blockquote>
+<p>TIER is a trailing efficiency diagnostic on the AI-cost axis — an axis DORA,
+SPACE, and DX Core 4 do not measure. Run it <em>beside</em> your framework as a
+complement. Never fuse it into a single performance number, never rank cohorts
+on it, and never make it a sole performance input.</p>
+</blockquote>
+<p>See <a href="how-it-works.html" rel="nofollow">How TIER Works Today</a> for the full measurement model and
+its grounding in the code.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>
