@@ -138,6 +138,46 @@ func TestCodexWatchCheck(t *testing.T) {
 	}
 }
 
+// TestCodexProxyDoubleCountWarn pins the one configuration in which Codex spend
+// is captured twice (#459 task 2): the OpenAI proxy mounted AND the rollout
+// collector enabled. Both docs/how-it-works.md §3b and the parseOpenAIResponses
+// doc claim tierd says so at startup — this is the test that keeps that claim
+// true. The warning must NOT fire for either half alone, or it becomes noise
+// that operators learn to ignore.
+func TestCodexProxyDoubleCountWarn(t *testing.T) {
+	cases := []struct {
+		name           string
+		codex, openAI  bool
+		wantWarn       bool
+		wantMentions   []string
+		forbidMentions []string
+	}{
+		{name: "neither", codex: false, openAI: false, wantWarn: false},
+		{name: "proxy only (ordinary OpenAI traffic)", codex: false, openAI: true, wantWarn: false},
+		{name: "collector only (the supported Codex path)", codex: true, openAI: false, wantWarn: false},
+		{
+			name: "both -> WARN", codex: true, openAI: true, wantWarn: true,
+			// The message must name the hazard, the reason the rows cannot
+			// dedup, and the way out — a warning that only says "careful" is
+			// not actionable.
+			wantMentions: []string{"TWICE", "dedup", "--codex-rollout"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := codexProxyDoubleCountWarn(tc.codex, tc.openAI)
+			if (got != "") != tc.wantWarn {
+				t.Fatalf("warn = %q, wantWarn = %v", got, tc.wantWarn)
+			}
+			for _, want := range tc.wantMentions {
+				if !strings.Contains(got, want) {
+					t.Errorf("warning must mention %q; got: %s", want, got)
+				}
+			}
+		})
+	}
+}
+
 // TestResolveVersion covers the go-install fallback (#477): a stamped ldflag
 // wins; the "dev" fallback defers to the build-info module version when the
 // toolchain embedded one.
@@ -201,7 +241,7 @@ func TestDispatch_Help(t *testing.T) {
 			t.Errorf("dispatch(%q) stdout = %q, want usage text", arg, out.String())
 		}
 		// Every subcommand must be discoverable from the help output.
-		for _, cmd := range []string{"score", "serve", "ship", "backfill", "backup", "doctor", "reprice", "version", "help"} {
+		for _, cmd := range []string{"score", "score-log", "serve", "ship", "backfill", "backup", "doctor", "reprice", "repair-repo", "version", "help"} {
 			if !strings.Contains(out.String(), cmd) {
 				t.Errorf("dispatch(%q) stdout missing subcommand %q", arg, cmd)
 			}

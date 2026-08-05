@@ -216,6 +216,7 @@ type devScore struct {
 	TIER            float64 `json:"tier"`
 	WeightedPoints  float64 `json:"weighted_points"`
 	TotalCostUSD    float64 `json:"total_cost_usd"`
+	ActualPaidUSD   float64 `json:"actual_paid_usd"`
 	SpendLeverage   float64 `json:"spend_leverage"`
 	SampleN         int     `json:"sample_n"`
 	CILow           float64 `json:"ci_low"`

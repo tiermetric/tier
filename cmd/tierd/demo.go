@@ -41,19 +41,93 @@ func runDemo(args []string, _, stderr io.Writer) int {
 		return 1
 	}
 	// #475: NEVER delete a real capture database. --db could point at a user's
-	// live ~/.tier/tier.db; the unconditional Remove below would silently destroy
+	// live ~/.tier/tier.db; the Remove below would silently destroy
 	// it. Only proceed when the target is absent or is a prior demo database
 	// (all-synthetic developers, the demo org). A real or unreadable file is
 	// refused, deleting nothing.
+	//
+	// SECURITY INVARIANT (#508): "a `tierd demo` boot can never let a byte of
+	// pre-existing --db content reach an HTTP client." Two independent controls
+	// jointly hold this, and BOTH are load-bearing — removing either one alone
+	// re-opens the exposure #508 describes (a misconfigured public origin serving
+	// real per-developer data):
+	//
+	//   1. guardDemoDBPath (just below): if the file holds ANY real data, this
+	//      returns non-nil and runDemo returns 1 here — execution never reaches
+	//      the Remove/seedDemo/serve below, so a real database is refused, never
+	//      served (guardDemoDBPath DOES read the file, via store.InspectIdentities
+	//      / store.PopulatedTablesOutside, to make that decision — "refused, not
+	//      served" is the accurate claim, not "refused, not read from").
+	//      TestGuardDemoDBPath_RefusesRealDB and
+	//      TestGuardDemoDBPath_RefusesWebhookOnlyDB (demo_test.go) call
+	//      guardDemoDBPath directly, so they pin its DECISION but cannot detect
+	//      the call site below being deleted or short-circuited from runDemo.
+	//      TestDemoSmoke_RefusesRealDataAndNeverBinds (demo_smoke_test.go,
+	//      integration-tagged) is the only control arm that drives the real
+	//      subprocess end to end and would fail if this call site were removed —
+	//      that is the mutant it exists to catch.
+	//
+	//   2. The FAIL-CLOSED os.Remove loop immediately below: once the guard has
+	//      passed, whatever was actually in the file — even guard-approved
+	//      content that is not the exact current synthetic cast (e.g. a strict
+	//      subset of the current demo-* cast, or extra rows under demo-* names) —
+	//      is deleted before store.Open re-creates the file and seedDemo writes
+	//      the fixed, deterministic dataset into it. seedDemo alone does NOT
+	//      provide this: it is additive/idempotent by design (dedups on
+	//      idempotency key / merge SHA, see its doc comment below), so run
+	//      without the preceding Remove it MERGES into whatever guard-approved
+	//      content was already there rather than replacing it. Removing the
+	//      os.Remove calls (while leaving the guard and seedDemo intact) is
+	//      exactly the "dark control" #508's re-scope names: it reads as
+	//      redundant busywork once the guard has already said "fine, proceed",
+	//      and an "optimization" along those lines would silently make the
+	//      invariant above depend on guard-approved content being byte-identical
+	//      to the canonical cast — which guardDemoDBPath's own doc comment does
+	//      NOT promise (it only protects a real DB from being CLOBBERED; a
+	//      guard-approved SUBSET or an extra guard-approved row both pass it).
+	//      TestDemoSmoke_AlwaysReseedsCanonicalData (demo_smoke_test.go,
+	//      integration-tagged) plants a guard-approved artifact seedDemo cannot
+	//      produce or overwrite and asserts it is ABSENT from what gets served —
+	//      the control arm for "os.Remove specifically", not merely "the reseed
+	//      step generically".
+	//
+	// Neither control alone is the invariant; both must hold. See #475 (guard
+	// (1)'s origin) and #508 (this comment's own issue) for the history; do not
+	// cite guard (1) alone as "the reason the demo serves only synthetic data" —
+	// it decides what is ALLOWED to proceed, not what ends up being SERVED.
 	if err := guardDemoDBPath(*dbPath, stderr); err != nil {
 		return 1
 	}
 	// Recreate each run so the demo is deterministic and never accretes. Remove
 	// the WAL/SHM sidecars too so "recreated each run" is literally clean — a
 	// Ctrl-C'd serve can leave an uncheckpointed WAL behind.
-	_ = os.Remove(*dbPath)
-	_ = os.Remove(*dbPath + "-wal")
-	_ = os.Remove(*dbPath + "-shm")
+	//
+	// 🔴 THE ERRORS ARE FATAL, AND THAT IS THE WHOLE POINT. The first version of
+	// this block discarded them (`_ = os.Remove(...)`) while the comment above
+	// called it UNCONDITIONAL. It was not: it was best-effort, and a security
+	// review REPRODUCED the consequence end to end. With a guard-approved demo DB
+	// carrying one extra demo-* row at $999 in a chmod-0555 directory, every
+	// unlink failed silently, store.Open reopened the surviving file, seedDemo
+	// MERGED into it (it is additive by design), and `GET /api/v1/scores` served
+	// demo-ada at total_cost_usd=1024.70 against a canonical 25.70 — with the
+	// "SYNTHETIC DATA" banner printed and not one warning on stderr.
+	//
+	// unlink can fail while the file stays perfectly openable: a non-writable
+	// containing directory, a Docker single-file bind mount (EBUSY on Linux), or
+	// Windows blocking deletion of an open handle. On any of those, control (1)
+	// becomes the ONLY thing between pre-existing content and the HTTP client —
+	// and the guard only promises "no developer outside the demo cast", which a
+	// planted demo-* row satisfies. Fail closed instead.
+	//
+	// ⚠️ os.ErrNotExist, NOT fs.ErrNotExist: runDemo shadows the io/fs import
+	// with its own `fs := flag.NewFlagSet(...)` above.
+	for _, stale := range []string{*dbPath, *dbPath + "-wal", *dbPath + "-shm"} {
+		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(stderr, "demo: cannot delete %s (%v)\n", stale, err)
+			_, _ = fmt.Fprintf(stderr, "demo: refusing to serve — the demo recreates its DB every run, and content that survives that is not guaranteed synthetic\n")
+			return 1
+		}
+	}
 
 	db, err := store.Open(*dbPath)
 	if err != nil {

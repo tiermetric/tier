@@ -11,6 +11,8 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,11 +32,13 @@ type Store interface {
 	// instant for which any token event was captured — and ok=false on an empty
 	// store (#512). A score window starting before it divides a full window of
 	// outcomes by a partial window of cost, silently inflating TIER.
-	CostCoverageStart(ctx context.Context) (time.Time, bool, error)
+	// scope (#590): a scoped read reports THAT repository's horizon. Left unscoped it
+	// would assert coverage for a scoped window on another repository's evidence.
+	CostCoverageStart(ctx context.Context, scope store.RepoScope) (time.Time, bool, error)
 	// SourceCoverageStart is the same horizon at per-source grain: capture paths
 	// enabled on different dates have different horizons, so a window clearing
 	// the global minimum can still predate one source entirely.
-	SourceCoverageStart(ctx context.Context) (map[string]time.Time, error)
+	SourceCoverageStart(ctx context.Context, scope store.RepoScope) (map[string]time.Time, error)
 	InsertTokenEvent(ctx context.Context, e store.TokenEvent) error
 	// InsertTokenEvents is the single-transaction bulk insert behind
 	// POST /api/v1/events (#126); same MAX-on-conflict UPSERT per row as
@@ -46,7 +50,18 @@ type Store interface {
 	// a DIFFERENT cost_micro, instead of silently first-writer-wins dropping the
 	// correction (#295). The automated ingester keeps the plain InsertTokenEvent
 	// path, where per-message replays are cost-identical.
+	//
+	// It is a REQUEST-PATH writer: it takes the bounded write lock, so it may
+	// also return store.ErrWriteLockUnavailable, which handlePostCosts answers with
+	// 503 + Retry-After ahead of every other classification (#610).
 	InsertManualCostEvent(ctx context.Context, e store.TokenEvent) error
+	// CorrectManualCostEvent implements POST /api/v1/costs's sanctioned
+	// override path (#346, ruling C — the follow-up to #295's ruling A above):
+	// given override=true plus a required actor and reason, it may rewrite an
+	// EXISTING keyed row's cost_micro instead of 409ing, and appends an
+	// append-only cost_correction_audit row (old → new, actor, reason) when it
+	// does. See store.DB.CorrectManualCostEvent for the full per-case contract.
+	CorrectManualCostEvent(ctx context.Context, e store.TokenEvent, actor, reason string) (store.CostCorrection, error)
 	InsertActualSpend(ctx context.Context, a store.ActualSpend) error
 	InsertOrgActualSpend(ctx context.Context, o store.OrgActualSpend) error
 	// OrgActualSpendTotals returns the net actual-paid roll-up per (org, period)
@@ -66,18 +81,21 @@ type Store interface {
 	// DeveloperCostsWindow returns per-developer cost totals over the half-open
 	// window [since, until) (#276); a zero `until` is open-ended (the pre-#276
 	// [since, ∞) behavior), unchanged byte-for-byte.
-	DeveloperCostsWindow(ctx context.Context, since, until time.Time) ([]store.DeveloperCost, error)
+	// scope narrows the read to ONE repository (#590), strictly: the 'unqualified'
+	// sentinel is excluded, never folded in. store.FleetWide is the unscoped zero
+	// value and reproduces the pre-#590 read exactly.
+	DeveloperCostsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.DeveloperCost, error)
 	// DeveloperIssueCostsWindow returns cost totals at (developer, issue) grain
 	// (#187) over [since, until) (#276), the finer grain the work-type segmentation
 	// attributes to a category: a token event's cost is charged to the work_type of
 	// the outcome sharing its (developer, issue). Same window/realtime-split as
 	// DeveloperCostsWindow, one level finer.
-	DeveloperIssueCostsWindow(ctx context.Context, since, until time.Time) ([]store.DevIssueCost, error)
+	DeveloperIssueCostsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.DevIssueCost, error)
 	// CostCompositionWindow returns the cost-composition sidecar over [since, until)
 	// (#234): cost by normalized model, per-class token composition, attributed vs
 	// unattributed spend, and the cache-read/premium-model levers. A whole-window,
 	// name-free aggregate; a zero `until` is open-ended.
-	CostCompositionWindow(ctx context.Context, since, until time.Time) (store.CostComposition, error)
+	CostCompositionWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.CostComposition, error)
 	// UnattributedBucketCostsWindow returns per-(developer, bucket) unattributed
 	// spend over [since, until) (#refocus, Option B): the honest split of the single
 	// unattributed mass the composition sidecar reports as one number, into the
@@ -85,26 +103,43 @@ type Store interface {
 	// the base sentinel for host-blind producers). A zero `until` is open-ended; the
 	// handler folds it to an org split and per-developer exploratory shares, and
 	// suppresses names in team-aggregation mode (#185).
-	UnattributedBucketCostsWindow(ctx context.Context, since, until time.Time) ([]store.UnattributedBucketCost, error)
+	UnattributedBucketCostsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.UnattributedBucketCost, error)
 	// DistinctPriceVersionsWindow returns the ascending distinct price_table
 	// versions that priced token_events in [since, until) (#293). Feeds the
 	// mixed-version data_quality WARN on /scores: cost_micro is immutable per row
 	// (#233), so a window can span multiple versions while the response stamps a
 	// single active price_table.version — this read surfaces the mix. A zero `until`
 	// is open-ended; an empty window returns nil.
-	DistinctPriceVersionsWindow(ctx context.Context, since, until time.Time) ([]int, error)
+	DistinctPriceVersionsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]int, error)
 	// AllOutcomesWindow returns every outcome in [since, until) (#276); a zero
 	// `until` is open-ended.
-	AllOutcomesWindow(ctx context.Context, since, until time.Time) ([]store.Outcome, error)
+	AllOutcomesWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.Outcome, error)
 	// OutcomeTokenTotals returns per-(developer, issue) token totals over each
 	// outcome's attributable window, keyed by the raw token_events developer, for
 	// the zero-token tripwire (#136). The caller canonicalizes the key (#125)
 	// before comparing to scoring.MinAttributableTokens.
-	OutcomeTokenTotals(ctx context.Context, outcomes []store.Outcome) (map[store.DevIssue]int64, error)
+	// Under a non-FleetWide scope the tripwire join goes strict too (#590) — see
+	// store.OutcomeTokenTotals for why a scoped read must not let a repo-blind row
+	// suppress a zero-token flag.
+	OutcomeTokenTotals(ctx context.Context, outcomes []store.Outcome, scope store.RepoScope) (map[store.DevIssue]int64, error)
 	// ActualSpendAllWindow returns per-developer actual paid spend over the
 	// half-open period window [since, until) (#276), at monthly grain; a zero
 	// `until` is open-ended. Feeds per-developer SpendLeverage without an N+1.
+	//
+	// 🔴 TAKES NO SCOPE, AND CANNOT (#590). actual_spend has no `repo` column and
+	// never could meaningfully have one: it records what an organization actually
+	// PAID a vendor over a period, which is not divisible by repository without
+	// inventing an allocation. So under a repo scope this read is left unscoped and
+	// its derived figure is SUPPRESSED rather than shown — dividing org-wide actual
+	// spend by one repository's list-price cost would manufacture a leverage ratio
+	// inflated by roughly the fleet-to-repo ratio. See scoresResponse.DataQuality's
+	// spend-leverage suppression note.
 	ActualSpendAllWindow(ctx context.Context, since, until time.Time) (map[string]float64, error)
+	// UnqualifiedExclusionWindow reports what a strict repo scope excluded from the
+	// window as repo-blind (#590) — the disclosure half of ruling C. Takes no scope
+	// by design: the sentinel rows are the same set whichever repository was asked
+	// for, because the sentinel means no repository could be determined at all.
+	UnqualifiedExclusionWindow(ctx context.Context, since, until time.Time) (store.UnqualifiedExclusion, error)
 	OverBudgetPeriods(ctx context.Context, since time.Time) ([]store.OverBudgetPeriod, error)
 	TeamsForDevelopers(ctx context.Context) (map[string]string, error)
 	// DivisionsForDevelopers is the division-level (#270) counterpart to
@@ -794,6 +829,29 @@ type costRequest struct {
 	// duplicate — the previous behaviour, retained for back-compat with
 	// scripts that don't track keys.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Override, OverrideActor, and OverrideReason implement #346's sanctioned
+	// "ruling C" exception to #295's default 409: a keyed re-post whose
+	// cost_usd DIVERGES from the stored row is REJECTED unless the caller
+	// explicitly sets override=true AND supplies both an actor and a reason.
+	// This is deliberately NOT a plain last-writer-wins upsert switch — it is
+	// the ONLY way a legitimate finance correction can land, and every use
+	// writes an append-only audit row (see store.DB.CorrectManualCostEvent).
+	// A bare key collision (override omitted or false) still 409s exactly as
+	// before; there is no way to silently overwrite an audited cost.
+	Override       bool   `json:"override,omitempty"`
+	OverrideActor  string `json:"override_actor,omitempty"`
+	OverrideReason string `json:"override_reason,omitempty"`
+}
+
+// costCorrectionResponse is the 200 body on a #346 override that ACTUALLY
+// corrected a row (CostCorrection.Corrected == true). Every other outcome on
+// POST /api/v1/costs — 201, 409, 400 — carries no body, matching this
+// endpoint's existing convention; this is the one case where the client has
+// no other way to learn what changed without a second read.
+type costCorrectionResponse struct {
+	Corrected  bool    `json:"corrected"`
+	OldCostUSD float64 `json:"old_cost_usd"`
+	NewCostUSD float64 `json:"new_cost_usd"`
 }
 
 func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
@@ -820,6 +878,18 @@ func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "identifier fields must be <= 256 chars")
 		return
 	}
+	// The unattributed sentinel is server-assigned and may not be forged, on EITHER
+	// column it names: issue_id (#466) and developer (#619). The developer half is
+	// checked first because it is the one that moves a dollar out of the forger's own
+	// denominator rather than between buckets inside it.
+	if err := validateDeveloper(req.Developer); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateIssueID(req.IssueID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// idempotency_key is optional and fully client-generated, so cap it at the
 	// trust boundary just like the required identifiers above (#144). Without
 	// this bound a client can persist a ~1 MiB string per row into the partial
@@ -832,6 +902,43 @@ func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
 	// cap in validateEventRequest — this closes the same gap on /costs.
 	if len(req.IdempotencyKey) > maxIdentifierLen {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("idempotency_key must be <= %d chars", maxIdentifierLen))
+		return
+	}
+	// #346 (ruling C): validate the override signal BEFORE it can reach
+	// CorrectManualCostEvent, so a malformed override request 400s instead of
+	// falling through to store-layer errors that were never meant to be an
+	// HTTP contract. Three fail-loud rules, all "never silent":
+	//   - override=true requires a non-empty idempotency_key: there is nothing
+	//     to override without one (an unkeyed post can never conflict — #295 —
+	//     so "override" is meaningless on it).
+	//   - override=true requires BOTH override_actor and override_reason: an
+	//     unattributed, unexplained override is exactly the silent overwrite
+	//     ruling C exists to prevent.
+	//   - override_actor / override_reason set WITHOUT override=true is
+	//     rejected rather than silently ignored — a client that filled in
+	//     both fields almost certainly meant to authorize an override and
+	//     forgot the flag; silently discarding them would look like the
+	//     override worked when the request instead just 409s (or is a plain
+	//     unkeyed insert).
+	if req.Override {
+		if req.IdempotencyKey == "" {
+			writeError(w, http.StatusBadRequest, "override requires a non-empty idempotency_key (nothing to override without one)")
+			return
+		}
+		if req.OverrideActor == "" || req.OverrideReason == "" {
+			writeError(w, http.StatusBadRequest, "override requires both override_actor and override_reason — an override must be attributed and explained, never silent")
+			return
+		}
+		if len(req.OverrideActor) > maxIdentifierLen {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("override_actor must be <= %d chars", maxIdentifierLen))
+			return
+		}
+		if len(req.OverrideReason) > maxOverrideReasonLen {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("override_reason must be <= %d chars", maxOverrideReasonLen))
+			return
+		}
+	} else if req.OverrideActor != "" || req.OverrideReason != "" {
+		writeError(w, http.StatusBadRequest, "override_actor/override_reason were set but override is not true — set override=true to authorize a cost correction, or omit both fields")
 		return
 	}
 	if math.IsNaN(req.CostUSD) || math.IsInf(req.CostUSD, 0) {
@@ -889,6 +996,24 @@ func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
 	// forged source would let tierd clobber a client-posted cost. Accept only
 	// "" (defaults to "api") or an explicit "api"; reject anything else. The
 	// companion fidelity restriction below protects Coverage % / Spend Leverage.
+	//
+	// 🔴 THIS IS ALSO THE #346 OVERRIDE'S BLAST-RADIUS CONTROL, and it is load-
+	// bearing precisely because it is not obvious. Forcing source="api" here,
+	// combined with CorrectManualCostEvent comparing source in its identity
+	// check, means the sanctioned cost-correction override can only ever reach
+	// a row whose STORED source is "api" -- the manual-import lane. (Deliberately
+	// NOT "a row /costs itself created": store.InsertTokenEvent is exported and
+	// writes source verbatim, so provenance is not what this proves. Stored
+	// source is.) Automatically captured spend -- every non-api source: jsonl,
+	// proxy, codex-rollout, copilot-api, the org pollers -- is STRUCTURALLY
+	// unreachable from this endpoint, not merely unlikely to be hit. An override request naming a collector-captured row's
+	// idempotency_key gets a 409 identity mismatch, because the stored source
+	// can never equal the "api" this handler forces.
+	//
+	// Widening this switch to accept another source would silently hand the
+	// override write access to captured spend. Do not widen it without
+	// deciding that question explicitly. Pinned by
+	// TestPostCosts_Override_CannotReachCapturedSpend.
 	switch req.Source {
 	case "":
 		req.Source = "api"
@@ -942,7 +1067,7 @@ func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
 	// the stored INTEGER cost_micro, so an honest retry whose float cost_usd / FX /
 	// rounding jitter lands on the same micro value is NOT a conflict. To CHANGE a
 	// figure, post under a NEW idempotency_key (or delete + repost). A sanctioned
-	// audited override (ruling C) is a separate follow-up.
+	// audited override (ruling C) now follows immediately below.
 	ev := store.TokenEvent{
 		Developer:      req.Developer,
 		IssueID:        req.IssueID,
@@ -958,20 +1083,159 @@ func (h *Handler) handlePostCosts(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: req.IdempotencyKey,
 		Timestamp:      time.Now().UTC(),
 	}
+
+	// #346 (ruling C): override=true routes through CorrectManualCostEvent
+	// instead of the plain InsertManualCostEvent path. CorrectManualCostEvent
+	// itself decides whether this is an ACTUAL correction (an existing row
+	// whose identity matches and whose cost diverges — audited, 200) or
+	// nothing to correct at all (no existing row, or a matching re-post —
+	// both land through CorrectManualCostEvent's OWN insert path, in the same
+	// transaction as its lookup, so they behave identically to the
+	// override=false path and return 201/idempotent-201 exactly as before).
+	// override=false keeps the original code path untouched — #295's 409
+	// default is not routed through the override machinery at all.
+	if req.Override {
+		result, err := h.store.CorrectManualCostEvent(r.Context(), ev, req.OverrideActor, req.OverrideReason)
+		if err != nil {
+			// 🔴 CONTENTION IS CLASSIFIED FIRST, AND THE ORDER IS LOAD-BEARING.
+			// CorrectManualCostEvent takes the write lock via
+			// beginImmediateBounded, so it is a request-path writer that can
+			// return store.ErrWriteLockUnavailable — a TRANSIENT failure whose
+			// honest answer is 503 + Retry-After, not the 500 "store error"
+			// sink below (which reads as corruption) and not the 409 above it.
+			// Every other branch in this chain must stay downstream of this
+			// one: the same reordering defect was MEASURED on the alias site
+			// (see TestContentionOutranksTheValidationPrefix), where a
+			// classification placed ahead of the sentinel silently turned a
+			// retryable 503 into a permanent status no client would retry.
+			//
+			// ⚠️ Only the sentinel gets this treatment. beginImmediateBounded
+			// wraps ErrWriteLockUnavailable ONLY around a genuine lock outcome
+			// (isPromoteContention gates it on the SQLite result code), so a
+			// read-only or full database — code 8 — falls through to the 500
+			// rather than being advertised as "retry shortly", which would be
+			// a permanent condition sold as transient.
+			if errors.Is(err, store.ErrWriteLockUnavailable) {
+				h.logger.Warn("correct manual cost: write lock unavailable", "err", logSafeErr(err))
+				writeStoreContention(w)
+				return
+			}
+			if errors.Is(err, store.ErrCostCorrectionIdentityMismatch) {
+				// The idempotency_key exists but belongs to a different
+				// (developer, issue_id, model, source, fidelity) than this
+				// request claims — same status family as the plain
+				// ErrCostConflict 409 below (a key that does not mean what the
+				// client thinks it means), and deliberately does NOT echo back
+				// which identity the key actually belongs to: a client that
+				// merely guessed or reused a key must not learn whose row it
+				// is. That non-disclosure is defense in depth against a BLIND
+				// collision, not a secrecy guarantee — the read-scoped
+				// GET /api/v1/events export already publishes every
+				// idempotency_key next to its full identity tuple. See
+				// store.ErrCostCorrectionIdentityMismatch for the endpoint's
+				// stated trust model.
+				writeError(w, http.StatusConflict,
+					"idempotency_key exists but does not match this request's developer/issue_id/model/source/fidelity; refusing to correct a row this request does not identify")
+				return
+			}
+			// Sanitized through the shared barrier (logSafeErr / logSafeStr):
+			// a store error can wrap caller-supplied text. BOTH store-error
+			// sinks on this endpoint route through it -- see the sibling on
+			// the non-override path below. (Package-wide the barrier is the
+			// convention, not yet a universal: bare "err", err sinks remain
+			// on other routes. Do not restate this as "every sink in this
+			// package" -- that was written here once and was false.)
+			h.logger.Error("correct manual cost", "err", logSafeErr(err))
+			writeError(w, http.StatusInternalServerError, "store error")
+			return
+		}
+		if result.Corrected {
+			// A money-mutating operation is worth an off-box record beyond
+			// the in-DB audit row: the ledger lives in SQLite, this log line
+			// is what ships to wherever operator logs go.
+			//
+			// override_actor is client-controlled free text, so it routes
+			// through logSafeStr like every other client-controlled string
+			// sink in this package — the convention is that no such value
+			// reaches a structured log unsanitized, and an exception here
+			// would be the one nobody notices. It is also a SELF-ASSERTED
+			// claim: it records who the caller says they are, not a verified
+			// principal (see cost_correction_audit's schema comment).
+			h.logger.Info("sanctioned cost correction applied",
+				"token_event_id", result.TokenEventID,
+				"old_cost_micro", result.OldCostMicro,
+				"new_cost_micro", result.NewCostMicro,
+				"actor", logSafeStr(req.OverrideActor),
+			)
+			// An existing audited cost was actually rewritten, with an
+			// append-only cost_correction_audit row recording the reason —
+			// 200, not 201: this modified a resource, it did not create one.
+			// The body echoes the old/new figures so a finance client can
+			// confirm what actually changed without a second read.
+			writeJSON(w, http.StatusOK, costCorrectionResponse{
+				Corrected:  true,
+				OldCostUSD: store.MicroToDollars(result.OldCostMicro),
+				NewCostUSD: store.MicroToDollars(result.NewCostMicro),
+			})
+			return
+		}
+		// Nothing diverged (fresh key, or a matching re-post) — the row still
+		// landed via CorrectManualCostEvent's own insert path, so this is the
+		// same outcome as the override=false path and gets the same status
+		// code (and, matching every other 201 on this endpoint, no body).
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+
 	if err := h.store.InsertManualCostEvent(r.Context(), ev); err != nil {
+		// 🔴 CONTENTION IS CLASSIFIED FIRST HERE TOO, FOR THE SAME REASON AS THE
+		// OVERRIDE BRANCH ABOVE — and #610 is the issue that made this branch
+		// need it. InsertManualCostEvent now takes the write lock via
+		// beginImmediateBounded (250ms) instead of a DEFERRED BeginTx, so it can
+		// return store.ErrWriteLockUnavailable, and the honest answer to that is
+		// the same retryable 503 + Retry-After the override half has always
+		// given. Before #610 this branch had no contention case at all: it
+		// blocked the DSN's full 5000ms and then fell into the 500 sink below,
+		// so one endpoint told a caller that a lost race for the single write
+		// lock was retryable or permanent depending on one request field.
+		//
+		// ORDER IS LOAD-BEARING, and the 409 below is exactly what it must
+		// outrank: ErrCostConflict is a PERMANENT verdict (the stored cost is
+		// immutable, retrying cannot help), and misclassifying a transient
+		// condition as permanent destroys a retry that would have succeeded,
+		// while the reverse merely costs a wasted one. Sentinels are exact
+		// matches; anything heuristic — a message prefix, a text scan — must
+		// stay downstream of every sentinel, which is the defect
+		// TestContentionOutranksTheValidationPrefix records on the alias site.
+		//
+		// ⚠️ Only the sentinel gets this treatment. beginImmediateBounded wraps
+		// ErrWriteLockUnavailable ONLY around a genuine lock outcome
+		// (isPromoteContention gates it on the SQLite result code), so a
+		// read-only or full database — code 8 — falls through to the 500 rather
+		// than being advertised as "retry shortly", which would be a permanent
+		// condition sold as transient.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("insert manual cost: write lock unavailable", "err", logSafeErr(err))
+			writeStoreContention(w)
+			return
+		}
 		if errors.Is(err, store.ErrCostConflict) {
 			// A keyed re-post changed the cost. cost_micro is immutable (#233), so
 			// this is a rejection, not an overwrite — the stored figure is unchanged.
 			// 409 tells the client its correction was NOT applied. The client-facing
-			// remedy names ONLY the path a client can actually take over HTTP — a new
-			// idempotency_key. (Deleting a single cost row is operator-level, direct
-			// against the store; there is no delete-by-key API route, so advertising
-			// it here would point the client at a door it cannot open.)
+			// remedy names BOTH paths a client can actually take: re-post under a new
+			// idempotency_key, or (#346) opt into the sanctioned override with
+			// override=true + override_actor + override_reason. (Deleting a single
+			// cost row is operator-level, direct against the store; there is no
+			// delete-by-key API route, so advertising it here would point the client
+			// at a door it cannot open.)
 			writeError(w, http.StatusConflict,
-				"idempotency_key already recorded with a different cost_usd; the stored cost is immutable. To correct it, re-post under a new idempotency_key")
+				"idempotency_key already recorded with a different cost_usd; the stored cost is immutable. To correct it, re-post under a new idempotency_key, or set override=true with override_actor and override_reason for a sanctioned, audited correction")
 			return
 		}
-		h.logger.Error("insert manual cost", "err", err)
+		// Sanitized for the same reason as the override sink above: this is the
+		// SAME request body reaching the SAME kind of store error.
+		h.logger.Error("insert manual cost", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
 	}
@@ -1012,6 +1276,14 @@ const (
 // would otherwise still allow per request).
 const maxIdentifierLen = 256
 
+// maxOverrideReasonLen caps the free-text override_reason field on a #346
+// sanctioned cost-correction override — larger than maxIdentifierLen because
+// a real correction reason ("Q3 invoice reconciliation, PO #4471") is a short
+// sentence, not a bare identifier, but still bounded so a hostile/buggy
+// client can't fill the append-only audit ledger with multi-KB rows per
+// request (the same storage-DoS reasoning as maxIdentifierLen).
+const maxOverrideReasonLen = 1024
+
 // validateRepo normalizes an OPTIONAL client-supplied repository field (#231) into
 // the value stored in the `repo` column.
 //
@@ -1022,7 +1294,8 @@ const maxIdentifierLen = 256
 // The reserved sentinel cannot be supplied explicitly. A producer that could not
 // determine its repository must say so by OMITTING the field; letting a client
 // assert "unqualified" would let it opt out of repo-scoping on purpose and re-fuse
-// two repos' issues. Same discipline that forbids forging collector.UnattributedIssueID.
+// two repos' issues. Same discipline validateIssueID applies to the unattributed
+// issue-id sentinel.
 func validateRepo(s string) (string, error) {
 	if s == "" {
 		return repoid.Unqualified, nil
@@ -1038,6 +1311,115 @@ func validateRepo(s string) (string, error) {
 		return "", fmt.Errorf(`repo must be a canonical "owner/repo" slug (got %q)`, s)
 	}
 	return slug, nil
+}
+
+// validateIssueID rejects a client-supplied unattributed sentinel (#466). The sentinel
+// family — the bare "unattributed" plus its ":<reason>" sub-buckets — is
+// SERVER-ASSIGNED: the collector and the proxy write it when they genuinely could not
+// resolve an issue. A client that forges it asserts "this spend has no issue" about
+// spend it is simultaneously attributing to itself, moving its own dollars out of
+// segment_reconciliation.no_outcome_cost_usd (the #466 thrash signal) and out of the
+// attributed side of the cost_composition coverage split (#234).
+//
+// THIS IS THE STRICT, CLIENT-SURFACE RULE, and it belongs only on genuinely
+// client-facing writes: POST /api/v1/costs (manual import) and POST /api/v1/outcomes.
+// It must NOT be applied to POST /api/v1/events, which is the collector's own
+// transport and legitimately ships the sentinel family — see validateShippedIssueID,
+// which is the correct guard there. Applying this predicate to /events destroys
+// capture for every developer who works on main or a detached HEAD.
+//
+// Case-INSENSITIVE, deliberately WIDER than the exact read-side matcher
+// store.IsUnattributed. The read side must be exact (a case variant already in the
+// table is data, and SQL and Go must classify it identically — see
+// store's unattributedGlobPattern); the write side should refuse anything that merely
+// resembles the sentinel, so a forged "UNATTRIBUTED:main" never becomes a row.
+// Rejecting more at ingest than you match at read is the safe direction.
+//
+// The error text interpolates the CLIENT-SUPPLIED value; callers pass it to
+// writeError, never to a logger. Anything that logs a rejected issue_id must wrap it
+// in logsafe first.
+func validateIssueID(s string) error {
+	if store.ResemblesUnattributed(s) {
+		return fmt.Errorf("issue_id %q is reserved; it is assigned by the server when an issue cannot be resolved", s)
+	}
+	return nil
+}
+
+// validateDeveloper rejects a client-supplied unattributed sentinel in the `developer`
+// field (#619). It is the SAME rule validateIssueID applies to `issue_id`, on the other
+// column the sentinel names — and it closes the worse half of the vector.
+//
+// 🔴 WHY THIS HALF IS WORSE, and why it is not merely symmetry. Forging `issue_id`
+// moves a dollar BETWEEN BUCKETS INSIDE the forger's own denominator: out of
+// segment_reconciliation.no_outcome and onto the unattributed side of the #234
+// coverage split. The forger's headline TIER — points / (cost/1000) — is unchanged.
+// Forging `developer` moves the dollar OUT OF THE FORGER'S DENOMINATOR ENTIRELY: the
+// cost lands on the "unattributed" pseudo-developer instead, the forger's own cost
+// falls, and their score RISES. That is a direct, self-interested incentive rather
+// than an accident, and it is exactly the #1 gaming vector the sentinel's own doc
+// (internal/collector/collector.go) says the sentinel exists to make VISIBLE.
+//
+// THE LEGITIMATE PRODUCERS ARE UNAFFECTED, AND THAT IS STRUCTURAL, NOT A CARVE-OUT.
+// The org pollers (internal/collector/anthropicadmin, internal/collector/openaiusage)
+// genuinely assign this sentinel to `developer`: an org-level invoice aggregate cannot
+// honestly be split per person. They are untouched because they never cross this
+// boundary — cmd/tierd wires them straight into ingester.Store(db) in-process, as it
+// does the proxy's own capture. So `developer` needs NO /events allowlist, unlike
+// `issue_id`, which needed one because the JSONL collector ships the sentinel family
+// over the wire on every exploratory session. See validateEventRequest for the check
+// that keeps that asymmetry honest.
+func validateDeveloper(s string) error {
+	if store.ResemblesUnattributed(s) {
+		return fmt.Errorf("developer %q is reserved; it is assigned by the server when spend cannot be tied to a person", s)
+	}
+	return nil
+}
+
+// NOTE(#619): the predicate itself is store.ResemblesUnattributed, beside the
+// IsUnattributed it must contain. The wrappers above are deliberately thin and each
+// owns its FULL literal message rather than sharing a parameterized formatter: a
+// (field, subject) parameter pair is transposable, and a transposition still produces
+// a message containing the right field name, so no test could catch it. Share the
+// predicate, not the prose.
+
+// validateShippedIssueID is the /events variant of validateIssueID (#466). POST
+// /api/v1/events is NOT a client surface — it is the transport the JSONL collector
+// ships over (internal/shipper), and that collector legitimately assigns the whole
+// sentinel family: internal/collector/jsonl.go routes a message that resolves to no
+// issue into UnattributedMain / UnattributedDetachedHEAD / UnattributedNoIssue rather
+// than dropping its cost, and the shipper forwards IssueID verbatim.
+//
+// So this endpoint ALLOWS the sentinel — but only in its four EXACT, canonical,
+// case-sensitive spellings. Every near-miss and every case variant is still rejected,
+// so a stored "UNATTRIBUTED:main" remains impossible and the forgery the strict rule
+// closes stays closed; what changes is that the collector can ship what it honestly
+// captured.
+//
+// Getting this wrong is not a degraded-reporting bug, it is total capture loss:
+// handlePostEvents validates all-or-nothing, so one exploratory event fails a whole
+// batch; shipper.postBatch treats 4xx as terminal with no retry and stops the
+// collector's Run loop; and the CLI is stateless, so the next run re-ships the same
+// batch and fails identically. A developer who has ever committed on main without an
+// issue would lose 100% of their capture, permanently — including their well-formed
+// attributed events. TestShipper_UnattributedFamilyRoundTrips (internal/shipper) is
+// the end-to-end guard, because no shipper→real-handler test existed when that
+// regression was first written.
+func validateShippedIssueID(s string) error {
+	// Derived from store.UnattributedFamily(), never a hardcoded copy. A retyped list
+	// is how this becomes a capture outage: a fifth bucket added to internal/collector
+	// would compile against a hardcoded switch, ship from the collector, and 400 the
+	// whole batch terminally. store.UnattributedBuckets carries the enumeration and the
+	// collector's mirror is pinned equal to it by
+	// collector.TestUnattributedIssueIDMatchesStore, so the family cannot grow on one
+	// side only.
+	if slices.Contains(store.UnattributedFamily(), s) {
+		// Exact canonical spelling from the collector — legitimate, allow.
+		return nil
+	}
+	// Anything else that merely LOOKS like the sentinel is a forgery or a corrupt
+	// value; fall through to the strict rule so near-misses and case variants are
+	// rejected exactly as they are on the client surfaces.
+	return validateIssueID(s)
 }
 
 // handlePostActualSpend records the enterprise-contract invoice total for a
@@ -1065,6 +1447,15 @@ func (h *Handler) handlePostActualSpend(w http.ResponseWriter, r *http.Request) 
 	}
 	if len(req.Developer) > maxIdentifierLen {
 		writeError(w, http.StatusBadRequest, "developer must be <= 256 chars")
+		return
+	}
+	// #619, found while enumerating every client-supplied `developer` for that issue
+	// and NOT listed in it. actual_spend is the tier-1 invoice ledger behind Spend
+	// Leverage, so it is a denominator by another name: posting your own invoice under
+	// the sentinel drops your actual-paid out of your row exactly as forging /costs
+	// drops your metered cost. Same rule, same reason.
+	if err := validateDeveloper(req.Developer); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validatePeriod(req.Period); err != nil {
@@ -1313,6 +1704,15 @@ type scoresResponse struct {
 	// k-anonymized team aggregates WITHIN the type, never individual names. omitempty
 	// so a window with no outcomes ships no key.
 	WorkTypes []workTypeSegmentJSON `json:"work_types,omitempty"`
+	// SegmentReconciliation accounts for the window's whole spend against the
+	// work_types segments above (#466): how much the segmented view can attribute to
+	// a category, and the two disjoint reasons the rest cannot be. Without it the
+	// segments silently exclude spend that produced no outcome and every per-type
+	// TIER reads better than the pooled headline score. It is NOT filtered by
+	// ?work_type — the gap is a property of the developer's window, not of the
+	// segment a caller happened to request. omitempty so a window with no spend at
+	// all ships no key.
+	SegmentReconciliation *segmentReconciliationJSON `json:"segment_reconciliation,omitempty"`
 	// CostComposition surfaces WHERE the window's spend went (#234): cost by
 	// normalized model, the per-class token composition, attributed vs unattributed
 	// spend, and the two optimization levers (cache_read_share, premium_model_share).
@@ -1342,6 +1742,149 @@ type workTypeSegmentJSON struct {
 	Developers  []developerScoreJSON `json:"developers,omitempty"`
 	Teams       []teamScoreJSON      `json:"teams,omitempty"`
 	Total       *teamScoreJSON       `json:"total,omitempty"`
+	// KAnonSuppressed declares a suppression that happened INSIDE this segment
+	// (#593). A segment has its own population and its own total, so it suppresses
+	// independently of the top level — and review caught that without this field it
+	// did so SILENTLY: a segment could ship with `total` missing and no signal
+	// anywhere in the response. That is the failure the top-level declaration exists
+	// to prevent, reproduced one nesting level down.
+	//
+	// Present only on a segment that actually suppressed; a segment where nothing was
+	// withheld omits it, exactly like the top-level field.
+	KAnonSuppressed *kanonSuppressedJSON `json:"kanon_suppressed,omitempty"`
+}
+
+// segmentReconciliationJSON accounts for ALL of the window's spend against the
+// work-type segments (#466), so a reader can see how much spend the segmented view
+// leaves out and why — rather than being told only that a gap exists.
+//
+// WHY THIS EXISTS. The segments denominate on outcome-linked cost: a token event's
+// cost reaches a segment only via the work_type of an outcome sharing its
+// (developer, issue). Spend that produced no outcome therefore lands in NO segment,
+// so every per-type TIER is systematically better than the pooled headline score,
+// which correctly keeps that spend in its denominator (DeveloperCostsWindow joins no
+// outcomes). Un-reconciled, that bias is invisible and inverts the diagnosis: a team
+// that thrashes sees the damage in the headline number, goes to the segment view for
+// the cause, and finds the evidence removed. A caveat in the docs would not fix this;
+// only a number that adds up does.
+//
+// Teams is deliberately absent: the block is emitted only in developer mode, and
+// collapses to Total alone in an anonymized mode (#185, #270) — see the field docs.
+//
+// SCOPE: this ships the DATA. internal/dashboard does not render it yet, so the
+// segmented panel a reader actually looks at still shows only attributed cost. That
+// is a real gap in the user-facing story and belongs in its own issue (it needs a
+// UI/UX pass, not a handler change); nothing here should be read as claiming the
+// dashboard surfaces the gap today.
+type segmentReconciliationJSON struct {
+	// Developers carries one row per developer with spend in the window, sorted by
+	// name. Omitted entirely in an anonymized mode (#185, #270), where a named
+	// per-developer cost row would defeat the k-anonymity floor — the same collapse
+	// dataQualityJSON makes when it drops ZeroTokenOutcomes for a bare count.
+	Developers []developerCostReconciliationJSON `json:"developers,omitempty"`
+	// Total is the name-free rollup across every developer in the window, and is
+	// always present. It is strictly coarser than the pooled `total` already in the
+	// response, so it carries in every aggregation mode without exposing a sub-k
+	// cohort — the same argument that lets cost_composition (#234) ship in team mode.
+	Total developerCostReconciliationJSON `json:"total"`
+}
+
+// developerCostReconciliationJSON splits one developer's whole-window spend into the
+// part the work-type segments can see and the two disjoint reasons the rest cannot be
+// filed under any work_type (#466).
+//
+// THE INVARIANT, and exactly how far it goes:
+//
+//	outcome_linked_cost_micro + no_outcome_cost_micro + unattributed_cost_micro
+//	    == window_cost_micro
+//
+// That equality is EXACT and unconditional, and it is stated on the *_cost_micro
+// fields deliberately. All four figures are folded from ONE snapshot — the same
+// DeveloperIssueCostsWindow result — with every row classified into exactly one part
+// and also added to the window total. The sums are integer micro-dollars (#69), so
+// there is no rounding anywhere. The invariant is therefore an arithmetic IDENTITY,
+// not a cross-check, and no concurrent writer can break it.
+//
+// 🔴 IT WAS BRIEFLY THE OTHER THING, AND THAT WAS A BUG. Anchoring window_cost_micro
+// on DeveloperCostsWindow — a DIFFERENT query, several statements earlier, over a
+// window whose upper bound is usually open — made the published invariant a race:
+// rows written between the two reads land in one and not the other, so the response
+// tells a consumer its own arithmetic does not add up. That consumer cannot tell that
+// apart from corruption, and the doc simultaneously told it to ASSERT on these very
+// fields. TestSegmentReconciliation_InvariantHoldsUnderConcurrentWrites measures it:
+// with window anchored on DeveloperCostsWindow the invariant fails within a few
+// hundred requests against one concurrent writer; folded from one snapshot it never
+// fails. The genuine cross-query property (DeveloperCostsWindow agreeing with a
+// fold of DeveloperIssueCostsWindow) is still pinned — as
+// store.TestDeveloperCostsWindowFoldsToIssueCosts, over a fixed quiescent database,
+// where a discrepancy really does mean a query bug. Do not move it back onto the
+// wire; TestSegmentReconciliation_InvariantHoldsUnderConcurrentWrites fails if you do.
+//
+// In a quiescent read window_cost_micro still equals the developer's
+// DeveloperCostsWindow total — the two queries read the same rows with the same
+// predicate — so this remains the pooled TIER denominator, just sourced coherently.
+//
+// The *_cost_usd fields are a rendering convenience and DO NOT satisfy that equality
+// bit-exactly. Each is converted independently via store.MicroToDollars (a float64
+// division), and float division does not distribute over addition, so a consumer
+// evaluating `a + b + c === d` on the dollar fields gets false for a substantial
+// fraction of realistic inputs. A consumer that needs to ASSERT the invariant must use
+// the micro fields; one that merely displays it should compare the dollars with a
+// tolerance of ~1e-9. This is why the integer companions are on the wire at all.
+//
+// WHAT THIS DOES NOT SAY. OutcomeLinkedCostUSD is NOT the sum of the work-type
+// segments' TotalCostUSD, and no invariant claims it is. The segments can legitimately
+// double-count a cost row, for two independent reasons:
+//
+//  1. Work type. segIssues is keyed per work_type, so an issue carrying outcomes of
+//     two different types has its whole cost charged to BOTH segments. This needs no
+//     unusual data at all — one issue that fixed a bug and shipped a feature does it.
+//  2. Repo. Under the tolerant join (store.RepoMatch, #231) a repo-blind cost row is
+//     charged to EVERY qualified outcome sharing its issue id.
+//
+// Both over-counts are deliberate — they lower TIER, so ambiguity never flatters a
+// developer — but together they mean "segments + gap == window" is false on ordinary
+// data, not just at some exotic edge. This block therefore reconciles against the
+// underlying cost ROWS, each counted exactly once, never against the segment totals.
+type developerCostReconciliationJSON struct {
+	// Developer is the canonical (alias-resolved, #125) identity. Empty on Total.
+	Developer string `json:"developer,omitempty"`
+	// WindowCostUSD is the developer's whole-window spend: the sum of every one of
+	// their per-issue cost rows in the window, which is what DeveloperCostsWindow
+	// reports for them and hence the denominator of their pooled headline TIER. It is
+	// folded from the same snapshot as the three parts below so the partition is
+	// exact (see the type doc); it is NOT read from DeveloperCostsWindow directly,
+	// which would race.
+	WindowCostUSD float64 `json:"window_cost_usd"`
+	// The *Micro companions are the same four figures in integer micro-dollars
+	// (1 USD = 1e6, #69) — the form the server actually sums. They are the ONLY
+	// fields on which the partition invariant holds bit-exactly; see the type doc. A
+	// consumer asserting the reconciliation (a test, a finance check, a dashboard
+	// that refuses to render an inconsistent response) must read these, not the
+	// dollars. Always present.
+	WindowCostMicro        int64 `json:"window_cost_micro"`
+	OutcomeLinkedCostMicro int64 `json:"outcome_linked_cost_micro"`
+	NoOutcomeCostMicro     int64 `json:"no_outcome_cost_micro"`
+	UnattributedCostMicro  int64 `json:"unattributed_cost_micro"`
+	// OutcomeLinkedCostUSD is spend on (developer, repo, issue) keys that join to at
+	// least one outcome in the window under the tolerant rule — the spend the
+	// segmented view can attribute to some work_type. Named for the join, not for
+	// "attributed": cost_composition (#234) already uses attributed/unattributed for
+	// the different question of whether an issue id was resolvable at all.
+	OutcomeLinkedCostUSD float64 `json:"outcome_linked_cost_usd"`
+	// NoOutcomeCostUSD is the defect this block exists to surface: spend on a REAL
+	// issue id that produced no outcome in the window — abandoned work, work still in
+	// flight, or a PR that never merged. It is invisible to every segment because
+	// work_type comes from the outcome, so there is no category to file it under.
+	// Distinct from UnattributedCostUSD, with which it must never be conflated: here
+	// the issue is known and the outcome is missing.
+	NoOutcomeCostUSD float64 `json:"no_outcome_cost_usd"`
+	// UnattributedCostUSD is spend the collector could not tie to any issue at all —
+	// the store.IsUnattributed sentinel family (base plus the :main, :detached-head,
+	// :branch-without-issue sub-buckets). This is the ESTABLISHED meaning of
+	// "unattributed" in TIER and matches cost_composition's split; it is reported here
+	// only so the three parts sum to the window total.
+	UnattributedCostUSD float64 `json:"unattributed_cost_usd"`
 }
 
 // dataQualityJSON is the top-level data-quality block (#136). Today it carries
@@ -1462,6 +2005,89 @@ type dataQualityJSON struct {
 	// of its cost. Emitted only when more than one source has recorded cost, since a
 	// single-source install learns nothing the global horizon did not already say.
 	SourceCoverageStart map[string]string `json:"source_coverage_start,omitempty"`
+	// RepoScope echoes the repository this response was narrowed to (#590), or is
+	// omitted entirely on a fleet-wide read. It is the field that makes "scoped" and
+	// "not scoped" DISTINGUISHABLE on the wire, which is the whole point of #590: the
+	// original defect was not that repo= did nothing, it was that a caller could not
+	// TELL it did nothing. A consumer that requires a scoped figure should assert on
+	// this key's presence and value, never on having sent the parameter.
+	RepoScope string `json:"repo_scope,omitempty"`
+	// RepoScopeExcluded discloses what the strict scope DROPPED as repo-blind (#590,
+	// Steve's ruling C). Present only on a scoped read that actually excluded
+	// something; a scoped read over a fully-qualified window omits it, and that
+	// absence is the clean signal.
+	//
+	// Read it as: this much of the window could not be placed in ANY repository, so
+	// the scoped figures above are a LOWER BOUND, not a total. The excluded rows are
+	// not claimed to belong to the scoped repository — they are unattributable by
+	// construction, which is what the sentinel means.
+	RepoScopeExcluded *repoScopeExcludedJSON `json:"repo_scope_excluded,omitempty"`
+	// KAnonSuppressed is present when a sub-k residual cohort was WITHHELD from an
+	// anonymized response (#593), along with the grand total and cost-composition
+	// sidecar that would otherwise reconstruct it by subtraction.
+	//
+	// 🔴 IT IS MANDATORY THAT THIS IS SAID OUT LOUD. Without it, a suppressed response
+	// is indistinguishable from "this window has no data" — and those demand opposite
+	// reactions. "No data" means check your capture; "suppressed" means the answer
+	// exists and cannot be shown at this k, and the remedy is to widen the window or
+	// query a level with more people in it. Going silently quiet would be the same
+	// failure this project keeps paying for: a response that cannot answer sharing a
+	// shape with one that did.
+	//
+	// Name-free by construction: a count of withheld CONTRIBUTING developers and
+	// nothing else. The count is itself useful — "1 developer withheld" and "40
+	// withheld" are different problems (narrow window vs. an unpopulated org
+	// hierarchy) with different fixes.
+	KAnonSuppressed *kanonSuppressedJSON `json:"kanon_suppressed,omitempty"`
+	// SpendLeverageSuppressed is true when a repo scope suppressed the spend-leverage
+	// figures (#590). actual_spend records what the org PAID a vendor over a period
+	// and carries no repository, so it cannot be scoped; dividing it by one
+	// repository's list-price cost would manufacture a ratio inflated by roughly the
+	// fleet-to-repo ratio. Suppressing and SAYING SO beats emitting a confidently
+	// wrong number — the same reasoning as the exclusion disclosure above. A pointer
+	// so the field is simply absent on unscoped reads rather than reading false.
+	SpendLeverageSuppressed *bool `json:"spend_leverage_suppressed,omitempty"`
+}
+
+// kanonSuppressedJSON is the wire shape of a k-anonymity suppression (#593).
+// Name-free: counts only.
+type kanonSuppressedJSON struct {
+	// Developers is how many contributing developers were withheld.
+	Developers int `json:"developers"`
+	// KAnonymity echoes the floor in force, so a consumer can see WHY the cohort was
+	// too small without having to know the server's configuration.
+	KAnonymity int `json:"k_anonymity"`
+	// WithheldTotal and WithheldCostComposition state which aggregates were dropped
+	// alongside the rows. A consumer that finds `total` missing must be able to learn
+	// that it was withheld deliberately rather than that the window was empty.
+	WithheldTotal           bool `json:"withheld_total"`
+	WithheldCostComposition bool `json:"withheld_cost_composition"`
+	// WithheldSegmentReconciliation states that the #466 block was dropped too.
+	//
+	// 🔴 IT HAS TO BE. segment_reconciliation.total.window_cost_micro is the window's
+	// WHOLE cost — the same quantity as cost_composition.total_cost_usd, folded from
+	// the same rows — so publishing it while cost_composition is nil'd hands back the
+	// exact figure this pass withheld, in a field the pass had not been taught about.
+	// The #466 block's own doc argues it is "strictly coarser than the pooled total
+	// already in the response"; that argument is true in an unsuppressed response and
+	// FALSE here, because the pooled total is precisely what is missing. Declared
+	// rather than silently absent, for the same reason as the other two: absent must
+	// never be confusable with "the window had no spend".
+	WithheldSegmentReconciliation bool `json:"withheld_segment_reconciliation"`
+}
+
+// repoScopeExcludedJSON is the wire shape of what a strict repo scope excluded as
+// repo-blind (#590). Name-free — counts and dollars only — so it carries identically
+// in developer and team-aggregation mode (#185).
+type repoScopeExcludedJSON struct {
+	// TokenEvents and CostUSD are the repo-blind token_events in the window and their
+	// summed cost. CostUSD is the number that matters: it is the size of the hole in
+	// the scoped denominator.
+	TokenEvents int64   `json:"token_events"`
+	CostUSD     float64 `json:"cost_usd"`
+	// Outcomes is the count of repo-blind outcome records in the window — the hole in
+	// the scoped NUMERATOR, which moves a TIER score the other way.
+	Outcomes int64 `json:"outcomes"`
 }
 
 // unattributedBucketJSON is one labeled slice of unattributed spend (#refocus,
@@ -1650,6 +2276,24 @@ type teamScoreJSON struct {
 	// on summed totals. No CI here — the bootstrap is a per-developer signal (#133),
 	// so ci fields stay on developerScoreJSON only.
 	CostPerPoint *float64 `json:"cost_per_point"`
+	// Ranked mirrors developerScoreJSON.ranked for a GROUP aggregate (#502): the
+	// #133/#136 evidence floor applied to the summed inputs. Not omitempty — a
+	// false here is the load-bearing value, and omitting it would make "unranked"
+	// indistinguishable from "an older server that never said", which is exactly
+	// the ambiguity that let every team row render as ranked evidence (#603).
+	//
+	// TIER above is UNCHANGED by this flag. The wire still carries the true
+	// quotient for a below-floor aggregate (the #502 case ships tier: 2.8e8), per
+	// the house rule from #136: the number is never altered, only its ranking
+	// authority revoked. Consumers must gate the HEADLINE on ranked, not expect a
+	// scrubbed number.
+	//
+	// Deliberately NOT accompanied by a sample_n: the count that feeds this
+	// boolean is the denominator that would make data_quality's
+	// attributed_outcome_share invertible in the anonymized modes (see the k-anon
+	// strip block below). A boolean discloses the threshold crossing, not the
+	// count.
+	Ranked bool `json:"ranked"`
 }
 
 // newTeamScoreJSON maps a scoring.TeamScore onto the wire shape (#25). One mapper
@@ -1682,6 +2326,7 @@ func newTeamScoreJSON(ts scoring.TeamScore) teamScoreJSON {
 		SpendLeverage:   ts.SpendLeverage,
 		CoveragePercent: ts.CoveragePercent,
 		CostPerPoint:    costPerPointOrNull(ts.WeightedPoints, ts.CostPerPoint),
+		Ranked:          ts.Ranked,
 	}
 }
 
@@ -1854,34 +2499,50 @@ type windowScores struct {
 // fetch the work-type / cost-composition sidecars (which /scores fetches itself and
 // compare does not need) — those stay on the /scores path so a two-window compare
 // pays only for the shared reads, twice.
-func (h *Handler) loadWindow(ctx context.Context, since, until time.Time) (windowScores, error) {
-	costs, err := h.store.DeveloperCostsWindow(ctx, since, until)
+// scope (#590) narrows every read below to ONE repository, strictly. It is threaded
+// through EVERY read on this path rather than applied to a subset: a scoped response
+// assembled from a mix of scoped and fleet-wide reads is the original #590 defect
+// wearing a filter — it would look scoped and silently is not. The multi-repo
+// control-arm tests assert on response FIELDS precisely so an unthreaded read shows
+// up as a field that stayed fleet-wide.
+func (h *Handler) loadWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (windowScores, error) {
+	costs, err := h.store.DeveloperCostsWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query costs: %w", err)
 	}
-	outcomes, err := h.store.AllOutcomesWindow(ctx, since, until)
+	outcomes, err := h.store.AllOutcomesWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query outcomes: %w", err)
 	}
 	// Zero-token tripwire (#136): windowed token totals per (developer, issue), one
 	// bulk query (no per-outcome N+1). Keyed by the raw token_events developer;
 	// canonicalized below through the same alias map as the cost join.
-	tokenTotals, err := h.store.OutcomeTokenTotals(ctx, outcomes)
+	tokenTotals, err := h.store.OutcomeTokenTotals(ctx, outcomes, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query token totals: %w", err)
 	}
 	// Bulk-fetch actual_spend so per-developer SpendLeverage is computed without an
 	// N+1. Missing developer in the map → 0, which ComputeDeveloper treats as "no
 	// actual_spend recorded yet".
-	actualSpend, err := h.store.ActualSpendAllWindow(ctx, since, until)
-	if err != nil {
-		return windowScores{}, fmt.Errorf("query actual_spend: %w", err)
+	//
+	// 🔴 SKIPPED UNDER A REPO SCOPE (#590), see the Store interface note on
+	// ActualSpendAllWindow: actual_spend is what the org PAID and carries no
+	// repository, so a scoped read has no honest per-repo actual-paid figure. An
+	// empty map leaves every developer's SpendLeverage in the "not recorded" state
+	// rather than dividing org-wide dollars by one repository's cost. The suppression
+	// is declared on the wire by the caller, never left to be inferred.
+	actualSpend := map[string]float64{}
+	if scope.IsFleetWide() {
+		actualSpend, err = h.store.ActualSpendAllWindow(ctx, since, until)
+		if err != nil {
+			return windowScores{}, fmt.Errorf("query actual_spend: %w", err)
+		}
 	}
 	// Mixed-version signal (#293): the DISTINCT price_table versions that priced
 	// token_events in this window. cost_micro is immutable per row (#233), so a
 	// window legitimately spans versions while the response stamps a single active
 	// price_table.version; this read surfaces the mix for the data-quality block.
-	priceVersions, err := h.store.DistinctPriceVersionsWindow(ctx, since, until)
+	priceVersions, err := h.store.DistinctPriceVersionsWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query price versions: %w", err)
 	}
@@ -1932,7 +2593,7 @@ func (h *Handler) loadWindow(ctx context.Context, since, until time.Time) (windo
 	// denominator (#495). Window-bounded; the /scores handler fetches this again for
 	// its segment/composition sidecars — a small duplicate scan (#333) kept here so
 	// /scores/compare, which never reaches that code, shares one CI derivation.
-	issueCosts, err := h.store.DeveloperIssueCostsWindow(ctx, since, until)
+	issueCosts, err := h.store.DeveloperIssueCostsWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query issue costs: %w", err)
 	}
@@ -2144,6 +2805,14 @@ func withCostHorizon(dq *dataQualityJSON, since, horizon time.Time, hasHorizon b
 }
 
 func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
+	// Strict parameter allowlist FIRST, before any parsing or store work (#590): a
+	// request carrying a parameter this endpoint does not implement is answered, not
+	// quietly widened. `before` is the legacy alias for `until` that
+	// parseWindowUpperBound still accepts, so it must appear here or the allowlist
+	// would reject a parameter the handler honors.
+	if !rejectUnknownQueryParams(w, r, "since", "until", "before", "team", "work_type", "repo") {
+		return
+	}
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid since: "+err.Error())
@@ -2173,12 +2842,58 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ?repo filter (#590), validated at the same trust boundary and for the same
+	// reason as work_type: a bad value is a loud 400, never a silently different
+	// result set.
+	scope, ok := parseRepoScope(w, r)
+	if !ok {
+		return
+	}
+	// 🔴 REFUSED IN ANY ANONYMIZED MODE (#185 team, #270 division). This is the same
+	// carve-out ?team= gets below, for the same reason, and it is not theoretical —
+	// it was REPRODUCED during review before this guard existed.
+	//
+	// ?repo= is a caller-controlled POPULATION SELECTOR. Scoping narrows the cohort
+	// BEFORE k-anonymity is applied, so a repository only one person works in drops
+	// the whole team under the floor. Everything then folds into the residual "other"
+	// bucket — which is emitted WITHOUT a floor — and `total` carries no floor at all.
+	// Measured on a k=5 fixture: a 5-developer team scoped to a repo only `alice`
+	// touched returned an "other" row and a `total` of exactly her figures (her TIER,
+	// her cost, her points, her cost-per-point) in a mode whose whole contract is that
+	// an individual's numbers never leave the server.
+	//
+	// The repository axis is a materially better attack primitive than the time axis:
+	// repo↔developer association is stable, semantically meaningful, and knowable from
+	// outside (every repository in an install is another ready-made probe), where a time slice needs
+	// insider knowledge of who worked when. /api/v1/scores/{developer} is blanket-404'd
+	// in these modes precisely to stop this read; ?repo= would have reintroduced it
+	// around the side.
+	//
+	// REJECT, do not silently ignore. Quietly dropping the filter would hand back an
+	// installation-wide aggregate that looks scoped — the exact #590 defect this whole
+	// change exists to close. (?team= below merely SKIPS its branch, which is
+	// fail-safe there because the k-anonymized resp.Teams is still what ships; here
+	// the honest answer is that the question cannot be asked in this mode.)
+	//
+	// ⚠️ The unfloored residual bucket and unfloored `total` are a PRE-EXISTING hole,
+	// reachable today by narrowing ?since= alone with no ?repo= involved. This guard
+	// closes the new primitive, NOT that underlying defect — filed as #593, which
+	// carries the reproduction for the time axis. Do not read this comment as a claim
+	// that anonymized mode is now sound against cohort-narrowing generally.
+	if !scope.IsFleetWide() && h.aggregation.Anonymized() {
+		writeError(w, http.StatusBadRequest,
+			"repo scoping is not available in "+h.aggregation.String()+"-aggregation mode (#185, #270): "+
+				"narrowing to one repository can shrink a cohort below the k-anonymity floor and expose "+
+				"an individual's figures. Remove ?repo=, or run the server in developer aggregation")
+		return
+	}
+
 	// Load + canonicalize + join the window into per-developer scores. This is the
 	// shared scores path (#277): loadWindow does exactly the store reads, alias
 	// canonicalization, cost/outcome/token join and zero-token tripwire that both
 	// /scores and /scores/compare need, so the two endpoints can never compute a
 	// developer's score — or its k-anon inputs — differently.
-	win, err := h.loadWindow(r.Context(), since, until)
+	win, err := h.loadWindow(r.Context(), since, until, scope)
 	if err != nil {
 		h.logger.Error("load window", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -2190,16 +2905,40 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// endpoint (#277) needs none of them, so they are fetched here rather than in
 	// the shared loadWindow.
 	//
-	// Per-(developer, issue) cost denominates each work-type segment; the
-	// composition read is the one non-index-covered read on this path (#333):
-	// it groups by (host, model) but filters on ts, so a ts-window seek + per-row
-	// heap lookup + GROUP BY temp b-tree runs on every /scores poll. Fine at
-	// single-tenant scale (window-bounded, tens–low-hundreds ms).
+	// Per-(developer, issue) cost denominates each work-type segment.
+	//
+	// #333 MEASURED — decision: no index. (The issue is still open pending the
+	// evidence being posted; this comment records the measurement, not a closure.)
+	// This comment used to claim the
+	// composition read was "the one non-index-covered read on this path". That was
+	// FALSE, and the measurement is why (dogfood snapshot, 172,240 token_events
+	// rows, 135,218 in the default 30d window, 2026-08-04):
+	//
+	//	GET /api/v1/scores (default window)  629 ms   total
+	//	  DeveloperIssueCostsWindow          138 ms   <- the LARGEST window scan
+	//	  CostCompositionWindow              132 ms
+	//	  UnattributedBucketCostsWindow       85 ms
+	//	  DeveloperCostsWindow                23 ms   (idx_token_events_scores)
+	//
+	// Composition is the second of THREE comparable ts-window scans, not a lone
+	// offender, so indexing it leaves the shape of the endpoint unchanged: the
+	// best case saves 64 ms of 629 (~10%, the (host, model, ts) option) and the
+	// covering index saves 25 ms (~4%). Both measured worse than doing nothing:
+	// a 10-column ts-leading covering index cut 132 ms -> 107 ms (-19%) for +19% DB
+	// size and +14% insert latency on an append-hot table; a (host, model, ts)
+	// index cut it to 68 ms at 30d but converts the window SEEK into a full-table
+	// SCAN, so it is 3.3x SLOWER on a 1-day window (18.9 ms vs 5.6 ms) and gets
+	// worse as token_events grows — the exact growth #333 was filed to protect
+	// against. Its cost is window-proportional today (5.6 ms @1d, 35 ms @7d,
+	// 133 ms @30d) and that is the property worth keeping.
+	//
+	// TestCostCompositionWindow_PlanStaysAWindowSeek pins it: if a future index
+	// makes this query stop seeking the ts window, that test fails.
 	// Reuse the per-issue cost rows loadWindow already fetched (#495/#333): one
 	// DeveloperIssueCostsWindow scan per request now feeds BOTH the joint CI and
 	// these work-type segment sidecars, instead of scanning the same window twice.
 	issueCosts := win.issueCosts
-	costComposition, err := h.store.CostCompositionWindow(r.Context(), since, until)
+	costComposition, err := h.store.CostCompositionWindow(r.Context(), since, until, scope)
 	if err != nil {
 		h.logger.Error("query cost composition", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -2209,7 +2948,7 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// over the SAME window, folded below into the org-level labeled split and each
 	// developer's exploratory-overhead share. Raw token_events.developer, canonicalized
 	// through the same alias map as the score rows.
-	unattributedBuckets, err := h.store.UnattributedBucketCostsWindow(r.Context(), since, until)
+	unattributedBuckets, err := h.store.UnattributedBucketCostsWindow(r.Context(), since, until, scope)
 	if err != nil {
 		h.logger.Error("query unattributed buckets", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -2263,6 +3002,11 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// since is UTC-anchored (sinceUTC above, #180), so this echoed date is the
 	// UTC calendar day — on a negative-offset host it may read one day earlier
 	// than the operator's local "90 days ago", which is intended, not a shift.
+	// #593: set when a sub-k residual cohort was withheld, which forces every
+	// unfloored aggregate over the same population to be withheld too (see the
+	// assignment site). Zero value = nothing suppressed, so developer mode — which
+	// never aggregates — is untouched.
+	var kanonSuppressed scoring.KAnonSuppression
 	activePrices := store.ActivePriceTableInfo()
 	resp := scoresResponse{
 		Since: since.Format("2006-01-02"),
@@ -2291,9 +3035,18 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Aggregation = h.aggregation.String()
 		resp.Developers = []developerScoreJSON{}
-		for _, ts := range scoring.AggregateTeamsKAnon(win.devScores, labelOf, h.kAnonymity) {
+		teams, sup := scoring.AggregateTeamsKAnon(win.devScores, labelOf, h.kAnonymity)
+		for _, ts := range teams {
 			resp.Teams = append(resp.Teams, newTeamScoreJSON(ts))
 		}
+		// 🔴 #593: when the residual was withheld, EVERY unfloored aggregate over the
+		// same population must go with it. resp.Total is a rollup of all devScores and
+		// cost_composition is a whole-window sum, so leaving either in place lets a
+		// caller subtract the named rows and reconstruct the suppressed cohort exactly
+		// — measured at 6+2 developers, k=5: total(66) - namedA(60) = 6, the hidden
+		// pair's cost to the cent. Suppressing the row alone MOVES the disclosure; it
+		// does not close it. Flag recorded below for the data_quality block.
+		kanonSuppressed = sup
 	} else {
 		for _, s := range win.devScores {
 			// CI via the shared derivation so /scores and /scores/compare never
@@ -2326,10 +3079,10 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// scores are still correct, they are merely unannotated — but it must NOT be
 	// silently swallowed, because a permanently-absent signal would read as
 	// "window is covered" to any consumer that treats missing as clean.
-	if horizon, hasHorizon, err := h.store.CostCoverageStart(r.Context()); err != nil {
+	if horizon, hasHorizon, err := h.store.CostCoverageStart(r.Context(), scope); err != nil {
 		h.logger.Error("query cost coverage start", "err", err)
 	} else {
-		perSource, err := h.store.SourceCoverageStart(r.Context())
+		perSource, err := h.store.SourceCoverageStart(r.Context(), scope)
 		if err != nil {
 			// Degrade to the global horizon rather than dropping the whole signal.
 			h.logger.Error("query per-source coverage start", "err", err)
@@ -2352,6 +3105,48 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 			resp.DataQuality = &dataQualityJSON{}
 		}
 		return resp.DataQuality
+	}
+
+	// #593: declare the suppression. Attached unconditionally when it happened — this
+	// is the field that keeps a suppressed response distinguishable from an empty one.
+	if kanonSuppressed.Any() {
+		attachDataQuality().KAnonSuppressed = &kanonSuppressedJSON{
+			Developers: kanonSuppressed.Developers,
+			// The EFFECTIVE floor from the aggregation, not h.kAnonymity — the two
+			// differ whenever the configured value is below scoring.MinKAnonymity and
+			// gets clamped up. Reporting the configured value would leave an operator
+			// unable to explain why a cohort at their configured k was suppressed.
+			KAnonymity:              kanonSuppressed.K,
+			WithheldTotal:           true,
+			WithheldCostComposition: true,
+			// #466: the reconciliation block republishes the whole-window cost that
+			// withholding cost_composition just removed, so it goes with it.
+			WithheldSegmentReconciliation: true,
+		}
+	}
+
+	// Repo-scope disclosure (#590, Steve's ruling C). Attached in BOTH modes and
+	// UNCONDITIONALLY on a scoped read — like the #351 coverage shares above and
+	// unlike the exception-only signals, because the whole contract is that a scoped
+	// response must be self-describing. A consumer must be able to answer "is this
+	// figure scoped, and to what, and what did that cost me?" from the response alone,
+	// without re-deriving it from the request it no longer has.
+	//
+	// A failure here is fatal to the response rather than logged-and-dropped, which is
+	// the OPPOSITE of how the cost-horizon block above degrades, and deliberately so:
+	// the horizon is an annotation on figures that are correct without it, whereas
+	// these figures ARE scoped, and shipping them with the scope silently unstated
+	// hands back something indistinguishable from a fleet aggregate. That is the exact
+	// #590 defect. Fail loudly instead.
+	if disc, err := h.buildScopeDisclosure(r.Context(), since, until, scope); err != nil {
+		h.logger.Error("build scope disclosure", "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	} else if !scope.IsFleetWide() {
+		dq := attachDataQuality()
+		dq.RepoScope = disc.Repo
+		dq.RepoScopeExcluded = disc.Excluded
+		dq.SpendLeverageSuppressed = disc.Suppressed
 	}
 	// attributed_cost_share: attributed / total from the SAME window's cost composition
 	// (exact integer micro-dollars, #234). Pointer so a genuine 0.0 is emitted; nil when
@@ -2416,7 +3211,9 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// computation guarantees the dashboard sees the same numbers
 	// scoring.RollupTeam produces, instead of reconstructing them client-
 	// side from rounded per-developer percentages.
-	if len(win.devScores) > 0 {
+	// #593: withheld when a sub-k residual was suppressed — this rollup is the
+	// differencing channel that makes row-suppression alone useless.
+	if len(win.devScores) > 0 && !kanonSuppressed.Any() {
 		total := newTeamScoreJSON(scoring.RollupTeam("", win.devScores))
 		resp.Total = &total
 	}
@@ -2456,18 +3253,198 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 	// modes (#185, #270): each segment's rows are k-anonymized GROUP aggregates
 	// when h.aggregation.Anonymized() (team or division). workTypeFilter (validated
 	// above) restricts the output to one segment; empty emits every type present.
-	segments, err := h.buildWorkTypeSegments(r.Context(), win.outcomes, win.canon, win.canonTokens, issueCosts, workTypeFilter)
+	segments, offFilterSup, err := h.buildWorkTypeSegments(r.Context(), win.outcomes, win.canon, win.canonTokens, issueCosts, workTypeFilter)
 	if err != nil {
 		h.logger.Error("build work-type segments", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	// Segment reconciliation (#466): account for EVERY dollar of the window against
+	// the segments just built, so the spend they structurally cannot categorize is
+	// reported instead of silently dropped. Built from win.outcomes — the UNFILTERED
+	// list — on purpose: ?work_type must not turn another category's spend into
+	// "no outcome". See segmentReconciliationJSON. Assigned before the #593 strip pass
+	// below, which owns withholding it when k-anonymity suppresses.
+	resp.SegmentReconciliation = buildSegmentReconciliation(
+		win.outcomes, win.canon, issueCosts, h.aggregation.Anonymized(), h.logger)
+
+	// 🔴 #593 ESCALATION — a suppressed SEGMENT forces the POOLED suppression.
+	//
+	// Weighted points partition EXACTLY across work types: every outcome carries
+	// exactly one work_type (COALESCEd to 'feature'), so the segments are a complete
+	// disjoint cover of the window. That makes the pooled total a cross-segment
+	// differencing channel:
+	//
+	//   total.weighted_points - Σ(visible segments' totals) == the suppressed segment
+	//
+	// and subtracting that segment's own named rows yields the hidden cohort. Flooring
+	// each segment independently does NOT close it; only withholding jointly does.
+	//
+	// So a segment-level suppression escalates to the whole response. The cost is real
+	// — one narrow work type can suppress the pooled view — and it is the honest price
+	// of a complete cover. Escalating here, after the segments exist, is why the strip
+	// pass below sits at the end rather than at each attach site.
+	//
+	// 🔴 offFilterSup IS PART OF THIS LOOP, and leaving it out was a measured bypass.
+	// The loop reads the EMITTED segments, so under ?work_type=<t> a sub-k segment of
+	// some OTHER type is not in `segments` and nothing escalates — while `total`,
+	// `cost_composition` and `segment_reconciliation` are all whole-window and ship
+	// unfiltered. Measured on the #593 fixture: ?work_type=feature returned the pooled
+	// total (13 points / $67.77) beside a visible feature segment (10 / $60.00),
+	// recovering the hidden developer's 3 points and — via
+	// segment_reconciliation.outcome_linked_cost_micro — their $7.77 to the cent.
+	// buildWorkTypeSegments therefore builds every type and hands back the suppression
+	// of any it filtered out, so the escalation is filter-independent.
+	// TestKAnonResidual_WorkTypeFilterCannotBypassEscalation pins it.
+	if offFilterSup.Any() && !kanonSuppressed.Any() {
+		kanonSuppressed = scoring.KAnonSuppression{
+			Residual:   true,
+			Developers: offFilterSup.Developers,
+			K:          offFilterSup.K,
+		}
+	}
+	for _, seg := range segments {
+		if seg.KAnonSuppressed != nil && !kanonSuppressed.Any() {
+			kanonSuppressed = scoring.KAnonSuppression{
+				Residual:   true,
+				Developers: seg.KAnonSuppressed.Developers,
+				K:          seg.KAnonSuppressed.KAnonymity,
+			}
+			break
+		}
+	}
+
+	// 🔴 #593 SECOND PASS — STRIP EVERY WINDOW-AGGREGATE FIGURE WHEN SUPPRESSED.
+	//
+	// This runs LAST, after every data_quality attach site, and that ordering is the
+	// design. A per-site guard is one forgotten `if` away from re-opening the leak, and
+	// a future field added above would default to LEAKING. Here the default is safe.
+	//
+	// Review measured the leak this closes, and it defeated the suppression completely:
+	// with `total` and `cost_composition` withheld, the response still shipped
+	//
+	//   unattributed_buckets: [{cost_usd: 5.00, share: 0.3333}]
+	//   attributed_cost_share: 0.6667
+	//
+	// and cost_usd / share == 15.00 — the withheld composition total, exactly, from a
+	// single bucket. Multiply by attributed_cost_share and you have the attributed
+	// spend too. Over a one-developer window the bucket's cost_usd IS that person's
+	// spend in dollars, with no arithmetic at all. Our own dogfood window is ~72%
+	// unattributed, so a window with no unattributed spend is the unrealistic case.
+	//
+	// What stays, and why it is not the same class:
+	//   - cost_coverage_* / source_coverage_start: properties of the INSTALLATION (when
+	//     capture began), not aggregates over the window's population.
+	//   - mixed_price_versions: a set of price-table version integers. Carries no
+	//     figure and no count of people or work.
+	//   - kanon_suppressed: the declaration itself, which is the point.
+	if kanonSuppressed.Any() {
+		// Owned here rather than only at their assignment sites: the escalation above
+		// can flip suppression ON after resp.Total was already set, so the withhold has
+		// to be re-asserted at the end. Belt and braces on the assignment-site guards,
+		// which stay because they document intent where the value is produced.
+		resp.Total = nil
+		resp.CostComposition = nil
+		// 🔴 #466 GOES WITH cost_composition, and it is the same leak, not a new one.
+		// segment_reconciliation.total.window_cost_micro is the window's WHOLE cost —
+		// the identical quantity as cost_composition.total_cost_usd, folded from the
+		// same token_events rows — so leaving it in would hand back the figure the
+		// line above just withheld, exactly, with no arithmetic. Its own doc argues it
+		// is "strictly coarser than the pooled total already in the response"; that is
+		// true of an unsuppressed response and FALSE here, where the pooled total is
+		// precisely what is missing. The per-developer rows are already suppressed
+		// upstream by the anonymized flag; this withholds the name-free rollup too.
+		// TestSegmentReconciliation_WithheldWhenKAnonSuppresses pins it.
+		resp.SegmentReconciliation = nil
+		// 🔴 BIDIRECTIONAL, and the reverse direction is a SEPARATE leak review had to
+		// point out. The escalation above handles segment-suppressed => pooled
+		// suppressed. This handles pooled-suppressed => segments suppressed, which
+		// leaks identically because the cover is disjoint in BOTH directions:
+		//
+		//   Σ segment.weighted_points - (named pooled rows) == the hidden cohort
+		//
+		// Reachable whenever a team is k-safe POOLED but sub-k within a segment: the
+		// segment's residual absorbs it and clears k, so the segment publishes while
+		// the pooled level suppresses. Measured: segments summing to 22 points / $106
+		// minus a named pooled row of 20 / $100 returned exactly the two hidden
+		// developers. Withholding one level and not the other closes nothing.
+		for i := range segments {
+			segments[i].Total = nil
+			if segments[i].KAnonSuppressed == nil {
+				segments[i].KAnonSuppressed = &kanonSuppressedJSON{
+					Developers:    kanonSuppressed.Developers,
+					KAnonymity:    kanonSuppressed.K,
+					WithheldTotal: true,
+					// Whole-window sidecars, not per-segment — see the segment attach
+					// site. The strip pass above withholds both at the TOP level and
+					// declares it there; saying `true` on a per-segment declaration
+					// would misattribute a whole-window withhold to this segment.
+					WithheldCostComposition:       false,
+					WithheldSegmentReconciliation: false,
+				}
+			}
+		}
+		if resp.DataQuality == nil {
+			resp.DataQuality = &dataQualityJSON{}
+		}
+		if resp.DataQuality.KAnonSuppressed == nil {
+			resp.DataQuality.KAnonSuppressed = &kanonSuppressedJSON{
+				Developers:    kanonSuppressed.Developers,
+				KAnonymity:    kanonSuppressed.K,
+				WithheldTotal: true,
+				// 🔴 ALL THREE, and this fallback is the one that is easy to miss.
+				// There are TWO ways kanonSuppressed becomes true. The pooled-first
+				// path builds its declaration earlier, where every flag is already
+				// set. The SEGMENT-ESCALATION path — pooled population k-safe, one
+				// segment sub-k — flips it on AFTER that site has been skipped, so
+				// this fallback is the only declaration the response gets. Omitting
+				// a flag here withholds the figure and then reports that it was not
+				// withheld, which is precisely the "absent must never be confusable
+				// with 'the window had no spend'" rule these flags exist to enforce,
+				// broken by the branch that needed it most.
+				// TestKAnonResidual_SegmentSuppressionEscalatesBothWays pins it.
+				WithheldCostComposition:       true,
+				WithheldSegmentReconciliation: true,
+			}
+		}
+		dq := resp.DataQuality
+		// STRIP EXACTLY THE INVERTIBLE ONES — no more, no less. All three divide by
+		// costComposition.TotalCostMicro, and publishing both halves of x/T publishes
+		// T. Review recovered the withheld total to the cent by two independent
+		// formulas: bucket.cost_usd / bucket.share, and
+		// Σ buckets.cost_usd / (1 - attributed_cost_share).
+		dq.AttributedCostShare = nil
+		dq.UnattributedBuckets = nil
+		dq.ExploratoryCostShare = nil
+
+		// ⚠️ DELIBERATELY KEPT, and the restraint is the point. An earlier draft also
+		// stripped attributed_outcome_share, unjoined_developers, zero_token_outcomes
+		// and repo_scope_excluded. Review measured each and found none invertible:
+		//   - attributed_outcome_share is a ratio of outcome COUNTS whose denominator
+		//     is published nowhere (teamScoreJSON carries no sample_n), so there is no
+		//     second equation to solve.
+		//   - zero_token_* identities are already name-suppressed in anonymized mode,
+		//     and the bare count pairs with nothing.
+		//   - unjoined_developers carries counts only.
+		//   - repo_scope_excluded is unreachable here: ?repo= is 400'd in anonymized
+		//     mode before this block is built.
+		// Stripping them cost real data-quality signal — they are the honest-coverage
+		// fields an adopter needs most — and bought no privacy. Over-suppression is not
+		// the safe default when it silently degrades the signals that tell an operator
+		// their capture is broken; it just moves the harm somewhere less visible.
+	}
+
 	resp.WorkTypes = segments
 
 	// Cost-composition sidecar (#234): nil (key omitted) when the window has no
 	// token spend, so a clean window ships no `cost_composition` and the dashboard
 	// panel stays hidden — same omit-when-empty discipline as data_quality (#136).
-	resp.CostComposition = newCostCompositionJSON(costComposition)
+	// #593: the composition is an unfloored whole-window sum, so it restates the
+	// suppressed cohort's spend just as surely as `total` does — measured leaking the
+	// identical figure on the reproduction fixture. Withheld on the same condition.
+	if !kanonSuppressed.Any() {
+		resp.CostComposition = newCostCompositionJSON(costComposition)
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -2488,9 +3465,16 @@ func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
 // type group so a developer who is sub-k within a type cannot be re-exposed by the
 // segmentation. #133 ranking floors apply per segment in developer mode.
 //
-// filter, when non-empty (already validated by the caller), restricts the result to
+// filter, when non-empty (already validated by the caller), restricts the RESULT to
 // that single type; a type with no outcomes yields a segment with no rows so a
 // filtered request still gets a well-formed (empty) answer.
+//
+// 🔴 The filter narrows the OUTPUT ONLY — every present type is still built and still
+// has its k-anonymity floor applied. The second return value carries a suppression
+// fired by a type the filter EXCLUDED, so the caller's #593 escalation sees it. See
+// the comment on `types` below for the measured differencing channel that shape
+// closes; the short version is that a filter must never be a way to opt out of a
+// suppression the same data triggers without it.
 func (h *Handler) buildWorkTypeSegments(
 	ctx context.Context,
 	outcomes []store.Outcome,
@@ -2498,7 +3482,7 @@ func (h *Handler) buildWorkTypeSegments(
 	canonTokens map[store.DevIssue]int64,
 	issueCosts []store.DevIssueCost,
 	filter string,
-) ([]workTypeSegmentJSON, error) {
+) ([]workTypeSegmentJSON, scoring.KAnonSuppression, error) {
 	// Canonicalize per-(developer, repo, issue) cost so it joins to the canonical
 	// outcome identity exactly as the pooled path canonicalizes DeveloperCosts (#125).
 	// repo stays on the key (#231); the JoinIndex applies the tolerant match so a
@@ -2525,9 +3509,6 @@ func (h *Handler) buildWorkTypeSegments(
 		wt := o.WorkType
 		if wt == "" {
 			wt = store.WorkTypeFeature // defensive: AllOutcomesSince COALESCEs, but never trust an empty category
-		}
-		if filter != "" && wt != filter {
-			continue
 		}
 		dev := canon(o.Developer)
 		zeroToken := tokenIndex.Sum(dev, o.Repo, o.IssueID) < scoring.MinAttributableTokens
@@ -2558,24 +3539,44 @@ func (h *Handler) buildWorkTypeSegments(
 		var err error
 		labelOf, err = h.resolveGroupLabels(ctx, canon)
 		if err != nil {
-			return nil, err
+			return nil, scoring.KAnonSuppression{}, err
 		}
 	}
 
-	// The set of types to emit. With a filter, emit exactly that one type (even when
-	// empty, so a filtered request always gets a well-formed segment). Otherwise emit
-	// every type present, sorted for a stable response.
-	var types []string
-	if filter != "" {
-		types = []string{filter}
-	} else {
-		for wt := range segByDev {
-			types = append(types, wt)
-		}
-		sort.Strings(types)
+	// 🔴 EVERY type present is BUILT, even under a filter; only the OUTPUT is narrowed
+	// (at the append below). Building just the requested type was a k-anonymity
+	// differencing channel — measured, not theorised. With five k-safe `feature`
+	// developers and one sub-k `security` developer, the UNFILTERED /scores correctly
+	// withheld `total`, `cost_composition` and `segment_reconciliation` via the #593
+	// escalation. But ?work_type=feature never CONSTRUCTED the security segment, so
+	// nothing escalated and all three whole-window aggregates shipped in full:
+	//
+	//	total.weighted_points 13 - visible feature segment 10   == 3      (hidden points)
+	//	outcome_linked_cost_micro 67_770_000 - segment $60.00   == $7.77  (hidden cost)
+	//
+	// A filter is a VIEW; it must never be a way to opt out of the suppression the
+	// same data triggers without it.
+	// TestKAnonResidual_WorkTypeFilterCannotBypassEscalation pins this, and
+	// TestKAnonResidual_WorkTypeFilterStillNarrowsWhenKSafe is its control arm — the
+	// filter must still narrow on k-safe data, or "suppress everything" would pass.
+	//
+	// A filter naming a type with no outcomes still yields a well-formed empty segment,
+	// so a filtered request always gets a shaped answer.
+	types := make([]string, 0, len(segByDev)+1)
+	for wt := range segByDev {
+		types = append(types, wt)
 	}
+	if filter != "" && segByDev[filter] == nil {
+		types = append(types, filter)
+	}
+	sort.Strings(types)
 
 	segments := make([]workTypeSegmentJSON, 0, len(types))
+	// offFilterSup carries a suppression fired by a segment the FILTER excluded from
+	// the response. It is returned rather than dropped because the caller's #593
+	// escalation reads the emitted segments, and an excluded segment is exactly the
+	// one an attacker would use to make that escalation invisible.
+	var offFilterSup scoring.KAnonSuppression
 	for _, wt := range types {
 		devMap := segByDev[wt]
 		// Compute per-developer scores for this type. Cost is summed over the
@@ -2587,6 +3588,7 @@ func (h *Handler) buildWorkTypeSegments(
 			devs = append(devs, dev)
 		}
 		sort.Strings(devs)
+		var segSup scoring.KAnonSuppression // #593, per-segment: see the assignment below
 		var devScores []scoring.DeveloperScore
 		for _, dev := range devs {
 			var totalMicro, realtimeMicro int64
@@ -2611,9 +3613,15 @@ func (h *Handler) buildWorkTypeSegments(
 			// discriminator names the active level.
 			seg.Aggregation = h.aggregation.String()
 			seg.Developers = []developerScoreJSON{}
-			for _, ts := range scoring.AggregateTeamsKAnon(devScores, labelOf, h.kAnonymity) {
+			teams, sup := scoring.AggregateTeamsKAnon(devScores, labelOf, h.kAnonymity)
+			for _, ts := range teams {
 				seg.Teams = append(seg.Teams, newTeamScoreJSON(ts))
 			}
+			// #593: a segment carries its OWN total over its OWN population, so it has
+			// its own differencing channel and needs the same treatment. A per-type
+			// segment is if anything a sharper lever than the whole window — narrowing
+			// to `security` or `incident` work is a cheap way to shrink a cohort.
+			segSup = sup
 		} else {
 			for _, s := range devScores {
 				var ciLow, ciHigh float64
@@ -2628,13 +3636,373 @@ func (h *Handler) buildWorkTypeSegments(
 				seg.Developers = append(seg.Developers, newDeveloperScoreJSON(s, ciLow, ciHigh))
 			}
 		}
+		// NOTE (#593): deliberately NOT gated on segSup here. Suppression of segment
+		// totals is enforced in ONE place — the strip pass on the /scores path, which
+		// nils every segment total whenever anything suppressed at either level.
+		//
+		// An assignment-site gate was written first and then removed: mutation testing
+		// showed its deletion failed NO test, because the strip pass dominates it. A
+		// guard that cannot fail is not defence in depth, it is dead code that reads
+		// like protection — and this repo has been bitten by exactly that (a drift
+		// check written so it could not fire on the one file that mattered). The strip
+		// pass IS mutation-covered; keep the enforcement there.
 		if len(devScores) > 0 {
 			total := newTeamScoreJSON(scoring.RollupTeam("", devScores))
 			seg.Total = &total
 		}
+		// Declare it on the segment. Without this a consumer reading work_types sees a
+		// segment whose `total` simply is not there and cannot tell "withheld for
+		// anonymity" from "this category had no data".
+		if segSup.Any() {
+			seg.KAnonSuppressed = &kanonSuppressedJSON{
+				Developers:    segSup.Developers,
+				KAnonymity:    segSup.K,
+				WithheldTotal: true,
+				// The composition sidecar is whole-window, not per-segment, so a
+				// segment-local suppression does not withhold it. Saying `true` here
+				// would be a false statement about what this suppression dropped.
+				WithheldCostComposition: false,
+				// Same reasoning for the #466 reconciliation: it is whole-window and
+				// per-developer, not per-segment. The /scores strip pass is what
+				// actually withholds it, and it declares that at the top level.
+				WithheldSegmentReconciliation: false,
+			}
+		}
+		// Narrow the OUTPUT here, AFTER segSup has been computed — so a sub-k segment
+		// the caller filtered out of the response still reaches the escalation.
+		if filter != "" && seg.WorkType != filter {
+			if segSup.Any() && !offFilterSup.Any() {
+				offFilterSup = segSup
+			}
+			continue
+		}
 		segments = append(segments, seg)
 	}
-	return segments, nil
+	return segments, offFilterSup, nil
+}
+
+// addSaturating returns a+b clamped to the int64 range instead of wrapping, and
+// REPORTS whether it had to clamp (#466).
+//
+// The reconciliation sums cost_micro across every row in a window. Each row is bounded
+// at ingest (store.MaxCostUSD), but the SUM is not: enough max-value writes overflow
+// int64. Wrapping would be silent AND self-concealing — all four accumulators wrap
+// together, so the partition invariant still holds and a consumer following the
+// documented "assert on the _micro fields" advice sees a perfectly consistent
+// reconciliation whose totals are meaningless.
+//
+// 🔴 THE SECOND RETURN IS THE WHOLE POINT, and its absence was a bug. An earlier draft
+// clamped silently and relied on a non-negativity check over the rollup to notice —
+// but clamping is exactly what STOPS the sum going negative, so that check was
+// unreachable by construction and the block published a saturated figure (~$9.2e12) as
+// if it were a measurement. Saturation is only detectable at the moment it happens;
+// callers must propagate this bool, not re-derive it from the result.
+//
+// The negative arm cannot fire on cost input (costs are non-negative) but is kept
+// correct so the helper is not a trap if reused on a signed quantity.
+func addSaturating(a, b int64) (sum int64, saturated bool) {
+	sum = a + b
+	// Overflow iff the operands share a sign and the result's sign differs. Note the
+	// underflow arm needs `>= 0`, not `> 0`: MinInt64 + MinInt64 wraps to exactly 0.
+	switch {
+	case a > 0 && b > 0 && sum < 0:
+		return math.MaxInt64, true
+	case a < 0 && b < 0 && sum >= 0:
+		return math.MinInt64, true
+	}
+	return sum, false
+}
+
+// newDeveloperCostReconciliationJSON builds one reconciliation row from the integer
+// micro-dollar parts, emitting both the exact micros and their rendered dollars from
+// the SAME values — so the two representations can never disagree about which number
+// they describe. dev is empty for the name-free rollup.
+func newDeveloperCostReconciliationJSON(dev string, window, linked, noOutcome, unattributed int64) developerCostReconciliationJSON {
+	return developerCostReconciliationJSON{
+		Developer:              dev,
+		WindowCostUSD:          store.MicroToDollars(window),
+		WindowCostMicro:        window,
+		OutcomeLinkedCostUSD:   store.MicroToDollars(linked),
+		OutcomeLinkedCostMicro: linked,
+		NoOutcomeCostUSD:       store.MicroToDollars(noOutcome),
+		NoOutcomeCostMicro:     noOutcome,
+		UnattributedCostUSD:    store.MicroToDollars(unattributed),
+		UnattributedCostMicro:  unattributed,
+	}
+}
+
+// outcomeCoverKey is a (canonical developer, issue) pair. Deliberately NOT store.DevIssue,
+// which carries a third Repo field: this index answers the repo question separately
+// (via outcomeRepos), so a key that merely LEFT Repo zero would be one added field away
+// from silently splitting into per-repo buckets and reclassifying joined spend as
+// no-outcome. Two fields, no room for the mistake.
+type outcomeCoverKey struct {
+	developer string
+	issueID   string
+}
+
+// outcomeRepos records, for one canonical (developer, issue), which repositories carry
+// an outcome — enough to answer the tolerant repo join (store.RepoMatch, #231) in O(1)
+// per cost row without rescanning the outcome list.
+type outcomeRepos struct {
+	// repoBlind is true when at least one outcome for this (developer, issue) is
+	// itself repo-blind, in which case it joins a cost row in ANY repo.
+	repoBlind bool
+	// real holds the qualified repositories that carry an outcome. Allocated LAZILY:
+	// a window is routinely all repo-blind (the proxy structurally cannot know a
+	// repository, and every pre-#231 row carries the sentinel), and eagerly making a
+	// map per (developer, issue) would allocate one per outcome that never holds a
+	// key. Read through the nil map, which is legal and returns false.
+	real map[string]bool
+}
+
+// outcomeCoverage answers, in O(1) per cost row, "does this (developer, repo, issue)
+// cost row join at least one outcome?" — the same question store.JoinIndex answers
+// with a value, reduced to a boolean.
+//
+// It is a named type with a method rather than a closure inside
+// buildSegmentReconciliation so a test can call THE REAL PREDICATE. The rule below is
+// a restatement of store.RepoMatch, and a restatement that is only asserted by a
+// hand-built copy in a test is not asserted at all — see
+// TestSegmentReconciliation_RepoJoinMatchesRepoMatch, which drives this method and
+// store.RepoMatch over the full repo cross-product and fails on any disagreement.
+type outcomeCoverage map[outcomeCoverKey]*outcomeRepos
+
+// buildOutcomeCoverage indexes the window's outcomes by canonical (developer, issue)
+// and by the repositories they were earned in.
+//
+// Developers are canonicalized through the same alias map as the cost rows (#125) so
+// an OS-username cost row and a GitHub-login outcome collapse to one key. Without it
+// every aliased developer's spend would misreport as no-outcome — the #466 gap would
+// swallow the very spend it exists to explain.
+func buildOutcomeCoverage(outcomes []store.Outcome, canon func(string) string) outcomeCoverage {
+	cover := make(outcomeCoverage, len(outcomes))
+	for _, o := range outcomes {
+		key := outcomeCoverKey{developer: canon(o.Developer), issueID: o.IssueID}
+		e := cover[key]
+		if e == nil {
+			e = &outcomeRepos{}
+			cover[key] = e
+		}
+		if repoid.IsReal(o.Repo) {
+			if e.real == nil {
+				e.real = map[string]bool{}
+			}
+			e.real[o.Repo] = true
+		} else {
+			e.repoBlind = true
+		}
+	}
+	return cover
+}
+
+// linked reports whether a cost row joins at least one outcome under store.RepoMatch
+// (#231) — the rule JoinIndex.Sum applies when it charges that row into a work-type
+// segment: a repo-blind cost row joins any outcome for its issue, and a qualified one
+// joins its own repo's outcome OR a repo-blind outcome. Keeping the two rules identical
+// is what makes the partition match what the segments actually counted; diverging in
+// either direction silently moves real spend between outcome_linked and no_outcome.
+//
+// Stated against RepoMatch, not against Sum, because that is what is ASSERTED:
+// TestSegmentReconciliation_RepoJoinMatchesRepoMatch drives this method and RepoMatch
+// over the repo cross-product. The two differ on the empty repo — RepoMatch treats ""
+// as blind, while Sum buckets the blind side on the literal repoid.Unqualified — which
+// is unreachable from stored data (normalizeRepo maps "" to the sentinel and the column
+// is NOT NULL DEFAULT 'unqualified'), but claiming exact Sum equivalence would be one
+// step stronger than the test proves.
+func (c outcomeCoverage) linked(developer, repo, issue string) bool {
+	e := c[outcomeCoverKey{developer: developer, issueID: issue}]
+	if e == nil {
+		return false
+	}
+	// A repo-blind cost row matches every outcome for its issue — RepoMatch is true
+	// whenever EITHER side is unqualified, so the row's own repo cannot discriminate.
+	if !repoid.IsReal(repo) {
+		return true
+	}
+	return e.repoBlind || e.real[repo]
+}
+
+// buildSegmentReconciliation accounts for every dollar of the window against the
+// work-type segments (#466). See segmentReconciliationJSON for why this exists and
+// developerCostReconciliationJSON for the invariant it maintains.
+//
+// It takes the UNFILTERED outcome list on purpose. A ?work_type=feature request must
+// not report a developer's bugfix spend as "no outcome" — the gap being reconciled is
+// a property of the window, and narrowing the outcome set to the requested segment
+// would manufacture a gap that does not exist. Callers pass win.outcomes, never the
+// filtered partition buildWorkTypeSegments works from.
+//
+// Returns nil when the window produced no per-issue cost rows at all — i.e. no
+// token_events in the window — so a clean window ships no key. Note that is "no cost
+// ROWS", not "no spend": a window containing only zero-cost events still yields rows
+// and still gets a (zero-valued) block, which is correct, since a reader asking "where
+// did the spend go" deserves the answer "there was none" rather than a missing key.
+func buildSegmentReconciliation(
+	outcomes []store.Outcome,
+	canon func(string) string,
+	issueCosts []store.DevIssueCost,
+	anonymized bool,
+	logger *slog.Logger,
+) *segmentReconciliationJSON {
+	if len(issueCosts) == 0 {
+		return nil
+	}
+	// Package-level function taking the logger as a parameter, so a caller can pass
+	// nil where the Handler's own constructor would have defaulted it. Guard rather
+	// than panic: this is a reporting sidecar, and dying on the /scores path because a
+	// diagnostic sink was unset would be a far worse failure than a stray log line.
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	// Index which (developer, issue) keys carry an outcome, and in which repos.
+	cover := buildOutcomeCoverage(outcomes, canon)
+
+	// windowMicro is the developer's window total folded from the SAME issueCosts
+	// snapshot the three parts come from. It is deliberately NOT the
+	// DeveloperCostsWindow total. loadWindow issues those as two separate,
+	// non-transactional reads (handler.go: DeveloperCostsWindow, then several
+	// intervening queries, then DeveloperIssueCostsWindow) over a window whose upper
+	// bound is normally OPEN, so a token_events row written between them lands in one
+	// and not the other and the PUBLISHED invariant breaks — not as corruption, but as
+	// ordinary concurrency a consumer cannot distinguish from corruption.
+	// TestSegmentReconciliation_InvariantHoldsUnderConcurrentWrites is the measurement:
+	// it hammers /scores while writing, and it FAILS if this is moved back onto
+	// DeveloperCostsWindow.
+	//
+	// Folding here makes the wire invariant an arithmetic IDENTITY that no concurrent
+	// writer can break — the parts and the total are the same rows, summed once. The
+	// genuine CROSS-QUERY property (DeveloperCostsWindow agreeing with a fold of
+	// DeveloperIssueCostsWindow) is not given up, it is moved somewhere it can be
+	// deterministic: store.TestDeveloperCostsWindowFoldsToIssueCosts pins it over a
+	// fixed quiescent database, where a discrepancy really does mean a query bug.
+	//
+	// windowMicro lives on the SAME struct as the three parts, and that is what makes
+	// the per-row invariant structural rather than a thing to remember: every cost row
+	// adds to windowMicro and to exactly one part, in one place, so there is no way to
+	// update one and forget the other.
+	type parts struct {
+		windowMicro                                    int64
+		linkedMicro, noOutcomeMicro, unattributedMicro int64
+	}
+	byDev := map[string]*parts{}
+
+	// saturated latches the moment ANY accumulator has to clamp. It must be captured
+	// here, at the add: once a sum pins at math.MaxInt64 the four figures stay
+	// mutually consistent and non-negative, so no property of the FINAL numbers can
+	// reveal that they are no longer measurements. See addSaturating.
+	saturated := false
+	add := func(dst *int64, v int64) {
+		sum, clamped := addSaturating(*dst, v)
+		*dst = sum
+		saturated = saturated || clamped
+	}
+
+	for _, c := range issueCosts {
+		dev := canon(c.Developer)
+		p := byDev[dev]
+		if p == nil {
+			p = &parts{}
+			byDev[dev] = p
+		}
+		// Unconditional, BEFORE the classification below: a developer whose every
+		// dollar is unlinked must still get a row rather than silently vanishing from
+		// the reconciliation.
+		add(&p.windowMicro, c.TotalCostMicro)
+		switch {
+		// The sentinel family is tested FIRST. Since #466 the outcome ingress rejects
+		// a sentinel issue_id (validateOutcomeRequest -> validateIssueID), so a NEW
+		// outcome can no longer be written on the sentinel and the two arms should
+		// never both match. The ordering still matters for rows that predate that
+		// guard or were inserted out of band: sentinel-first can only move cost OUT of
+		// outcome_linked, never into it, so a legacy or forged outcome cannot inflate
+		// the spend the segments appear to explain. Defence in depth behind the ingest
+		// guard, not a substitute for it.
+		case store.IsUnattributed(c.IssueID):
+			add(&p.unattributedMicro, c.TotalCostMicro)
+		case cover.linked(dev, c.Repo, c.IssueID):
+			add(&p.linkedMicro, c.TotalCostMicro)
+		default:
+			add(&p.noOutcomeMicro, c.TotalCostMicro)
+		}
+	}
+
+	// One row per developer with cost rows in this window, name-sorted so the response
+	// is deterministic. Every key in byDev came from a cost row, and every cost row
+	// added to windowMicro, so a developer whose every dollar is unlinked still gets a
+	// row instead of silently vanishing from the reconciliation.
+	devs := make([]string, 0, len(byDev))
+	for dev := range byDev {
+		devs = append(devs, dev)
+	}
+	sort.Strings(devs)
+
+	out := &segmentReconciliationJSON{}
+	var sumWindow, sumLinked, sumNoOutcome, sumUnattributed int64
+	// negative latches PER DEVELOPER, and that is the point. Checking only the rollup
+	// nets one developer's negative row against everyone else's positive spend, so a
+	// single out-of-band negative is caught only if it drives the WHOLE FLEET negative
+	// — while the affected developer's own published row ships a negative figure with
+	// the partition invariant intact.
+	negative := false
+	for _, dev := range devs {
+		p := byDev[dev]
+		if p.windowMicro < 0 || p.linkedMicro < 0 || p.noOutcomeMicro < 0 || p.unattributedMicro < 0 {
+			negative = true
+		}
+		add(&sumWindow, p.windowMicro)
+		add(&sumLinked, p.linkedMicro)
+		add(&sumNoOutcome, p.noOutcomeMicro)
+		add(&sumUnattributed, p.unattributedMicro)
+		if anonymized {
+			continue
+		}
+		out.Developers = append(out.Developers, newDeveloperCostReconciliationJSON(
+			dev, p.windowMicro, p.linkedMicro, p.noOutcomeMicro, p.unattributedMicro))
+	}
+	// Summed in micro-dollars and converted once, so the rollup is exact integer
+	// arithmetic (#69) and cannot drift from the parts by float accumulation.
+	out.Total = newDeveloperCostReconciliationJSON("", sumWindow, sumLinked, sumNoOutcome, sumUnattributed)
+	// FITNESS TRIPWIRE — two independent conditions, and BOTH are needed.
+	//
+	//  1. saturated: an accumulator hit the int64 ceiling. This is the condition an
+	//     earlier draft could not see. It clamped silently and then tested the FINAL
+	//     numbers for negativity — but clamping is precisely what keeps them positive,
+	//     so the check was unreachable by construction and the block shipped ~$9.2e12
+	//     as a measurement, with the partition invariant intact and every figure
+	//     non-negative. Nothing about the published numbers betrays it;
+	//     TestSegmentReconciliation_SuppressedOnOverflow drives the real builder over a
+	//     saturating fixture and fails if the block is published.
+	//  2. negative: a genuinely negative figure. Costs are non-negative at ingest and
+	//     there is no CHECK constraint on token_events.cost_micro, so this catches a
+	//     negative row arriving out of band (or a future signed cost correction)
+	//     rather than an overflow — a different fault with the same remedy. Latched
+	//     PER DEVELOPER above as well as checked on the rollup here: a rollup-only
+	//     test nets one person's negative against everyone else's spend and would
+	//     publish their negative row while the fleet total looked healthy.
+	//
+	// Either way the block is not fit to publish, so it is dropped rather than served
+	// as numbers a reader would reasonably trust. Logged, not 500'd: the rest of the
+	// score response is unaffected and still worth serving. No client-controlled string
+	// is logged — only the integers and two bools.
+	//
+	// ⚠️ THIS IS THE ONE ABSENCE THAT IS NOT DECLARED ON THE WIRE, and the exception is
+	// deliberate rather than overlooked. Everywhere else this change insists that
+	// "absent must never be confusable with 'the window had no spend'" — hence
+	// withheld_segment_reconciliation. Here the absence signals a SERVER FAULT, not a
+	// policy withhold, and a fault flag would be a new contract field whose only
+	// reachable trigger is a fleet whose summed spend exceeds ~9.2e12 dollars. The
+	// operator log is the signal; docs/api-compatibility.md names this third nil path
+	// so a consumer is not left guessing.
+	if saturated || negative || sumWindow < 0 || sumLinked < 0 || sumNoOutcome < 0 || sumUnattributed < 0 {
+		logger.Error("segment reconciliation is not fit to publish; suppressing block",
+			"saturated", saturated,
+			"window_micro", sumWindow, "outcome_linked_micro", sumLinked,
+			"no_outcome_micro", sumNoOutcome, "unattributed_micro", sumUnattributed)
+		return nil
+	}
+	return out
 }
 
 // --- GET /api/v1/scores/{developer} ---
@@ -2663,6 +4031,35 @@ type developerDetailResponse struct {
 	// Ranked is false.
 	FlaggedOutcomes int               `json:"flagged_outcomes"`
 	Issues          []issueDetailJSON `json:"issues"`
+	// RepoScope echoes the repository this detail was narrowed to (#590), omitted on
+	// a fleet-wide read. Same contract as the /scores data_quality field of the same
+	// name: assert on THIS to know a figure is scoped, never on having sent ?repo=.
+	RepoScope string `json:"repo_scope,omitempty"`
+	// 🔴 THERE IS DELIBERATELY NO repo_scope_excluded FIELD HERE, and it is not an
+	// oversight — an earlier revision had one and review caught it.
+	//
+	// The exclusion measurement is ORG-WIDE by construction: store.UnqualifiedExclusionWindow
+	// counts every repo-blind row in the window, with no developer predicate (and it
+	// could not easily gain one — cost and outcomes live in different identity spaces
+	// joined by the #125 alias map, which lives in this handler, not in SQL).
+	//
+	// On /scores, whose population IS the whole window, that grain matches. On a
+	// SINGLE-DEVELOPER response it does not, and shipping it here was wrong twice
+	// over. Measured: a request for alice's detail scoped to one repo returned
+	// repo_scope_excluded = {cost_usd: 99} where all $99 was BOB's repo-blind spend —
+	// so a reader would conclude alice's $3 might be understating by up to $99, when
+	// none of it is hers. And an installation-wide absolute dollar figure inside a
+	// response that declares itself scoped is squarely the embargoed shape this whole
+	// issue exists to prevent.
+	//
+	// The org-wide disclosure lives on GET /api/v1/scores, where its grain is honest.
+	// A consumer needing it for a scoped window reads it there.
+	// SpendLeverageSuppressed is true when a repo scope suppressed ActualPaidUSD and
+	// SpendLeverage above — they are org-wide by construction and cannot be scoped.
+	// Without this field a scoped response's actual_paid_usd of 0 would be
+	// indistinguishable from "this developer has no recorded actual spend", which are
+	// materially different statements.
+	SpendLeverageSuppressed *bool `json:"spend_leverage_suppressed,omitempty"`
 }
 
 type issueDetailJSON struct {
@@ -2691,6 +4088,14 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "per-developer score detail is disabled in "+h.aggregation.String()+"-aggregation mode (#185, #270)")
 		return
 	}
+	// Strict parameter allowlist + ?repo scope (#590), same posture and same reasons
+	// as /scores. The issue names this endpoint explicitly: a per-developer figure
+	// that silently spans every repository is the same defect at a finer grain, and
+	// arguably a worse one, since a single developer's cost is the number most likely
+	// to be quoted directly.
+	if !rejectUnknownQueryParams(w, r, "since", "until", "before", "repo") {
+		return
+	}
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid since: "+err.Error())
@@ -2700,6 +4105,10 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	since = sinceUTC(since)
 	// Half-open [since, until) upper bound (#276), same contract as /scores.
 	until, ok := h.parseWindowUpperBound(w, r, since)
+	if !ok {
+		return
+	}
+	scope, ok := parseRepoScope(w, r)
 	if !ok {
 		return
 	}
@@ -2721,12 +4130,12 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Outcomes: the SQL-side DeveloperOutcomes(developer=?) filter cannot see
 	// aliases, so pull all outcomes in the window and filter by canonical id.
-	outcomes, err := h.store.AllOutcomesWindow(r.Context(), since, until)
+	outcomes, err := h.store.AllOutcomesWindow(r.Context(), since, until, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	costs, err := h.store.DeveloperCostsWindow(r.Context(), since, until)
+	costs, err := h.store.DeveloperCostsWindow(r.Context(), since, until, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
@@ -2744,19 +4153,30 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Merge actual_spend by canonical id: sum every raw developer's allocation
 	// that resolves to the target.
-	spendAll, err := h.store.ActualSpendAllWindow(r.Context(), since, until)
-	if err != nil {
-		// target is canon(r.PathValue("developer")): a URL path segment is percent-
-		// decoded, so it is client-controlled and CRLF-injectable, and is never
-		// charset-validated here. Sanitize via the shared logsafe barrier (#321).
-		h.logger.Error("query actual_spend for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
-		writeError(w, http.StatusInternalServerError, "db error")
-		return
-	}
+	//
+	// 🔴 SKIPPED ENTIRELY UNDER A REPO SCOPE (#590). actual_spend has no repository
+	// and cannot be divided by one, so under a scope there is no honest per-repo
+	// actual-paid figure to report. Reading it anyway and dividing it by this
+	// repository's list-price cost would inflate SpendLeverage by roughly the
+	// fleet-to-repo ratio — a number that looks like a measurement and is an artifact.
+	// Leaving actualPaid at 0 makes ComputeDeveloper treat it as "no actual_spend
+	// recorded", which is the correct honest state for a scoped read, and the
+	// suppression is DECLARED on the wire below rather than left to be inferred.
 	var actualPaid float64
-	for dev, paid := range spendAll {
-		if canon(dev) == target {
-			actualPaid += paid
+	if scope.IsFleetWide() {
+		spendAll, err := h.store.ActualSpendAllWindow(r.Context(), since, until)
+		if err != nil {
+			// target is canon(r.PathValue("developer")): a URL path segment is percent-
+			// decoded, so it is client-controlled and CRLF-injectable, and is never
+			// charset-validated here. Sanitize via the shared logsafe barrier (#321).
+			h.logger.Error("query actual_spend for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		for dev, paid := range spendAll {
+			if canon(dev) == target {
+				actualPaid += paid
+			}
 		}
 	}
 
@@ -2771,7 +4191,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Windowed token totals for the tripwire (#136), re-keyed by canonical
 	// identity so aliased tokens (#125) count toward the target.
-	tokenTotals, err := h.store.OutcomeTokenTotals(r.Context(), targetOutcomes)
+	tokenTotals, err := h.store.OutcomeTokenTotals(r.Context(), targetOutcomes, scope)
 	if err != nil {
 		// target is the same client-controlled path value; sanitize via logsafe (#321).
 		h.logger.Error("query token totals for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
@@ -2786,7 +4206,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Per-(developer, repo, issue) cost for the target's joint bootstrap CI (#495),
 	// same window and alias canonicalization as the tripwire above.
-	detailIssueCosts, err := h.store.DeveloperIssueCostsWindow(r.Context(), since, until)
+	detailIssueCosts, err := h.store.DeveloperIssueCostsWindow(r.Context(), since, until, scope)
 	if err != nil {
 		h.logger.Error("query issue costs for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -2827,6 +4247,12 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 		ciLow, ciHigh = scoring.BootstrapCI(ciContribs, ciCosts, ciFixed, scoring.DefaultBootstrapSamples, rng)
 	}
 	cppLow, cppHigh := scoring.CostPerPointCI(ciLow, ciHigh)
+	disc, err := h.buildScopeDisclosure(r.Context(), since, until, scope)
+	if err != nil {
+		h.logger.Error("build scope disclosure for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
 	writeJSON(w, http.StatusOK, developerDetailResponse{
 		Developer:          s.Developer,
 		TIER:               s.TIER,
@@ -2844,6 +4270,12 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 		Ranked:             s.Ranked,
 		FlaggedOutcomes:    s.FlaggedOutcomes,
 		Issues:             issues,
+
+		RepoScope: disc.Repo,
+		// No RepoScopeExcluded — see the field's absence documented on
+		// developerDetailResponse. disc.Excluded is org-grain and would be a fleet
+		// absolute inside a single-developer response.
+		SpendLeverageSuppressed: disc.Suppressed,
 	})
 }
 
@@ -2886,11 +4318,68 @@ func (h *Handler) handlePostDeveloperAlias(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "alias and canonical must be <= 256 chars")
 		return
 	}
+	// 🔴 #619, found while enumerating and NOT listed in the issue: WITHOUT THIS, THE
+	// WHOLE #619 GUARD IS BYPASSABLE IN ONE HOP. The score join resolves every stored
+	// developer through the alias map before aggregating, so an alias row is a rename
+	// of the identity space applied retroactively to rows already in the table — the
+	// write-side guards on /costs, /events, /outcomes and /actual_spend all check a
+	// value that this endpoint can then relabel.
+	//
+	// BOTH columns, and they are two different attacks:
+	//   - canonical == sentinel: {alias: "alice", canonical: "unattributed"} folds
+	//     alice's entire cost and outcome history into the pseudo-developer. Her spend
+	//     leaves the leaderboard — the #619 vector, achieved without ever naming the
+	//     sentinel on a spend write.
+	//   - alias == sentinel: {alias: "unattributed", canonical: "bob"} is the inverse,
+	//     and worse for someone else: every org-poller aggregate and every
+	//     proxy-unresolved dollar lands in BOB's denominator and destroys his score.
+	//     Sabotage rather than self-dealing, but the same forged identity.
+	//
+	// An operator who genuinely wants an identity folded into the unattributed pool
+	// has no business doing it by aliasing: that would make a real person's spend
+	// indistinguishable from spend the server could not attribute, which is the one
+	// distinction the sentinel exists to preserve.
+	if err := validateDeveloper(req.Alias); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateDeveloper(req.Canonical); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := h.store.UpsertDeveloperAlias(r.Context(), req.Alias, req.Canonical); err != nil {
+		// 🔴 ORDER IS LOAD-BEARING: THE SENTINEL RUNS FIRST. An errors.Is check is
+		// an EXACT match on an identity the store deliberately wraps; the
+		// "developer_alias:" prefix below is a HEURISTIC over message text. A
+		// heuristic must never pre-empt an exact match, because the heuristic can
+		// match something it was never meant to.
+		//
+		// This is not hypothetical. These two branches were the other way round,
+		// and were correct only by the accident that beginImmediateBounded's error
+		// happens not to start with "developer_alias:". MEASURED: stamping that
+		// prefix onto the store's begin failure — `fmt.Errorf("developer_alias:
+		// %w", err)`, a plausible "make the errors in this function consistent"
+		// edit — left the ENTIRE tree green while turning a transient contention
+		// into a permanent 400 that no client would ever retry. With the sentinel
+		// first, that edit cannot change the status code at all: the defect is
+		// unrepresentable rather than merely watched. Pinned by
+		// TestContentionOutranksTheValidationPrefix.
+		//
+		// Contention is retryable and must not read as corruption — see
+		// writeStoreContention. This site uses beginImmediateBounded, so it is one
+		// of the request-path writers that can produce the sentinel.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("upsert developer_alias: write lock unavailable", "err", err)
+			writeStoreContention(w)
+			return
+		}
 		// The store's validation errors (self-map, chain) are caller-facing 400s
 		// with a descriptive message; only an unexpected failure is a 500. The
-		// store returns plain errors.New for the validation cases, so match on the
-		// "developer_alias:" prefix it stamps on every such message.
+		// store returns plain errors.New for the validation cases — no sentinel to
+		// match on — so match on the "developer_alias:" prefix it stamps on every
+		// such message. Reordering cannot misclassify these: they wrap nothing, so
+		// the errors.Is above is false for all of them
+		// (TestValidationErrorsStillAnswer400UnderTheReorderedChecks).
 		if strings.HasPrefix(err.Error(), "developer_alias:") {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -2974,6 +4463,15 @@ func (h *Handler) handleEraseDeveloper(w http.ResponseWriter, r *http.Request) {
 	}
 	counts, err := h.store.EraseDeveloper(r.Context(), id)
 	if err != nil {
+		// Contention is retryable and must not read as corruption — see
+		// writeStoreContention. Telling a DSAR operator "store error" when the
+		// erasure merely lost a lock race invites them to report a failed
+		// compliance action that a retry would have completed.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("erase developer: write lock unavailable", "err", err)
+			writeStoreContention(w)
+			return
+		}
 		// Log server-side only; the client error never echoes the requested id
 		// (no PII in responses).
 		h.logger.Error("erase developer", "err", err)
@@ -3124,6 +4622,63 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// writeLockUnavailableRetryAfter is the Retry-After (seconds) advertised when a
+// write-path request loses the race for SQLite's single write lock.
+//
+// One second, because the wait the client just absorbed was bounded at
+// store.requestPathBusyTimeout (250ms) — so a retry a second later is past the
+// window that just failed without making an interactive client feel hung.
+const writeLockUnavailableRetryAfter = 1
+
+// writeStoreContention answers a request that failed because ANOTHER writer holds
+// the database write lock, and it must be gated on store.ErrWriteLockUnavailable —
+// never on any other store error.
+//
+// 🔴 WHY THIS IS NOT A 500. The sentinel's own doc says callers gate an
+// operator-facing hint on exactly it, and `tierd repair-repo` does
+// (internal/store/repairrepo.go). The request-path writers that existed when this
+// was written — the alias upsert and the GDPR erasure, since joined by the #346
+// /costs override — produced the sentinel and then collapsed it into the generic
+// 500 "store error", which reads as corruption: an operator who sees it goes
+// looking for a damaged database when the true answer is "a concurrent writer had
+// the lock; try again". 503 + Retry-After says the request is retryable, which a
+// 500 explicitly does not.
+//
+// The 250ms cap this fires past is deliberately generous for the SERVING path,
+// and the measurement is recorded here so the choice stays traceable: `repair-repo`
+// keeps ONE transaction open across scan + per-row update + commit at ~3.46 µs/row —
+// BenchmarkRepairRepoCommit on 5000 rows, `-benchtime 5x`, 17,289,550 ns/op
+// (Apple M5 Max, 2026-08-04). 250ms therefore rides out a repair of roughly
+// 72,000 rows before a request-path writer gives up.
+//
+// ⚠️ REPAIR-REPO IS NO LONGER THE SERVING-PATH CEILING, AND THIS SENTENCE HAS
+// ALREADY BEEN WRONG ONCE (see the paragraph below). `tierd reprice --commit`
+// (store.Reprice) now takes the write lock via beginImmediate BEFORE its scan
+// rather than at its first UPDATE, so its hold spans scan + two writes per changed
+// row + commit over EVERY token_events row at or above the version floor — a
+// strict superset of repair-repo's repo-filtered subset, and unbounded by any
+// developer or repo predicate. It is reachable while serving on exactly the terms
+// repair-repo is (both tell the operator to run against a quiesced database and
+// neither can enforce it). That does not make 250ms wrong — it is the same
+// argument as the migrations below: a request arriving mid-reprice is precisely
+// when a retryable 503 is the honest answer.
+//
+// ⚠️ THAT IS THE SERVING PATH, NOT THE TREE. An earlier version of this comment
+// claimed `repair-repo` was the longest write in the tree; it is not.
+// recomputeKnownSourceCosts, migrateCostUSDToMicro and migrateActualSpendToMicro
+// (internal/store/store.go) each rewrite an ENTIRE table inside one UNBOUNDED
+// beginImmediate. They are tier_migrations-marker-gated, so they run once — but
+// that once is the first upgrade of an already-populated database, where the row
+// count is all of token_events rather than repair-repo's repo-filtered subset,
+// and it can exceed this cap comfortably. That does not make 250ms wrong: a
+// request arriving while another process is mid-upgrade is exactly the case where
+// a retryable 503 is the honest answer and a five-second stall behind the single
+// connection is not.
+func writeStoreContention(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(writeLockUnavailableRetryAfter))
+	writeError(w, http.StatusServiceUnavailable, "database is busy: another writer holds the write lock, retry shortly")
+}
+
 func parseSince(s string) (time.Time, error) {
 	if s == "" {
 		// Bind the default 90-day lower bound in UTC. time.Now() carries the
@@ -3209,3 +4764,182 @@ func (h *Handler) parseWindowUpperBound(w http.ResponseWriter, r *http.Request, 
 // at every store call site fixes the window regardless of the zone the caller's
 // time.Time happens to carry.
 func sinceUTC(t time.Time) time.Time { return t.UTC() }
+
+// rejectUnknownQueryParams writes a 400 and returns false when the request carries
+// ANY query parameter outside the endpoint's allowlist (#590).
+//
+// 🔴 This is not tidiness — it is half the fix, and the half without which the other
+// half is a false green. net/http silently ignores unrecognized parameters, so before
+// this, `?repo=x` on an endpoint with no repo support returned a FLEET aggregate that
+// was byte-identical to a correctly scoped one. A caller who believed they had scoped
+// a query got the whole fleet and had no way to find out. Adding the filter alone
+// would leave exactly that footgun one typo away: `repos=`, `Repo=`, `repo_id=` would
+// each silently widen a query back to fleet-wide while the caller's own assertion
+// passed, asserting nothing.
+//
+// The rule this enforces: "could not scope" must never share a response shape with
+// "scoped, and this is the result".
+//
+// Matching is EXACT and case-sensitive, deliberately. Accepting `Repo=` as a synonym
+// would mean guessing which of several plausible spellings a caller meant, and a
+// guess is how you end up silently answering a question nobody asked. An unknown
+// parameter is a caller bug; the useful response says so and lists what IS accepted.
+//
+// Measured before adopting the strict posture (2026-08-03): internal/dashboard's
+// assets/dashboard.js is the only known client of these endpoints and sends only
+// `since` and `until`, so nothing in-tree breaks.
+func rejectUnknownQueryParams(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
+	// 🔴 PARSE EXPLICITLY. Do NOT use r.URL.Query() here — it DISCARDS the parse
+	// error and silently DROPS every pair it could not decode, which defeats this
+	// entire check. Measured:
+	//
+	//   "since=X&repo=a/b;x=1"  -> Query() yields {since} only; repo VANISHES
+	//   "since=X&repos=a/b;x=1" -> Query() yields {since} only; the UNKNOWN key vanishes
+	//   "since=X&repo=%zz"      -> same
+	//
+	// Go 1.17+ rejects ';' as a pair separator, so a single semicolon anywhere in a
+	// value voids the whole query string. Against Query() the allowlist then sees a
+	// clean request, returns true, and the caller gets a FLEET-WIDE 200 — the exact
+	// #590 defect, surviving its own fix, and reachable from an ordinary unquoted
+	// shell variable: curl ".../scores?repo=$REPO".
+	//
+	// The lesson generalizes past this function: a validator built on a parser that
+	// silently drops its own failures validates nothing. Check the error.
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeError(w, http.StatusBadRequest,
+			"malformed query string: "+err.Error()+
+				". Query parameters are parsed strictly — a pair that cannot be decoded is "+
+				"rejected rather than silently dropped, so a mistyped filter can never widen "+
+				"the result set while looking filtered (#590)")
+		return false
+	}
+	known := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		known[a] = true
+	}
+	var unknown, repeated []string
+	for k, v := range q {
+		if !known[k] {
+			unknown = append(unknown, k)
+			continue
+		}
+		// A repeated parameter is ambiguous, and every reader downstream takes the
+		// FIRST via Get(). "?repo=a/b&repo=c/d" would scope to a/b and discard c/d
+		// with no signal — a caller who believes they asked for c/d gets a/b's
+		// figures. Same class as the silent drop above: answer the question asked,
+		// or refuse; never answer a different one quietly.
+		if len(v) > 1 {
+			repeated = append(repeated, k)
+		}
+	}
+	if len(repeated) > 0 {
+		sort.Strings(repeated)
+		writeError(w, http.StatusBadRequest,
+			"repeated query parameter(s): "+strings.Join(repeated, ", ")+
+				" — each may appear at most once; a repeat is ambiguous and only the first "+
+				"value would take effect (#590)")
+		return false
+	}
+	if len(unknown) == 0 {
+		return true
+	}
+	// Sort both lists: map iteration order is randomized in Go, and an error message
+	// that reshuffles between identical requests is one a test cannot pin and an
+	// operator cannot diff.
+	sort.Strings(unknown)
+	sorted := append([]string(nil), allowed...)
+	sort.Strings(sorted)
+	writeError(w, http.StatusBadRequest,
+		"unknown query parameter(s): "+strings.Join(unknown, ", ")+
+			" — accepted: "+strings.Join(sorted, ", ")+
+			". Parameters are matched exactly; an unrecognized one is rejected rather "+
+			"than ignored, so a mistyped filter can never return a wider result set "+
+			"that looks filtered (#590)")
+	return false
+}
+
+// parseRepoScope reads and validates the ?repo= filter (#590), returning the scope to
+// apply. An absent or empty parameter is store.FleetWide (unscoped). On an invalid
+// value it has already written a 400 and returns ok=false.
+//
+// Validation goes through repoid.Canonical, so a caller's "Acme/Widget" matches
+// rows stored as "acme/widget" instead of silently matching nothing.
+//
+// ⚠️ BE PRECISE ABOUT WHAT THIS CATCHES, because an earlier version of this comment
+// over-claimed it. Canonical rejects MALFORMED values — fewer than two segments, an
+// embedded URL (the "//" leaves an empty segment), illegal characters, over MaxLen,
+// or the reserved sentinel. It does NOT and cannot reject a well-formed slug that
+// simply names no repository we hold: "acme/alpah" canonicalizes fine and scopes to
+// an empty window, and a host-qualified "github.com/acme/alpha" is accepted as a
+// three-segment slug (the GitLab nested-group shape) rather than being stripped to
+// "acme/alpha" — scheme/host stripping lives in repoid.FromRemoteURL, on the
+// COLLECTOR's write path, not here.
+//
+// So the 400 buys "you sent something that is not a slug", not "you typo'd a repo
+// name". A typo still yields an empty scoped result; what makes that detectable is
+// the echoed data_quality.repo_scope, which reports the canonical slug actually
+// queried. That is why the echo is part of the contract and not a convenience.
+//
+// Canonical also REFUSES the reserved 'unqualified' sentinel, which is the behavior we
+// want at this boundary: "scope me to the rows whose repository is unknown" is not a
+// question the scoped-figure contract can answer honestly. Those rows are surfaced as
+// a disclosure (repo_scope_excluded), not as a scope you can select.
+func parseRepoScope(w http.ResponseWriter, r *http.Request) (store.RepoScope, bool) {
+	raw := r.URL.Query().Get("repo")
+	if raw == "" {
+		return store.FleetWide, true
+	}
+	canon, ok := repoid.Canonical(raw)
+	if !ok {
+		writeError(w, http.StatusBadRequest,
+			"invalid repo: must be a canonical repository slug such as "+
+				"\"owner/name\" (at least two non-empty segments, no scheme or host, "+
+				"no trailing \".git\"); the reserved \"unqualified\" sentinel cannot be "+
+				"selected as a scope")
+		return store.FleetWide, false
+	}
+	return store.RepoScope(canon), true
+}
+
+// scopeDisclosure is the assembled wire disclosure for a scoped read (#590): what the
+// scope was, what it excluded, and what it suppressed. The zero value is the
+// fleet-wide case and emits no keys at all, so an unscoped response is byte-identical
+// to its pre-#590 shape.
+type scopeDisclosure struct {
+	Repo       string
+	Excluded   *repoScopeExcludedJSON
+	Suppressed *bool
+}
+
+// buildScopeDisclosure measures what a scope cost this window and packages it for the
+// wire (#590, ruling C). It is shared by /scores and the per-developer detail so the
+// two can never describe the same scope differently — the drift that would otherwise
+// let one endpoint disclose an exclusion the other hides.
+//
+// Fleet-wide reads short-circuit before touching the store: nothing was scoped, so
+// nothing was excluded, and there is no honest disclosure to make.
+func (h *Handler) buildScopeDisclosure(ctx context.Context, since, until time.Time, scope store.RepoScope) (scopeDisclosure, error) {
+	if scope.IsFleetWide() {
+		return scopeDisclosure{}, nil
+	}
+	ex, err := h.store.UnqualifiedExclusionWindow(ctx, since, until)
+	if err != nil {
+		return scopeDisclosure{}, fmt.Errorf("query unqualified exclusion: %w", err)
+	}
+	suppressed := true
+	d := scopeDisclosure{Repo: scope.String(), Suppressed: &suppressed}
+	// Omit-when-clean: a scoped window in which every row named a real repository
+	// emits no exclusion key, and that ABSENCE is the signal the figure is a true
+	// total rather than a lower bound. Emitting a zeroed block instead would make the
+	// clean case and the excluded case look alike at a glance, which is the failure
+	// this whole disclosure exists to prevent.
+	if ex.Any() {
+		d.Excluded = &repoScopeExcludedJSON{
+			TokenEvents: ex.TokenEvents,
+			CostUSD:     store.MicroToDollars(ex.CostMicro),
+			Outcomes:    ex.OutcomeRecords,
+		}
+	}
+	return d, nil
+}

@@ -1,6 +1,7 @@
 package scoring
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"strings"
@@ -141,9 +142,14 @@ func TestFormatReport_Empty(t *testing.T) {
 // summed, TIER and coverage derived — NOT averaged), and the explanatory
 // footer. Input is deliberately unsorted to prove the sort happens.
 func TestFormatReport_SortsAndTotals(t *testing.T) {
+	// SampleN is set because the TEAM TOTAL row is now gated on the ranking floor
+	// (#606): it is rolled up through RollupTeam, whose gate reads the SUMMED
+	// outcome count. Without it the aggregate is legitimately unranked and its TIER
+	// is withheld — which is the correct behaviour, but not what this test measures.
+	// TestFormatReport_TeamTotalWithheldBelowFloor covers that arm.
 	scores := []DeveloperScore{
-		{Developer: "bob", TIER: 100, WeightedPoints: 1, TotalCostUSD: 10, CoveragePercent: 50},
-		{Developer: "alice", TIER: 1200, WeightedPoints: 3, TotalCostUSD: 2.5, CoveragePercent: 100},
+		{Developer: "bob", TIER: 100, WeightedPoints: 1, TotalCostUSD: 10, CoveragePercent: 50, SampleN: 2},
+		{Developer: "alice", TIER: 1200, WeightedPoints: 3, TotalCostUSD: 2.5, CoveragePercent: 100, SampleN: 2},
 	}
 	out := FormatReport(scores, "2026-01-01", AggregationDeveloper)
 
@@ -180,16 +186,46 @@ func TestFormatReport_SortsAndTotals(t *testing.T) {
 }
 
 // TestFormatReport_ZeroCostNoDivByZero pins the guard for the all-estimated /
-// no-spend case: the team row renders 0.0 instead of NaN/Inf.
+// no-spend case: points over zero cost must not produce NaN/Inf.
+//
+// ⚠️ The ASSERTION MOVED in #606 and the reason matters. The team row used to
+// render "0.0" here and this test read the report text. It no longer does: $0.00
+// is below MinRankedCostUSD, so the row is unranked and its TIER column is
+// withheld as "—". That em dash would MASK the very defect this test exists to
+// catch — if RollupTeam started emitting NaN or +Inf for a zero-cost quotient, the
+// withheld branch would overwrite it and the report scan would still pass.
+//
+// So the division guard is now asserted where it actually lives (RollupTeam's
+// `if ts.TotalCostUSD > 0`), and the report scan is kept as the second arm for the
+// per-developer rows, which still print their own numbers.
 func TestFormatReport_ZeroCostNoDivByZero(t *testing.T) {
-	out := FormatReport([]DeveloperScore{
-		{Developer: "carol", WeightedPoints: 2},
-	}, "2026-01-01", AggregationDeveloper)
+	scores := []DeveloperScore{{Developer: "carol", WeightedPoints: 2}}
+
+	// (a) The guard itself, upstream of any formatting that could hide it.
+	team := RollupTeam("", scores)
+	if math.IsNaN(team.TIER) || math.IsInf(team.TIER, 0) {
+		t.Errorf("RollupTeam produced TIER = %v for %v points over $0 of cost; the engine must "+
+			"not divide when cost is 0", team.TIER, team.WeightedPoints)
+	}
+	if team.Ranked {
+		t.Errorf("a $0.00 window cannot clear the $%.2f evidence floor, yet ranked = true — "+
+			"the withheld-column assertion below would then be measuring nothing",
+			MinRankedCostUSD)
+	}
+
+	// (b) The rendered report: still no NaN/Inf anywhere, and the aggregate row is
+	// present and withheld rather than headlining a meaningless 0.0.
+	out := FormatReport(scores, "2026-01-01", AggregationDeveloper)
 	if strings.Contains(out, "NaN") || strings.Contains(out, "Inf") {
 		t.Errorf("zero-cost report leaked NaN/Inf: %q", out)
 	}
 	if !strings.Contains(out, "TEAM TOTAL") {
 		t.Errorf("missing TEAM TOTAL row; out=%q", out)
+	}
+	if got := reportTotalTIER(t, out); got != "—" {
+		t.Errorf("TEAM TOTAL TIER = %q for a $0.00 window, want %q: zero cost is below the "+
+			"evidence floor, and 0.0 would read as the worst possible yield when the honest "+
+			"statement is that it cannot be scored", got, "—")
 	}
 }
 
@@ -552,5 +588,141 @@ func TestFormatReport_FidelityCopy(t *testing.T) {
 	}
 	if !strings.Contains(out, "completeness of capture is NOT measured") {
 		t.Errorf("footer missing completeness caveat; out=%q", out)
+	}
+}
+
+// rollupDev builds a DeveloperScore the way production does — through
+// ComputeDeveloper — so SampleN and FlaggedOutcomes are DERIVED from real
+// outcomes rather than typed in. A hand-built struct would let these tests assert
+// intent against a fixture that the real pipeline could never produce.
+func rollupDev(name string, outcomes int, weightEach, costUSD float64, zeroTokens int) DeveloperScore {
+	var os []Outcome
+	for i := 0; i < outcomes; i++ {
+		os = append(os, Outcome{
+			Developer: name,
+			IssueID:   fmt.Sprintf("%s-%d", name, i),
+			Weight:    weightEach,
+			Quality:   1.0,
+			ZeroToken: i < zeroTokens,
+		})
+	}
+	return ComputeDeveloper(name, os, costUSD, costUSD, 0)
+}
+
+// TestRollupTeam_RankedFromSummedInputs pins #502: the #133/#136 evidence floor
+// now applies to the team rollup, judged on the SUMMED inputs against the SAME
+// developer constants. Before this, RollupTeam never set Ranked at all, so every
+// team aggregate reached the wire as ranked evidence.
+//
+// The boundary rows are the point of the table: >= is not >, so exactly
+// MinRankedOutcomes outcomes and exactly MinRankedCostUSD dollars must RANK,
+// while one cent and one outcome below must not.
+func TestRollupTeam_RankedFromSummedInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		devs []DeveloperScore
+		want bool
+	}{
+		{
+			name: "both floors cleared exactly, no flags",
+			devs: []DeveloperScore{rollupDev("alice", MinRankedOutcomes, 1.0, MinRankedCostUSD, 0)},
+			want: true,
+		},
+		{
+			name: "one outcome short of the floor, spend far above it",
+			devs: []DeveloperScore{rollupDev("alice", MinRankedOutcomes-1, 1.0, 100.0, 0)},
+			want: false,
+		},
+		{
+			name: "one cent short of the spend floor, outcomes far above it",
+			devs: []DeveloperScore{rollupDev("alice", 20, 1.0, MinRankedCostUSD-0.01, 0)},
+			want: false,
+		},
+		{
+			name: "both floors cleared but one zero-token outcome",
+			devs: []DeveloperScore{rollupDev("alice", 20, 1.0, 100.0, 1)},
+			want: false,
+		},
+		{
+			name: "flagged outcome sits on a DIFFERENT member than the evidence",
+			devs: []DeveloperScore{
+				rollupDev("alice", 20, 1.0, 100.0, 0),
+				rollupDev("bob", 1, 1.0, 10.0, 1),
+			},
+			want: false,
+		},
+		{
+			name: "empty team",
+			devs: nil,
+			want: false,
+		},
+		{
+			name: "the #502 case: 28 points against $0.0001 of measured spend",
+			devs: []DeveloperScore{rollupDev("alice", 2, 14.0, 0.0001, 0)},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := RollupTeam("backend", tt.devs)
+			if ts.Ranked != tt.want {
+				t.Errorf("RollupTeam Ranked = %v, want %v (points %.2f, cost %.4f)",
+					ts.Ranked, tt.want, ts.WeightedPoints, ts.TotalCostUSD)
+			}
+		})
+	}
+}
+
+// TestRollupTeam_RankedUsesSumsNotMemberVerdicts is the control against the
+// tempting wrong implementation: Ranked = every member is Ranked. Three
+// developers with one outcome and $2 each are EVERY ONE below both floors, yet
+// the team number is computed from their sums (3 outcomes, $6) — and it is the
+// sums the floor must judge, because the sums are the evidence standing behind
+// the number being published.
+//
+// An implementation that ANDed the members' flags would return false here and
+// pass every case in the table above.
+func TestRollupTeam_RankedUsesSumsNotMemberVerdicts(t *testing.T) {
+	devs := []DeveloperScore{
+		rollupDev("alice", 1, 1.0, 2.0, 0),
+		rollupDev("bob", 1, 1.0, 2.0, 0),
+		rollupDev("carol", 1, 1.0, 2.0, 0),
+	}
+	for _, d := range devs {
+		if d.Ranked {
+			t.Fatalf("fixture broken: %s is ranked individually, so this test no longer "+
+				"distinguishes summed evidence from an AND over members", d.Developer)
+		}
+	}
+	ts := RollupTeam("backend", devs)
+	if !ts.Ranked {
+		t.Errorf("team Ranked = false with %d summed outcomes and $%.2f summed cost; the floor "+
+			"must judge the sums the team TIER is computed from, not each member",
+			MinRankedOutcomes, ts.TotalCostUSD)
+	}
+}
+
+// TestRollupTeam_UnrankedKeepsTheTrueQuotient pins the house rule from #136 that
+// #502 explicitly preserves: the number is never altered, only its ranking
+// authority revoked. The below-floor team still carries its exact TIER —
+// 28 / (0.0001/1000) = 2.8e8 — and cost_per_point stays unfloored beside it.
+//
+// This is the guard against "fixing" #502 in the engine by flooring the
+// denominator (option A) or by zeroing/omitting TIER for an unranked row: both
+// would pass a test that only checked Ranked.
+func TestRollupTeam_UnrankedKeepsTheTrueQuotient(t *testing.T) {
+	ts := RollupTeam("backend", []DeveloperScore{rollupDev("alice", 2, 14.0, 0.0001, 0)})
+	if ts.Ranked {
+		t.Fatal("fixture broken: this team must be below the floor for the test to mean anything")
+	}
+	const wantTIER = 28.0 / (0.0001 / 1000.0) // 2.8e8
+	if math.Abs(ts.TIER-wantTIER) > 1.0 {
+		t.Errorf("unranked team TIER = %v, want %v — the arithmetic must be untouched; "+
+			"ranking authority is withheld at the presentation layer, not in the formula",
+			ts.TIER, wantTIER)
+	}
+	wantCPP := 0.0001 / 28.0
+	if math.Abs(ts.CostPerPoint-wantCPP) > 1e-12 {
+		t.Errorf("unranked team CostPerPoint = %v, want %v (unfloored)", ts.CostPerPoint, wantCPP)
 	}
 }

@@ -504,47 +504,39 @@ func TestE2E_FullOrgMultiVendorRig(t *testing.T) {
 		for _, row := range ts.Teams {
 			byTeam[row.Team] = row
 		}
-		// Exactly two rows: team-alpha (5 contributing >= k) named, and "other"
-		// (team-beta's 3 contributing devs folded).
-		if len(ts.Teams) != 2 {
-			t.Fatalf("team-mode returned %d rows, want 2 (team-alpha + other); got %+v", len(ts.Teams), ts.Teams)
+		// #593: team-beta's 3 contributors are BELOW k=5, so the residual is WITHHELD
+		// rather than folded into a published "other" row. Exactly ONE row survives.
+		//
+		// This assertion previously required two rows and then proved "grand total
+		// (named + folded) reproduces the whole-org sum ... data is suppressed by
+		// identity, never dropped". That property was real and it was the disclosure:
+		// with it, total - team-alpha = team-beta, so a 3-person cohort was recoverable
+		// whether or not its row was printed. Steve retired it (option A, 2026-08-03).
+		if len(ts.Teams) != 1 {
+			t.Fatalf("team-mode returned %d rows, want 1 (team-alpha only; the sub-k residual is "+
+				"withheld); got %+v", len(ts.Teams), ts.Teams)
 		}
 		alpha, ok := byTeam["team-alpha"]
 		if !ok {
 			t.Fatalf("team-alpha (5 contributing) must be named; got %+v", ts.Teams)
 		}
 		if _, named := byTeam["team-beta"]; named {
-			t.Errorf("sub-k team-beta (3 contributing) must fold into 'other', not be named; got %+v", ts.Teams)
+			t.Errorf("sub-k team-beta (3 contributing) must never be named; got %+v", ts.Teams)
 		}
-		other, ok := byTeam[scoring.OtherCohort]
-		if !ok {
-			t.Fatalf("expected an 'other' bucket for sub-k team-beta; got %+v", ts.Teams)
+		if _, folded := byTeam[scoring.OtherCohort]; folded {
+			t.Errorf("a sub-k residual must be withheld, not published as 'other'; got %+v", ts.Teams)
 		}
 
-		// Totals preserved through the fold: named team-alpha and folded "other"
-		// carry exactly the developer-mode team sums.
+		// The named cohort's own figures are unaffected by the suppression.
 		alphaCostUSD := store.MicroToDollars(alphaMicro)
-		betaCostUSD := store.MicroToDollars(betaMicro)
 		if !approxEq(alpha.WeightedPoints, 42.3) || !approxEq(alpha.TotalCostUSD, alphaCostUSD) {
 			t.Errorf("team-alpha = points %v cost %v, want 42.3 / %v", alpha.WeightedPoints, alpha.TotalCostUSD, alphaCostUSD)
 		}
-		if !approxEq(other.WeightedPoints, 25.0) || !approxEq(other.TotalCostUSD, betaCostUSD) {
-			t.Errorf("'other' = points %v cost %v, want 25.0 / %v (team-beta preserved)", other.WeightedPoints, other.TotalCostUSD, betaCostUSD)
-		}
-
-		// Grand total (named + folded) reproduces the whole-org sum: 67.3 points,
-		// $106.50 cost. Data is suppressed by identity, never dropped.
-		grandPts := alpha.WeightedPoints + other.WeightedPoints
-		grandCost := alpha.TotalCostUSD + other.TotalCostUSD
-		if !approxEq(grandPts, 67.3) {
-			t.Errorf("grand total points = %v, want 67.3", grandPts)
-		}
-		if wantGrand := store.MicroToDollars(alphaMicro + betaMicro); !approxEq(grandCost, wantGrand) {
-			t.Errorf("grand total cost = %v, want %v ($106.50)", grandCost, wantGrand)
-		}
-		// When the API ships a grand-total row, it must equal the folded sum.
-		if ts.Total != nil && !approxEq(ts.Total.WeightedPoints, 67.3) {
-			t.Errorf("team-mode total row points = %v, want 67.3", ts.Total.WeightedPoints)
+		// 🔴 And the grand total must be ABSENT: publishing it here would hand back
+		// total(67.3) - alpha(42.3) = 25.0, team-beta's points exactly.
+		if ts.Total != nil {
+			t.Errorf("team-mode grand total must be withheld alongside a suppressed residual — it "+
+				"is the differencing channel; got %+v", ts.Total)
 		}
 	})
 }

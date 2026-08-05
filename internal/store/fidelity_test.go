@@ -39,6 +39,35 @@ func TestModelIsExactHost(t *testing.T) {
 	}
 }
 
+// TestIsAuditedRate pins the exported wrapper (#465 review finding — a
+// billing_mode-based "is this audited" check is a lying proxy on a
+// self-hosted entry, since self_hosted_amortized is the billing_mode
+// whether the entry was reached EXACTLY or by a size-class/flat GUESS). It
+// must agree with modelIsExactHost byte for byte, since it delegates
+// directly — this test exists so a future refactor that breaks that
+// delegation fails here, not only in cmd/tierd/scorelog_test.go.
+func TestIsAuditedRate(t *testing.T) {
+	tests := []struct {
+		host, model string
+		want        bool
+	}{
+		{"", "claude-sonnet-4", true},               // exact model-only entry
+		{"", "self-hosted-large", true},             // exact self-hosted entry — audited despite self_hosted_amortized billing_mode
+		{"", "totally-made-up-model", false},        // flat fallback guess
+		{"", "mystery-70b", false},                  // size-class heuristic guess
+		{"openrouter.ai", "claude-sonnet-4", true},  // host-aware form falls back to the model-only entry
+		{"openrouter.ai", "totally-made-up", false}, // unknown regardless of host
+	}
+	for _, tt := range tests {
+		if got := IsAuditedRate(tt.host, tt.model); got != tt.want {
+			t.Errorf("IsAuditedRate(%q, %q) = %v, want %v", tt.host, tt.model, got, tt.want)
+		}
+		if got, want := IsAuditedRate(tt.host, tt.model), modelIsExactHost(tt.host, tt.model); got != want {
+			t.Errorf("IsAuditedRate(%q, %q) = %v, disagrees with modelIsExactHost = %v — the exported wrapper must delegate exactly", tt.host, tt.model, got, want)
+		}
+	}
+}
+
 func TestDeveloperFidelity(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()

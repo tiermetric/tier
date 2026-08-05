@@ -135,13 +135,21 @@ func initGitRepo(t *testing.T) string {
 // scans for. Mirrors the watcher tests' fixture line.
 func writeSessionFixture(t *testing.T, claudeDir, repo string) {
 	t.Helper()
+	writeSessionFixtureModel(t, claudeDir, repo, "claude-sonnet-4")
+}
+
+// writeSessionFixtureModel is writeSessionFixture with the model string as a
+// parameter, so a test can drive `tierd score` over a session recorded against
+// a subscription-billed route (#154).
+func writeSessionFixtureModel(t *testing.T, claudeDir, repo, model string) {
+	t.Helper()
 	projDir := filepath.Join(claudeDir, "projects", "p1")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	line := fmt.Sprintf(
-		`{"type":"assistant","timestamp":"2026-05-19T10:00:00Z","sessionId":"sess-score","gitBranch":"feature/42-foo","cwd":%q,"message":{"id":"msg_score_1","model":"claude-sonnet-4","role":"assistant","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`+"\n",
-		repo,
+		`{"type":"assistant","timestamp":"2026-05-19T10:00:00Z","sessionId":"sess-score","gitBranch":"feature/42-foo","cwd":%q,"message":{"id":"msg_score_1","model":%q,"role":"assistant","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`+"\n",
+		repo, model,
 	)
 	if err := os.WriteFile(filepath.Join(projDir, "s1.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)

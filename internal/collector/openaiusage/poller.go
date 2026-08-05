@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -367,7 +368,7 @@ func (p *Poller) buildRemainderEvents(ctx context.Context, buckets []usageBucket
 	}
 	if len(unpriced) > 0 {
 		p.logger.Warn("openai-usage: org usage reported for models missing from the price table; their remainder was NOT ingested (update prices.yaml)",
-			"models", mapKeys(unpriced))
+			"models", logsafe.Join(mapKeys(unpriced), maxModelsLogged))
 	}
 	return out, overCapture, nil
 }
@@ -380,6 +381,14 @@ func (p *Poller) buildRemainderEvents(ctx context.Context, buckets []usageBucket
 func resultTokens(r usageResult) int {
 	return r.InputTokens + r.OutputTokens
 }
+
+// maxModelsLogged bounds how many model names the missing-from-price-table WARN
+// names before collapsing the rest to a count (#321 review, 2026-08-04). These
+// names come from the provider's usage API — upstream-controlled, unbounded in
+// both length and cardinality — and this is a slog sink, so the exposure is a
+// log FLOOD, not record forgery (slog escapes CR/LF; it caps nothing). Enough to
+// be actionable, since the operator has to add each one to prices.yaml.
+const maxModelsLogged = 20
 
 // mapKeys returns the keys of a set as a slice (for structured logging).
 func mapKeys(m map[string]struct{}) []string {

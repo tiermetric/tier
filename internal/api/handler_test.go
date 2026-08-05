@@ -2506,7 +2506,7 @@ func (spendFaultStore) ActualSpendAllWindow(context.Context, time.Time, time.Tim
 
 type tokenFaultStore struct{ *store.DB }
 
-func (tokenFaultStore) OutcomeTokenTotals(context.Context, []store.Outcome) (map[store.DevIssue]int64, error) {
+func (tokenFaultStore) OutcomeTokenTotals(context.Context, []store.Outcome, store.RepoScope) (map[store.DevIssue]int64, error) {
 	return nil, errors.New("boom: token totals query failed")
 }
 

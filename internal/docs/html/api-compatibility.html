@@ -99,6 +99,38 @@ not need credentials), so feature detection never requires a token.</p>
 feature detection at runtime: additive fields (below) can appear at any release,
 and <code>omitempty</code> fields are absent whenever their value is empty even on a server
 that fully supports them.</p>
+<h2 id="query-parameters-are-strictly-validated-on-the-scores-endpoints-590">Query parameters are STRICTLY validated on the scores endpoints (#590)</h2>
+<p><code>GET /api/v1/scores</code>, <code>GET /api/v1/scores/{developer}</code> and
+<code>GET /api/v1/scores/compare</code> <strong>reject any query parameter they do not implement
+with <code>400</code></strong>, naming the offending parameter and listing what is accepted.
+Matching is exact and case-sensitive: <code>?Repo=</code> is not a synonym for <code>?repo=</code>, it
+is an error.</p>
+<blockquote>
+<p>⚠️ <strong>This is a deliberate behavioural break, and it is recorded as one rather
+than filed under &#34;additive&#34;.</strong> Before #590 these endpoints silently ignored
+unrecognized parameters, as <code>net/http</code> does by default. A client that sends an
+extraneous parameter and previously got <code>200</code> now gets <code>400</code>.</p>
+</blockquote>
+<p>It was taken because the alternative is worse than a break. <code>/api/v1/scores</code>
+accepted <code>?repo=</code> and <strong>ignored it</strong>, returning a whole-installation aggregate
+byte-for-byte identical to a correctly scoped one. A caller who believed they had
+scoped a query received a figure spanning every repository, with no way to detect
+it from the response. Adding the filter without this strictness would have left
+the same trap one keystroke away -- <code>?repos=</code>, <code>?Repo=</code>, <code>?repo_id=</code> would each
+silently widen a query back to installation-wide while the caller&#39;s own assertion
+passed, asserting nothing.</p>
+<p>The invariant, stated once: <strong>&#34;could not scope&#34; must never share a response shape
+with &#34;scoped, and this is the result.&#34;</strong> A silent wrong answer is worse than an
+error.</p>
+<p>This extends to query strings the strictness the write endpoints have always applied
+to request bodies (<code>DisallowUnknownFields()</code>, see <a href="#the-compatibility-rule" rel="nofollow">the compatibility rule</a>).
+It is a <strong>request-side</strong> break, which is why it ships on <code>/v1</code> rather than forcing a
+<code>/v2</code>: rules 2 and 3 above govern the RESPONSE schema, where a consumer&#39;s parsing
+breaks silently. A rejected request fails loudly at the caller, in the one place the
+mistake can still be corrected.</p>
+<p><strong>What a client should do:</strong> send only documented parameters, and detect scoping
+from the <strong>response</strong> (<code>data_quality.repo_scope</code>), never from the request it
+sent. Feature-detect via <code>livez.version</code> as always.</p>
 <h2 id="the-compatibility-rule">The compatibility rule</h2>
 <p><strong>JSON responses are additive-only. A field&#39;s semantics are frozen once
 shipped.</strong></p>
@@ -193,6 +225,10 @@ a previously-optional field required, or adding a required field, is breaking.</
 <td>Change a success status code</td>
 <td><strong>Breaking</strong></td>
 </tr>
+<tr>
+<td>Reject a previously-ignored query parameter</td>
+<td><strong>Breaking</strong> (see <a href="#query-parameters-are-strictly-validated-on-the-scores-endpoints-590" rel="nofollow">#590</a>)</td>
+</tr>
 </tbody>
 </table>
 <h2 id="announcing-a-deprecation-or-a-semantic-change">Announcing a deprecation or a semantic change</h2>
@@ -234,31 +270,205 @@ The read-only viewer token is rejected 403.</li>
 <h3 id="write-endpoints">Write endpoints</h3>
 <h4 id="post-apiv1costs"><code>POST /api/v1/costs</code></h4>
 <ul>
-<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
-<li>Manual single-row cost import. Request: <code>costRequest</code> -- <code>developer</code>,
+<li>
+<p><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code> (fresh key, or an identical/
+matching re-post), empty body -- <strong>or</strong> <code>200 OK</code> (a sanctioned override
+actually corrected a row, #346), body <code>{&#34;corrected&#34;: true, &#34;old_cost_usd&#34;: &lt;float&gt;, &#34;new_cost_usd&#34;: &lt;float&gt;}</code>.</p>
+</li>
+<li>
+<p>Manual single-row cost import. Request: <code>costRequest</code> -- <code>developer</code>,
 <code>issue_id</code>, <code>model</code> (required); <code>input_tokens</code>, <code>output_tokens</code>,
 <code>cache_read_tokens</code>, <code>cache_write_5m_tokens</code>, <code>cache_write_1h_tokens</code>,
-<code>cost_usd</code>, <code>source</code>, <code>fidelity</code>, <code>idempotency_key</code> (optional).</li>
-<li><code>cache_write_tokens</code> is the <strong>deprecated</strong> legacy single-bucket field
+<code>cost_usd</code>, <code>source</code>, <code>fidelity</code>, <code>idempotency_key</code> (optional);
+<code>override</code>, <code>override_actor</code>, <code>override_reason</code> (optional -- #346, see
+below).</p>
+</li>
+<li>
+<p><code>cache_write_tokens</code> is the <strong>deprecated</strong> legacy single-bucket field
 (superseded by the 5m/1h split, #55); when present and non-zero it is routed
-to the 5m bucket and the response carries the legacy <code>Warning: 299</code> header.</li>
-<li><code>source</code> accepts only <code>&#34;api&#34;</code> or omitted; <code>fidelity</code> accepts <code>&#34;daily&#34;</code>,
+to the 5m bucket and the response carries the legacy <code>Warning: 299</code> header.</p>
+</li>
+<li>
+<p><code>source</code> accepts only <code>&#34;api&#34;</code> or omitted; <code>fidelity</code> accepts <code>&#34;daily&#34;</code>,
 <code>&#34;estimated&#34;</code>, or omitted (<code>&#34;realtime&#34;</code> is rejected -- reserved for automated
-capture).</li>
-<li><strong>Keyed re-post (<code>idempotency_key</code> present):</strong> an <strong>identical</strong> re-post (same
+capture).</p>
+</li>
+<li>
+<p>⚠️ <strong><code>issue_id</code> may not be the reserved unattributed sentinel (#466).</strong> The
+sentinel family -- the bare <code>unattributed</code> plus any <code>unattributed:&lt;reason&gt;</code>
+sub-bucket -- is <strong>server-assigned</strong>: the collector and the proxy write it when
+they genuinely could not resolve an issue. A client supplying it now gets <code>400</code>;
+it was previously written silently. The check is <strong>case-insensitive</strong> and
+trims surrounding whitespace, so <code>UNATTRIBUTED:main</code> is refused too -- ingest
+deliberately rejects more than the read side matches, because a case variant in
+the table would classify one way in SQL and another in Go. Ordinary ids that
+merely contain the word (<code>unattributed-work</code>, <code>not-unattributed</code>) are
+unaffected. Same rule on <code>POST /outcomes</code>; <code>POST /events</code> is the documented
+exception.</p>
+</li>
+<li>
+<p>⚠️ <strong><code>developer</code> may not be the reserved unattributed sentinel either (#619).</strong> The
+same reserved string is the sentinel for <em>two</em> columns, and this is now the same
+rule on both -- one predicate backs both checks, so they cannot drift. A client
+supplying <code>&#34;developer&#34;: &#34;unattributed&#34;</code> (or <code>UNATTRIBUTED</code>, or
+<code>unattributed:main</code>, or any of them with surrounding whitespace) now gets <code>400</code>;
+it was previously written silently.</p>
+<p><strong>This half mattered more than the <code>issue_id</code> half.</strong> TIER is
+<code>points / (cost/1000)</code>. Forging <code>issue_id</code> moves a dollar <em>between buckets inside
+your own denominator</em> and leaves your headline score unchanged. Forging <code>developer</code>
+moves it <em>out of your denominator entirely</em> -- onto the <code>unattributed</code>
+pseudo-developer -- so your cost falls and your score rises.</p>
+<p>⚠️ <strong>Scope, stated plainly:</strong> this removes the <em>deniable</em> forgery, not the ability to
+raise your own score. TIER is single-tenant with one shared write token and a
+free-form <code>developer</code> column, so posting <code>&#34;developer&#34;: &#34;mallory-2&#34;</code> still moves your
+spend out of your own row. What the sentinel added was <em>cover</em> — it is
+indistinguishable from honest server-assigned spend and lands in a bucket nobody
+audits. Binding <code>developer</code> to the authenticating credential is the control that
+would close the general case, and it is separate work.</p>
+<p>Ordinary identities that merely contain the word (<code>unattributed-bot</code>,
+<code>not-unattributed</code>) are unaffected, as is <code>unknown</code>, the real no-identity fallback
+the collector emits. Same rule on <code>POST /outcomes</code>, <code>POST /events</code>,
+<code>POST /actual_spend</code>, both columns of <code>POST /developer_alias</code>, and
+<code>PUT</code>/<code>POST /org_hierarchy</code>.
+Unlike <code>issue_id</code>, <code>developer</code> has <strong>no allowlist anywhere</strong>, including <code>/events</code>:
+the producers that legitimately assign the developer sentinel (the org-level
+Anthropic-Admin and OpenAI-Usage pollers, and the proxy&#39;s own missing-header
+fallback) write in-process and never cross an HTTP boundary, so there is nothing on
+the wire to allowlist.</p>
+</li>
+<li>
+<p><strong>Keyed re-post (<code>idempotency_key</code> present):</strong> an <strong>identical</strong> re-post (same
 key, same cost) is idempotent -- <code>201</code>, no new row. A re-post with the same key
 but a <strong>different</strong> <code>cost_usd</code> is rejected with <strong><code>409 Conflict</code></strong> (#295): the
 stored cost is immutable (#233), so the correction is refused rather than
 applied. Divergence is judged on the stored <strong>integer</strong> <code>cost_micro</code>, so an
 honest retry whose float/FX/rounding jitter rounds to the same micro value is
-<strong>not</strong> a conflict. To change a recorded figure, re-post under a <strong>new</strong>
-<code>idempotency_key</code> (deleting a single row is operator-level, direct against the
-store — there is no delete-by-key route).</li>
-<li>Dedup is keyed on <code>idempotency_key</code> alone, and <strong>only</strong> a <code>cost_micro</code>
-divergence raises <code>409</code>. A re-post that reuses a key but changes a <em>non-cost</em>
-field (<code>developer</code>, <code>issue_id</code>, <code>model</code>, token counts) is still a silent no-op
-on those columns (they are immutable on conflict, #233) -- it is NOT a <code>409</code>.
-Reuse a key only for a genuine retry of the same event.</li>
+<strong>not</strong> a conflict. To change a recorded figure, either re-post under a
+<strong>new</strong> <code>idempotency_key</code>, or (#346) opt into the sanctioned override below
+(deleting a single row is operator-level, direct against the store -- there
+is no delete-by-key route).</p>
+</li>
+<li>
+<p>Dedup is keyed on <code>idempotency_key</code> alone, and (on the plain, non-override
+path) <strong>only</strong> a <code>cost_micro</code> divergence raises <code>409</code>. A re-post that reuses
+a key but changes a <em>non-cost</em> field (<code>developer</code>, <code>issue_id</code>, <code>model</code>,
+token counts) is still a silent no-op on those columns (they are immutable
+on conflict, #233) -- it is NOT a <code>409</code>. Reuse a key only for a genuine
+retry of the same event -- <code>idempotency_key</code> is a GLOBAL namespace across
+every producer (client-generated <code>/costs</code> keys and automated
+<code>MessageIdempotencyKey</code>-derived keys from <code>/events</code>/JSONL/proxy alike), so
+reusing someone else&#39;s key is a real, not hypothetical, way to collide with
+a row that isn&#39;t yours.</p>
+</li>
+<li>
+<p><strong>Sanctioned cost-correction override (#346, ruling C -- the follow-up to
+#295&#39;s ruling A above):</strong> set <code>override: true</code> plus <strong>required</strong>
+<code>override_actor</code> and <code>override_reason</code> (both non-empty, <code>override_actor</code> &lt;=
+256 chars, <code>override_reason</code> &lt;= 1024 chars) to let a legitimate finance
+correction land on a DIVERGENT keyed re-post instead of 409ing.</p>
+<ul>
+<li><code>override</code> with a missing/empty <code>override_actor</code> or <code>override_reason</code>,
+or with an empty <code>idempotency_key</code>, is rejected <code>400</code> -- an override must
+be attributed and explained, never silent, and there is nothing to
+override without a key.</li>
+<li><code>override_actor</code>/<code>override_reason</code> set without <code>override: true</code> is
+rejected <code>400</code> rather than silently ignored.</li>
+<li>The stored row&#39;s <code>(developer, issue_id, model, source, fidelity)</code> must
+match the request&#39;s -- a mismatch is rejected <code>409</code> (a DIFFERENT status
+detail than the plain divergent-cost 409, but the same status code).
+The 409 body deliberately does not echo which identity the key actually
+belongs to -- defense in depth against a BLIND collision, <strong>not a secrecy
+guarantee</strong> (see the stated trust model below). That tuple is
+exactly the set of stored columns a <code>/costs</code> request can vary; <code>repo</code>,
+<code>host</code>, <code>billing_mode</code>, <code>session_id</code>, and <code>ts</code> are forced by the endpoint
+and are therefore NOT compared. <code>idempotency_key</code> is a global namespace
+(see above), so this is a real collision case, not a theoretical one:
+without this check, reusing a copy-pasted key under a different identity
+could rewrite the WRONG row&#39;s cost.</li>
+<li>⚠️ <strong>One row class cannot be corrected through this endpoint at all.</strong>
+<code>fidelity</code> is INSERT-only, and #82 narrowed <code>/costs</code> to
+<code>daily</code>/<code>estimated</code>/omitted -- so a <strong>pre-#82</strong> <code>source=&#39;api&#39;</code> row that
+still carries <code>realtime</code> can never be matched: stating it is a <code>400</code>,
+omitting it defaults to <code>estimated</code>, and both mismatch. Every possible
+request <code>409</code>s. The remedy is the same one #295 gives for any figure you
+cannot override: re-post under a <strong>new</strong> <code>idempotency_key</code>.</li>
+<li>When it actually corrects a divergent row: the UPDATE touches <strong>only</strong>
+<code>cost_micro</code> on that one row (token counts, model, source, fidelity,
+price_version, billing_mode are all left exactly as first recorded --
+never a last-writer-wins upsert of the whole row), and an append-only
+audit row (old -&gt; new, actor, reason) is written to the (internal,
+unexposed via any GET route today) <code>cost_correction_audit</code> table. <code>200</code>.</li>
+<li>When there is nothing to correct (fresh key, or the cost already
+matches): behaves exactly like the non-override path -- <code>201</code>, no audit
+row.</li>
+<li><strong>Reprice-safe.</strong> <code>tierd reprice --commit</code> recomputes <code>cost_micro</code> from
+token counts, and it never reprices a <code>source=&#39;api&#39;</code> row -- a manual
+import&#39;s cost is the caller&#39;s authoritative figure and re-deriving it from
+token counts (which may not exist) yields <code>$0.00</code>. Corrections therefore
+survive a reprice sweep, and the sweep reports how many rows it protected
+rather than omitting them silently.</li>
+</ul>
+</li>
+<li>
+<p><strong>Stated trust model for the override.</strong> Read this before treating the
+identity check as an access control:</p>
+<ul>
+<li>The write scope is a <strong>single global bearer token with no subject</strong>.
+Nothing binds the authenticating principal to the <code>developer</code> field, and
+no <code>tenant_id</code> column exists anywhere to put such a binding in -- TIER is
+single-tenant by design today.</li>
+<li>The identity check therefore prevents an <strong>accidental</strong> key collision
+from landing a correction on the wrong row. It does <strong>not</strong> prevent a
+holder of the write token from deliberately correcting a row that is not
+theirs, because the tuple it compares is not secret: the read-scoped
+<code>GET /api/v1/events</code> export publishes every <code>idempotency_key</code> alongside
+its full identity tuple.</li>
+<li>Deliberate misattribution by a write-token holder is <strong>out of scope</strong>
+until an identity layer exists (#65).</li>
+<li><strong>What the endpoint does structurally guarantee:</strong> it forces
+<code>source=&#34;api&#34;</code> on every request and the identity check compares <code>source</code>,
+so the override can only ever touch a row whose stored <code>source</code> is
+<code>api</code> -- the manual-import lane. Automatically captured spend (every
+non-<code>api</code> source: <code>jsonl</code>, <code>proxy</code>, <code>codex-rollout</code>, <code>copilot-api</code>, and
+the org pollers) is unreachable from this endpoint.</li>
+<li><code>override_actor</code> is <strong>a self-asserted claim, not a verified identity</strong>.
+It is unvalidated free text the caller chooses, written verbatim into the
+audit ledger and the operator log. <strong>The audit trail records who the
+caller says they are.</strong> Nothing checks it against the credential that made
+the request, and nothing can while the write scope has no subject.</li>
+<li><code>cost_correction_audit</code> refuses <code>UPDATE</code> at the schema level (#604), so no
+code path can <strong>silently</strong> rewrite a recorded correction -- a mutation
+would have to drop the trigger first. <code>DELETE</code> is deliberately not
+refused -- erasure and retention are lawful deletes. This is not
+tamper-proofing against someone holding the database file.</li>
+</ul>
+</li>
+<li>
+<p><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable, and nothing landed</strong> -- the request runs in one all-or-nothing
+transaction that takes the write lock before it writes, so on <code>503</code> no row was
+inserted, no cost was corrected and no audit row was recorded; retry to complete
+the request. Distinguish it from the permanent statuses: a <code>409</code> means the key
+genuinely conflicts (divergent cost, or an identity mismatch) and retrying is
+pointless, and a <code>500</code> means an unexpected store failure -- including a
+read-only or full database, which is deliberately NOT reported as <code>503</code>
+because it will never clear on its own. Only the <code>503</code> should be retried
+automatically.
+⚠️ <strong>Since #610 this applies to the WHOLE endpoint, and that is a behavioural
+change on the plain path.</strong> Both halves -- <code>override: true</code> and the plain
+insert, keyed or unkeyed -- now take the write lock before they write, bounded
+at the same 250ms. Before #610 only the override half did: a plain post that
+lost the race blocked for the DSN&#39;s full 5000ms and then answered <code>500</code> with no
+<code>Retry-After</code>, so one URL called the same transient condition retryable or
+permanent depending on the <code>override</code> field.
+<strong>Two things move for a plain post, not one.</strong> A <code>500</code> after ~5s becomes a <code>503</code>
+after ~250ms -- and, because the endpoint now gives up at 250ms instead of
+waiting out 5000ms, contention that used to resolve <em>into a <code>201</code></em> can now
+return <code>503</code> as well. The endpoint no longer waits on the client&#39;s behalf; the
+retry is the client&#39;s. That is the deliberate trade: with a single write
+connection, a request that waits 5s does not stall itself, it stalls every other
+in-flight request behind it.</p>
+</li>
 </ul>
 <h4 id="post-apiv1events"><code>POST /api/v1/events</code></h4>
 <ul>
@@ -268,6 +478,28 @@ rows newly created (the MAX-on-conflict UPSERT absorbs replays). Per-event
 fields mirror <code>costRequest</code> plus <code>repo</code>, <code>session_id</code>, and a <strong>required</strong>
 RFC3339 <code>timestamp</code>. Since #233 the server reprices token counts with its own
 price table; the client <code>cost_usd</code> is retained only as a cross-check.</li>
+<li>⚠️ <strong><code>issue_id</code> follows an ALLOWLIST here, not the <code>/costs</code> rule (#466).</strong> This
+endpoint is the JSONL collector&#39;s own transport, and the collector legitimately
+assigns the unattributed sentinel when a message resolves to no issue. It
+therefore <strong>accepts the four exact canonical spellings</strong> -- <code>unattributed</code>,
+<code>unattributed:main</code>, <code>unattributed:detached-head</code>,
+<code>unattributed:branch-without-issue</code> -- and <code>400</code>s every other member of the
+family, every case variant, and every near-miss.
+<em>Why the split rather than one rule:</em> the endpoint validates all-or-nothing, so
+one rejected event fails the whole batch; the shipper treats <code>4xx</code> as terminal
+with no retry; and it is stateless, so the next run rebuilds the identical batch
+and fails identically. Applying the strict <code>/costs</code> rule here would be permanent
+100% capture loss for anyone who has ever committed on <code>main</code> without an issue,
+including their well-formed attributed events.</li>
+<li>⚠️ <strong><code>developer</code> gets the STRICT rule here, with NO allowlist (#619).</strong> The
+asymmetry with <code>issue_id</code> directly above is deliberate, not an oversight: the two
+collectors this wire admits (<code>source</code> must be <code>jsonl</code> or <code>codex-rollout</code>) label
+every event with <code>--developer</code> or the OS username, whose own no-identity fallback
+is <code>unknown</code> -- never <code>unattributed</code>. The producers that <em>do</em> assign the developer
+sentinel are the org pollers, which are excluded from this endpoint twice over
+(their sources are not shippable, and they write in-process rather than over HTTP).
+There is therefore nothing legitimate to allowlist, and an allowlist would only make
+forging as effective as honesty.</li>
 </ul>
 <h4 id="post-apiv1outcomes"><code>POST /api/v1/outcomes</code></h4>
 <ul>
@@ -276,12 +508,29 @@ price table; the client <code>cost_usd</code> is retained only as a cross-check.
 present) plus <code>weight_source</code>, <code>weight</code>, <code>work_type</code> (<code>omitempty</code>). Dedup is on
 <code>merge_commit_sha</code>; a replay returns <code>200</code> with <code>status: &#34;duplicate&#34;</code> and
 echoes the stored row&#39;s weight/source/work_type.</li>
+<li>⚠️ <strong><code>issue_id</code> may not be the reserved unattributed sentinel (#466)</strong> -- the
+same case-insensitive rule as <code>POST /costs</code>, <code>400</code> on any member of the family.
+This is the path where forging actually pays: an outcome on the sentinel earns
+weighted points whose cost no work-type segment denominator ever sees, inflating
+the numerator rather than merely shifting a denominator. The GitHub webhook
+derives ids via <code>issueref</code>, which can only emit <code>#\d+</code> / <code>ABC-123</code> shapes, so no
+legitimate producer is affected.</li>
+<li>⚠️ <strong><code>developer</code> may not be the sentinel either (#619)</strong> -- same rule, <code>400</code>. An
+outcome filed against the <code>unattributed</code> pseudo-developer credits weighted points
+to a pool of spend that by construction has no owner. The webhook takes its
+developer from the signed GitHub payload&#39;s PR author login, so no legitimate
+producer is affected here either.</li>
 </ul>
 <h4 id="post-apiv1actual_spend"><code>POST /api/v1/actual_spend</code></h4>
 <ul>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
 <li>Finance per-developer invoice total. Request: <code>developer</code>, <code>period</code> (YYYY-MM),
 <code>actual_paid_usd</code>. Rows accumulate; negatives are accepted as credit memos.</li>
+<li>⚠️ <strong><code>developer</code> may not be the reserved unattributed sentinel (#619)</strong> -- <code>400</code>,
+same case-insensitive rule as <code>POST /costs</code>. This ledger is the tier-1 invoice
+input to Spend Leverage, so it is a denominator by another name: posting your own
+invoice under the sentinel drops your actual-paid out of your row exactly as
+forging <code>/costs</code> drops your metered cost.</li>
 </ul>
 <h4 id="post-apiv1org_actual_spend"><code>POST /api/v1/org_actual_spend</code></h4>
 <ul>
@@ -307,6 +556,22 @@ behind that net.</li>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, empty body.</li>
 <li>Maps a raw identifier to a canonical developer. Request: <code>alias</code>, <code>canonical</code>
 (both required). Chain/self-map violations are <code>400</code>.</li>
+<li>⚠️ <strong>Neither <code>alias</code> nor <code>canonical</code> may be the reserved unattributed sentinel
+(#619)</strong> -- <code>400</code> on either, same case-insensitive rule. An alias is a <em>retroactive</em>
+rename of the identity space: the score join resolves every stored developer through
+this map before aggregating, so without this guard the checks on <code>/costs</code>,
+<code>/events</code>, <code>/outcomes</code> and <code>/actual_spend</code> could all be bypassed in one hop.
+Both directions are refused because they are two different attacks:
+<code>{&#34;alias&#34;: &#34;alice&#34;, &#34;canonical&#34;: &#34;unattributed&#34;}</code> folds alice&#39;s whole history into
+the pseudo-developer (self-dealing), while
+<code>{&#34;alias&#34;: &#34;unattributed&#34;, &#34;canonical&#34;: &#34;bob&#34;}</code> dumps every org-poller aggregate and
+every proxy-unresolved dollar into bob&#39;s denominator (sabotage).</li>
+<li><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable</strong> — it is a lost race for SQLite&#39;s single writer, not a bad request
+and not a broken database. Distinguish it from the <code>400</code>s above: those are
+permanent and retrying cannot help. A <code>500</code> here still means an unexpected
+store failure, including a database that cannot be written at all (read-only
+file, full disk) — deliberately NOT reported as retryable.</li>
 </ul>
 <h4 id="delete-apiv1developer_aliasalias"><code>DELETE /api/v1/developer_alias/{alias}</code></h4>
 <ul>
@@ -343,6 +608,11 @@ behind that net.</li>
 <code>{&#34;deleted&#34;: {&lt;table&gt;: &lt;count&gt;, ...}, &#34;total_deleted&#34;: &lt;int&gt;}</code>; <code>404</code> when
 nothing matched (which makes a repeated erasure idempotent). Available in
 team-aggregation mode (compliance tooling, not a reporting surface).</li>
+<li><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable, and the erasure did NOT happen</strong> — the transaction is
+all-or-nothing, so nothing was partially deleted; retry to complete the
+request. A <code>404</code> means there was nothing to erase; a <code>500</code> means an unexpected
+store failure. Only the <code>503</code> should be retried automatically.</li>
 </ul>
 <h4 id="get-apiv1developeridexport-gdpr-art-15-access"><code>GET /api/v1/developer/{id}/export</code> (GDPR Art. 15 access)</h4>
 <ul>
@@ -356,7 +626,58 @@ in team-aggregation mode.</li>
 <ul>
 <li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>, <code>scoresResponse</code>.</li>
 <li>Query: <code>?since=</code> (YYYY-MM-DD / YYYY-MM / YYYY, default 90 days), <code>?until=</code>
-(or <code>?before=</code>) exclusive upper bound, <code>?team=</code>, <code>?work_type=</code>.</li>
+(or <code>?before=</code>) exclusive upper bound, <code>?team=</code>, <code>?work_type=</code>, <code>?repo=</code>.
+<strong>Any other parameter is a <code>400</code></strong> -- see
+<a href="#query-parameters-are-strictly-validated-on-the-scores-endpoints-590" rel="nofollow">strict query-parameter validation</a>.</li>
+<li><code>?repo=</code> (#590) narrows the response to ONE repository. The value must already be
+slug-shaped: two or more <code>/</code>-separated segments, no scheme and no host
+(<code>acme/alpha</code>, or <code>group/sub/proj</code> for a nested GitLab path). It is then
+canonicalized exactly as stored <code>repo</code> values are -- lowercased, a trailing <code>.git</code>
+and surrounding <code>/</code> trimmed -- so <code>Acme/Alpha.git</code> matches <code>acme/alpha</code>.
+<ul>
+<li>A value that cannot canonicalize <em>at all</em> is a <code>400</code>: fewer than two segments, an
+embedded URL, illegal characters, over-length, or the reserved <code>unqualified</code>.</li>
+<li>⚠️ A <strong>well-formed but non-existent</strong> slug is NOT a <code>400</code>. <code>acme/alpah</code> scopes
+normally and returns an empty window, and a host-qualified <code>github.com/acme/alpha</code>
+is accepted as a legal three-segment slug rather than stripped to <code>acme/alpha</code>
+(scheme/host stripping belongs to the collector&#39;s write path, not this filter).
+So the <code>400</code> buys &#34;that is not a slug&#34;, not &#34;you mistyped a repository name&#34;.
+Distinguish an empty result from a typo by reading the echoed
+<code>data_quality.repo_scope</code>, which reports the canonical slug actually queried.</li>
+<li><code>?repo=</code> with an <strong>empty value</strong> is treated as unscoped and returns an
+installation-wide read; fleet-wide is spelled by OMITTING the parameter. It stays
+distinguishable because no <code>repo_scope</code> key is emitted -- assert on that key.</li>
+<li><strong>Scoping is STRICT.</strong> Only rows naming that exact repository are counted. Rows
+carrying the reserved <code>unqualified</code> sentinel -- recorded by producers that
+structurally cannot know a repository, such as the reverse proxy -- are
+<strong>excluded</strong>, never folded in. Including them would attribute every repo-blind
+row in the installation to whichever single repository was named, which is the
+same over-counting defect <code>?repo=</code> exists to prevent, inverted.</li>
+<li>Strictness can therefore <strong>under-count</strong>, so it is disclosed rather than left
+silent: see <code>data_quality.repo_scope_excluded</code>. A scoped figure over a window
+containing repo-blind rows is a <strong>lower bound</strong>, not a total.</li>
+<li><code>unqualified</code> itself <strong>cannot be selected</strong> as a scope. Those rows are surfaced
+as a disclosure, not offered as a queryable population.</li>
+<li><strong><code>spend_leverage</code> and <code>actual_paid_usd</code> are suppressed to <code>0</code> under a scope</strong>, and the
+suppression is declared (<code>data_quality.spend_leverage_suppressed</code>). Actual spend
+is what the organization PAID a vendor over a period; it carries no repository
+and cannot be divided by one without inventing an allocation. Dividing it by one
+repository&#39;s list-price cost would inflate leverage by roughly the
+installation-to-repository ratio. The keys remain PRESENT and read <code>0</code>; read the
+<code>spend_leverage_suppressed</code> flag, not the zero.</li>
+<li>🔴 <strong><code>?repo=</code> is REFUSED with a <code>400</code> in any anonymized (<code>team</code>/<code>division</code>)
+aggregation mode.</strong> Scoping narrows the cohort <em>before</em> the k-anonymity floor is
+applied, so a repository only one person works in can shrink a group below <code>k</code> and
+expose an individual&#39;s figures through the residual bucket -- the exact disclosure
+those modes exist to prevent, and the same reason <code>?team=</code> is not honored there. It
+is rejected rather than ignored: silently dropping it would return an
+installation-wide aggregate that looks scoped.</li>
+<li>Query parameters are parsed STRICTLY, not via a lenient decoder: a malformed pair
+(bad percent-encoding, or a <code>;</code> -- which Go does not accept as a separator) is a
+<code>400</code>, and so is a REPEATED parameter. Both would otherwise be silently dropped or
+silently resolved to the first value, widening the result while looking filtered.</li>
+</ul>
+</li>
 <li>Fields:
 <ul>
 <li>
@@ -474,6 +795,77 @@ for exploratory overhead: the <code>unattributed:main</code> bucket&#39;s share 
 cost. This overhead STAYS in the denominator (it is real planning/exploration
 spend); the field makes it <em>visible</em> rather than excluded. Pointer-emitted so a
 real <code>0.0</code> carries; present alongside <code>unattributed_buckets</code>. Name-free.</li>
+<li><code>kanon_suppressed</code> (<code>omitempty</code>, #593) -- present when a sub-k residual cohort
+was WITHHELD from an anonymized (<code>team</code>/<code>division</code>) response. Shape
+<code>{developers, k_anonymity, withheld_total, withheld_cost_composition,</code>
+<code>withheld_segment_reconciliation}</code>.
+Name-free: counts only, never an identity.
+<ul>
+<li><strong>When it is present, <code>total</code>, <code>cost_composition</code> and
+<code>segment_reconciliation</code> are ABSENT</strong>, and the
+visible cohort rows no longer sum to the window. That is deliberate. Before
+#593 the residual bucket was emitted with no floor, publishing a sub-k cohort&#39;s
+exact figures; and merely removing that row would not have closed it, because
+<code>total</code> minus the named rows reconstructs the hidden cohort by subtraction.
+Both the row and every unfloored aggregate over the same population are
+withheld together.</li>
+<li>⚠️ This <strong>retires the previous guarantee that k-anonymized rows always sum to
+the grand total.</strong> That property is what makes the disclosure recoverable, so
+it and k-anonymity cannot both hold. Consumers that reconciled rows against
+<code>total</code> must treat a suppressed response as a distinct case rather than a
+reconciliation failure.</li>
+<li><code>k_anonymity</code> is the floor <strong>actually in force</strong>, after the library&#39;s
+<code>MinKAnonymity</code> clamp -- not the value a caller requested. Note <code>tierd serve</code>
+refuses to start below <code>MinKAnonymity</code> (3), so on a served deployment the
+configured and enforced values always agree; the clamp is defence in depth for
+direct library callers. The field reports the enforced value regardless, so a
+consumer never has to know which.</li>
+<li>A consumer must key off this field to distinguish &#34;withheld for anonymity&#34; from
+&#34;this window has no data&#34;. Those demand opposite reactions: the first is fixed
+by widening the window or querying a level with more people in it, the second
+by fixing capture.</li>
+<li>Developer-aggregation mode never emits this: it names everyone by design, so
+there is nothing to reconstruct.</li>
+<li><strong>Two further placements carry the same shape</strong> (#593). <code>work_types[].kanon_suppressed</code>
+declares a suppression local to one work-type segment -- a segment is scored over
+only the developers who did that kind of work, so it is systematically smaller
+than the window and can be sub-k while the window is not. And
+<code>/scores/compare</code> carries a <strong>top-level</strong> <code>kanon_suppressed</code> rather than one
+inside a window&#39;s <code>data_quality</code>, because the two-window fold suppresses a
+cohort from BOTH sides together or from neither -- attaching it to one window
+would imply the other was unaffected.</li>
+<li>⚠️ <strong>A suppression at either level withholds BOTH levels&#39; totals.</strong> Weighted
+points partition exactly across work types, so the pooled total and the segment
+totals reconstruct each other: <code>pooled - Σ(segments)</code> isolates a suppressed
+segment, and <code>Σ(segments) - (named pooled rows)</code> isolates a suppressed pooled
+cohort. Withholding one level and not the other closes nothing.</li>
+</ul>
+</li>
+<li><code>repo_scope</code> (<code>&lt;string&gt;</code>, <code>omitempty</code>, #590) -- the canonical repository this
+response was narrowed to, echoed back <strong>canonicalized</strong> (what was queried, not
+what was typed). Present on every <code>?repo=</code> read; <strong>absent on an unscoped one</strong>.
+This is the field that makes &#34;scoped&#34; and &#34;not scoped&#34; distinguishable on the
+wire, which is the whole point of #590 -- the original defect was not that
+<code>?repo=</code> did nothing, it was that a caller could not TELL it did nothing. A
+consumer that requires a scoped figure must assert on this key, <strong>never</strong> on
+having sent the parameter. Name-free; carries in both modes.</li>
+<li><code>repo_scope_excluded</code> (<code>omitempty</code>, #590) -- what the strict scope DROPPED from
+the window as repo-blind. Shape <code>{token_events, cost_usd, outcomes}</code>. Present
+only on a scoped read that actually excluded something; a scoped read over a
+fully-qualified window omits it, and <strong>that absence is the clean signal</strong> --
+the scoped figures are a true total rather than a lower bound.
+Read it as: this much of the window could not be placed in ANY repository. The
+excluded rows are <strong>not</strong> claimed to belong to the scoped repository; they are
+unattributable by construction, which is what the sentinel means. <code>cost_usd</code> is
+the size of the hole in the scoped denominator and <code>outcomes</code> the hole in the
+numerator -- they move a TIER score in opposite directions. Name-free.</li>
+<li><code>spend_leverage_suppressed</code> (<code>&lt;bool&gt;</code>, <code>omitempty</code>, #590) -- <code>true</code> when a repo
+scope suppressed <code>spend_leverage</code> / <code>actual_paid_usd</code>, which are
+installation-wide by construction and cannot be scoped (see <code>?repo=</code> above).
+Absent entirely on an unscoped read: suppression is a property of scoping, not a
+standing caveat. Without this field a scoped response&#39;s <code>actual_paid_usd: 0</code>
+would be indistinguishable from &#34;no actual spend has been recorded&#34;, which is a
+materially different statement. Name-free.</li>
 </ul>
 </li>
 <li>
@@ -484,6 +876,68 @@ category (the per-segment <code>aggregation</code> mirrors the top-level discrim
 This is the surface for comparing developers/teams; the pooled
 <code>developers</code>/<code>teams</code>/<code>total</code> above are retained for back-compat and are not a
 cross-type ranking.</p>
+</li>
+<li>
+<p><code>segment_reconciliation</code> (<code>omitempty</code>, #466) -- accounts for the window&#39;s WHOLE
+spend against the <code>work_types</code> segments above, so a reader can see how much the
+segmented view leaves out and why. Omitted when the window has no cost rows, and
+withheld entirely under a k-anonymity suppression (see <code>kanon_suppressed</code>), since
+its window total restates the figure <code>cost_composition</code> just withheld. It is ALSO
+dropped — silently, with a server-side ERROR log — when the block is not fit to
+publish: an accumulator saturated at the int64 ceiling, or any figure came out
+negative. That third case is the one absence this API does NOT declare on the wire,
+because it signals a server fault rather than a policy withhold; its only reachable
+trigger is a window whose summed spend approaches ~9.2e12 USD. Shape:
+<code>{developers: [row], total: row}</code> where <code>row</code> is
+<code>{developer, window_cost_usd, window_cost_micro, outcome_linked_cost_usd,</code>
+<code>outcome_linked_cost_micro, no_outcome_cost_usd, no_outcome_cost_micro,</code>
+<code>unattributed_cost_usd, unattributed_cost_micro}</code>. <code>developers</code> is omitted in any
+anonymized mode (a named per-developer cost row would defeat the k floor);
+<code>total</code> is the always-present name-free rollup and carries no <code>developer</code>. ⚠️ A
+deployment running an org-usage poller will see a row whose <code>developer</code> is literally
+<code>&#34;unattributed&#34;</code> — org-level invoice aggregates that cannot honestly be split per
+person — with its cost wholly in <code>unattributed_cost_micro</code>. That is the developer
+sentinel, a different field from the issue sentinel discussed below.</p>
+<ul>
+<li><strong>Why it exists.</strong> A segment&#39;s TIER denominator is outcome-linked cost only:
+<code>work_type</code> is a property of the OUTCOME, so spend on an issue that produced
+none has no category to be filed under and appears in no segment. The pooled
+headline score keeps that spend in its denominator, so every per-type TIER read
+systematically better than the headline, invisibly.</li>
+<li><strong>The invariant, and exactly where it holds:</strong>
+<code>outcome_linked_cost_micro + no_outcome_cost_micro + unattributed_cost_micro</code>
+<code>== window_cost_micro</code>, EXACTLY, on the <strong>integer</strong> fields and only those. The
+<code>_usd</code> companions are independent float conversions, so <code>a + b + c === d</code> on
+them is false for roughly one triple in ten — 22601 of 216000 in a deterministic
+SYNTHETIC sweep spanning $0.008 to $78 per component
+(<code>TestSegmentReconciliation_DollarsAreNotExact</code>); the same sweep fails 0 of 216000
+on the integers. That rate is a property of the sweep&#39;s magnitudes, not a
+measurement of any production window. <strong>Assert on the micros, display the
+dollars.</strong></li>
+<li>The invariant is INTERNAL to this block. All four figures fold from ONE
+<code>DeveloperIssueCostsWindow</code> snapshot, which makes it an arithmetic identity no
+concurrent writer can break. It is <strong>not</strong> a cross-block promise:
+<code>window_cost_micro</code> and the pooled <code>total</code> come from separate non-transactional
+reads over a window whose upper bound is usually open, so on a live store they can
+differ by rows written between them. Do not assert across blocks.</li>
+<li>⚠️ <strong>It does NOT reconcile against the segments&#39; totals, and no invariant
+claims it does.</strong> The segments can legitimately double-count a cost row -- an
+issue carrying two work types is charged to both segments, and under the
+tolerant repo join (#231) a repo-blind cost row is charged to every qualified
+outcome sharing its issue id. Both over-counts are deliberate (they lower TIER,
+so ambiguity never flatters a developer), which makes &#34;segments + gap == window&#34;
+false on ordinary data. This block partitions the underlying cost ROWS instead,
+each counted exactly once, under the identical repo rule the segments use.</li>
+<li>⚠️ <strong><code>no_outcome</code> and <code>unattributed</code> are DIFFERENT and are never merged.</strong>
+<code>no_outcome</code> is cost tied to a REAL issue id that produced no outcome in the
+window (abandoned work, work in flight, a PR that never merged) -- the gap this
+block exists to surface. <code>unattributed</code> is cost the collector could not tie to
+any issue at all (the <code>unattributed</code> sentinel family), which is the established
+meaning of the word elsewhere in this API and matches <code>cost_composition</code>&#39;s
+split. It is reported here only so the three parts sum to the window.</li>
+<li>Not narrowed by <code>?work_type</code>: the gap is a property of the developer&#39;s window,
+not of the segment the caller asked for.</li>
+</ul>
 </li>
 <li>
 <p><code>cost_composition</code> (<code>omitempty</code>) -- cost-composition sidecar (#234): a
@@ -519,8 +973,14 @@ accepted outcome&#34; is not encoded as the most-efficient <code>0</code>, while
 zero-cost (FREE) row keeps its honest <code>0</code>. <code>cost_per_point_ci_low/high</code>
 are its 95% self-relative bootstrap interval, the reciprocal (ends swapped) of
 the <code>tier</code> CI -- <code>0</code> for unranked rows. See <a href="rubric.html" rel="nofollow">docs/rubric.md</a>.</li>
-<li><code>teamScoreJSON</code>: <code>team (omitempty), tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point</code>. No CI at team
-grain (the bootstrap is a per-developer signal, #133).</li>
+<li><code>teamScoreJSON</code>: <code>team (omitempty), tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, ranked</code>. No CI at
+team grain (the bootstrap is a per-developer signal, #133). <code>ranked</code> (#502) is
+the #133/#136 evidence floor on the aggregate&#39;s SUMMED inputs -- outcomes &gt;=
+<code>MinRankedOutcomes</code>, spend &gt;= <code>MinRankedCostUSD</code>, no zero-token outcome among the
+members. <code>tier</code> is <strong>unaffected</strong> by it: an unranked aggregate still carries its
+true quotient, so a consumer must gate the headline on <code>ranked</code> rather than
+expect a scrubbed number (#136). There is deliberately <strong>no team-level
+<code>sample_n</code></strong> -- see the #502 changelog entry.</li>
 </ul>
 <h4 id="get-apiv1scoresdeveloper"><code>GET /api/v1/scores/{developer}</code></h4>
 <ul>
@@ -531,6 +991,16 @@ it is not an existence oracle.</li>
 <li>Fields: <code>developer, tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, sample_n, ci_low, ci_high, cost_per_point_ci_low, cost_per_point_ci_high, ranked, flagged_outcomes, issues</code>. <code>cost_per_point</code> and its CI mirror <code>developerScoreJSON</code> (#239).
 <code>issues</code> is an array of <code>{issue_id, weight, quality, pr_number (omitempty), zero_token}</code>. Note: this endpoint&#39;s top-level object has no <code>rubric</code>/<code>price_table</code>
 stamp of its own -- read those from <code>GET /api/v1/scores</code> for the same window.</li>
+<li>Query: <code>?since=</code>, <code>?until=</code> (or <code>?before=</code>), <code>?repo=</code>. <strong>Any other parameter is a
+<code>400</code></strong> -- see
+<a href="#query-parameters-are-strictly-validated-on-the-scores-endpoints-590" rel="nofollow">strict query-parameter validation</a>.</li>
+<li><code>?repo=</code> (#590) applies the SAME strict scoping as <code>/scores</code>, including the
+<code>unqualified</code> exclusion, and narrows the <code>issues</code> array too -- a scoped detail must
+not list work done in another repository. Adds three top-level fields mirroring the
+<code>/scores</code> <code>data_quality</code> ones: <code>repo_scope</code> (<code>omitempty</code>), <code>repo_scope_excluded</code>
+(<code>omitempty</code>), <code>spend_leverage_suppressed</code> (<code>omitempty</code>). Under a scope
+<code>actual_paid_usd</code> and <code>spend_leverage</code> are suppressed to <code>0</code> and the suppression is
+declared -- read the flag, not the zero.</li>
 </ul>
 <h4 id="get-apiv1scorescompare"><code>GET /api/v1/scores/compare</code></h4>
 <ul>
@@ -545,7 +1015,13 @@ with k-anonymized group deltas -- it is NOT the single-developer <code>404</code
 #276): <code>?since_a=</code>, <code>?until_a=</code> (window A = &#34;before&#34;); <code>?since_b=</code>, <code>?until_b=</code>
 (window B = &#34;after&#34;). Each <code>since_</code> defaults to 90 days ago; each <code>until_</code> is an
 optional exclusive upper bound that must be strictly after its <code>since_</code>
-(<code>400</code> otherwise) and is retention-checked (<code>422</code>). Every delta is <strong>B - A</strong>.</li>
+(<code>400</code> otherwise) and is retention-checked (<code>422</code>). Every delta is <strong>B - A</strong>.
+<strong>Any other parameter is a <code>400</code></strong> (#590) -- including <code>?repo=</code>, which this endpoint
+does <strong>not</strong> implement. It is rejected rather than ignored precisely because it
+returns the same class of cost figure from the same shared windowed computation as
+<code>/scores</code>, so silently accepting-and-dropping it would reproduce the #590 defect one
+endpoint over. Scoped comparison is a legitimate future feature; being quietly
+unscoped is not a feature.</li>
 <li>Fields:
 <ul>
 <li><code>window_a</code>, <code>window_b</code> (<code>{since, until?, data_quality?}</code>) -- each window&#39;s
@@ -572,7 +1048,7 @@ self-relative <code>cost_per_point</code> CI on a side. Rows are the
 computed <strong>only</strong> when the developer is present in BOTH windows (<code>0</code>/<code>false</code>
 otherwise, never fabricated against an absent side).</li>
 <li><code>teams</code> (array of <code>teamDeltaJSON</code>, <code>omitempty</code>) -- populated <strong>only</strong> in an
-anonymized mode (team #185 / division #270): each row <code>{team (omitempty), a, b, delta_tier, delta_weighted_points, delta_total_cost_usd, significant}</code> where
+anonymized mode (team #185 / division #270): each row <code>{team (omitempty), a, b, delta_tier, delta_weighted_points, delta_total_cost_usd, significant, ranked}</code> where
 <code>a</code>/<code>b</code> are <code>teamScoreJSON</code>. <strong>k-anonymity is a two-window INTERSECTION (#277):</strong>
 a group is a named row only if it independently clears the k-floor in BOTH
 windows; a group sub-k in EITHER window (including one present in only one window)
@@ -583,6 +1059,16 @@ differs across windows and no sub-k aggregate can be recovered from a delta.
 <li><code>total</code> (<code>teamDeltaJSON</code>, <code>omitempty</code>) -- name-free grand-rollup delta across
 every developer in each window, present in both modes; <code>nil</code> when both windows
 are empty. <code>significant</code> is always <code>false</code>.</li>
+<li><code>ranked</code> (bool, on every <code>teamDeltaJSON</code> -- both <code>teams[]</code> rows and <code>total</code>) --
+the <strong>derived</strong> ranking verdict of the comparison itself (#605): <code>a.ranked &amp;&amp; b.ranked</code>, a boolean AND over the two sides&#39; own #133/#136 verdicts and never a
+third floor. The rule it encodes is one sentence: <em>anything derived from an
+unranked input is itself unranked.</em> It is an AND rather than an OR because a
+ranked baseline beside an unranked selected window lets a reader reconstruct the
+withheld ratio exactly (<code>selected = baseline + delta</code>), and <code>% change = delta/baseline</code> is a pure function of the withheld baseline ratio. Always present,
+never <code>omitempty</code>: <code>false</code> and &#34;an older server that never said&#34; must stay
+distinguishable on the wire (the ambiguity behind #603). Consumers <strong>read</strong> this
+field rather than re-deriving the conjunction -- one producer, so the floor
+reaches every consumer instead of being re-implemented at each.</li>
 </ul>
 </li>
 <li><strong>Significance test:</strong> <code>significant</code> is <code>true</code> for a developer row only when the
@@ -727,7 +1213,228 @@ documented <a href="#feature-detection" rel="nofollow">feature-detection</a> sig
 Backfilled entries (<code>#185</code>, <code>#187</code>, <code>#191</code>, and the additive-column history)
 predate this discipline and are recorded here so the record is complete.</p>
 <ul>
-<li><strong>#277 -- <code>GET /api/v1/scores/compare</code> (additive: new endpoint).</strong> A before/after
+<li>
+<p><strong>#619 -- the reserved-sentinel ingest guard now covers <code>developer</code> (BREAKING on
+<code>POST /costs</code>, <code>/events</code>, <code>/outcomes</code>, <code>/actual_spend</code>, <code>/developer_alias</code>,
+<code>PUT</code>/<code>POST /org_hierarchy</code>; silent header drop on the proxy).</strong> #466 closed forgery
+of the <code>unattributed</code> sentinel on <code>issue_id</code> and deliberately left the <code>developer</code>
+half open. This closes it, with the same predicate rather than a lookalike, so the
+two columns cannot drift.
+<em>Breaking:</em> <code>developer</code> may no longer carry the sentinel family — the bare
+<code>unattributed</code> plus any <code>unattributed:&lt;reason&gt;</code> sub-bucket — on any of the six
+endpoints above. <code>400</code> on all of them, case-insensitively and after trimming
+whitespace. It was previously written silently. On <code>POST /developer_alias</code> the rule
+applies to <strong>both</strong> <code>alias</code> and <code>canonical</code>.
+<em>Why the break was taken:</em> this is the worse half of the #466 vector, and the only
+half that pays. TIER is <code>points / (cost/1000)</code>. Forging <code>issue_id</code> moves a dollar
+between buckets inside the forger&#39;s own denominator and leaves the headline score
+unchanged; forging <code>developer</code> moves it out of that denominator entirely, onto the
+<code>unattributed</code> pseudo-developer, so the forger&#39;s cost falls and their score rises.
+It was also user-visible: <code>segment_reconciliation.developers[]</code> emitted a row whose
+<code>developer</code> was literally <code>&#34;unattributed&#34;</code>.
+<code>POST /developer_alias</code> is included because an alias is a <em>retroactive</em> rename of
+the identity space — the score join resolves stored developers through it before
+aggregating — so without that guard the spend endpoints are bypassable in one hop.
+⚠️ <code>org_hierarchy</code> was <strong>missed by the first pass of this work</strong> and added after
+review, which is worth recording because of <em>why</em> it was missed: it reads as
+org-structure admin rather than a spend write. It is not. <code>upsertHierarchyTx</code> also
+opens a <code>period_membership</code> <strong>seat</strong> backdated to <code>0000-01</code>, and nothing downstream
+excludes the sentinel from a per-developer aggregate — so one authenticated write
+enrolling <code>unattributed</code> into a team drags the whole unattributed pool into that
+team&#39;s denominator. Every other surface here is self-dealing; that one is aimed
+outward.
+<em>No allowlist anywhere, unlike <code>issue_id</code>:</em> the <code>/events</code> allowlist exists because
+the JSONL collector legitimately ships the sentinel <em>family</em> as an <code>issue_id</code> on
+every exploratory session. Nothing legitimately ships it as a <code>developer</code>: the two
+producers that assign it — the <code>anthropicadmin</code> / <code>openaiusage</code> org pollers, for
+aggregates that cannot honestly be split per person — write in-process via
+<code>collector.Ingester</code> and never cross an HTTP boundary, and the sources they carry
+are not shippable over <code>/events</code> in the first place. The proxy&#39;s own missing-header
+fallback is likewise server-side. So the strict rule costs no capture.
+<em>Blast radius:</em> a client that was forging. <code>unknown</code> — the real no-identity fallback
+<code>collector.OSUsername()</code> emits — is unaffected, as are ordinary identities that
+merely contain the word (<code>unattributed-bot</code>, <code>not-unattributed</code>). <code>tierd ship --developer unattributed</code> will now fail its batch; that invocation was always a
+forgery.
+<em>Proxy (not an error, by design):</em> a forged <code>X-Tier-Developer</code> is treated as a
+<strong>missing</strong> header rather than rejected — the proxy sits on the request path and
+must never fail a provider call over attribution metadata. The stored row is
+identical to the missing-header case; what changes is the counter.
+<em>Also additive:</em> <code>tier_proxy_unattributed_total</code> gains a <code>developer-forged</code> value on
+its <code>header</code> label, mirroring <code>issue-forged</code>. No existing series changes meaning — a
+forged header previously incremented no counter at all. This is the label to alert
+on: it is the only one of the five that indicates a client raising its own score.</p>
+</li>
+<li>
+<p><strong>#466 -- <code>scores.segment_reconciliation</code> (additive) + the reserved-sentinel
+ingest guard (BREAKING on <code>POST /costs</code>, <code>/outcomes</code>, <code>/events</code>).</strong>
+<em>Additive:</em> a top-level <code>segment_reconciliation</code> block on <code>GET /scores</code> partitions
+the window&#39;s cost into <code>outcome_linked</code> / <code>no_outcome</code> / <code>unattributed</code>, each as
+both <code>_usd</code> and <code>_cost_micro</code>, with the exact partition invariant holding on the
+integers. <code>kanon_suppressed</code> gains <code>withheld_segment_reconciliation</code>. Purely
+additive: no existing field changes meaning, and the block is <code>omitempty</code>.
+<em>Breaking:</em> <code>issue_id</code> may no longer carry the reserved unattributed sentinel.
+<code>POST /costs</code> and <code>POST /outcomes</code> <code>400</code> on the whole family, case-insensitively
+and after trimming whitespace; <code>POST /events</code> allows exactly the collector&#39;s four
+canonical spellings and <code>400</code>s everything else. It was previously written
+silently.
+<em>Why the break was taken:</em> the sentinel is server-assigned, and a client forging it
+moved its own dollars out of the <code>no_outcome</code> thrash signal and out of the
+attributed side of the #234 coverage split. Worse, a case variant classified
+DIFFERENTLY in SQL (<code>LIKE</code>, case-insensitive) and in Go (<code>HasPrefix</code>,
+case-sensitive), so one dollar was reported simultaneously as exploration by
+<code>cost_composition</code> and as abandoned real-issue work by <code>segment_reconciliation</code>, in
+one response, against a named developer. The read side is now <code>GLOB</code>
+(case-sensitive) so the two engines agree on stored rows; ingest is deliberately
+WIDER than the read side so a variant never becomes a row at all.
+<em>Blast radius:</em> no legitimate producer sets the sentinel as an <code>issue_id</code> on these
+HTTP surfaces. The GitHub webhook derives ids via <code>issueref</code>, which can only emit
+<code>#[1-9]\d*</code> / <code>ABC-123</code> shapes. The org pollers (<code>anthropicadmin</code>, <code>openaiusage</code>) DO
+assign the bare sentinel for aggregates they cannot split per developer — they are
+unaffected because they write in-process via <code>collector.Ingester</code>, never over
+<code>/costs</code>. The <code>/events</code> allowlist exists precisely because the JSONL collector assigns
+it too, and a <code>4xx</code> there is terminal for the stateless shipper.
+⚠️ <em>Scope, stated precisely:</em> this guard covered <strong><code>issue_id</code> only</strong>. The same string
+is also the sentinel for the <strong><code>developer</code></strong> field; that half was closed separately
+by <strong>#619</strong>, below.
+<em>Also additive:</em> <code>tier_proxy_unattributed_total</code> gains an <code>issue-forged</code> value on its
+<code>header</code> label. No existing series changes meaning — a forged header previously
+incremented no counter at all, since the guard did not exist.
+<em>Today&#39;s readers:</em> none. This ships the DATA only; <code>internal/dashboard</code> does not
+render <code>segment_reconciliation</code>, so the segmented panel a reader actually looks at
+still shows outcome-linked cost alone. The UI pass is separate work.</p>
+</li>
+<li>
+<p><strong>#610 -- <code>POST /costs</code> answers write-lock contention one way (BREAKING status
+change on the plain path).</strong> The plain, non-override half of the endpoint now
+takes the SQLite write lock before it writes, bounded at the same 250ms the
+<code>override: true</code> half has used since #346. Contention there is therefore
+<code>503</code> + <code>Retry-After: 1</code> after ~250ms, where it was previously a <code>500</code> after the
+DSN&#39;s full 5000ms block with no <code>Retry-After</code>. Applies to keyed and unkeyed
+posts alike.
+<em>Breaking, and recorded as such rather than filed under &#34;a better error&#34;:</em> a
+status code changes for an input that a client can actually hit, and a client
+with a <code>500</code>-is-fatal rule now sees <code>503</code>. The correct handling is the one the
+override path already documents -- retry the <code>503</code>, do not retry the <code>409</code> or
+the <code>500</code>.
+⚠️ <em>And the break is wider than the <code>500</code> -&gt; <code>503</code> swap, so do not read it as
+error-text polish:</em> the wait itself shrank from 5000ms to 250ms, so contention
+the endpoint previously <strong>waited out and completed as a <code>201</code></strong> now returns
+<code>503</code> instead. Any client posting into a contended store sees more failures than
+before -- each of them fast, retryable, and carrying <code>Retry-After</code>. A client with
+no retry on <code>/costs</code> at all is the one that regresses, and it is the one that
+must change.
+<em>Why the break was taken:</em> one route answered the same transient condition two
+different ways depending on one request field, and no caller can reasonably
+retry one and not the other. The <code>500</code> was also the worse of the two answers --
+it reads as a broken database, so an operator goes looking for corruption when
+another writer simply held the lock. And the 5000ms wait was never free: with a
+single write connection, a request that blocks that long stalls every other
+in-flight request behind it, so the endpoint was buying one client&#39;s <code>201</code> with
+every other client&#39;s latency. It is the same defect class #598 fixed across the
+store, here on the busiest write path.
+<em>What does NOT change:</em> the <code>201</code>/<code>200</code> status codes and bodies themselves, the
+#295 divergent-cost <code>409</code>, the #346 override behaviour, and the <code>500</code> for a
+genuinely permanent store failure (read-only or full database -- deliberately
+NOT reported as <code>503</code>). On <code>503</code> nothing was written: the insert runs in one
+all-or-nothing transaction that takes the lock before it writes.</p>
+</li>
+<li>
+<p><strong>#605 -- <code>ranked</code> on every compare DELTA row (additive field).</strong> <code>teamDeltaJSON</code>
+-- the shape behind <code>/scores/compare</code>&#39;s <code>teams[]</code> rows and its name-free <code>total</code>
+-- now carries a DERIVED <code>ranked</code>: <code>a.ranked &amp;&amp; b.ranked</code>, computed once
+server-side. The rule it encodes is one sentence: <em>anything derived from an
+unranked input is itself unranked.</em>
+<em>Why an AND and not an OR:</em> a ranked baseline beside an unranked selected window
+lets a reader reconstruct the withheld ratio exactly (<code>selected = baseline + delta</code>), and <code>% change = delta/baseline</code> is a pure function of the withheld
+baseline ratio -- it leaks directly rather than additively. The
+one-ranked-one-unranked case is precisely the one worth withholding, so it is the
+case the AND catches.
+<em>Not <code>omitempty</code>:</em> a <code>false</code> is the load-bearing value here, so omitting it would
+drop the verdict entirely rather than encode it. (Do <strong>not</strong> read this as a
+licence to feature-detect on field presence -- see the compatibility rules above;
+<code>livez</code>&#39;s <code>version</code> remains the supported mechanism.)
+<em>Derived, with a single producer:</em> consumers READ this field instead of
+re-deriving the conjunction. #502 added <code>ranked</code> to the aggregate and it reached
+only one of the org headline&#39;s three consumers, because the other two re-derived
+the quotient from raw sums rather than reading the struct (#605 fixed the compare
+view, #606 the CLI report). A rule re-implemented at each consumer drifts at each
+consumer.
+<em>Today&#39;s readers:</em> the dashboard&#39;s compare card gates its delta and % change on
+<code>total.ranked</code>. The <code>teams[]</code> rows carry the same derived field for contract
+uniformity -- one struct, one producer -- but the dashboard&#39;s team dumbbell reads
+the two sides&#39; own <code>a.ranked</code>/<code>b.ranked</code> directly, so nothing consumes <code>ranked</code> on
+a <code>teams[]</code> row yet.</p>
+</li>
+<li>
+<p><strong>#502 -- <code>ranked</code> on every group aggregate (additive field).</strong> <code>teamScoreJSON</code>
+-- the shape behind <code>total</code>, the <code>?team=</code> filter, the k-anonymized <code>teams</code> array,
+each <code>work_types</code> segment, and both sides of <code>/scores/compare</code> -- now carries
+<code>ranked</code>, the #133/#136 evidence floor applied to the aggregate&#39;s SUMMED inputs
+(outcomes &gt;= 3, spend &gt;= $5.00, no zero-token outcome). It previously existed only
+on <code>developerScoreJSON</code>, so a group aggregate reached every consumer with no
+ranking verdict at all and was rendered as evidence by default.
+<em>Not <code>omitempty</code>:</em> a <code>false</code> is the load-bearing value, and omitting it makes
+&#34;unranked&#34; indistinguishable from &#34;a server that never said&#34;.
+<em>No field&#39;s meaning changes, and <code>tier</code> is NOT one of them:</em> an unranked aggregate
+still carries its exact quotient (the #502 case ships <code>tier: 2.8e8</code>), per #136 --
+the number is never altered, only its ranking authority revoked. <strong>Consumers must
+gate the headline on <code>ranked</code>; do not expect a scrubbed or floored number.</strong>
+<em>Deliberately NOT accompanied by a team-level <code>sample_n</code>:</em> that count is the
+missing denominator that keeps <code>data_quality.attributed_outcome_share</code>
+non-invertible in the anonymized modes. A boolean discloses a threshold crossing,
+not a count.</p>
+</li>
+<li>
+<p><strong>#593 -- k-anonymity residual floor (BREAKING behaviour in anonymized modes;
+additive field).</strong> The residual <code>other</code> cohort was emitted with <strong>no k-floor</strong>, so an
+anonymized deployment published a sub-k cohort&#39;s exact figures -- reproduced at k=5
+as one developer&#39;s TIER, cost, points and cost-per-point. Reachable by narrowing any
+axis; the <code>?repo=</code> guard added in #590 closed only one of them.
+<em>Fix:</em> a sub-k residual is withheld, and <code>total</code> plus <code>cost_composition</code> are withheld
+with it -- necessary because <code>total</code> minus the named rows reconstructs the hidden
+cohort exactly. Applies to <code>/scores</code>, each <code>work_types</code> segment, and
+<code>/scores/compare</code>. Declared via the additive <code>data_quality.kanon_suppressed</code>.
+<em>Breaking:</em> in anonymized modes a response may now omit <code>total</code> and
+<code>cost_composition</code>, and visible rows no longer sum to the window. The previously
+documented &#34;totals are preserved exactly&#34; property is <strong>retired</strong> -- it is the
+property that made the disclosure recoverable. Developer mode is unaffected.</p>
+</li>
+<li>
+<p><strong>#590 -- <code>?repo=</code> scoping on the scores endpoints (additive fields) + strict
+query-parameter validation (BREAKING behaviour, deliberately).</strong> Two halves that
+must ship together.
+<em>Additive:</em> <code>?repo=</code> on <code>GET /scores</code> and <code>GET /scores/{developer}</code>, plus the
+<code>data_quality</code> fields <code>repo_scope</code>, <code>repo_scope_excluded</code> and
+<code>spend_leverage_suppressed</code> (the last three mirrored as top-level fields on the
+developer detail). No existing field changes meaning.
+<em>Breaking:</em> all three scores endpoints now reject unrecognized query parameters
+with <code>400</code> instead of ignoring them. Classified as breaking and recorded as such
+rather than quietly filed under &#34;additive&#34; -- a client sending an extraneous
+parameter goes from <code>200</code> to <code>400</code>.
+<em>Why the break was taken:</em> <code>/scores</code> previously accepted <code>?repo=</code> and ignored it,
+returning a whole-installation aggregate indistinguishable from a scoped one. The
+filter alone would have left the trap one keystroke away (<code>?repos=</code>, <code>?Repo=</code>),
+where a caller&#39;s assertion passes while asserting nothing. The governing invariant
+is that <strong>&#34;could not scope&#34; must never share a response shape with &#34;scoped, and
+this is the result&#34;</strong>; a silent wrong answer is worse than an error.
+<em>Scoping semantics:</em> strict equality. Rows carrying the <code>unqualified</code> sentinel are
+excluded, never folded in -- tolerant matching would attribute every repo-blind row
+in the installation to whichever single repository was named. Strictness can
+under-count, so it is disclosed (<code>repo_scope_excluded</code>) rather than left silent: a
+scoped figure over a window containing repo-blind rows is a lower bound.
+<code>spend_leverage</code>/<code>actual_paid_usd</code> are suppressed under a scope (actual spend has no
+repository and cannot be divided by one) and the suppression is declared.
+🔴 <strong>What #593 does NOT close, stated plainly so nobody reads it as more than it is:</strong>
+it is a per-RESPONSE rule, and <strong>cross-request differencing remains open</strong>. Two
+separately k-safe windows -- neither suppressed, neither declaring anything -- still
+subtract to the cohort active only in the wider one, recovering points as well as
+cost. No per-response rule can close that; it is the query-composition problem and
+needs a different control (rate limiting, query logging, or a privacy budget).
+Treat anonymized aggregation as raising the cost of identifying an individual, not as
+a guarantee against a determined caller who can issue arbitrary windows.</p>
+</li>
+<li>
+<p><strong>#277 -- <code>GET /api/v1/scores/compare</code> (additive: new endpoint).</strong> A before/after
 period comparison: two half-open windows (<code>since_a</code>/<code>until_a</code>, <code>since_b</code>/<code>until_b</code>)
 in, per-developer or per-group deltas plus a CI-overlap <code>significant</code> flag out. Read
 scope. Reuses the <code>/scores</code> windowed computation (extracted into a shared
@@ -738,8 +1445,10 @@ group is named only if it clears the k-floor in BOTH windows, else it folds to
 <code>other</code> in both, so presence never differs across windows and no sub-k aggregate
 leaks through a delta; <strong>(2)</strong> the same anonymized guard as <code>/scores</code> -- never a
 named per-developer delta in team/division mode; <strong>(3)</strong> per-window <code>data_quality</code>.
-A new endpoint breaks no existing consumer. Unblocks the dashboard dumbbell (#278).</li>
-<li><strong>#239 -- <code>scores.cost_per_point</code> + <code>scores.rubric</code> version stamp (additive).</strong>
+A new endpoint breaks no existing consumer. Unblocks the dashboard dumbbell (#278).</p>
+</li>
+<li>
+<p><strong>#239 -- <code>scores.cost_per_point</code> + <code>scores.rubric</code> version stamp (additive).</strong>
 Added the inverse-unit <code>cost_per_point</code> (<code>total_cost_usd / weighted_points</code>,
 <code>0</code> on a zero-point row) and its self-relative bootstrap CI
 (<code>cost_per_point_ci_low/high</code>, the reciprocal of the <code>tier</code> CI, no second
@@ -758,8 +1467,10 @@ non-comparable AND visible instead of a silent category error). <strong>No absol
 self-relative and valid only within a matched <code>rubric.version</code> + <code>price_table.version</code>
 (see <a href="rubric.html" rel="nofollow">docs/rubric.md</a>). Existing fields and the TIER formula are
 untouched; pinned consumers unbroken. A cross-org opt-in benchmark distribution
-is a forward-compatible follow-up that needs a second org&#39;s data to exist first.</li>
-<li><strong>#295 -- <code>POST /costs</code> divergent keyed re-post now <code>409</code> (bug-fix; narrowly
+is a forward-compatible follow-up that needs a second org&#39;s data to exist first.</p>
+</li>
+<li>
+<p><strong>#295 -- <code>POST /costs</code> divergent keyed re-post now <code>409</code> (bug-fix; narrowly
 breaking).</strong> Fixes silent financial data loss: after #233 a keyed re-post with
 the SAME <code>idempotency_key</code> but a CHANGED <code>cost_usd</code> was silently dropped
 (first-writer-wins) yet still returned <code>201</code>, so a finance correction vanished
@@ -772,9 +1483,24 @@ the stored INTEGER <code>cost_micro</code>, so an honest retry whose float/FX/ro
 jitter rounds to the same micro value does NOT <code>409</code>. Classified breaking only
 for a client that depended on the silent-drop-returns-<code>201</code> behavior -- i.e. on
 losing its own correction; the correction path is a NEW <code>idempotency_key</code> (or
-delete + re-post). A sanctioned audited override (ruling C) is a separate
-follow-up.</li>
-<li><strong>#351 -- <code>scores.data_quality</code> true-attribution-coverage + unjoined-developer
+delete + re-post), or the sanctioned audited override below (ruling C).</p>
+</li>
+<li>
+<p><strong>#346 -- <code>POST /costs</code> sanctioned cost-correction override, ruling C
+(additive).</strong> The follow-up #295&#39;s changelog entry above named as a separate
+piece of work: <code>override: true</code> + required <code>override_actor</code> +
+<code>override_reason</code> lets a legitimate finance correction land on a divergent
+keyed re-post instead of 409ing, as a narrow, audited, single-column
+(<code>cost_micro</code>-only) UPDATE with an append-only <code>cost_correction_audit</code> row
+(old -&gt; new, actor, reason) -- never a last-writer-wins upsert. Purely
+additive: every pre-#346 request (no <code>override</code> field) behaves identically
+to before, including the #295 409. See the full contract above, including
+the endpoint&#39;s stated trust model: the identity check closes the
+<strong>accidental</strong> key collision, not deliberate misattribution by a holder of
+the write token, and <code>override_actor</code> is a self-asserted claim.</p>
+</li>
+<li>
+<p><strong>#351 -- <code>scores.data_quality</code> true-attribution-coverage + unjoined-developer
 flag (additive; presence-contract clarified).</strong> Added three <code>data_quality</code> fields
 so the headline <code>/scores</code> number is honest about how much of the window it actually
 covers: <code>attributed_cost_share</code> (fraction of window <code>cost_micro</code> joined to a real
@@ -791,8 +1517,10 @@ shares are ALWAYS present when the window has the relevant data (spend / outcome
 so a non-empty window now ships a <code>data_quality</code> block even when nothing is flagged
 (previously the block was omitted unless a tripwire fired). A truly empty window
 still ships no key; a consumer that ignores unknown keys is unaffected. The dashboard
-trust strip keys only off the zero-token fields, so it is visually unchanged.</li>
-<li><strong>#293 -- <code>scores.data_quality.mixed_price_versions</code> (additive).</strong> Added an
+trust strip keys only off the zero-token fields, so it is visually unchanged.</p>
+</li>
+<li>
+<p><strong>#293 -- <code>scores.data_quality.mixed_price_versions</code> (additive).</strong> Added an
 <code>omitempty</code> <code>[&lt;int&gt;]</code> field to the <a href="#get-apiv1scores" rel="nofollow"><code>data_quality</code></a> block: the
 ascending distinct <code>price_table</code> versions that priced the window&#39;s <code>token_events</code>,
 present ONLY when more than one version is spanned. <code>scores.price_table.version</code>
@@ -800,8 +1528,10 @@ stamps a single active table, but <code>cost_micro</code> is immutable per row (
 window legitimately mixes historical and active pricing; this WARN keeps the stamp
 from reading as false uniformity. Name-free (version integers only), so it carries
 identically in developer and team-aggregation mode. No existing field changed
-meaning; a consumer that ignores the key is unaffected.</li>
-<li><strong>#242 -- <code>push_day</code> on the outcomes export + quality audit bulk exports
+meaning; a consumer that ignores the key is unaffected.</p>
+</li>
+<li>
+<p><strong>#242 -- <code>push_day</code> on the outcomes export + quality audit bulk exports
 (additive).</strong> Appended <code>push_day</code> as the trailing column of the
 <a href="#get-apiv1outcomes" rel="nofollow"><code>GET /outcomes</code></a> JSON and CSV (the UTC per-issue-per-day
 dedup key a <code>source=&#39;push&#39;</code> row aggregates to; <code>&#34;&#34;</code> for a PR row) -- a pinned
@@ -811,51 +1541,69 @@ positional consumer is unbroken. Added two new read endpoints,
 keyset-pagination / limit / <code>Accept</code> machinery and inheriting the #185
 team-mode <code>403</code>. Together they make an outcome&#39;s multiplier re-derivable
 (<code>quality == last new_quality</code>) from a BI export, not just the erasure-scoped
-DSAR export.</li>
-<li><strong>#234 -- <code>scores.cost_composition</code> sidecar (additive).</strong> A whole-window,
+DSAR export.</p>
+</li>
+<li>
+<p><strong>#234 -- <code>scores.cost_composition</code> sidecar (additive).</strong> A whole-window,
 name-free breakdown of where spend went -- cost by normalized model, per-class
 token composition, attributed vs unattributed spend, and the two optimization
 levers (<code>cache_read_share</code>, <code>premium_model_share</code>). <code>omitempty</code>, so a window with
 no token spend ships no key. Pure sidecar: the TIER formula and every existing
-<code>/scores</code> field are untouched. Pinned consumers unbroken.</li>
-<li><strong>#48 -- <code>GET /api/v1/healthz</code> extensible subsystem body (additive).</strong> Added
+<code>/scores</code> field are untouched. Pinned consumers unbroken.</p>
+</li>
+<li>
+<p><strong>#48 -- <code>GET /api/v1/healthz</code> extensible subsystem body (additive).</strong> Added
 a top-level <code>subsystems</code> map (<code>{&#34;&lt;name&gt;&#34;: {healthy, detail}}</code>) and an
 aggregate <code>healthy</code> bool. The legacy top-level <code>watcher</code> block is retained
 (duplicates <code>subsystems.watcher.detail</code>) so pre-#48 consumers are unaffected;
 it is now deprecated in favour of the map. <code>200</code>/<code>503</code> semantics unchanged.
 Subsystems now register into a <code>health.Registry</code> instead of the handler
 hard-coding one key, so v1.5 collectors extend the body without a schema
-break.</li>
-<li><strong>#236 -- <code>GET /api/v1/fidelity</code> endpoint added (additive).</strong> Per-canonical-
+break.</p>
+</li>
+<li>
+<p><strong>#236 -- <code>GET /api/v1/fidelity</code> endpoint added (additive).</strong> Per-canonical-
 developer capture-fidelity signals (<code>now</code>/<code>since_7d</code>/<code>since_30d</code> window stamps;
 per developer <code>event_count_7d</code>, <code>event_count_30d</code>, <code>last_event_by_source</code>,
 <code>fidelity_levels</code>, <code>unknown_model_cost_share</code>). Read-scoped; <code>403</code> in
 team-aggregation mode like the bulk exports. Shipped in #320 on a branch that
 predated this contract doc (#241); the catalog entry was backfilled in #322. A
-new endpoint changes no existing surface.</li>
-<li><strong>#304 -- <code>host</code> + <code>billing_mode</code> columns (additive).</strong> Appended to the
+new endpoint changes no existing surface.</p>
+</li>
+<li>
+<p><strong>#304 -- <code>host</code> + <code>billing_mode</code> columns (additive).</strong> Appended to the
 <code>token_events</code> JSON/CSV export. <code>billing_mode</code>
 (<code>per_token</code>|<code>subscription</code>|<code>self_hosted_amortized</code>) discriminates whether
 <code>cost_micro</code> is a canonical per-token figure or a derived/approximate one.
-Pinned consumers unbroken.</li>
-<li><strong>#238 -- <code>session_id</code> column (additive).</strong> Appended to the <code>token_events</code>
+Pinned consumers unbroken.</p>
+</li>
+<li>
+<p><strong>#238 -- <code>session_id</code> column (additive).</strong> Appended to the <code>token_events</code>
 export (and accepted on <code>POST /events</code>). Opaque Claude Code session UUID; NULL
-for session-blind producers.</li>
-<li><strong>#233 -- <code>price_table</code> stamp + <code>price_version</code> column (additive).</strong>
+for session-blind producers.</p>
+</li>
+<li>
+<p><strong>#233 -- <code>price_table</code> stamp + <code>price_version</code> column (additive).</strong>
 <code>scores.price_table</code> (<code>{version, effective_date}</code>) is now always present;
 <code>price_version</code> was appended to the <code>token_events</code> export. The server became
 the single pricing authority (<code>POST /events</code> reprices; client <code>cost_usd</code> is a
-cross-check).</li>
-<li><strong>#231 -- <code>repo</code> column (additive).</strong> Appended to BOTH exports and accepted as
+cross-check).</p>
+</li>
+<li>
+<p><strong>#231 -- <code>repo</code> column (additive).</strong> Appended to BOTH exports and accepted as
 an optional field on <code>POST /costs</code> and <code>POST /events</code>. <code>issue_id</code> values were
 deliberately left unchanged so a consumer pinned to <code>issue_id</code> keeps reading
 the same value; the repository arrived in its own new column rather than
-changing an existing column&#39;s shape in place.</li>
-<li><strong>#191 -- bulk exports added (additive).</strong> <code>GET /api/v1/events</code> and
+changing an existing column&#39;s shape in place.</p>
+</li>
+<li>
+<p><strong>#191 -- bulk exports added (additive).</strong> <code>GET /api/v1/events</code> and
 <code>GET /api/v1/outcomes</code> introduced (keyset-paginated, JSON default + CSV). Both
 return <code>403</code> in team-aggregation mode. New endpoints, no existing surface
-changed.</li>
-<li><strong>#187 -- work-type segmentation; <code>/scores</code> top-level fields SEMANTICALLY
+changed.</p>
+</li>
+<li>
+<p><strong>#187 -- work-type segmentation; <code>/scores</code> top-level fields SEMANTICALLY
 DEMOTED.</strong> Added <code>scores.work_types</code> (the authoritative within-category
 comparison) and <code>work_type</code>/<code>work_type_source</code> columns on the outcomes export
 (additive). <strong>In the same change, the top-level <code>developers</code>/<code>teams</code>/<code>total</code>
@@ -865,8 +1613,10 @@ semantic change shipped without a version signal or deprecation header, and is
 the motivating defect for this contract (#241). Under the rule above it should
 have been announced via a changelog entry and the field doc comments (it now
 is); the new meaning correctly shipped under a new key (<code>work_types</code>) rather
-than repurposing the old fields.</li>
-<li><strong>#270 -- division-aggregation mode + <code>aggregation</code> discriminator (additive
+than repurposing the old fields.</p>
+</li>
+<li>
+<p><strong>#270 -- division-aggregation mode + <code>aggregation</code> discriminator (additive
 field; new opt-in mode).</strong> Adds <code>--aggregation division</code>, a second ANONYMIZED
 level that rolls <code>org_hierarchy</code> up one step past team to division, reusing the
 identical k-anonymity floor and every suppression guard team mode has (the
@@ -877,24 +1627,33 @@ are. Adding the field is additive and back-compatible; the mode itself is
 deploy-time and opt-in like #185. k-anonymity holds independently at each level
 because every level is a flat partition of the same developer set, so a sub-k
 team suppressed at team level is absorbed into a <code>&gt;= k</code> division at division
-level, never re-exposed.</li>
-<li><strong>#185 -- team-aggregation mode (behavioural, opt-in).</strong> When the server runs
+level, never re-exposed.</p>
+</li>
+<li>
+<p><strong>#185 -- team-aggregation mode (behavioural, opt-in).</strong> When the server runs
 in <code>AggregationTeam</code> mode, <code>GET /scores</code> replaces named <code>developers</code> with
 k-anonymized <code>teams</code> and emits <code>developers</code> as an empty array, and
 <code>GET /scores/{developer}</code> blanket-<code>404</code>s. This is a deploy-time mode, not a
 wire-shape change to a given response, but it changes which fields are
 populated -- consumers must handle the empty-<code>developers</code>/<code>teams</code> shape. (The
 bulk exports landed later in #191 and inherit this policy, returning <code>403</code> in
-team mode; see that entry. Division mode #270 rides the same policy.)</li>
-<li><strong>#136 -- <code>data_quality</code> block + <code>zero_token</code>/<code>flagged_outcomes</code> fields
+team mode; see that entry. Division mode #270 rides the same policy.)</p>
+</li>
+<li>
+<p><strong>#136 -- <code>data_quality</code> block + <code>zero_token</code>/<code>flagged_outcomes</code> fields
 (additive).</strong> Zero-token-outcome tripwire surfaced on <code>/scores</code> and
-<code>/scores/{developer}</code>.</li>
-<li><strong>#133 -- ranking fields (additive).</strong> <code>sample_n</code>, <code>ci_low</code>, <code>ci_high</code>,
-<code>ranked</code> added to per-developer rows; the array is not pre-sorted.</li>
-<li><strong>#55 -- <code>cache_write_5m_tokens</code>/<code>cache_write_1h_tokens</code> (additive);
+<code>/scores/{developer}</code>.</p>
+</li>
+<li>
+<p><strong>#133 -- ranking fields (additive).</strong> <code>sample_n</code>, <code>ci_low</code>, <code>ci_high</code>,
+<code>ranked</code> added to per-developer rows; the array is not pre-sorted.</p>
+</li>
+<li>
+<p><strong>#55 -- <code>cache_write_5m_tokens</code>/<code>cache_write_1h_tokens</code> (additive);
 <code>cache_write_tokens</code> deprecated.</strong> The legacy single-bucket request field is
 accepted with a <code>Warning: 299</code> header (the last use of the RFC 7234 precedent;
-new deprecations use the RFC 9745 <code>Deprecation</code> / RFC 8594 <code>Sunset</code> pair).</li>
+new deprecations use the RFC 9745 <code>Deprecation</code> / RFC 8594 <code>Sunset</code> pair).</p>
+</li>
 </ul>
 <h2 id="changing-the-api">Changing the API</h2>
 <p>When you add a field, add it in the same PR to (1) the Go response struct in

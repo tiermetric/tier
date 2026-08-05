@@ -187,23 +187,117 @@ the size-class path.
 
 ---
 
-## 5. Subscription / flat-rate hosts are NOT priced yet (blocked on #304)
+## 5. Subscription / flat-rate hosts (#113) — configure them yourself
 
-Some hosts do not meter per token — Ollama Cloud and GLM (#113) bill a flat monthly
-subscription, where the marginal cost of a token is effectively zero. TIER models this
-with `billing_mode: subscription` (and `self_hosted_amortized` for amortized
-self-hosted estimates), so a derived/approximate figure is never dressed up as a
-canonical $/M.
+Some hosts do not meter per token. Ollama Cloud and GLM bill a flat monthly
+subscription, where the marginal cost of one more token is effectively zero. That
+breaks the arithmetic every other price row assumes, so TIER splits the money in two
+and gives each artifact exactly one truth.
 
-**These rows are intentionally not seeded here.** The `/events` export
-(`internal/api/export.go`) does not yet surface the `host` / `billing_mode` columns
-(#304) — so the instant a `subscription` or `self_hosted_amortized` host rate ships, an
-exported `cost_micro` becomes a derived number with no adjacent flag telling a consumer
-it isn't a real per-token price. #304 (append `host` + `billing_mode` to the export
-contract) must land first. Until then this page and `prices.yaml` seed **per-token hosts
-only**.
+### The two artifacts
 
-The subscription-rate work (#113) is not yet on main; it depends on #304.
+| artifact | what it says | where it lands |
+|---|---|---|
+| **price table** (`prices.yaml` / `--prices`) | this route is subscription-billed, and its tokens are worth *this* comparable list rate | the TIER **denominator**, per call, at ingest |
+| **config** (`subscriptions:`) | and here is the **fee** we actually pay for it | the **actual-paid** side of Spend Leverage, only |
+
+Steve's ruling of 2026-07-02 (#113) chose this **list-rate inversion** over amortizing
+the fee across the window's tokens. The amortized form is non-local: divide a flat fee
+by the window's token count and the same session costs different dollars depending on
+how much a *colleague* used the route, and on which `?since=` you asked for. The
+inversion keeps every cost a local property of the call, which is what every other cost
+in TIER already is.
+
+The fee is *never* in the denominator, and the comparable rate is *never* claimed as a
+paid price. `billing_mode: subscription` rides with the row through `/events` (#304, now
+landed) so a consumer can always tell a valuation from a metered rate.
+
+### Price-table half
+
+```yaml
+# in your --prices override
+models:
+  "glm-5.2@ollama.com":
+    input_per_m: 0.875      # a comparable PEER model's published list rate
+    output_per_m: 7.00      # — see the honesty note below
+    provider: self-hosted
+    billing_mode: subscription
+```
+
+The comparable rates are ordinary, required, positive rates: the parser's non-positive-rate
+guard applies to a subscription row exactly as it does to any other, so a rate-less
+subscription entry is a **startup error**, never a silent $0.
+
+**🔴 No subscription row ships in the embedded default table, and this is deliberate.**
+A comparable rate is a judgement — "GLM-5.2 is worth about what gpt-5.2 costs" — not a
+figure any vendor publishes. Shipping one would state a $/M price for a real vendor, to
+every TIER install, that nobody could verify against a first-party page. That is the same
+bar §4 sets for per-token hosts ("verify the exact model-id string against a real
+response from that host"), applied to a number that *has* no first-party source. So you
+declare it, against a peer you can name, in your own override.
+
+### Config half
+
+```yaml
+subscriptions:
+  - route_prefix: "glm-5.2@ollama.com"  # a prefix of the PRICE-TABLE KEY, lowercase
+    plan: "max"                          # informational; appears in logs
+    org: "acme"                          # org_actual_spend key the fee posts under
+    monthly_fee_usd: 100.00              # the real flat fee, per calendar month
+    active_since: "2026-06"              # optional; see "missed periods" below
+```
+
+`tierd serve` **refuses to start** when a configured `route_prefix` matches no
+`billing_mode: subscription` entry in the active table. A fee posted for a route TIER
+prices as an ordinary metered model would add real dollars to actual-paid with no
+matching list value, quietly deflating Spend Leverage — a wrong number on a CFO-facing
+metric, produced by a typo.
+
+The reverse — a subscription row in the table with no fee configured — is a **WARN**, not
+a refusal: leverage reads high (the fee is missing), but nothing is fabricated, and
+`tierd score`, `tierd demo`, and read-only deployments legitimately run such a table with
+no `subscriptions:` block at all.
+
+### Missed billing periods (#155)
+
+The reconciler posts each fee into `org_actual_spend` under the source
+`subscription:<route_prefix>`. That source scoping is what makes it idempotent *and*
+what keeps it from ever touching another feed's rows — a manual finance invoice, an
+Anthropic/OpenAI poller delta, or a second subscription plan under the same org are
+neither netted against nor offset. There is no separate ledger table; the `source`
+column is the ledger.
+
+Without `active_since` only the **current** period is reconciled — correct for a server
+that never stops, and a hole for every month tierd was down. Set `active_since` to the
+month the plan started and the **startup** pass fills in every month that has no
+posting yet, logging one line per month actually posted. The hourly tick still touches
+the current period only; the catch-up is a one-shot, not an hourly re-walk.
+
+**The two periods are treated differently, on purpose.** The **current** month
+*converges* to the configured fee, so a mid-month price change posts the difference. A
+**closed** month is only ever *filled in at the configured fee* — never restated. Once
+a month has a posting, raising `monthly_fee_usd` in August leaves June alone, so a
+config edit cannot silently move every historical Spend Leverage figure.
+
+> ⚠️ **A month that has NO posting is filled in at TODAY'S fee.** Config carries one
+> fee and no per-period history, so first-run backfill cannot know what the plan cost
+> back then. If your plan cost $100 until June and $200 now, setting
+> `active_since: "2026-01"` posts **$200 for every one of those months** and understates
+> Jan–Jun Spend Leverage by roughly 2×. tierd logs a **WARN** naming each month it
+> backfills, precisely so this is visible; correct any affected month with
+> `POST /api/v1/org_actual_spend`. Months that already have a posting are untouched.
+
+> 🔴 **`route_prefix` and `org` are the posting identity.** A re-run knows a month is
+> already covered by looking for rows under `subscription:<route_prefix>` for that org.
+> Rename either and the next startup finds nothing under the new key and posts the whole
+> history again, while the old rows remain — the org total then double-counts. If you
+> rename one, correct or delete the old `org_actual_spend` rows in the same change.
+
+### Metering caveat
+
+Ollama Cloud **streaming** responses carry no token-usage stats (ollama#15169), so only
+non-streamed calls meter reliably through the proxy. A streamed call is not
+under-priced — it is not captured at all.
 
 ---
 

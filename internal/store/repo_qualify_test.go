@@ -326,7 +326,7 @@ func TestOutcomeTokenTotals_ExceedsOneBatch(t *testing.T) {
 		}
 	}
 
-	totals, err := db.OutcomeTokenTotals(ctx, outcomes)
+	totals, err := db.OutcomeTokenTotals(ctx, outcomes, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals over %d windows: %v (SQLite variable limit? check tokenTotalsBatchSize)", n, err)
 	}
@@ -441,7 +441,7 @@ func TestOutcomeTokenTotals_RepoBlindOutcomeSeesRealRepoTokens(t *testing.T) {
 	// CI posted the outcome without a repo (the optional field), so it is sentinel.
 	outcome := Outcome{Developer: "alice", IssueID: "issue-42", Timestamp: ts}
 
-	totals, err := db.OutcomeTokenTotals(ctx, []Outcome{outcome})
+	totals, err := db.OutcomeTokenTotals(ctx, []Outcome{outcome}, FleetWide)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestOutcomeTokenTotals_SentinelNotDoubleCountedAcrossBatches(t *testing.T) 
 		})
 	}
 
-	totals, err := db.OutcomeTokenTotals(ctx, outcomes)
+	totals, err := db.OutcomeTokenTotals(ctx, outcomes, FleetWide)
 	if err != nil {
 		t.Fatal(err)
 	}

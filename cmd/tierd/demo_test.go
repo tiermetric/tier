@@ -42,7 +42,7 @@ func TestSeedDemo_PopulatesAndIsIdempotent(t *testing.T) {
 	countRows := func() (outcomes, events int, paid float64) {
 		since := time.Now().AddDate(-1, 0, 0)
 		until := time.Now().AddDate(0, 0, 1)
-		outs, err := db.AllOutcomesWindow(ctx, since, until)
+		outs, err := db.AllOutcomesWindow(ctx, since, until, store.FleetWide)
 		if err != nil {
 			t.Fatalf("read outcomes: %v", err)
 		}
@@ -106,7 +106,20 @@ func TestDemo_SeedsRankedBoard(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/api/v1/scores?aggregation=developer")
+	// NOTE (#590): this request used to carry "?aggregation=developer", which the
+	// server has NEVER read — aggregation is a serve-time flag (--aggregation /
+	// TIER_AGGREGATION / config key), not a query parameter. The test passed anyway
+	// because api.New here already defaults to developer mode, so the no-op parameter
+	// looked like it was doing the work. The strict unknown-parameter allowlist added
+	// in #590 rejected it, which is exactly what that gate is for.
+	//
+	// Worth stating plainly, because the removed line was worse than dead weight: it
+	// read as though a CLIENT could select the aggregation mode per request. If that
+	// were ever true it would be a k-anonymity bypass — any caller could ask a
+	// team-mode server for named per-developer rows. It is not true, and the
+	// allowlist now makes any future attempt to send it a loud 400 rather than a
+	// silent no-op that a reader might mistake for a working control.
+	resp, err := http.Get(srv.URL + "/api/v1/scores")
 	if err != nil {
 		t.Fatalf("GET scores: %v", err)
 	}

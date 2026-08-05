@@ -1,8 +1,10 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -823,6 +825,112 @@ func TestFilterSessionsByRepo(t *testing.T) {
 		if keptIDs[id] {
 			t.Errorf("session %q was kept, want dropped", id)
 		}
+	}
+}
+
+// TestFilterSessionsByRepo_ZeroKeptLogsWarn is the positive arm for #549 arm
+// 1: a --repo target that matched NOTHING must log at WARN, not INFO. During
+// the 2026-07-30 dogfood backfill this exact shape (kept=0, foreign=4836)
+// logged at INFO and `tierd ship` exited 0 anyway — nothing distinguished
+// "scanned and found nothing" from "never ran" short of diffing
+// `select count(*) from token_events` by hand.
+// Both this test and its sibling below swap the process-global slog default
+// for the duration of one test body via slog.SetDefault, guarded only by a
+// deferred restore — that is race-safe ONLY because `go test` runs serial
+// tests (this package has none marked t.Parallel) strictly before parallel
+// ones. If a future edit adds t.Parallel to either test, a concurrently
+// running slog.Warn/Info from elsewhere in the package (e.g.
+// TestParseSessionFile_NegativeUsageClamped's clamp warning) would land in
+// this buffer too and could flip either assertion.
+func TestFilterSessionsByRepo_ZeroKeptLogsWarn(t *testing.T) {
+	repo := t.TempDir()
+	sessions := []sessionSummary{
+		{SessionID: "foreign-1", CWD: t.TempDir(), GitBranch: "feature/1-foo"},
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	kept := filterSessionsByRepo(sessions, repo)
+	if len(kept) != 0 {
+		t.Fatalf("filterSessionsByRepo kept %d sessions, want 0 (every session here is foreign)", len(kept))
+	}
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("a zero-kept scan must log at WARN — a --repo matching nothing is nearly always a wrong path; got log:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "level=INFO") {
+		t.Errorf("a zero-kept scan must not ALSO log the same event at INFO (double-logging); got log:\n%s", buf.String())
+	}
+	// The level alone doesn't pin the message: a WARN that says something
+	// unrelated would still pass the checks above. Pin the operator-facing
+	// text and the one attribute this exact fixture must produce.
+	if !strings.Contains(buf.String(), "wrong --repo path") {
+		t.Errorf("WARN message text drifted from the documented \"wrong --repo path\" diagnosis; got log:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "foreign=1") {
+		t.Errorf("WARN log missing foreign=1 for the one foreign session in this fixture; got log:\n%s", buf.String())
+	}
+}
+
+// TestFilterSessionsByRepo_EmptySessionsLogsNothing is a DELIBERATE pin, not
+// an assumption: with zero sessions at all (an idle repo whose --claude-dir
+// has no projects/ content), filterSessionsByRepo's WARN/INFO switch requires
+// foreign>0 || empty>0 to fire, so kept==0 with all three counters at zero
+// logs NOTHING at any level.
+//
+// Two other guards already cover the operator-visible consequence of this
+// exact shape — allReposEmpty (#549 arm 3) exits `ship` non-zero, loudly, and
+// TestRunShip_NoSessions/TestShipSmoke_EveryRepoEmpty_ExitsNonZero assert on
+// it — so a per-repo WARN here would be a second, redundant siren on a run
+// that already fails closed. Relaxing the switch's case to a bare
+// `len(kept)==0` (logging WARN even with foreign==empty==0) passes every
+// other test in this file just as well as leaving it alone, which is exactly
+// why this needs its own pin rather than being left to accident.
+func TestFilterSessionsByRepo_EmptySessionsLogsNothing(t *testing.T) {
+	repo := t.TempDir()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	kept := filterSessionsByRepo(nil, repo)
+	if len(kept) != 0 {
+		t.Fatalf("filterSessionsByRepo(nil, ...) kept %d sessions, want 0", len(kept))
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a scan with zero input sessions logged something; want silence (the loud path for this case is #549 arm 3's exit guard, not a per-repo log line); got:\n%s", buf.String())
+	}
+}
+
+// TestFilterSessionsByRepo_PartialFilterLogsInfo is the CONTROL arm for the
+// WARN test above: a scan that filters SOME sessions but keeps at least one
+// must stay at INFO. Without this, the WARN assertion would pass on a build
+// that logs WARN unconditionally regardless of the kept count — proving
+// nothing about the kept==0 conditional it exists to guard.
+func TestFilterSessionsByRepo_PartialFilterLogsInfo(t *testing.T) {
+	repo := t.TempDir()
+	sessions := []sessionSummary{
+		{SessionID: "in-repo", CWD: repo, GitBranch: "feature/1-foo"},
+		{SessionID: "foreign", CWD: t.TempDir(), GitBranch: "feature/2-bar"},
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	kept := filterSessionsByRepo(sessions, repo)
+	if len(kept) != 1 {
+		t.Fatalf("filterSessionsByRepo kept %d sessions, want 1", len(kept))
+	}
+	if !strings.Contains(buf.String(), "level=INFO") {
+		t.Errorf("a partially-filtered scan (kept>0) must log at INFO; got log:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("a partially-filtered scan (kept>0) must NOT escalate to WARN — that would train operators to ignore WARN on a healthy scan; got log:\n%s", buf.String())
 	}
 }
 

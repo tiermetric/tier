@@ -264,11 +264,75 @@ event type (allowlist-bounded to `pull_request` / `push` / `workflow_run`),
 upstream-validated period strings, and numeric fields such as PR numbers. Each is
 documented at its call site.
 
+**Errors are the sixth class, and the rule for them is narrower than "wrap
+everything".** An error is not exempt from the barrier just because it is an
+error: a store or validation error can *wrap* a free-form identifier (a developer
+id, org, team, or division that is length-capped but never charset-validated), and
+those sinks go through `logSafeErr` — the hierarchy writes, the `/outcomes` insert,
+and the per-developer score reads all do. The majority of `err` values are logged
+bare instead, and the discriminator is whether the error's *text* can carry a
+client value, not whether the operation touched one: the SQLite driver does not
+echo bound parameters, so a failed `INSERT` whose arguments include a hostile
+developer id still produces a constraint message that names only the table and
+column. A sweep of the request-facing packages (`internal/api`,
+`internal/webhook`, `internal/proxy`, `cmd/tierd`) found the values that *are*
+interpolated into `internal/store` error text are either operator-supplied
+(config route prefixes, DB paths, table names) or routed through `logsafe` at the
+point of construction. Wrapping the rest would add noise and blur exactly the
+client/operator distinction this barrier depends on.
+
+An earlier revision of that sentence listed *"price-table model names"* among the
+operator-supplied values. That was **backwards**, and it is corrected here rather
+than quietly dropped because the error it excused was real. The model names
+interpolated into `store.Reprice`'s GUESS-gate error are by construction the
+models **absent** from the price table — the producer-supplied strings that
+matched no operator-curated entry, arriving through `POST /api/v1/events`, which
+length-caps `model` and applies no charset check. They are now routed through
+`logsafe.Join` at construction, pinned by
+`TestReprice_GuessGateErrorIsNotForgeable`.
+
 Note on static analysis: an automated code scanner may report these constrained
 bare fields as potential log-injection findings. They are false positives — the
 scanner cannot prove the regex/allowlist constraint that the code guarantees —
 and are triaged as such, rather than "fixed" by wrapping a value that already
 cannot forge a record.
+
+**What the barrier actually buys, measured (#321, 2026-08-04).** Two honest
+qualifications, because "a sanitizer is applied" is not by itself a threat model:
+
+- On a `log/slog` handler the CR/LF forge is *already* structurally blocked
+  before `logsafe` runs: both `TextHandler` and `JSONHandler` quote or escape any
+  attribute value containing a control byte, so a newline cannot open a second
+  record through them. What `logsafe` adds on those sinks is the **length cap**
+  and the static-analysis barrier. The cap is not theoretical: a 4 KB upstream
+  header value reached one log line unbounded before this was fixed, which is what
+  `TestProxy_ContentEncodingNotForgeable` now pins.
+- The CR/LF strip is load-bearing for the sinks that are **not** `slog` — the
+  operator-facing report writers in `cmd/tierd` that print to stdout, where
+  nothing quotes — and for any log consumer that unquotes a field to render it.
+  Escaping is reversible downstream; removal is not.
+
+**Code scanning does not currently check this class, on either repo.** The
+`go/log-injection` query declares `@precision medium`, and GitHub's *default*
+code-scanning suite includes only `precision: high|very-high`
+(`misc/suite-helpers/code-scanning-selectors.yml`), so the query ships in
+`security-extended`. The public mirror runs default-setup with
+`query_suite: "default"`; the private repo is `not-configured`. Neither runs it.
+A clean Security tab is therefore **not** evidence that this section holds — the
+named tests are (`internal/logsafe`, `TestProxy_ContentEncodingNotForgeable`, and
+the per-sink `*NotForgeable` tests in `internal/api`, `internal/webhook`,
+`internal/collector`, `internal/store`, and `cmd/tierd`).
+
+⚠️ **Read that list precisely, because it was once read too generously.** Until
+2026-08-04 the only such test in `cmd/tierd` covered the **access log**
+(`TestRequestLogger_PathNotForgeable`), and no test covered a **report writer** —
+a different sink class with a different threat model, since the access log is
+`slog` (which escapes CR/LF even when the caller forgets) and a report writer is
+raw `fmt.Fprintf` (which escapes nothing). The sentence read as coverage of a
+class that had none, and `cmd/tierd/reprice.go` diverged from its
+correctly-wrapped sibling `repairrepo.go` without a single test going red. The
+report writers are now covered by `TestPrintRepriceResult_NotForgeable` and
+`TestPrintRepairRepoResult_NotForgeable`.
 
 ---
 

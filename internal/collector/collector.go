@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -25,9 +26,11 @@ const (
 	// (~/.codex/sessions/**/rollout-*.jsonl), read by
 	// internal/collector/codexrollout (#464). It is the Codex analogue of
 	// SourceJSONL: local session files, no proxy, per-call granularity — and
-	// the ONLY path that captures Codex spend, since Codex speaks the OpenAI
-	// Responses API, which the proxy's Chat-Completions parser cannot read
-	// (#463).
+	// the only path that captures Codex spend AS CODEX IS ACTUALLY RUN. The
+	// proxy learned to parse the Responses shape Codex speaks in #459 task 2,
+	// but reaching it requires pointing Codex at the proxy with API-key auth
+	// (ChatGPT-subscription auth never traverses it), and no live Responses
+	// traffic has ever exercised that parser. This source is the verified one.
 	SourceCodexRollout = "codex-rollout"
 )
 
@@ -150,6 +153,19 @@ const (
 	UnattributedNoIssue = UnattributedIssueID + ":branch-without-issue"
 )
 
+// UnattributedBucketIDs enumerates the labeled sub-buckets this package ASSIGNS, and is
+// the mirror of store.UnattributedBuckets (#466). Iterate it rather than retyping the
+// list: an allowlist elsewhere in the tree decides which ids may cross POST
+// /api/v1/events, and a bucket added here but not there is total, permanent capture
+// loss for every developer who hits it. TestUnattributedIssueIDMatchesStore compares
+// this slice element-wise with store's, so a one-sided addition fails the build rather
+// than shipping.
+var UnattributedBucketIDs = []string{
+	UnattributedMain,
+	UnattributedDetachedHEAD,
+	UnattributedNoIssue,
+}
+
 // IsUnattributed reports whether an issue id is the base unattributed sentinel or
 // any of its labeled sub-buckets (UnattributedMain/DetachedHEAD/NoIssue). Consumers
 // that split attributed vs. unattributed spend MUST use this rather than an exact
@@ -160,6 +176,44 @@ const (
 func IsUnattributed(issueID string) bool {
 	return issueID == UnattributedIssueID ||
 		strings.HasPrefix(issueID, UnattributedIssueID+":")
+}
+
+// harnessWorktreeBranchRE matches the branch names the agent harness INVENTS for
+// a worktree-isolated agent: "worktree-agent-" followed by a hex handle.
+//
+// Anchored at both ends, and hex-only, on purpose. A human branch that merely
+// mentions the words — "feature/worktree-agent-cleanup",
+// "fix/512-worktree-agent-naming" — is a NORMAL branch whose issue number must
+// still resolve, and matching it here would throw that number away and inherit
+// somebody else's issue instead. Only the exact machine-generated shape qualifies.
+var harnessWorktreeBranchRE = regexp.MustCompile(`^worktree-agent-[0-9a-f]+$`)
+
+// IsHarnessWorktreeBranch reports whether branch is a name the agent harness
+// invented for a worktree-isolated agent rather than one a human chose.
+//
+// 🔴 WHY THIS IS A CATEGORY OF ITS OWN (#490). Every other issue-less branch in
+// this package represents a CHOICE — somebody named a branch without an issue
+// number, and the fix is naming discipline. These names are machine-generated at
+// spawn time, so no naming discipline can ever reach them: the spend they carry
+// could never attribute, and it sat in unattributed:branch-without-issue
+// alongside genuine human sloppiness, making that bucket's advice ("name your
+// branches <prefix>/<issue>-slug") wrong for a fifth of its contents.
+//
+// Callers use it to know the name carries NO attribution signal and that the
+// spawning session's branch should be consulted instead — see
+// parseSessionFileFromOffset.
+//
+// ⚠️ FRESH PARSES ONLY — THIS RECOVERS NOTHING ALREADY STORED. The inheritance
+// happens at PARSE time, and the ingest UPSERT never re-stamps attribution: the
+// `ON CONFLICT(idempotency_key) DO UPDATE SET` clause in store.insertTokenEventSQL
+// touches the five token counters and nothing else, so a row's issue_id is pinned
+// by whichever producer keyed the message first. Spend already ingested under
+// unattributed:branch-without-issue therefore STAYS there — re-running `tierd
+// score` over the same session files will not move it. Retroactive
+// re-attribution of stored rows is tracked separately as #489; do not describe
+// this predicate as fixing historical data.
+func IsHarnessWorktreeBranch(branch string) bool {
+	return harnessWorktreeBranchRE.MatchString(strings.TrimSpace(branch))
 }
 
 // bucketForBranch classifies a branch that resolved to NO issue into its labeled

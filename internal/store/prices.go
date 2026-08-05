@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tiermetric/tier/internal/logsafe"
+
 	// go.yaml.in/yaml/v3 is the maintained YAML-org continuation of the
 	// archived gopkg.in/yaml.v3 (#52) — same API, same `yaml:` tags, same
 	// KnownFields strict decoding. The price table's strict-unknown-key
@@ -177,6 +179,23 @@ type PriceTableInfo struct {
 // synchronized.
 var priceTable map[string]modelPrice
 
+// EmbeddedPriceStampFormat is the startup line every command prints for the EMBEDDED
+// price table, and it is exported so the printers and the README guard share ONE
+// definition rather than two hand-copies.
+//
+// 🔴 Why it exists. README.md pins this line as sample output, and
+// TestREADMESamplePriceTableMatchesEmbedded checks it — but the first version of that
+// guard compared the README against ActivePriceTableInfo() while the README actually
+// quotes a `fmt.Fprintf` format string in cmd/tierd. The two were connected by nothing.
+// Measured: mutating BOTH print sites from `version %d` to `v%d` changed what the
+// binary prints, left the README stale, and produced ZERO additional test failures
+// across the whole suite. The guard's own comment claimed it "asks the program"; it
+// asked a struct. Sharing the format makes drift a compile-coupled failure.
+//
+// internal/store cannot import cmd/tierd, so the constant lives on this side of the
+// dependency edge — where the values it formats already live.
+const EmbeddedPriceStampFormat = "price table: embedded default (version %d, %s, %d models)"
+
 // activePriceTableInfo describes the currently-loaded table (logged at startup).
 var activePriceTableInfo PriceTableInfo
 
@@ -212,6 +231,33 @@ const (
 	anthropicReadMult    = 0.10
 	openAIReadMult       = 0.50
 )
+
+// usableRate reports whether a per-million-token price is a usable money-shaped
+// number: strictly positive, FINITE, and inside the same magnitude bound every
+// other money entry point in this system enforces (MaxCostUSD — see money.go).
+//
+// The finiteness half is the part that is easy to miss, and the reason this is a
+// named predicate rather than an inline `> 0`. YAML decodes `.inf` and `.nan`
+// straight into a float64, and the old `<= 0` guard caught NEITHER:
+//
+//   - `.nan` PASSES `<= 0` (every ordered comparison with NaN is false), and a
+//     NaN rate makes ComputeCost's product NaN, which DollarsToMicro pins to 0 —
+//     every call on that route then costs $0. That is precisely the "$0 table"
+//     hazard the guard below says it exists to prevent, walking through it.
+//   - `.inf` (and any absurd magnitude like 1e300) saturates cost_micro to
+//     MaxInt64, and two such rows overflow any SUM(cost_micro) aggregate.
+//
+// Both comparisons are false for NaN, so `f > 0 && f <= MaxCostUSD` rejects the
+// whole non-finite family without a separate math.IsNaN/IsInf call; it is spelled
+// out here because the omission, not the arithmetic, was the bug.
+func usableRate(f float64) bool { return f > 0 && f <= MaxCostUSD }
+
+// usableMult is usableRate for a cache multiplier, where 0 is legal and means
+// "inherit the provider default" (see providerDefaultMults). The old guard was
+// `>= 0`, which NaN also fails to trip — a NaN multiplier prices every cached
+// token at $0 by the same route as a NaN rate, so the multipliers are bounded on
+// the same terms rather than being the loose half of the pair.
+func usableMult(f float64) bool { return f >= 0 && f <= MaxCostUSD }
 
 // providerDefaultMults returns the (read, write5m, write1h) cache multipliers a
 // model of the given provider bills when it carries no explicit override in
@@ -264,11 +310,19 @@ func parsePriceTable(data []byte) (map[string]modelPrice, PriceTableInfo, error)
 		// fallback itself free. input_per_m is required for every model;
 		// output_per_m is required for non-combined models (combined entries bill
 		// every token class at input_per_m, so their output_per_m is unused).
-		if e.InputPerM <= 0 {
-			return nil, PriceTableInfo{}, fmt.Errorf("model %q: input_per_m must be > 0, got %v", name, e.InputPerM)
+		//
+		// usableRate, not `> 0`: the bound is finite AND <= MaxCostUSD, because
+		// `.nan` slips past a bare positivity test and prices the route at $0 —
+		// re-opening the very hazard this paragraph describes. See usableRate.
+		// #113 is what makes this load-bearing rather than hygiene: no
+		// subscription-priced row ships in the embedded table, so the comparable
+		// rate for a flat-fee route is ALWAYS hand-authored, and it lands in the
+		// TIER denominator.
+		if !usableRate(e.InputPerM) {
+			return nil, PriceTableInfo{}, fmt.Errorf("model %q: input_per_m must be > 0, finite, and <= %g, got %v", name, MaxCostUSD, e.InputPerM)
 		}
-		if !e.Combined && e.OutputPerM <= 0 {
-			return nil, PriceTableInfo{}, fmt.Errorf("model %q: output_per_m must be > 0 for a non-combined model, got %v", name, e.OutputPerM)
+		if !e.Combined && !usableRate(e.OutputPerM) {
+			return nil, PriceTableInfo{}, fmt.Errorf("model %q: output_per_m must be > 0, finite, and <= %g for a non-combined model, got %v", name, MaxCostUSD, e.OutputPerM)
 		}
 		// Long-context tier (#4): the three over-tier fields are all-or-nothing.
 		// A partial spec (a threshold with no premium rate, or a premium rate with
@@ -283,11 +337,14 @@ func parsePriceTable(data []byte) (map[string]modelPrice, PriceTableInfo, error)
 			if e.ContextThreshold <= 0 {
 				return nil, PriceTableInfo{}, fmt.Errorf("model %q: context_threshold must be > 0 when an over-tier rate is set, got %d", name, e.ContextThreshold)
 			}
-			if e.InputPerMOver <= 0 {
-				return nil, PriceTableInfo{}, fmt.Errorf("model %q: input_per_m_over must be > 0 when context_threshold is set, got %v", name, e.InputPerMOver)
+			// Same usableRate bound as the base rates: the over-tier IS a rate, and
+			// a long-context request re-prices at it, so a `.nan` here is a $0 route
+			// for exactly the largest calls.
+			if !usableRate(e.InputPerMOver) {
+				return nil, PriceTableInfo{}, fmt.Errorf("model %q: input_per_m_over must be > 0, finite, and <= %g when context_threshold is set, got %v", name, MaxCostUSD, e.InputPerMOver)
 			}
-			if e.OutputPerMOver <= 0 {
-				return nil, PriceTableInfo{}, fmt.Errorf("model %q: output_per_m_over must be > 0 when context_threshold is set, got %v", name, e.OutputPerMOver)
+			if !usableRate(e.OutputPerMOver) {
+				return nil, PriceTableInfo{}, fmt.Errorf("model %q: output_per_m_over must be > 0, finite, and <= %g when context_threshold is set, got %v", name, MaxCostUSD, e.OutputPerMOver)
 			}
 		}
 		// Per-model cache multipliers (#122). A negative multiplier is a
@@ -296,14 +353,18 @@ func parsePriceTable(data []byte) (map[string]modelPrice, PriceTableInfo, error)
 		// Any multiplier on a combined entry is rejected — the combined path bills
 		// every class at the single rate and would silently ignore it (mirrors the
 		// over-tier rejection above).
-		if e.CacheReadMult < 0 {
-			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_read_mult must be >= 0, got %v", name, e.CacheReadMult)
+		//
+		// usableMult, not `< 0`: a multiplier is half of a money product, so it is
+		// bounded on the same terms as the rate it multiplies. `.nan` passes a bare
+		// `>= 0` and zeroes every cached token's cost.
+		if !usableMult(e.CacheReadMult) {
+			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_read_mult must be >= 0, finite, and <= %g, got %v", name, MaxCostUSD, e.CacheReadMult)
 		}
-		if e.CacheWrite5mMult < 0 {
-			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_write_5m_mult must be >= 0, got %v", name, e.CacheWrite5mMult)
+		if !usableMult(e.CacheWrite5mMult) {
+			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_write_5m_mult must be >= 0, finite, and <= %g, got %v", name, MaxCostUSD, e.CacheWrite5mMult)
 		}
-		if e.CacheWrite1hMult < 0 {
-			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_write_1h_mult must be >= 0, got %v", name, e.CacheWrite1hMult)
+		if !usableMult(e.CacheWrite1hMult) {
+			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache_write_1h_mult must be >= 0, finite, and <= %g, got %v", name, MaxCostUSD, e.CacheWrite1hMult)
 		}
 		if e.Combined && (e.CacheReadMult != 0 || e.CacheWrite5mMult != 0 || e.CacheWrite1hMult != 0) {
 			return nil, PriceTableInfo{}, fmt.Errorf("model %q: cache multipliers (cache_read_mult/cache_write_5m_mult/cache_write_1h_mult) are not supported on a combined entry", name)
@@ -697,9 +758,12 @@ func warnUnknownModel(norm string) {
 	if !claimUnknownModelWarn(norm) {
 		return
 	}
+	// logsafe.Str, not %q — and the difference here is the LENGTH CAP, not the
+	// escaping. See warnHeuristicModel for the full reasoning; both warnings share
+	// the one sink and must share the one barrier.
 	unknownModelLogger.Load().Printf(
-		"WARN: model %q not in the price table; priced by a GUESS at the self-hosted-medium reference rate ($0.50/M combined), not an audited rate. Add an entry to prices.yaml (or your --prices override) for accurate cost.",
-		norm,
+		"WARN: model %s not in the price table; priced by a GUESS at the self-hosted-medium reference rate ($0.50/M combined), not an audited rate. Add an entry to prices.yaml (or your --prices override) for accurate cost.",
+		logsafe.Str(norm),
 	)
 }
 
@@ -717,9 +781,22 @@ func warnUnknownModel(norm string) {
 // collide across the two, and both paths share one distinct-model cap (#286).
 // The marker guard mirrors warnUnknownModel — a synthetic/placeholder string
 // (empty, or containing <>) never warns even if it happens to embed a param
-// count. The model name is upstream-controlled, so it is rendered with %q and
-// never interpolated raw; class is one of our own self-hosted-* constants and is
-// safe to print plainly.
+// count. class is one of our own self-hosted-* constants and is safe to print
+// plainly.
+//
+// 🔴 THE MODEL NAME GOES THROUGH logsafe.Str, AND THE REASON IS THE CAP, NOT THE
+// ESCAPING (#321 review, 2026-08-04). An earlier revision of this comment said
+// the name "is rendered with %q and never interpolated raw" and treated that as
+// sufficient. It is not, and this is the one place in the tree where it matters
+// most: prices.go's import of plain "log" (line 7) is the ONLY one in any
+// non-test file, so this sink does NOT get slog's handling — and while %q does
+// escape CR/LF, nothing here bounded the LENGTH. An upstream model string of a
+// megabyte produced a megabyte log record.
+//
+// The dedup gate above bounds how OFTEN this fires per distinct model; logsafe
+// bounds how BIG each one is. Neither substitutes for the other: #286's cap is
+// on the number of distinct models, so a single model with a huge name floods
+// through it unimpeded.
 func warnHeuristicModel(norm, class string) {
 	if norm == "" || strings.ContainsAny(norm, "<>") {
 		return
@@ -728,8 +805,8 @@ func warnHeuristicModel(norm, class string) {
 		return
 	}
 	unknownModelLogger.Load().Printf(
-		"WARN: model %q not in the price table; priced by a GUESS from the size-class heuristic at the %s reference rate (an estimate, not an audited rate). Add an audited entry to prices.yaml (or your --prices override) for accurate cost.",
-		norm, class,
+		"WARN: model %s not in the price table; priced by a GUESS from the size-class heuristic at the %s reference rate (an estimate, not an audited rate). Add an audited entry to prices.yaml (or your --prices override) for accurate cost.",
+		logsafe.Str(norm), class,
 	)
 }
 
@@ -934,6 +1011,26 @@ func modelIsExactHost(host, model string) bool {
 // sentinel, so it never consults a host-qualified entry.
 func modelIsExact(model string) bool {
 	return modelIsExactHost("", model)
+}
+
+// IsAuditedRate is the EXPORTED form of modelIsExactHost, for callers outside
+// this package that need the real audited-vs-guessed signal ComputeCostHost
+// computes internally (as `exact`/`guessed`) but does not return — only the
+// resolved billing_mode. billing_mode is NOT a substitute for this (#465
+// review finding): a self-hosted entry's billing_mode is always
+// self_hosted_amortized whether it was reached by an EXACT operator-provided
+// key or by the size-class GUESS/flat fallback, and a --prices override
+// could in principle set billing_mode: per_token on the very fallback key
+// ComputeCostHost guesses through. A caller that reports "this cost is
+// audited" (e.g. `tierd score-log`, #465) must call this, not compare
+// billing_mode against BillingSelfHostedAmortized.
+//
+// True means (host, model) resolved to a real price-table entry — a
+// host-qualified rate (#300) or a model-only rate — with no WARN, no
+// size-class heuristic, no flat fallback. False means ComputeCostHost priced
+// it as a GUESS. host="" is the host-blind form (see ComputeCost).
+func IsAuditedRate(host, model string) bool {
+	return modelIsExactHost(host, model)
 }
 
 // PremiumInputRateThresholdPerM is the list input rate ($/M tokens) at or above

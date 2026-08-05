@@ -32,6 +32,13 @@ func seedDeveloperPII(t *testing.T, db *DB, dev string) {
 			[]any{int64(1), dev, "issue-" + dev, "ci_pass", dev + ":sha1", now}},
 		{`INSERT INTO quality_history (outcome_id, developer, issue_id, old_quality, new_quality, reason) VALUES (?,?,?,?,?,?)`,
 			[]any{int64(1), dev, "issue-" + dev, 1.0, 0.5, "ci_fail"}},
+		// #493: repo_repair_audit records which repositories a `tierd repair-repo`
+		// run moved this developer's stored spend into. NOTE this seed list is a
+		// PARALLEL REGISTRY to developerPIITables — a table added there without a
+		// row here fails TestEraseDeveloper_RemovesAllPIITables loudly, which is
+		// how the omission is meant to be caught. Keep them in step.
+		{`INSERT INTO repo_repair_audit (repair_id, developer, from_repo, to_repo, row_count, cost_micro_sum, tool_version) VALUES (?,?,?,?,?,?,?)`,
+			[]any{"repair-" + dev, dev, "unqualified", "acme/" + dev, int64(1), int64(1000), "tierd-test"}},
 	}
 	for _, s := range stmts {
 		if _, err := db.db.ExecContext(ctx, s.sql, s.args...); err != nil {

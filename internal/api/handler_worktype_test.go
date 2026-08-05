@@ -193,7 +193,12 @@ func TestGetScores_WorkTypeSegments_TeamMode_NoNameLeak(t *testing.T) {
 	if teamNames["solo"] {
 		t.Errorf("sub-k 'solo' team must NOT appear as a named cohort; got %v", teamNames)
 	}
-	if !teamNames[scoring.OtherCohort] {
-		t.Errorf("sub-k cohort must collapse into %q; got %v", scoring.OtherCohort, teamNames)
+	// #593: within a segment the sub-k cohort is WITHHELD, not published as "other".
+	// A per-type segment is a sharper narrowing lever than the whole window — asking
+	// for `security` or `incident` work is a cheap way to shrink a cohort — so the
+	// residual floor applies per segment, and each segment's own total goes with it.
+	if teamNames[scoring.OtherCohort] {
+		t.Errorf("sub-k cohort in a work-type segment must be withheld, not published as %q; got %v",
+			scoring.OtherCohort, teamNames)
 	}
 }

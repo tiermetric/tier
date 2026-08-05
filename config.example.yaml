@@ -126,6 +126,67 @@ aggregation: team
 # Flag: --k-anonymity   Env: TIER_K_ANONYMITY
 k_anonymity: 5
 
+# Flat monthly FEES for subscription-billed model routes (#113). Config-only;
+# there is no CLI flag.
+#
+# A subscription route (Ollama Cloud MAX and friends) has no per-token price, so
+# TIER splits its two money facts across two artifacts and gives each exactly one
+# truth:
+#
+#   the PRICE TABLE says "this route is subscription-billed, and its tokens are
+#   worth this comparable list rate" — an entry with `billing_mode: subscription`
+#   and ordinary input_per_m / output_per_m rates. That valuation is what enters
+#   the TIER denominator, per call, at ingest.
+#
+#   THIS BLOCK says "and here is the fee we actually pay for it". The fee enters
+#   ONLY the actual-paid side of Spend Leverage, delta-posted into
+#   org_actual_spend under source `subscription:<route_prefix>`. It NEVER enters
+#   the TIER denominator.
+#
+# Steve's ruling of 2026-07-02 (#113) chose this list-rate INVERSION over
+# amortizing the fee across the window's tokens, because an amortized rate is
+# non-local: the same session would cost different dollars depending on how much
+# a COLLEAGUE used the route and on which `?since=` window you asked for.
+#
+# No `billing_mode: subscription` row ships in the embedded price table, so this
+# block is empty by default and `tierd serve` starts with subscriptions off. If
+# you configure one, `serve` REFUSES TO START unless route_prefix matches at
+# least one subscription entry in the active table — a fee posted for a route
+# TIER does not price as a subscription would silently inflate actual-paid.
+#
+# Example (mirrors the dogfood plan; the price-table half lives in your
+# prices_file override — see docs/open-weights-capture.md §5):
+#   subscriptions:
+#     - route_prefix: "glm-5.2@ollama.com"  # prefix of a PRICE-TABLE KEY, lowercase
+#       plan: "max"                          # informational; appears in logs
+#       org: "acme"                          # org_actual_spend key the fee posts under
+#       monthly_fee_usd: 100.00              # the real flat fee, per calendar month
+#       active_since: "2026-06"              # optional: backfill unposted months
+#
+# active_since is the ONLY backfill control (#155). Absent, only the CURRENT
+# period is reconciled — which is correct for a server that never stops, and
+# leaves a hole for every month tierd was offline. Set it to the month the plan
+# started and the startup pass FILLS IN every month that has no posting yet, at
+# the configured fee; months already posted are left exactly as they are, so this
+# is safe to leave set forever. Changing monthly_fee_usd later moves only the
+# CURRENT month — a month that already has a posting is never restated.
+#
+# ⚠️ A month with NO posting is filled in at TODAY'S fee. This block carries one
+# fee and no per-period history, so a first run cannot know what the plan cost
+# back then: if it cost $100 until June and $200 now, active_since: "2026-01"
+# posts $200 for EVERY one of those months and understates Jan–Jun Spend Leverage
+# by roughly 2x. tierd logs a WARN naming each month it backfills; correct any
+# affected month with POST /api/v1/org_actual_spend.
+#
+# 🔴 route_prefix and org are the POSTING IDENTITY. Fee rows are recorded under
+# `subscription:<route_prefix>` for that org, and that pair is how a re-run knows
+# a month is already covered. Editing either starts a NEW identity: the next
+# startup sees no postings under the new key and posts the whole history again,
+# while the rows under the old key stay put — so the org total double-counts.
+# If you must rename one, delete or correct the old org_actual_spend rows in the
+# same change.
+subscriptions: []
+
 proxy:
   # Upstream Anthropic API URL for the /anthropic/ reverse proxy. Set to ""
   # to disable the Anthropic proxy route.
@@ -136,6 +197,21 @@ proxy:
   # to disable the OpenAI proxy route.
   # Flag: --openai-target
   openai_target: "https://api.openai.com"
+
+  # Upstream Gemini API URL for the /gemini/ reverse proxy (#459 task 4). Set to
+  # "" to disable the Gemini proxy route. The parser has existed since v1 (#1),
+  # extended by #122 (thinking/cache tokens) and #300 (host stamping); this is
+  # the MOUNT, so a Gemini client pointed at TIER before it landed 404'd.
+  # Structurally complete, not yet live-verified (see docs/how-it-works.md).
+  #
+  # Gemini's REST API accepts the API key EITHER as a `?key=` query parameter
+  # OR as the `x-goog-api-key` header — both work through this proxy. PREFER
+  # the header form on your client: tierd's own request logging is path-only
+  # (never the query string), but any infrastructure IN FRONT of tierd
+  # (nginx/Caddy access logs, a load balancer, Cloudflare) that logs the
+  # request line would capture a `?key=` value verbatim.
+  # Flag: --gemini-target
+  gemini_target: "https://generativelanguage.googleapis.com"
 
 watch:
   # Git repositories to tail Claude Code JSONL for (live ingestion). An empty

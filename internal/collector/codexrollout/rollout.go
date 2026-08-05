@@ -3,11 +3,22 @@
 //
 // It is the Codex analogue of the Claude Code JSONL collector: local session
 // files, cwd-based repo attribution, per-call token events, no proxy in front.
-// It is also the ONLY path that captures Codex at all — Codex speaks the OpenAI
-// *Responses* API (input_tokens / output_tokens), while the reverse proxy's
-// OpenAI parser reads the *Chat Completions* usage shape (prompt_tokens /
-// completion_tokens), so a Codex response through the proxy yields no token
-// event whatsoever (#463). Until this collector, TIER could not measure Codex.
+// It is also the path that captures Codex AS CODEX IS ACTUALLY RUN, and the
+// only one verified against real Codex data. Codex speaks the OpenAI
+// *Responses* API (input_tokens / output_tokens); until #459 task 2 the reverse
+// proxy's OpenAI parsers read only the *Chat Completions* usage shape
+// (prompt_tokens / completion_tokens), so a Codex response through the proxy
+// yielded no token event whatsoever (#463), and until this collector TIER could
+// not measure Codex at all. The proxy now parses the Responses shape too, but
+// reaching it requires deliberately pointing Codex at the proxy with API-key
+// auth (ChatGPT-subscription auth never traverses it) and no live traffic has
+// ever exercised it — so this remains the supported path.
+//
+// This package's containment checks are also the EVIDENCE behind the proxy
+// parser's token semantics: checkContainment asserts total == input + output
+// alongside cached ⊆ input on real captured sessions, which is what establishes
+// that the Responses API's cached count sits inside its input count rather than
+// beside it. See internal/proxy's openAIResponsesUsage.
 //
 // # The load-bearing correctness rule: difference, never sum
 //

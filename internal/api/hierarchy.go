@@ -320,6 +320,27 @@ func validateHierarchyRow(developer, team, division, org string) (store.Hierarch
 		len(division) > maxIdentifierLen || len(org) > maxIdentifierLen {
 		return zero, fmt.Errorf("developer, team, division, and org must each be <= %d chars", maxIdentifierLen)
 	}
+	// 🔴 #619 RED, and the one the first pass MISSED. This looks like org-structure
+	// admin rather than a spend write, which is exactly why it was overlooked — but
+	// upsertHierarchyTx does not merely file a label. It also opens a period_membership
+	// SEAT backdated to '0000-01' ("active since the beginning of time"), and NOTHING
+	// downstream excludes the sentinel from a per-developer aggregate: every
+	// IsUnattributed call site in this package is on issue_id, never on developer.
+	//
+	// So one authenticated write — enrolling "unattributed" into a rival team — drags
+	// the ENTIRE unattributed pool (~72% of dogfood spend) into that team's denominator
+	// and craters its TIER, without touching a single cost row. It is the mirror image
+	// of the self-dealing vector #619 is about: the same forged identity, aimed
+	// outward. Sabotage does not need the sentinel to be YOUR denominator, only
+	// somebody's.
+	//
+	// Enforced HERE rather than at the two handlers so PUT (single) and POST (bulk)
+	// are covered by one edit and cannot drift apart, and so the bulk import stays
+	// all-or-nothing: it validates every row before writing any, so a forged row
+	// rejects the whole batch instead of landing a partial hierarchy.
+	if err := validateDeveloper(developer); err != nil {
+		return zero, err
+	}
 	return store.HierarchyRow{Developer: developer, Team: team, Division: division, Org: org}, nil
 }
 
@@ -353,10 +374,13 @@ func (h *Handler) resolveCanon(ctx context.Context) (func(string) string, error)
 // SIEM parsing it line by line, sees a record nobody wrote.
 //
 // The barrier lives in the shared internal/logsafe package (#321): it STRIPS
-// "\r"/"\n" — the transformation CodeQL recognizes as a sanitizer, which %q alone
-// is not credited for — then %q-quotes the remainder and caps the length. This
-// wrapper is retained so the api call sites stay unchanged. Sibling of logsafe.Str,
-// which the SHA/developer string sinks in this package now use.
+// "\r"/"\n", then %q-quotes the remainder and caps the length. This wrapper is
+// retained so the api call sites stay unchanged. Sibling of logsafe.Str, which the
+// SHA/developer string sinks in this package now use.
+//
+// See logsafe's package doc for why the strip is the primary barrier and %q the
+// backstop — the reasoning is subtler than it looks, and this comment previously
+// stated it wrongly.
 func logSafeErr(err error) string {
 	return logsafe.Err(err)
 }

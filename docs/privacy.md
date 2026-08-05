@@ -80,10 +80,12 @@ transmission**:
   JSONL file (`watcher_checkpoint`) so a restart resumes tailing from the last
   parsed byte instead of re-reading each file from the start. Each row's
   `metadata` column holds a small JSON blob describing the session being tailed:
-  the **absolute working-directory path** (`cwd`), the **git branch**, and the
-  **session id** (a UUID), plus the session start time, the first-observed model
-  name, and an internal parse-sequence counter. Nothing here is captured unless
-  you run the watcher; a one-shot `tierd score` writes no checkpoint.
+  the **absolute working-directory path** (`cwd`), the **git branch** (and, when
+  an isolated-agent session inherits one, the most recent human-named git branch
+  seen so far in that file), and the **session id** (a UUID), plus the session
+  start time, the first-observed model name, and an internal parse-sequence
+  counter. Nothing here is captured unless you run the watcher; a one-shot
+  `tierd score` writes no checkpoint.
 - **Raw GitHub webhook payloads** (**only when the GitHub webhook path is
   enabled** — i.e. you set `webhook_secret` / `TIER_WEBHOOK_SECRET` and point
   GitHub deliveries at `POST /webhook/github`; that endpoint is fail-closed and
@@ -143,10 +145,65 @@ data-subject access or erasure request without hand-editing the database (#184):
   | `period_membership` | the developer's org-membership windows |
   | `quality_events` | per-developer CI/revert quality signals |
   | `quality_history` | per-developer quality-transition log |
+  | `repo_repair_audit` | which repositories a `tierd repair-repo` run moved this developer's stored spend into |
   | `developer_alias` | the developer's alias→canonical mappings |
 
-  It returns per-table deleted-row counts and is **idempotent** (a second call, or
-  a call for an unknown developer, deletes nothing and returns `404`).
+  The companion `repo_repair_row_audit` ledger is **not** listed because it holds
+  no personal data: only a repair id, a row id, and the before/after repository
+  slug. It deliberately does not copy the resolving `session_id`, precisely so
+  that an audit record designed to outlive the row it describes cannot become
+  personal data that survives an erasure.
+
+  **All five audit ledgers** — `reprice_audit`, `reprice_row_audit`,
+  `repo_repair_audit`, `repo_repair_row_audit`, `cost_correction_audit` — are
+  **append-only by construction: no code path mutates them; the tables
+  themselves are not protected against direct database access.** One of them
+  carries more than that, and it is narrow: `cost_correction_audit` (the
+  money-rewrite ledger) refuses `UPDATE` at the schema level, so no code path
+  can **silently** rewrite a recorded correction — a mutation would have to
+  drop the trigger first. `DELETE` is deliberately **not** refused on any of them — erasure
+  (below) and future retention/GC are lawful deletes, and no database
+  constraint can tell a lawful delete from tampering. None of this is
+  tamper-proofing against someone holding the database file.
+
+  The `cost_correction_audit` ledger (#346, the sanctioned `POST /costs`
+  cost-correction override) follows the SAME pattern and is **also not
+  listed**: it holds no `developer` column, and — after an earlier draft got
+  this backwards — deliberately does **not** copy the correction's
+  `idempotency_key` either, precisely because that field is often
+  client-chosen and could embed personal data (an email, a ticket
+  reference), and this ledger is designed to outlive the row it describes.
+  It carries only a server-generated `token_event_id` (which simply stops
+  resolving once the row it names is erased or pruned — correct, not a bug)
+  plus `old_cost_micro`/`new_cost_micro` and the operator-supplied `actor`/
+  `reason` that explain the correction. `actor`/`reason` name the OPERATOR
+  who made the correction, not the data subject whose spend was corrected —
+  the same third-party-identifier class as the `webhook_payloads` residual
+  below — so they are not erased by this endpoint. Operators must not put a
+  data subject's own name or email in `reason`; nothing technical enforces
+  that today.
+
+  ⚠️ **`actor` is a self-asserted claim, not a verified identity — the audit
+  trail records who the caller says they are.** It is unvalidated free text
+  the caller chooses (length-capped only), and nothing checks it against the
+  credential that made the request. Nothing can today: `POST /api/v1/costs` is
+  gated — when a token is configured at all — by a single global write token
+  with no subject, so there is no
+  principal for the server to record instead. Treat every `actor` value as a
+  claim to be corroborated, not as an attribution. Binding it to a verified
+  principal requires the identity layer tracked as #65.
+
+  The same holds for the corrected row's `developer`: nothing binds the
+  authenticating principal to it either, which is the half that matters for
+  data accuracy (Art. 5(1)(d)). What *is* bounded is **reach** —
+  `POST /api/v1/costs` forces `source="api"` and the correction path compares
+  it, so an override can only ever touch a manually imported row.
+  Automatically captured spend cannot be corrected through this endpoint at
+  all.
+
+  The erasure endpoint returns per-table deleted-row counts and is
+  **idempotent** (a second call, or a call for an unknown developer, deletes
+  nothing and returns `404`).
 
 - **Access (DSAR)** — `GET /api/v1/developer/{id}/export` returns every stored
   row for the same resolved identifier set as JSON — the portable artifact you

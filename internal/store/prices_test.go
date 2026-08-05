@@ -526,6 +526,59 @@ func TestComputeCostWarnsOnUnknownModel(t *testing.T) {
 	}
 }
 
+// TestUnknownModelWarnIsLengthBounded pins the #321-review finding on this sink,
+// which is a DIFFERENT bound from the one #286 pins below.
+//
+// #286 caps how many DISTINCT models get a WARN. Nothing capped how BIG one WARN
+// could be, and this sink has no fallback protection: prices.go's `import "log"`
+// is the only one in any non-test file in the tree, so these two warnings never
+// touch slog. An upstream model string of a megabyte produced a megabyte record.
+//
+// %q was never the missing piece — it does escape CR/LF, so this was a flood and
+// not a forgery — which is exactly why it survived review for so long. The fix is
+// logsafe.Str, whose cap bounds the RENDERED width.
+//
+// GUARD COVERAGE: revert either warnUnknownModel or warnHeuristicModel to
+// `%q, norm` and this test fails on the corresponding subtest.
+func TestUnknownModelWarnIsLengthBounded(t *testing.T) {
+	cases := []struct {
+		name string
+		// model picks the warn path: the size-class heuristic fires when the
+		// name embeds a parameter count, the flat fallback otherwise.
+		model string
+	}{
+		{name: "flat GUESS fallback", model: "acme-llm-" + strings.Repeat("A", 100_000)},
+		{name: "size-class heuristic", model: "acme-70b-" + strings.Repeat("A", 100_000)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetUnknownModelDedupe(t)
+			buf := captureUnknownModelLogger(t)
+
+			computeCostUSD(tc.model, CostUsage{Input: 1_000_000})
+
+			got := buf.String()
+			if got == "" {
+				t.Fatalf("no WARN emitted for %q — the test is not exercising the path it claims", tc.name)
+			}
+			// The whole record, not just the interpolated field: the sentence
+			// around it is a fixed ~250 bytes, so a generous ceiling still fails
+			// hard on an uncapped 100 KB name.
+			if len(got) > 1024 {
+				t.Errorf("WARN record is %d bytes for a 100KB model name; the sink is not length-bounded.\n"+
+					"prices.go imports plain \"log\", so slog's handling does not apply here — "+
+					"route the model name through logsafe.Str.", len(got))
+			}
+			// Control: the barrier must still identify the model, or the WARN
+			// cannot do the job it exists for (telling an operator what to add to
+			// prices.yaml).
+			if !strings.Contains(got, "acme-") {
+				t.Errorf("the cap destroyed the diagnostic: %q", got)
+			}
+		})
+	}
+}
+
 // TestUnknownModelWarnSetIsBounded pins #286: the distinct-model WARN dedupe set
 // is capped, so an adversarial or noisy stream of never-before-seen model strings
 // cannot grow it without bound (a memory-leak / WARN-flood vector). Past the cap,

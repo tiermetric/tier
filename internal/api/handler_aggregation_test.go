@@ -67,22 +67,34 @@ func TestGetScores_TeamMode_NoDeveloperNames(t *testing.T) {
 	}
 }
 
-// TestGetScores_TeamMode_SubKCollapsesToOther_TotalsPreserved proves a sub-k
-// cohort collapses into "other" with its cost/outcomes preserved, and that the
-// team-mode grand total equals the developer-mode grand total (no data lost).
-func TestGetScores_TeamMode_SubKCollapsesToOther_TotalsPreserved(t *testing.T) {
-	// Build a fixture once, read it in developer mode and team mode.
+// TestGetScores_TeamMode_SubKResidualIsWithheld_WithTheTotal proves the #593
+// contract, which REPLACES the "totals preserved" contract this test used to assert.
+//
+// 🔴 WHAT CHANGED AND WHY. This test previously proved that a sub-k cohort collapses
+// into "other" with its cost/outcomes PRESERVED, and that the team-mode grand total
+// equals the developer-mode grand total. Both halves were true, and together they were
+// the disclosure: with "small" folded into a visible "other" row its 2-person figures
+// were published outright, and even suppressing that row would have left
+// total - big = small, exactly.
+//
+// Steve ruled option A (2026-08-03): withhold the residual AND every unfloored
+// aggregate over the same population. Totals no longer reconcile in a suppressed
+// response, and the response says so rather than leaving a consumer to discover the
+// arithmetic does not close.
+func TestGetScores_TeamMode_SubKResidualIsWithheld_WithTheTotal(t *testing.T) {
 	seed := func(h *Handler, db *store.DB) {
-		// team "big": 3 contributing → named.
+		// team "big": 3 contributing -> named.
 		seedTeamMember(t, db, "b1", "i-b1", "big", 10, 3)
 		seedTeamMember(t, db, "b2", "i-b2", "big", 10, 3)
 		seedTeamMember(t, db, "b3", "i-b3", "big", 10, 3)
-		// team "small": 2 contributing → collapses to "other".
+		// team "small": 2 contributing -> residual, and 2 < k=3 so it is WITHHELD.
 		seedTeamMember(t, db, "s1", "i-s1", "small", 7, 5)
 		seedTeamMember(t, db, "s2", "i-s2", "small", 7, 5)
 	}
 
-	// Developer-mode grand total (the ground truth).
+	// Developer mode is the ground truth AND the control arm: it must still show
+	// everything, or the assertions below would pass against a build that simply lost
+	// the data.
 	hDev, dbDev := newTestHandler(t)
 	seed(hDev, dbDev)
 	_, devBody := doRequest(t, hDev, http.MethodGet, "/api/v1/scores", nil)
@@ -91,10 +103,9 @@ func TestGetScores_TeamMode_SubKCollapsesToOther_TotalsPreserved(t *testing.T) {
 		t.Fatalf("dev unmarshal: %v", err)
 	}
 	if devResp.Total == nil {
-		t.Fatalf("developer-mode total missing")
+		t.Fatalf("developer-mode total missing — the control arm is broken")
 	}
 
-	// Team-mode read of the identical fixture.
 	hTeam, dbTeam := newTeamModeHandler(t, 3)
 	seed(hTeam, dbTeam)
 	_, teamBody := doRequest(t, hTeam, http.MethodGet, "/api/v1/scores", nil)
@@ -103,38 +114,41 @@ func TestGetScores_TeamMode_SubKCollapsesToOther_TotalsPreserved(t *testing.T) {
 		t.Fatalf("team unmarshal: %v", err)
 	}
 
-	// "small" must NOT be named; "other" and "big" present.
 	if teamPresent(teamResp.Teams, "small") {
 		t.Errorf("sub-k team 'small' must not be named; got %v", teamJSONNames(teamResp.Teams))
 	}
-	if !teamPresent(teamResp.Teams, "other") || !teamPresent(teamResp.Teams, "big") {
-		t.Fatalf("expected 'big' + 'other'; got %v", teamJSONNames(teamResp.Teams))
+	if !teamPresent(teamResp.Teams, "big") {
+		t.Errorf("k-clearing team 'big' must still be named; got %v", teamJSONNames(teamResp.Teams))
 	}
-	other := teamByName(teamResp.Teams, "other")
-	if other.WeightedPoints != 10 || other.TotalCostUSD != 14 {
-		t.Errorf("'other' = points %v cost %v, want points 10 cost 14 (small's s1+s2 preserved, not dropped)",
-			other.WeightedPoints, other.TotalCostUSD)
+	// The residual itself is withheld — publishing it would expose the 2-person cohort.
+	if teamPresent(teamResp.Teams, "other") {
+		t.Errorf("a sub-k residual must be WITHHELD, not published as 'other'; got %v",
+			teamJSONNames(teamResp.Teams))
 	}
-
-	// Totals preserved: team-mode grand total == developer-mode grand total.
-	if teamResp.Total == nil {
-		t.Fatalf("team-mode total missing")
+	// 🔴 And the total must go with it. Leaving it would make the suppression
+	// cosmetic: total(cost 44) - big(cost 30) = 14 = small's cost, to the cent.
+	if teamResp.Total != nil {
+		t.Errorf("grand total must be withheld alongside a suppressed residual — it is the "+
+			"differencing channel; got %+v", teamResp.Total)
 	}
-	if teamResp.Total.TotalCostUSD != devResp.Total.TotalCostUSD ||
-		teamResp.Total.WeightedPoints != devResp.Total.WeightedPoints {
-		t.Errorf("team-mode total (cost %v, points %v) != developer-mode total (cost %v, points %v): suppression must not change totals",
-			teamResp.Total.TotalCostUSD, teamResp.Total.WeightedPoints,
-			devResp.Total.TotalCostUSD, devResp.Total.WeightedPoints)
+	// ...as must the composition sidecar, which restates the same window sum.
+	if teamResp.CostComposition != nil {
+		t.Errorf("cost_composition must be withheld alongside a suppressed residual; got %+v",
+			teamResp.CostComposition)
 	}
-	// And the sum of the visible team rows must equal the grand total (nothing lost).
-	var sumCost, sumPoints float64
-	for _, ts := range teamResp.Teams {
-		sumCost += ts.TotalCostUSD
-		sumPoints += ts.WeightedPoints
+	// And the suppression must be DECLARED, so it is distinguishable from "no data".
+	if teamResp.DataQuality == nil || teamResp.DataQuality.KAnonSuppressed == nil {
+		t.Fatalf("suppression must be declared in data_quality; got %+v", teamResp.DataQuality)
 	}
-	if sumCost != teamResp.Total.TotalCostUSD || sumPoints != teamResp.Total.WeightedPoints {
-		t.Errorf("sum of team rows (cost %v, points %v) != grand total (cost %v, points %v)",
-			sumCost, sumPoints, teamResp.Total.TotalCostUSD, teamResp.Total.WeightedPoints)
+	ks := teamResp.DataQuality.KAnonSuppressed
+	if ks.Developers != 2 {
+		t.Errorf("kanon_suppressed.developers = %d, want 2 (small's s1+s2)", ks.Developers)
+	}
+	if ks.KAnonymity != 3 {
+		t.Errorf("kanon_suppressed.k_anonymity = %d, want the EFFECTIVE floor 3", ks.KAnonymity)
+	}
+	if !ks.WithheldTotal || !ks.WithheldCostComposition {
+		t.Errorf("kanon_suppressed must state what else was withheld; got %+v", ks)
 	}
 }
 
@@ -212,9 +226,18 @@ func TestGetScores_TeamMode_ComposesWithLowSample(t *testing.T) {
 	if teamPresent(resp.Teams, "solo") {
 		t.Errorf("one-developer team 'solo' must collapse to 'other'; got %v", teamJSONNames(resp.Teams))
 	}
-	other := teamByName(resp.Teams, "other")
-	if other == nil || other.WeightedPoints != 1 || other.TotalCostUSD != 1 {
-		t.Errorf("loner's data must be preserved in 'other' (points 1, cost 1); got %+v", other)
+	// #593: a single-developer residual is the sharpest case of all — "other" would BE
+	// the loner. Withheld, and the suppression declared. (This assertion used to
+	// require the loner's data be preserved in 'other', i.e. published.)
+	if teamByName(resp.Teams, "other") != nil {
+		t.Errorf("a 1-developer residual must be withheld, not published as 'other'; got %v",
+			teamJSONNames(resp.Teams))
+	}
+	if resp.DataQuality == nil || resp.DataQuality.KAnonSuppressed == nil {
+		t.Fatal("suppression must be declared")
+	}
+	if got := resp.DataQuality.KAnonSuppressed.Developers; got != 1 {
+		t.Errorf("kanon_suppressed.developers = %d, want 1", got)
 	}
 }
 

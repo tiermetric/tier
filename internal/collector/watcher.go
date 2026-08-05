@@ -18,6 +18,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -241,7 +242,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			st, err := stateFromCheckpoint(cp)
 			if err != nil {
 				// Unusable row — prune it so it isn't re-logged every restart.
-				logger.Warn("watcher: pruning malformed checkpoint", "path", cp.Path, "err", err)
+				logger.Warn("watcher: pruning malformed checkpoint", "path", logsafe.Str(cp.Path), "err", err)
 				w.deleteCheckpoint(ctx, cp.Path, logger)
 				continue
 			}
@@ -441,7 +442,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 					// dir for a non-target repo is skipped so it never consumes a
 					// descriptor (#142).
 					if err := w.addRecursive(fw, ev.Name, projectsDir, targets, logger); err != nil {
-						logger.Warn("watcher: add new subdir failed", "path", ev.Name, "err", err)
+						logger.Warn("watcher: add new subdir failed", "path", logsafe.Str(ev.Name), "err", err)
 					}
 					continue
 				}
@@ -500,7 +501,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 	if err != nil {
 		// File gone or permission denied — drop any cached state and let
 		// the next CREATE event re-establish.
-		logger.Warn("watcher: stat failed", "path", path, "err", err)
+		logger.Warn("watcher: stat failed", "path", logsafe.Str(path), "err", err)
 		return parseState{}, false
 	}
 
@@ -526,7 +527,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 		prior.headLen > 0 {
 		currentCRC, currentHeadLen, fpErr := fingerprintHead(path, prior.headLen)
 		if fpErr != nil && !errors.Is(fpErr, io.EOF) {
-			logger.Warn("watcher: fingerprint failed", "path", path, "err", fpErr)
+			logger.Warn("watcher: fingerprint failed", "path", logsafe.Str(path), "err", fpErr)
 			return parseState{}, false
 		}
 		if currentHeadLen == prior.headLen && currentCRC == prior.headCRC {
@@ -544,7 +545,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 	}
 	nextCRC, nextHeadLen, fpErr := fingerprintHead(path, wantHeadLen)
 	if fpErr != nil && !errors.Is(fpErr, io.EOF) {
-		logger.Warn("watcher: fingerprint failed", "path", path, "err", fpErr)
+		logger.Warn("watcher: fingerprint failed", "path", logsafe.Str(path), "err", fpErr)
 		return parseState{}, false
 	}
 
@@ -553,7 +554,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 	// the next debounce once the writer has flushed the \n.
 	s, newOffset, err := parseSessionFileFromOffset(path, startOffset, knownMeta, true)
 	if err != nil {
-		logger.Warn("watcher: parse failed", "path", path, "err", err)
+		logger.Warn("watcher: parse failed", "path", logsafe.Str(path), "err", err)
 		return parseState{}, false
 	}
 	if s == nil {
@@ -580,18 +581,11 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 		// Foreign repo — but cache the session metadata + offset anyway
 		// so the next debounce can skip cheaply without re-reading.
 		return parseState{
-			offset:  newOffset,
-			inode:   currentInode,
-			headCRC: nextCRC,
-			headLen: nextHeadLen,
-			metadata: sessionMetadata{
-				SessionID:    s.SessionID,
-				GitBranch:    s.GitBranch,
-				CWD:          s.CWD,
-				StartTime:    s.StartTime,
-				Model:        s.Model,
-				NextParseSeq: s.NextParseSeq,
-			},
+			offset:   newOffset,
+			inode:    currentInode,
+			headCRC:  nextCRC,
+			headLen:  nextHeadLen,
+			metadata: metadataFromSummary(s),
 		}, true
 	}
 
@@ -616,7 +610,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 			// error. Logging it at WARN would scare an operator who saw
 			// "watcher: insert failed" on every tierd serve stop.
 			if errors.Is(err, context.Canceled) {
-				logger.Debug("watcher: insert cancelled on shutdown", "path", path)
+				logger.Debug("watcher: insert cancelled on shutdown", "path", logsafe.Str(path))
 				// Shutdown cancelled the insert before it landed. Returning
 				// false routes to the !ok path, which drops this path from
 				// offsets AND deletes its persisted checkpoint (#71): the
@@ -633,7 +627,7 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 			// prior offset so the next debounce retries this chunk. The
 			// store layer's MAX-on-conflict UPSERT (closes #18) absorbs the
 			// successful-then-retried events idempotently.
-			logger.Warn("watcher: insert failed", "path", path, "err", err)
+			logger.Warn("watcher: insert failed", "path", logsafe.Str(path), "err", err)
 			insertFailed = true
 		}
 	}
@@ -655,19 +649,54 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 	// All events forwarded. Cache the metadata + new offset so the next
 	// debounce can resume incrementally.
 	return parseState{
-		offset:  newOffset,
-		inode:   currentInode,
-		headCRC: nextCRC,
-		headLen: nextHeadLen,
-		metadata: sessionMetadata{
-			SessionID:    s.SessionID,
-			GitBranch:    s.GitBranch,
-			CWD:          s.CWD,
-			StartTime:    s.StartTime,
-			Model:        s.Model,
-			NextParseSeq: s.NextParseSeq,
-		},
+		offset:   newOffset,
+		inode:    currentInode,
+		headCRC:  nextCRC,
+		headLen:  nextHeadLen,
+		metadata: metadataFromSummary(s),
 	}, true
+}
+
+// metadataFromSummary builds the sessionMetadata the watcher caches between
+// debounces from a freshly parsed session.
+//
+// 🔴 IT EXISTS TO BE THE ONLY PLACE THIS STRUCT IS BUILT ON THE WATCHER PATH.
+// There were two literals — the foreign-repo cache above and the ingesting path
+// — and #490's original RED was a latch line present in one and missing from the
+// other. That defect was invisible because no test reached the literal:
+// TestSessionMetadataRoundTripsInFull's reflection completeness guard is strong,
+// but it guards checkpointFromState/stateFromCheckpoint and builds its OWN
+// literal, so a field omitted from a watcher literal never reached it.
+//
+// ⚠️ AND BE PRECISE ABOUT WHAT COLLAPSING THE LITERALS BUYS. There is one literal
+// TODAY, and TestMetadataFromSummaryCarriesEveryField reflects over ITS output —
+// so an eighth field left behind fails that test. It does NOT make the omission
+// unrepresentable: nothing forces a future third site to call this constructor,
+// and re-inlining a literal here minus a field would leave that test green. What
+// covers the two sites themselves is behavioural, one test each:
+// TestWatcher_WorktreeAgentInheritsSpawningBranchAcrossDebounce (the ingesting
+// path) and TestProcessCachesFullMetadataForAForeignRepo (the foreign-repo path,
+// which had NO coverage at all until it was added — every other watcher test
+// scopes the watcher to the repo its JSONL lives in).
+//
+// #490 specifics: LastRealBranch is the worktree-agent inheritance latch. Omitting
+// it leaves `tierd serve` attributing a tail window to
+// unattributed:branch-without-issue while a full `tierd score` re-parse of the
+// same file resolves it — and stamps the empty latch into the checkpoint blob so
+// a restart cannot recover either. NextParseSeq is the ID-less ordinal that keeps
+// the next incremental parse's idempotency keys from colliding with this one's.
+// Both are behaviourally pinned by
+// TestWatcher_WorktreeAgentInheritsSpawningBranchAcrossDebounce.
+func metadataFromSummary(s *sessionSummary) sessionMetadata {
+	return sessionMetadata{
+		SessionID:      s.SessionID,
+		GitBranch:      s.GitBranch,
+		CWD:            s.CWD,
+		StartTime:      s.StartTime,
+		Model:          s.Model,
+		LastRealBranch: s.LastRealBranch,
+		NextParseSeq:   s.NextParseSeq,
+	}
 }
 
 // fingerprintHead reads exactly want bytes from the start of path and
@@ -833,15 +862,15 @@ func (w *Watcher) saveCheckpoint(ctx context.Context, path string, s parseState,
 	}
 	cp, err := checkpointFromState(path, s)
 	if err != nil {
-		logger.Warn("watcher: build checkpoint failed", "path", path, "err", err)
+		logger.Warn("watcher: build checkpoint failed", "path", logsafe.Str(path), "err", err)
 		return
 	}
 	if err := w.Checkpoints.SaveWatcherCheckpoint(ctx, cp); err != nil {
 		if errors.Is(err, context.Canceled) {
-			logger.Debug("watcher: checkpoint save cancelled on shutdown", "path", path)
+			logger.Debug("watcher: checkpoint save cancelled on shutdown", "path", logsafe.Str(path))
 			return
 		}
-		logger.Warn("watcher: checkpoint save failed", "path", path, "err", err)
+		logger.Warn("watcher: checkpoint save failed", "path", logsafe.Str(path), "err", err)
 	}
 }
 
@@ -852,10 +881,10 @@ func (w *Watcher) saveCheckpoint(ctx context.Context, path string, s parseState,
 func (w *Watcher) deleteCheckpoint(ctx context.Context, path string, logger *slog.Logger) {
 	if err := w.Checkpoints.DeleteWatcherCheckpoint(ctx, path); err != nil {
 		if errors.Is(err, context.Canceled) {
-			logger.Debug("watcher: checkpoint delete cancelled on shutdown", "path", path)
+			logger.Debug("watcher: checkpoint delete cancelled on shutdown", "path", logsafe.Str(path))
 			return
 		}
-		logger.Warn("watcher: checkpoint delete failed", "path", path, "err", err)
+		logger.Warn("watcher: checkpoint delete failed", "path", logsafe.Str(path), "err", err)
 	}
 }
 
@@ -1080,7 +1109,7 @@ func (w *Watcher) addRecursive(fw watchAdder, root, projectsDir string, targets 
 	)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			logger.Warn("watcher: walk error", "path", path, "err", err)
+			logger.Warn("watcher: walk error", "path", logsafe.Str(path), "err", err)
 			return nil
 		}
 		if !d.IsDir() {
@@ -1107,18 +1136,18 @@ func (w *Watcher) addRecursive(fw watchAdder, root, projectsDir string, targets 
 			switch {
 			case errors.Is(addErr, syscall.ENOSPC) && !enospcLogged:
 				logger.Error("watcher: inotify watch limit reached — raise fs.inotify.max_user_watches",
-					"path", path,
+					"path", logsafe.Str(path),
 					"hint", "sudo sysctl fs.inotify.max_user_watches=524288",
 				)
 				enospcLogged = true
 			case errors.Is(addErr, syscall.EMFILE) && !emfileLogged:
 				logger.Error("watcher: file-descriptor limit reached — raise the open-file limit",
-					"path", path,
+					"path", logsafe.Str(path),
 					"hint", "ulimit -n 4096 (per shell) or launchctl limit maxfiles (persistent, macOS)",
 				)
 				emfileLogged = true
 			default:
-				logger.Warn("watcher: add failed", "path", path, "err", addErr)
+				logger.Warn("watcher: add failed", "path", logsafe.Str(path), "err", addErr)
 			}
 			if w.OnWatchAddFailure != nil {
 				w.OnWatchAddFailure(path, addErr)

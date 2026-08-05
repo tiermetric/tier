@@ -238,7 +238,7 @@ func TestCostCompositionWindow_Empty(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
 
-	c, err := db.CostCompositionWindow(context.Background(), time.Now().UTC().Add(-24*time.Hour), time.Time{})
+	c, err := db.CostCompositionWindow(context.Background(), time.Now().UTC().Add(-24*time.Hour), time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCompositionWindow: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestCostCompositionWindow_AggregatesAndReconciles(t *testing.T) {
 		t.Fatalf("InsertTokenEvents: %v", err)
 	}
 
-	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{})
+	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCompositionWindow: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestCostCompositionWindow_UnattributedFamily(t *testing.T) {
 		t.Fatalf("InsertTokenEvents: %v", err)
 	}
 
-	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{})
+	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCompositionWindow: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestUnattributedBucketCostsWindow(t *testing.T) {
 		t.Fatalf("InsertTokenEvents: %v", err)
 	}
 
-	rows, err := db.UnattributedBucketCostsWindow(ctx, now.Add(-time.Hour), time.Time{})
+	rows, err := db.UnattributedBucketCostsWindow(ctx, now.Add(-time.Hour), time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("UnattributedBucketCostsWindow: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestUnattributedBucketCostsWindow(t *testing.T) {
 		}
 	}
 	// The breakdown sums to the same unattributed figure the composition reports.
-	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{})
+	c, err := db.CostCompositionWindow(ctx, now.Add(-time.Hour), time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCompositionWindow: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestCostCompositionWindow_UpperBoundExclusive(t *testing.T) {
 
 	// Window [base, base+time.Hour): the second event is at the exclusive upper
 	// bound and must be excluded, so only the 10000-micro event counts.
-	c, err := db.CostCompositionWindow(ctx, base.Add(-time.Minute), base.Add(time.Hour))
+	c, err := db.CostCompositionWindow(ctx, base.Add(-time.Minute), base.Add(time.Hour), FleetWide)
 	if err != nil {
 		t.Fatalf("CostCompositionWindow: %v", err)
 	}

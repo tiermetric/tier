@@ -33,6 +33,7 @@ import (
 	"github.com/tiermetric/tier/internal/docs"
 	"github.com/tiermetric/tier/internal/health"
 	"github.com/tiermetric/tier/internal/ingester"
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/metrics"
 	"github.com/tiermetric/tier/internal/proxy"
 	"github.com/tiermetric/tier/internal/scoring"
@@ -67,6 +68,11 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "score":
 		runScore(args[1:])
+	// "score-log": price ONE session log file in isolation — no store, no
+	// daemon, no repo, no attribution (#465). Distinct from "score", which
+	// scans ~/.claude/projects/ and joins to a repo's git log.
+	case "score-log":
+		return runScoreLog(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(args[1:])
 	case "ship":
@@ -79,6 +85,12 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return runDoctor(args[1:], stdout, stderr)
 	case "reprice":
 		return runRepriceCmd(args[1:], stdout, stderr)
+	// "repair-repo": rewrite the 'unqualified' repo sentinel on rows a pre-#491
+	// shipper captured. #491's wire fix is forward-only — a re-ship collides on
+	// idempotency_key and the conflict clause never touches `repo` — so this is
+	// the only path that can repair that history (#493).
+	case "repair-repo":
+		return runRepairRepoCmd(args[1:], stdout, stderr)
 	case "demo":
 		return runDemo(args[1:], stdout, stderr)
 	// "healthcheck": probe a running tierd over HTTP and exit 0/1. Backs the
@@ -109,12 +121,14 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "usage: tierd <command> [flags]")
 	_, _ = fmt.Fprintln(w, "  score    compute TIER from local Claude Code JSONL files")
+	_, _ = fmt.Fprintln(w, "  score-log price ONE session log file (claude|codex) as JSON, no store/daemon/network (#465)")
 	_, _ = fmt.Fprintln(w, "  serve    run the TIER HTTP server (proxy + webhook + dashboard)")
 	_, _ = fmt.Fprintln(w, "  ship     forward locally captured JSONL events to a central tierd (#126)")
 	_, _ = fmt.Fprintln(w, "  backfill reconstruct outcomes from merged-PR history via the GitHub API (#237)")
 	_, _ = fmt.Fprintln(w, "  backup   write a consistent snapshot of the database (VACUUM INTO)")
 	_, _ = fmt.Fprintln(w, "  doctor   verify this install captures correctly (local + optional --server, #236)")
 	_, _ = fmt.Fprintln(w, "  reprice  recompute historical costs under the current price table (audited, #294)")
+	_, _ = fmt.Fprintln(w, "  repair-repo  repair rows stuck on the 'unqualified' repo sentinel (audited, #493)")
 	_, _ = fmt.Fprintln(w, "  demo     serve the dashboard on SYNTHETIC sample data (no setup, #383)")
 	_, _ = fmt.Fprintln(w, "  healthcheck  probe a running tierd and exit 0/1 (backs the container HEALTHCHECK, #571)")
 	_, _ = fmt.Fprintln(w, "  version  print the build version and exit")
@@ -151,6 +165,35 @@ func codexWatchCheck(codexEnabled bool, watchRepoCount int, readOnly bool) (warn
 		return "--codex-rollout is set but --read-only disables all capture; Codex spend will not be recorded", ""
 	}
 	return "", "--codex-rollout needs a repository to attribute Codex spend to, but no --watch-repo (or watch.repos config) is set. Add --watch-repo <path>, or drop --codex-rollout. (#464)"
+}
+
+// codexProxyDoubleCountWarn returns the startup warning for the one
+// configuration in which Codex spend is captured TWICE (#459 task 2), or "" when
+// it cannot arise.
+//
+// Since the proxy learned OpenAI's Responses shape, Codex traffic routed through
+// /openai/ IS captured there — and Codex writes its rollout logs regardless, so
+// the collector captures the same call again. The two rows cannot dedup: the
+// proxy keys on the response id (IdempotencyKey("msg","openai","resp_...")),
+// the collector keys on (session id, ordinal) because a rollout log carries no
+// response id at all. Different hashes by construction, and the store dedups on
+// the key alone — so this DOUBLES the spend rather than colliding, and doubling
+// is the failure mode this codebase treats as worse than under-reporting.
+//
+// Deliberately a WARN and not a refusal: the overwhelmingly common case is an
+// operator proxying ordinary OpenAI traffic that Codex never touches, which is
+// unaffected — we cannot tell from configuration alone whether Codex will be
+// pointed at the proxy. But #459 task 3 (live-verifying the Responses parser) is
+// exactly the setup that trips it, so it is said out loud at boot rather than
+// discovered in a doubled dashboard.
+//
+// A pure function for the same reason codexWatchCheck is one: the decision is
+// table-testable without booting a server (TestCodexProxyDoubleCountWarn).
+func codexProxyDoubleCountWarn(codexEnabled, openAIProxyMounted bool) string {
+	if !codexEnabled || !openAIProxyMounted {
+		return ""
+	}
+	return "both the OpenAI proxy and the Codex rollout collector are enabled: if you route Codex CLI traffic through /openai/, its spend is captured TWICE — the proxy keys on the response id, the collector keys on (session, ordinal), and the two cannot dedup. Ordinary OpenAI traffic is unaffected. To live-verify the proxy's Responses parser (#459 task 3), disable --codex-rollout first"
 }
 
 // resolveVersion returns the ldflag-injected version when the Makefile stamped
@@ -240,19 +283,70 @@ func runScore(args []string) {
 	developer := fs.String("developer", "", "developer ID override (default: OS username)")
 	claudeDir := fs.String("claude-dir", "", "override ~/.claude directory (for testing)")
 	pricesPath := fs.String("prices", os.Getenv("TIER_PRICES"), "path to a price-table YAML override (#68); empty uses the embedded default. A bad file fails the command")
+	configPath := fs.String("config", "", "path to a tierd config YAML (#154); `score` reads ONLY prices_file from it, so the CLI prices identically to the serve it reports against. --prices wins over the file's prices_file")
 	_ = fs.Parse(args)
 
-	// Apply a --prices override before Collect, which prices events via
-	// ComputeCost. No override → the embedded default stays active. Note which
-	// table priced the report to stderr (audit: "which prices produced these
-	// numbers"), mirroring the structured log `tierd serve` emits.
-	if info, ok := loadPricesOverride(*pricesPath); ok {
+	// Resolve the effective price table BEFORE Collect, which prices events.
+	//
+	// #154: `score` is the zero-setup CLI, and it used to have no way to reach the
+	// SAME table its server prices with — an operator whose serve runs a --prices
+	// override (the only place a `billing_mode: subscription` route ever lives,
+	// since none ships in the embedded default) would silently get different
+	// numbers from the two surfaces. --config closes that by reading prices_file.
+	//
+	// Precedence mirrors runServe: an explicit --prices (or TIER_PRICES) wins over
+	// the config file, which wins over the embedded default.
+	resolvedPrices := *pricesPath
+	var subscriptionsCfg []config.Subscription
+	if *configPath != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config: %v\n", err)
+			os.Exit(1)
+		}
+		if resolvedPrices == "" && cfg.PricesFile != nil {
+			resolvedPrices = *cfg.PricesFile
+		}
+		subscriptionsCfg = cfg.Subscriptions
+	}
+
+	// A bad --prices file fails the command (never a silent fallback). No override
+	// → the embedded default stays active. Note which table priced the report to
+	// stderr (audit: "which prices produced these numbers"), mirroring the
+	// structured log `tierd serve` emits.
+	if info, ok := loadPricesOverride(resolvedPrices); ok {
 		fmt.Fprintf(os.Stderr, "price table: override %s (version %d, %s, %d models)\n",
-			*pricesPath, info.Version, info.EffectiveDate, info.ModelCount)
+			resolvedPrices, info.Version, info.EffectiveDate, info.ModelCount)
 	} else {
 		info := store.ActivePriceTableInfo()
-		fmt.Fprintf(os.Stderr, "price table: embedded default (version %d, %s, %d models)\n",
+		fmt.Fprintf(os.Stderr, store.EmbeddedPriceStampFormat+"\n",
 			info.Version, info.EffectiveDate, info.ModelCount)
+	}
+	// Name the subscription-billed routes in the active table alongside the
+	// provenance line (#154). Their cost_micro is a comparable-list-rate
+	// VALUATION of flat-fee tokens, not a metered price, and this report shows
+	// dollars with no billing_mode column — so the one honest place to say so is
+	// here, next to the table that produced them.
+	if routes := store.SubscriptionRouteSummary(); len(routes) > 0 {
+		fmt.Fprintln(os.Stderr, "subscription-billed routes in this table:")
+		for _, r := range routes {
+			fmt.Fprintf(os.Stderr, "  %s\n", r)
+		}
+	}
+	// `score` never POSTS a fee — it has no database and reports no Spend
+	// Leverage — but it must not be SILENT about a `subscriptions:` block that
+	// `serve` would refuse to start on. Left silent, the same typo is fatal on one
+	// surface and invisible on the other, and an operator who reaches for the CLI
+	// to debug their config gets a clean run that tells them nothing.
+	//
+	// A WARN rather than an exit, because `score` is a read-only report against a
+	// config it only borrowed: refusing to print costs over a fee-bookkeeping
+	// misconfiguration would be the wrong severity for this surface.
+	for _, s := range subscriptionsCfg {
+		if len(store.SubscriptionRoutesWithPrefix(s.RoutePrefix)) > 0 {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: config subscriptions route_prefix %q matches no billing_mode: subscription entry in this price table — `tierd serve` would REFUSE to start on this config. (score posts no fee either way, so this report is unaffected.)\n", s.RoutePrefix)
 	}
 
 	since, err := parseSince(*sinceStr)
@@ -300,7 +394,7 @@ func runScore(args []string) {
 	printCostReport(events, since)
 
 	// Show issue-level cost breakdown.
-	printIssueCosts(events)
+	printIssueCosts(os.Stdout, events)
 
 	fmt.Printf("\nTip: run `tierd backfill` then `tierd serve` to record PR outcomes and compute full TIER scores. See /docs/quickstart.\n")
 }
@@ -348,8 +442,15 @@ func printCostReport(events []collector.TokenEvent, since time.Time) {
 	fmt.Printf("%-20s  %78.4f\n", "TOTAL", store.MicroToDollars(totalCostMicro))
 }
 
-// printIssueCosts prints per-issue cost breakdown.
-func printIssueCosts(events []collector.TokenEvent) {
+// printIssueCosts prints the per-issue cost breakdown.
+//
+// Takes an io.Writer rather than printing to os.Stdout directly, matching the
+// convention the reprice/repair/doctor reports already follow. That is not
+// tidiness: this report interpolates a producer-controlled model name into a raw
+// fmt.Fprintf, and without an injectable writer the logsafe barrier below cannot
+// be tested — a mutant that removed it survived the whole suite (#321 review,
+// 2026-08-04).
+func printIssueCosts(w io.Writer, events []collector.TokenEvent) {
 	type row struct {
 		costMicro int64
 		model     string
@@ -382,13 +483,27 @@ func printIssueCosts(events []collector.TokenEvent) {
 		return issues[i] < issues[j]
 	})
 
-	fmt.Println("\nCost by Issue")
-	fmt.Println("──────────────────────────────────────────────────────────────────")
-	fmt.Printf("%-34s  %-20s  %10s\n", "Issue", "Model", "Cost ($)")
-	fmt.Println("──────────────────────────────────────────────────────────────────")
+	_, _ = fmt.Fprintln(w, "\nCost by Issue")
+	_, _ = fmt.Fprintln(w, "──────────────────────────────────────────────────────────────────")
+	_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10s\n", "Issue", "Model", "Cost ($)")
+	_, _ = fmt.Fprintln(w, "──────────────────────────────────────────────────────────────────")
 	for _, issue := range issues {
 		r := byIssue[issue]
-		fmt.Printf("%-34s  %-20s  %10.4f\n", issueLabel(issue), r.model, store.MicroToDollars(r.costMicro))
+		// r.model is session content — it comes off the JSONL entry's
+		// Message.Model, which nothing validates for charset — and this is a raw
+		// fmt.Printf sink, so a model string carrying CR/LF forges a whole row of
+		// this table. logsafe.Str, not %q, for the reason the logsafe package doc
+		// gives: the strip is the barrier, the quoting is the backstop.
+		//
+		// issueLabel's output is NOT wrapped, and that is a measured distinction,
+		// not an oversight: a real issue id passes through unchanged, but issue
+		// ids are derived from git refnames, which cannot contain control bytes
+		// (git rejects them), and every other branch of issueLabel returns one of
+		// this repo's own constants. The developer column in printDevCosts is
+		// exempt for a different measured reason — see collector.Collect's
+		// developer parameter, which is a single per-run operator-supplied value,
+		// never session content.
+		_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10.4f\n", issueLabel(issue), logsafe.Str(r.model), store.MicroToDollars(r.costMicro))
 	}
 }
 
@@ -446,11 +561,52 @@ func resolveRepo(path string) (string, error) {
 type repeatableStringSlice []string
 
 func (s *repeatableStringSlice) String() string { return strings.Join(*s, ",") }
+
+// Set appends one occurrence, and REJECTS an empty value.
+//
+// 🔴 It used to `return nil` without appending, which made an empty-string
+// occurrence (shell: --map followed by a quoted empty argument) the one
+// malformed form that vanished in silence: every other shape (`--map foo`,
+// `--map =x`, `--map x=`) is a hard error naming the bad entry, but an empty
+// value produced no entry, no message, and no non-zero exit. A shell that ate a
+// quote or an unset `--map "$SESSION=$SLUG"` variable therefore silently shrank
+// the mapping, and repair-repo would go on to report a smaller repair as a clean
+// one. Every flag using this type wants the same answer — an empty occurrence is
+// never a meaningful instruction, and flag.Parse turns the error into a usage
+// message naming the flag, which is exactly the diagnosis the operator needs.
 func (s *repeatableStringSlice) Set(v string) error {
 	if v == "" {
-		return nil
+		return errors.New("empty value: pass a value, or omit the flag entirely (an empty occurrence is silently lost otherwise)")
 	}
 	*s = append(*s, v)
+	return nil
+}
+
+// applyRepeatableConfigList feeds a config-file list into a repeatable flag,
+// failing on the first bad entry with a message naming the config KEY and the
+// entry.
+//
+// It exists as a seam for the same reason buildWebhookOptions does: the two call
+// sites in runServeWithOptions end in os.Exit(1), which no in-process test can
+// survive, so without this the config->flag wiring is unreachable from a test and
+// only the flag type itself is covered. That is exactly the gap that let the #240
+// regression (a config key parsed but never plumbed) go unnoticed.
+//
+// It matters more now that repeatableStringSlice.Set REJECTS an empty value: an
+// explicit `- ""` in watch.repos or http.trusted_proxy_cidrs used to be skipped
+// in silence and now refuses to start the server. (A bare `-` does NOT reach
+// here — measured against the pinned go.yaml.in/yaml/v3: a null sequence element
+// is dropped by the decoder before it becomes a []string entry. The realistic
+// producer of an explicit "" is a rendered template whose variable was empty,
+// which is the config-file analogue of an unset shell variable in --map.)
+//
+// dst is appended to, never replaced, so a caller's existing entries survive.
+func applyRepeatableConfigList(dst *repeatableStringSlice, values []string, configKey string) error {
+	for _, v := range values {
+		if err := dst.Set(v); err != nil {
+			return fmt.Errorf("config: invalid %s entry %q: %w", configKey, v, err)
+		}
+	}
 	return nil
 }
 
@@ -524,6 +680,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	readToken := fs.String("read-token", os.Getenv("TIER_READ_TOKEN"), "Read-only viewer token (#190): Bearer that grants GET /scores, /scores/{dev}, and /metrics (the dashboard data) but is rejected on all writes and the proxies. Must differ from --api-token; alone it does NOT permit a non-loopback bind. Prefer TIER_READ_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	anthropicTarget := fs.String("anthropic-target", "https://api.anthropic.com", "upstream Anthropic API URL")
 	openaiTarget := fs.String("openai-target", "https://api.openai.com", "upstream OpenAI-compatible API URL")
+	geminiTarget := fs.String("gemini-target", "https://generativelanguage.googleapis.com", "upstream Gemini API URL (#459 task 4); the /gemini/ proxy route. Set to \"\" to disable")
 	rlDefault := api.DefaultRateLimitConfig()
 	authMaxFailures := fs.Int("auth-max-failures", rlDefault.MaxFailures, "per-IP failed-auth attempts within --auth-failure-window before a 429 lockout (#36); 0 disables the limiter")
 	authFailureWindow := fs.Duration("auth-failure-window", rlDefault.Window, "sliding window over which --auth-max-failures is counted (#36)")
@@ -537,7 +694,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	fs.Var(&trustedProxyCIDRs, "trusted-proxy-cidr", "CIDR of a trusted reverse proxy/TLS terminator (repeatable). When the direct peer is inside a trusted CIDR, the failed-auth lockout keys on the client IP from X-Forwarded-For (rightmost untrusted hop) instead of the peer address. Default: unset — X-Forwarded-For is never trusted (#131)")
 	var watchRepos repeatableStringSlice
 	fs.Var(&watchRepos, "watch-repo", "git repo path to tail Claude Code JSONL for (repeatable; omit to disable live ingestion)")
-	codexRollout := fs.Bool("codex-rollout", envBool("TIER_CODEX_ROLLOUT"), "capture Codex CLI spend from the local rollout logs at ~/.codex/sessions/**/rollout-*.jsonl (#464). This is the ONLY path that captures Codex — Codex speaks the OpenAI Responses API, which the reverse proxy's Chat Completions parser cannot read (#463). Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_CODEX_ROLLOUT, config block collectors.codex_rollout (which also sets sessions_dir / scan_interval)")
+	codexRollout := fs.Bool("codex-rollout", envBool("TIER_CODEX_ROLLOUT"), "capture Codex CLI spend from the local rollout logs at ~/.codex/sessions/**/rollout-*.jsonl (#464). This is the path that captures Codex as you actually run it: the reverse proxy can parse the Responses API Codex speaks (#459), but only for traffic you deliberately point at it with API-key auth, and that path is not yet live-verified. Do NOT do both at once — Codex routed through /openai/ while this flag is on is counted TWICE (the proxy keys on the response id, this collector keys on session+ordinal, and the two cannot dedup). Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_CODEX_ROLLOUT, config block collectors.codex_rollout (which also sets sessions_dir / scan_interval)")
 	logFormat := fs.String("log-format", cmp.Or(os.Getenv("TIER_LOG_FORMAT"), "auto"), "log format: auto|json|text (#67; auto = JSON unless stderr is a terminal)")
 	logLevel := fs.String("log-level", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "info"), "log level: debug|info|warn|error (#67)")
 	_ = fs.Parse(args)
@@ -590,6 +747,12 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// webhook.WithSizeLabels, which treats an empty map as a no-op so `{}` preserves
 	// the defaults.
 	var sizeLabelsCfg map[string]float64
+	// subscriptionsCfg carries the config-only `subscriptions:` block (#113) out
+	// to the coverage gate (after the price table settles) and the fee reconciler
+	// (after the DB opens). There is deliberately no CLI flag or env var: a
+	// per-route monthly fee is a deployment fact, not a switch, and there is no
+	// sensible single-value form for a list of them.
+	var subscriptionsCfg []config.Subscription
 	if *configPath != "" {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
@@ -602,6 +765,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		watchRepoSlugs = cfg.Watch.RepoSlugs
 		generatedPathsCfg = cfg.Outcomes.GeneratedPaths
 		sizeLabelsCfg = cfg.Outcomes.SizeLabels
+		subscriptionsCfg = cfg.Subscriptions
 		setFlags := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 		envVarSet := map[string]bool{
@@ -621,6 +785,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		applyStringFromConfig(fs, setFlags, envVarSet, "read-token", cfg.HTTP.ReadToken)
 		applyStringFromConfig(fs, setFlags, envVarSet, "anthropic-target", cfg.Proxy.AnthropicTarget)
 		applyStringFromConfig(fs, setFlags, envVarSet, "openai-target", cfg.Proxy.OpenAITarget)
+		applyStringFromConfig(fs, setFlags, envVarSet, "gemini-target", cfg.Proxy.GeminiTarget)
 		applyIntFromConfig(fs, setFlags, envVarSet, "zero-outcome-window-days", cfg.ZeroOutcomeWindowDays)
 		applyBoolFromConfig(fs, setFlags, envVarSet, "push-capture", cfg.Outcomes.PushCapture)
 		applyStringFromConfig(fs, setFlags, envVarSet, "aggregation", cfg.Aggregation)
@@ -642,13 +807,9 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 					"cli_repos", []string(watchRepos),
 					"config_repos_ignored", cfg.Watch.Repos)
 			}
-		} else {
-			for _, r := range cfg.Watch.Repos {
-				if err := watchRepos.Set(r); err != nil {
-					fmt.Fprintf(os.Stderr, "config: invalid watch.repos entry %q: %v\n", r, err)
-					os.Exit(1)
-				}
-			}
+		} else if err := applyRepeatableConfigList(&watchRepos, cfg.Watch.Repos, "watch.repos"); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
 		}
 		// trusted-proxy-cidr is repeatable, same list-valued CLI-wins-entirely
 		// precedence as watch-repo (#131): any --trusted-proxy-cidr on the CLI
@@ -659,13 +820,9 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 					"cli_cidrs", []string(trustedProxyCIDRs),
 					"config_cidrs_ignored", cfg.HTTP.TrustedProxyCIDRs)
 			}
-		} else {
-			for _, c := range cfg.HTTP.TrustedProxyCIDRs {
-				if err := trustedProxyCIDRs.Set(c); err != nil {
-					fmt.Fprintf(os.Stderr, "config: invalid http.trusted_proxy_cidrs entry %q: %v\n", c, err)
-					os.Exit(1)
-				}
-			}
+		} else if err := applyRepeatableConfigList(&trustedProxyCIDRs, cfg.HTTP.TrustedProxyCIDRs, "http.trusted_proxy_cidrs"); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
 		}
 	}
 
@@ -779,9 +936,18 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	if *readOnly {
 		watchRepos = nil
 		*webhookSecret = ""
-		*anthropicTarget, *openaiTarget = "", ""
+		*anthropicTarget, *openaiTarget, *geminiTarget = "", "", ""
 		adminSettings, openaiSettings = nil, nil
 		codexSettings = nil
+		// The subscription-fee reconciler WRITES org_actual_spend rows (#113), so
+		// it belongs in this neutralization list for the same reason the pollers do:
+		// read-only mode must leave no background writer running. Clearing the
+		// config here (rather than guarding the goroutine's start site) is what
+		// makes the ordinary `len(subscriptionsCfg) > 0` guard below do the work —
+		// and, because this choke point runs BEFORE the coverage gate, it also
+		// means a demo may ship a subscriptions block the gate would otherwise
+		// refuse. TestServeSmoke_ReadOnlyNeutralizesSubscriptionFees pins both.
+		subscriptionsCfg = nil
 	}
 
 	// A non-zero failure cap with a non-positive window or lockout would create
@@ -825,6 +991,16 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		info := store.ActivePriceTableInfo()
 		logger.Info("using embedded price table",
 			"version", info.Version, "effective_date", info.EffectiveDate, "models", info.ModelCount)
+	}
+
+	// Two-artifacts-one-truth gate for subscription routes (#113), run HERE
+	// because it is the first point at which both artifacts are settled: the
+	// price table has taken any --prices override, and the config block is
+	// parsed. It is BEFORE store.Open on purpose — a misconfiguration should
+	// fail startup without having touched the database.
+	if err := checkSubscriptionCoverage(subscriptionsCfg, logger); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
 
 	// Ensure the database directory exists before opening.
@@ -994,6 +1170,20 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
 		registerProxy(mux, "/openai", p, apiHandler.ProxyAuth, logger)
 		logger.Info("OpenAI proxy", "path", "/openai/", "target", *openaiTarget)
+		// Double-count hazard (#459 task 2) — see codexProxyDoubleCountWarn.
+		if w := codexProxyDoubleCountWarn(codexSettings != nil, true); w != "" {
+			logger.Warn(w, "proxy_path", "/openai/", "collector", collector.SourceCodexRollout)
+		}
+	}
+	// #459 task 4: mount /gemini/. The parser (parseGemini) has existed since
+	// v1 (#1), extended by #122 (thinking/cache tokens) and #300 (host
+	// stamping) — only the mount was missing, so a Gemini client pointed at
+	// TIER before this landed got a plain 404 with no signal why.
+	if t := parseProxyTarget(*geminiTarget, logger); t != nil {
+		p := proxy.New(t, proxy.ProviderGemini, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
+		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
+		registerProxy(mux, "/gemini", p, apiHandler.ProxyAuth, logger)
+		logger.Info("Gemini proxy", "path", "/gemini/", "target", *geminiTarget)
 	}
 
 	srv := &http.Server{
@@ -1170,11 +1360,81 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		logger.Info("OpenAI Usage poller disabled (no collectors.openai_usage config block)")
 	}
 
+	// Subscription flat-fee reconciler (#113/#155): keeps org_actual_spend
+	// carrying each configured plan's monthly fee, so Spend Leverage's
+	// actual-paid side reflects what the org really pays for its flat-fee
+	// routes. One catch-up pass at startup, then the current period on a slow
+	// tick. Cancelled via watcherCtx on shutdown.
+	//
+	// Same DELIBERATE ASYMMETRY as the pollers above: it does NOT feed srvErr. A
+	// failed post logs ERROR and is retried on the next tick — fee bookkeeping
+	// that lags an hour is recoverable, a dead server is not.
+	//
+	// feeDone is the shutdown JOIN: unlike the pollers, this goroutine opens
+	// transactions, so shutdown waits for it before the deferred db.Close rather
+	// than closing the pool underneath one.
+	feeDone := make(chan struct{})
+	if len(subscriptionsCfg) > 0 {
+		logger.Info("subscription fee reconciler enabled", "routes", len(subscriptionsCfg),
+			"interval", subscriptionFeeReconcileInterval)
+		go func() {
+			defer close(feeDone)
+			runSubscriptionFeeReconciler(watcherCtx, db, subscriptionsCfg, logger, subscriptionFeeReconcileInterval)
+		}()
+	} else {
+		logger.Info("subscription fee reconciler disabled (no subscriptions config block)")
+		close(feeDone) // pre-closed so the shutdown join is an instant no-op
+	}
+
+	// BOTH background writers are now live, so from here on every exit path must
+	// join them before the deferred db.Close runs — including the ones that never
+	// reach the select at the bottom of this function.
+	//
+	// The two `return 1`s below (the Codex-rollout config errors) are exactly
+	// that: they unwind straight past shutdownServer into `defer db.Close`, which
+	// would close the pool underneath an open reconciler transaction. That is the
+	// precise race shutdownServer's own doc says the join exists to prevent
+	// "rather than relying on the race being small", so relying on it here would
+	// contradict this file. It is inherited — supDone (started above) is bypassed
+	// by the same two returns — so ONE defer covers both writers.
+	//
+	// ORDER IS THE WHOLE POINT. `defer db.Close` is registered far earlier
+	// (store.Open), so LIFO runs this join FIRST. It cancels before waiting,
+	// because on these paths nothing else has: the deferred watcherCancel is
+	// registered earlier too, so it would otherwise run after this and the join
+	// would sit out its full timeout waiting for goroutines nobody had told to
+	// stop. On the normal paths shutdownServer has already cancelled and joined,
+	// so both channels are closed and this is a silent no-op.
+	// ⚠️ ONE-SHOT. joinBackgroundWriters is idempotent when the channels are
+	// CLOSED, but not when a writer is WEDGED: it burns its full drainTimeout per
+	// open channel and gives up. Without this flag an orderly shutdown that timed
+	// out would join twice — measured at drainTimeout=200ms, 202.5ms then 403.9ms
+	// — which at the real 15s turns a wedged SIGTERM drain into 30s (60s if both
+	// writers are wedged), duplicates the timeout ERROR, and re-samples live=true
+	// so the Info below fires on a plain SIGTERM claiming a startup abort that did
+	// not happen. The second join also buys nothing: the first already gave up, so
+	// db.Close lands underneath the wedged writer either way.
+	shutdownJoined := false
+	defer func() {
+		if shutdownJoined {
+			return
+		}
+		if joinBackgroundWriters(watcherCancel, supDone, feeDone, watcherDrainTimeout, logger) {
+			// Only reachable from an abrupt exit, and there it is not a race: on
+			// that path nothing has cancelled the background context yet, so both
+			// writers ARE still running and this join is what stops them. Saying so
+			// is the difference between "tierd died at startup" and "tierd died at
+			// startup and closed its database cleanly".
+			logger.Info("drained background writers before closing the database (startup aborted before the shutdown sequence)")
+		}
+	}()
+
 	// Codex rollout-log collector (#464): local, per-developer, per-call Codex
-	// capture from ~/.codex/sessions/**/rollout-*.jsonl. It is the ONLY path
-	// that captures Codex — Codex speaks the OpenAI Responses API, which the
-	// proxy's Chat-Completions parser cannot read (#463), so Codex spend was
-	// previously invisible to TIER entirely.
+	// capture from ~/.codex/sessions/**/rollout-*.jsonl. It is the path that
+	// captures Codex as Codex is actually run: the proxy can parse the Responses
+	// shape since #459 task 2, but only for traffic deliberately pointed at it
+	// with API-key auth, and that parser has never seen live traffic. Before
+	// #464 Codex spend was invisible to TIER entirely (#463).
 	//
 	// SCOPED TO THE SAME REPOS AS THE JSONL WATCHER. A Codex session whose cwd
 	// is outside every --watch-repo is dropped, not attributed: cross-repo bleed
@@ -1293,11 +1553,13 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	select {
 	case err := <-srvErr:
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		shutdownServer(watcherCancel, supDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownServer(watcherCancel, supDone, feeDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownJoined = true
 		logger.Info("tierd stopped")
 		return 1
 	case <-quit:
-		shutdownServer(watcherCancel, supDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownServer(watcherCancel, supDone, feeDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownJoined = true
 		logger.Info("tierd stopped")
 		return 0
 	}
@@ -1309,10 +1571,13 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 // pathological insert hang must not make SIGTERM hang forever (systemd would
 // SIGKILL, but we want a logged, orderly give-up). 15s > httpShutdownTimeout so
 // a healthy watcher always joins well within it.
-const (
-	httpShutdownTimeout = 10 * time.Second
-	watcherDrainTimeout = 15 * time.Second
-)
+const httpShutdownTimeout = 10 * time.Second
+
+// watcherDrainTimeout is a var, not a const, ONLY so a test can lower it. The
+// double-join it guards against (see the shutdownJoined flag) costs one full
+// drainTimeout per wedged writer, so pinning it at the shipped 15s would mean a
+// 30s test. Production never assigns to this.
+var watcherDrainTimeout = 15 * time.Second
 
 // shutdownServer is the single graceful-shutdown sequence shared by the signal
 // and fatal-error paths (#146). Order is load-bearing: cancel the watcher
@@ -1322,7 +1587,51 @@ const (
 // (an insert that never returns) it logs an ERROR and proceeds to close anyway,
 // so a stuck watcher can't make shutdown ignore SIGTERM indefinitely. supDone
 // is pre-closed when no watcher is configured, making the join an instant no-op.
-func shutdownServer(watcherCancel context.CancelFunc, supDone <-chan struct{}, srv *http.Server, drainTimeout, httpTimeout time.Duration, logger *slog.Logger) {
+//
+// feeDone joins the subscription-fee reconciler (#113) on the same terms and for
+// the same reason: it is a TRANSACTIONAL WRITER, and its #155 startup catch-up is
+// the longest-running write this process issues. Closing the pool underneath an
+// open transaction is exactly what the supDone join exists to prevent — so the
+// one other background writer gets the same treatment rather than relying on the
+// race being small. Pre-closed when no subscription is configured.
+func shutdownServer(watcherCancel context.CancelFunc, supDone, feeDone <-chan struct{}, srv *http.Server, drainTimeout, httpTimeout time.Duration, logger *slog.Logger) {
+	// This is the path that normally does the draining, so the "did I have to
+	// drain anyone" answer is uninteresting here — it is the abrupt-exit defer in
+	// run() that reports it.
+	_ = joinBackgroundWriters(watcherCancel, supDone, feeDone, drainTimeout, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+}
+
+// joinBackgroundWriters cancels the background context and waits for both
+// DB-writing goroutines — the watcher supervisor and the subscription-fee
+// reconciler — to return, so the caller's deferred db.Close cannot close the
+// pool underneath an open transaction.
+//
+// It is split out of shutdownServer because it is needed on two kinds of exit:
+// the orderly one (shutdownServer, which then drains HTTP) and the abrupt one (a
+// post-store.Open `return 1` that unwinds straight into `defer db.Close`).
+// Duplicating the sequence for the second case would let the two drift.
+//
+// It returns whether either writer was STILL LIVE when it was called: false means
+// the caller's path had already drained them (the orderly shutdown, where this is
+// a silent no-op), true means this call is the one that stopped them. The abrupt
+// path uses that to tell an operator its database was closed cleanly despite the
+// startup failure — and it is a fact worth having, because on that path the value
+// is not a race: nothing has cancelled the context yet, so both writers are
+// necessarily still running.
+//
+// Idempotent by construction: cancelling an already-cancelled context is a no-op
+// and both channels are receive-only and closed-once.
+//
+// Each join is bounded by drainTimeout and logs an ERROR rather than blocking
+// forever: a wedged writer must not make SIGTERM hang (systemd would SIGKILL, but
+// we want a logged, orderly give-up).
+func joinBackgroundWriters(watcherCancel context.CancelFunc, supDone, feeDone <-chan struct{}, drainTimeout time.Duration, logger *slog.Logger) bool {
+	// Sampled BEFORE the cancel, or the answer would be a race against how fast
+	// the goroutines notice it.
+	live := !isClosed(supDone) || !isClosed(feeDone)
 	watcherCancel()
 	select {
 	case <-supDone:
@@ -1330,9 +1639,25 @@ func shutdownServer(watcherCancel context.CancelFunc, supDone <-chan struct{}, s
 		logger.Error("watcher failed to drain before shutdown timeout; closing DB anyway",
 			"timeout", drainTimeout)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
+	select {
+	case <-feeDone:
+	case <-time.After(drainTimeout):
+		logger.Error("subscription fee reconciler failed to drain before shutdown timeout; closing DB anyway",
+			"timeout", drainTimeout)
+	}
+	return live
+}
+
+// isClosed reports whether a done-channel has already been closed, without
+// blocking. Only valid for channels that are closed-and-never-sent-on, which is
+// what supDone and feeDone are.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // unknownCostShareWarnThreshold is the fraction of interval priced spend billed

@@ -29,6 +29,9 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/collector/anthropicadmin"
+	"github.com/tiermetric/tier/internal/collector/openaiusage"
+	"github.com/tiermetric/tier/internal/config"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -106,6 +109,12 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	claudeDir := fs.String("claude-dir", "", "override ~/.claude directory (for testing)")
 	developer := fs.String("developer", "", "developer ID override (default: OS username)")
 	server := fs.String("server", "", "central tierd base URL to round-trip against, e.g. https://tier.example (optional)")
+	// No backticks in this usage string: Go's flag package treats the FIRST
+	// back-quoted substring in a usage string as the flag's argument
+	// placeholder in --help output, so `tierd serve --config` would render as
+	// the placeholder instead of the conventional "string" (verified: it
+	// printed literally as "-config tierd serve --config").
+	configPath := fs.String("config", "", "path to the same YAML config file passed to 'tierd serve --config' (#452); when its collectors.anthropic_admin / collectors.openai_usage blocks are present, doctor makes one live authenticated probe against each configured collector's endpoint so a missing or expired Admin/Usage key is caught here, not discovered later as a silently-empty Spend Leverage tile")
 	apiToken := fs.String("api-token", os.Getenv("TIER_API_TOKEN"), "API token for --server, sent as Authorization: Bearer. Prefer TIER_API_TOKEN or @/path/to/file (#37)")
 	minAttribution := fs.Float64("min-attribution", defaultMinAttribution, "named-branch attribution floor in [0,1]: below this fraction of feature-branch SPEND resolving to an issue, the attribution check FAILs (non-zero exit) instead of merely warning (#352, #488). Exploratory spend on main is excluded and reported separately")
 	if err := fs.Parse(args); err != nil {
@@ -194,6 +203,64 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
+	// --- Collector credential checks (#452): one live probe per CONFIGURED
+	// actual-cost collector, so a missing/expired Admin or Usage key is caught
+	// at doctor time instead of surfacing later as a silently-empty Spend
+	// Leverage tile. Only runs with --config, and only for blocks actually
+	// present in it — mirrors resolveAnthropicAdminConfig/resolveOpenAIUsageConfig's
+	// own "(nil, nil) means disabled" contract exactly, so doctor never reports
+	// on a collector `tierd serve` itself would not have started.
+	if *configPath == "" {
+		// Same "invisible check reads as a passing one" reasoning as the --server
+		// WARN above: an operator who configured collectors.anthropic_admin/
+		// openai_usage but forgot --config here would otherwise see an all-green
+		// doctor report that checked nothing about the credential.
+		results = append(results, checkResult{
+			name:   "collector credentials",
+			status: statusWarn,
+			detail: "not checked — pass --config to verify a configured anthropic_admin/openai_usage collector credential is live",
+			hint:   "re-run with --config /path/to/tierd.yaml (the same file passed to tierd serve) to confirm the poller's key actually authenticates against the provider",
+		})
+	} else {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			results = append(results, checkResult{
+				name:   "collector credentials",
+				status: statusFail,
+				detail: fmt.Sprintf("--config %q: %v", *configPath, err),
+				hint:   "check the YAML file path and syntax",
+			})
+		} else {
+			collectorChecks := checkCollectorConfigsAt(ctx, cfg,
+				doctorProbeBaseURLs.anthropic, doctorProbeBaseURLs.openai)
+			if len(collectorChecks) == 0 {
+				// A config that parsed but configures NO actual-cost collector
+				// must still emit a row. Without one, `tierd doctor --config
+				// <file>` prints nothing at all for collectors — which is
+				// BYTE-IDENTICAL to what the operator would see if this whole
+				// branch silently stopped running. That is not hypothetical:
+				// config.example.yaml ships its `collectors:` block commented
+				// out, so the shipped example config is exactly this case.
+				//
+				// Same "an invisible check reads as a passing one" reasoning as
+				// the no---config WARN above, but the verdict differs and the
+				// difference is the point: there we never looked (WARN — go
+				// look), here we looked and there was nothing to check (OK —
+				// this is a valid JSONL-only install). Three distinguishable
+				// outcomes instead of two-plus-silence.
+				collectorChecks = []checkResult{{
+					name:   "collector credentials",
+					status: statusOK,
+					// %q (not raw) matches the --config FAIL row just above:
+					// the path is operator-supplied and must not be able to
+					// inject newlines into the report.
+					detail: fmt.Sprintf("no actual-cost collectors configured in %q — nothing to probe (capture still works; only org-level Spend Leverage reconciliation is unavailable)", *configPath),
+				}}
+			}
+			results = append(results, collectorChecks...)
+		}
+	}
+
 	return reportDoctor(results, stdout)
 }
 
@@ -201,6 +268,143 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 // backfill command's GitHub client and is generous for a health probe while still
 // failing a wedged server rather than hanging forever.
 const doctorServerTimeout = 30 * time.Second
+
+// doctorCollectorProbeTimeout bounds ONE live credential probe (#452) against
+// an actual-cost collector's endpoint. Shorter than doctorServerTimeout: a
+// probe is a single unauthenticated-shape GET with no pagination and no
+// retries (see anthropicadmin.Client.Probe / openaiusage.Client.Probe), so a
+// well-behaved provider answers in well under a second; 20s is generous
+// headroom for TLS+DNS on a slow network while still failing a wedged
+// provider quickly rather than hanging doctor for the full 60s HTTP-client
+// timeout each Client would otherwise apply to a real poll.
+const doctorCollectorProbeTimeout = 20 * time.Second
+
+// credentialProbeResult carries one live probe's raw outcome PLUS its
+// classification, for checkCollectorCredential's formatting. The
+// authorized/unauthorized bools are deliberately computed by the CALLER from
+// the provider's own ProbeResult.Authorized()/Unauthorized() methods (see
+// checkCollectorConfigsAt) rather than re-derived here from statusCode —
+// doctor.go used to reimplement that comparison a third time (alongside
+// anthropicadmin.ProbeResult and openaiusage.ProbeResult, which are
+// deliberately two distinct types — see the openaiusage package doc's
+// "premature shared abstraction" note), which both duplicated the logic and
+// left both providers' predicate methods without a caller reachable under
+// plain `make check` (they were only exercised — one of them not even that —
+// by the credential-gated live tests). Routing through them here means the
+// wire tests below exercise the SAME classification the live tests trust.
+type credentialProbeResult struct {
+	statusCode               int
+	err                      error
+	authorized, unauthorized bool
+}
+
+// doctorProbeBaseURLs overrides the two providers' credential-probe base URLs.
+// Both fields are EMPTY in production, which is each Client's own "use my
+// production default" contract (anthropicadmin.NewClient / openaiusage.NewClient
+// — pinned by TestProbe_EmptyBaseURLOverrideKeepsProductionDefault in both
+// packages), so the zero value IS the shipped behavior and no build tag or
+// production branch is involved.
+//
+// It exists so a test can assert THROUGH runDoctor — the operator-facing entry
+// point — instead of only through checkCollectorConfigsAt (#452 review RED-2).
+// Before it, replacing runDoctor's whole collector-probe call with `_ = cfg`
+// compiled and passed every test including integration: only the internal
+// helper was covered, so the `--config` branch an operator actually types was
+// untested on its success path. Tests set these via withDoctorProbeBaseURLs,
+// which restores them on cleanup.
+var doctorProbeBaseURLs struct{ anthropic, openai string }
+
+// checkCollectorConfigsAt is checkCollectorConfigs with the two providers'
+// base URLs overridable, purely so tests can point both probes at an
+// httptest.Server and exercise the FULL config→resolve→Probe→classify wire
+// without ever making a live network call in `make check`/`make check-full`
+// (an empty override keeps each Client's own production default — see
+// anthropicadmin.NewClient / openaiusage.NewClient).
+//
+// Reuses resolveAnthropicAdminConfig / resolveOpenAIUsageConfig verbatim —
+// the exact validation `tierd serve` itself runs at startup — so a doctor
+// FAIL here means "this config would also refuse to serve", not a
+// doctor-only rule drifting from serve's.
+func checkCollectorConfigsAt(ctx context.Context, cfg *config.Config, anthropicBaseURL, openaiBaseURL string) []checkResult {
+	var results []checkResult
+
+	if adminSettings, err := resolveAnthropicAdminConfig(cfg.Collectors.AnthropicAdmin); err != nil {
+		results = append(results, checkResult{
+			name:   "anthropic_admin credential",
+			status: statusFail,
+			detail: fmt.Sprintf("collectors.anthropic_admin: %v", err),
+			hint:   "fix the config block — tierd serve would refuse to start with it as-is",
+		})
+	} else if adminSettings != nil {
+		client := anthropicadmin.NewClient(anthropicadmin.ClientConfig{APIKey: adminSettings.apiKey, BaseURL: anthropicBaseURL})
+		pctx, cancel := context.WithTimeout(ctx, doctorCollectorProbeTimeout)
+		res := client.Probe(pctx)
+		cancel()
+		results = append(results, checkCollectorCredential("anthropic_admin credential", "collectors.anthropic_admin.api_key",
+			credentialProbeResult{statusCode: res.StatusCode, err: res.Err, authorized: res.Authorized(), unauthorized: res.Unauthorized()}))
+	}
+
+	if openaiSettings, err := resolveOpenAIUsageConfig(cfg.Collectors.OpenAIUsage); err != nil {
+		results = append(results, checkResult{
+			name:   "openai_usage credential",
+			status: statusFail,
+			detail: fmt.Sprintf("collectors.openai_usage: %v", err),
+			hint:   "fix the config block — tierd serve would refuse to start with it as-is",
+		})
+	} else if openaiSettings != nil {
+		client := openaiusage.NewClient(openaiusage.ClientConfig{APIKey: openaiSettings.apiKey, BaseURL: openaiBaseURL})
+		pctx, cancel := context.WithTimeout(ctx, doctorCollectorProbeTimeout)
+		res := client.Probe(pctx)
+		cancel()
+		results = append(results, checkCollectorCredential("openai_usage credential", "collectors.openai_usage.api_key",
+			credentialProbeResult{statusCode: res.StatusCode, err: res.Err, authorized: res.Authorized(), unauthorized: res.Unauthorized()}))
+	}
+
+	return results
+}
+
+// checkCollectorCredential turns one live probe's classified outcome into a
+// doctor verdict. configKey names the YAML field to point the operator at in
+// the hint. The decision table is deliberately finer than checkServer's
+// binary reachable/not: 401/403 (credential rejected) is the specific,
+// actionable case #452 exists to catch, and must not be conflated with a
+// transport failure (network/DNS/TLS) or an unexpected-but-reached status
+// (429/5xx/etc, possibly transient or provider-side) — each has a different
+// remedy. r.authorized/r.unauthorized are the provider's OWN classification
+// (anthropicadmin.ProbeResult / openaiusage.ProbeResult), not re-derived
+// here — see credentialProbeResult's doc.
+func checkCollectorCredential(name, configKey string, r credentialProbeResult) checkResult {
+	if r.err != nil {
+		return checkResult{
+			name:   name,
+			status: statusFail,
+			detail: fmt.Sprintf("endpoint unreachable: %v", r.err),
+			hint:   "check network access to the provider's API from this host; the poller cannot run without it",
+		}
+	}
+	switch {
+	case r.unauthorized:
+		return checkResult{
+			name:   name,
+			status: statusFail,
+			detail: fmt.Sprintf("credential rejected (HTTP %d)", r.statusCode),
+			hint:   fmt.Sprintf("check %s (and the matching org field) — the key is missing, wrong, or expired", configKey),
+		}
+	case r.authorized:
+		return checkResult{
+			name:   name,
+			status: statusOK,
+			detail: fmt.Sprintf("endpoint reachable, credential accepted (HTTP %d)", r.statusCode),
+		}
+	default:
+		return checkResult{
+			name:   name,
+			status: statusWarn,
+			detail: fmt.Sprintf("endpoint reachable but returned an unexpected status (HTTP %d)", r.statusCode),
+			hint:   "re-run doctor shortly; if it persists, check the provider's status page or the org id in the config block",
+		}
+	}
+}
 
 // checkGitRepo reports whether the repo has a canonical owner/repo identity (#231).
 // A resolvable slug is OK; falling back to the unqualified sentinel is a WARN, not
@@ -827,21 +1031,17 @@ func pctStr(share float64) string {
 // doctor's own "all checks passed" line — defeating the very check whose purpose
 // is to stop an operator misreading the report. Capped in count as well as
 // length so a large fleet cannot emit a multi-megabyte line.
+//
+// The body moved to logsafe.Join (#321 review, 2026-08-04) once internal/store
+// and reprice needed the same thing; this stays as the named, doctor-specific
+// binding of the count cap. THREE is a doctor number, not a universal one:
+// doctor names identities for an operator to eyeball, so a truncated list still
+// answers the question. reprice names the models an operator must ADD to the
+// price table, where a truncated list is an incomplete remedy — see
+// maxListedInReport there. Do not "unify" the two constants.
 func joinSafe(ids []string) string {
 	const maxShown = 3
-	shown := ids
-	if len(shown) > maxShown {
-		shown = shown[:maxShown]
-	}
-	parts := make([]string, 0, len(shown))
-	for _, id := range shown {
-		parts = append(parts, logsafe.Str(id))
-	}
-	out := strings.Join(parts, ", ")
-	if len(ids) > maxShown {
-		out += fmt.Sprintf(" (+%d more)", len(ids)-maxShown)
-	}
-	return out
+	return logsafe.Join(ids, maxShown)
 }
 
 // aliasRemedy emits a paste-ready command ONLY when the pairing is unambiguous.

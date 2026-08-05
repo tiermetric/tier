@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
@@ -279,20 +280,87 @@ func (a *anthropicStreamParser) Finalise(developer, issueID, host string) *colle
 	}
 }
 
-// --- OpenAI streaming parser ---
+// --- OpenAI streaming parsers ---
+//
+// ProviderOpenAI carries TWO wire shapes on one route (see openAIShape on the
+// JSON path), so the parser installed for it is a router: openAIStreamParser
+// dispatches each framed event to the Chat Completions or the Responses
+// sub-parser and finalises whichever one actually accumulated usage.
+//
+// The discriminator is the SSE `event:` field. Responses-API events are named
+// `response.*` (response.created, response.output_text.delta,
+// response.completed, ...) and every frame carries that name; Chat Completions
+// chunks carry NO event field at all — they are bare `data: {...}` lines, so
+// eventType is "". A compatible upstream that names its chat events something
+// else still routes to the chat parser, since only the `response.` prefix is
+// claimed.
+//
+// ⚠️ Consequence worth stating: a Responses stream whose `event:` lines were
+// stripped by an intermediary would route to the chat parser, find no
+// prompt_tokens, and close as reason=stream_no_usage — visible in the counter,
+// never a silent mis-price. Live confirmation that OpenAI always sends the
+// field is #459 task 3 (credential-blocked).
+const responsesEventPrefix = "response."
+
+type openAIStreamParser struct {
+	chat      openAIChatStreamParser
+	responses openAIResponsesStreamParser
+	// logger reports the mixed-shape case in Finalise. Nil is tolerated (unit
+	// tests construct this type bare) and falls back to slog.Default.
+	logger *slog.Logger
+}
+
+func (o *openAIStreamParser) OnEvent(eventType string, data []byte) {
+	if strings.HasPrefix(eventType, responsesEventPrefix) {
+		o.responses.OnEvent(eventType, data)
+		return
+	}
+	o.chat.OnEvent(eventType, data)
+}
+
+// Finalise prefers the Responses sub-parser when both accumulated usage.
+//
+// No real stream is both shapes, so in practice at most one sub-parser latches
+// anything and the preference never fires — but that is a property of upstreams,
+// NOT an invariant this type enforces, and it must not be written down as one.
+// A malformed or interleaved stream CAN latch both, and then one sub-parser's
+// counts are discarded. Discarding money silently is the exact failure the
+// uncaptured counter exists to prevent, so it is logged rather than swallowed.
+//
+// The order itself is deliberate: asking Responses first leaves the pre-#459
+// Chat Completions result byte-identical whenever no `response.*` event was seen
+// (the Responses sub-parser is then untouched and returns nil).
+func (o *openAIStreamParser) Finalise(developer, issueID, host string) *collector.TokenEvent {
+	if o.responses.gotUsage && o.chat.gotUsage {
+		logger := o.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		// Both totals are internally-generated integers, not upstream strings —
+		// no logsafe barrier needed (docs/security.md §8, numerics).
+		logger.Warn("proxy: SSE stream carried BOTH OpenAI usage shapes; keeping the Responses counts and DISCARDING the Chat Completions ones",
+			"discarded_prompt_tokens", o.chat.prompt, "discarded_completion_tokens", o.chat.comp)
+	}
+	if ev := o.responses.Finalise(developer, issueID, host); ev != nil {
+		return ev
+	}
+	return o.chat.Finalise(developer, issueID, host)
+}
+
+// --- OpenAI Chat Completions streaming parser ---
 //
 // OpenAI SSE chunks all carry the same `id`. The `usage` field is non-null
 // only on the final chunk, and ONLY when the client opted in via
 // stream_options.include_usage. Without that opt-in there is no usage block
 // in the stream at all — we emit nothing rather than guess.
-type openAIStreamParser struct {
+type openAIChatStreamParser struct {
 	id, model    string
 	prompt, comp int
 	cached       int
 	gotUsage     bool
 }
 
-func (o *openAIStreamParser) OnEvent(_ string, data []byte) {
+func (o *openAIChatStreamParser) OnEvent(_ string, data []byte) {
 	// OpenAI doesn't use `event:` fields — events are bare `data: {...}`.
 	// The literal "[DONE]" terminator carries no JSON.
 	if bytes.Equal(data, []byte("[DONE]")) {
@@ -328,49 +396,118 @@ func (o *openAIStreamParser) OnEvent(_ string, data []byte) {
 	}
 }
 
-func (o *openAIStreamParser) Finalise(developer, issueID, host string) *collector.TokenEvent {
+func (o *openAIChatStreamParser) Finalise(developer, issueID, host string) *collector.TokenEvent {
 	if !o.gotUsage || o.model == "" {
 		// stream_options.include_usage was not set, or stream malformed —
 		// emit nothing rather than guess at counts.
 		return nil
 	}
-	// Clamp negative usage counts on the RAW accumulated values first (#121),
-	// before the carve-out below. The P0-01 cached=min(cached,prompt)
-	// subtraction (#114) layers AFTER this clamp so it only handles
-	// cached>prompt, never negatives. Count once per event.
-	if collector.ClampNegativeTokens(&o.prompt, &o.comp, &o.cached) {
-		collector.WarnClamp(collector.SourceProxy, o.model)
-		collector.RecordClamp(collector.SourceProxy)
+	// The clamp, the cached carve-out (prompt_tokens INCLUDES cached_tokens,
+	// #114) and the host-qualified pricing all live in openAITokenEvent, shared
+	// with the Responses parser and both JSON parsers; OnEvent keeps
+	// accumulating the raw wire values so the carve-out happens once, here.
+	return openAITokenEvent(developer, issueID, host, o.id, o.model, o.prompt, o.comp, o.cached)
+}
+
+// --- OpenAI Responses API streaming parser (#459 task 2) ---
+//
+// The Responses stream nests the whole response object under `response`, and
+// `usage` inside it is null until the response reaches a terminal status:
+//
+//	event: response.created
+//	data: {"type":"response.created","response":{"id":"resp_...","model":"...","usage":null}}
+//
+//	event: response.output_text.delta ...
+//
+//	event: response.completed
+//	data: {"type":"response.completed","response":{"id":"resp_...","model":"...","usage":{"input_tokens":N,"input_tokens_details":{"cached_tokens":N},"output_tokens":N,...}}}
+//
+// response.completed is the usual carrier, but it is deliberately NOT
+// special-cased by name: `response.incomplete` (hit max_output_tokens) and
+// `response.failed` also terminate with a usage block, and those tokens were
+// billed just the same. Latching ANY non-null usage, last-one-wins, captures all
+// three and mirrors how the Anthropic and Gemini parsers take the final
+// cumulative value rather than trusting one event name.
+type openAIResponsesStreamParser struct {
+	id, model     string
+	input, output int
+	cached        int
+	gotUsage      bool
+}
+
+func (o *openAIResponsesStreamParser) OnEvent(_ string, data []byte) {
+	// Cheap pre-filter before the unmarshal. This runs SYNCHRONOUSLY inside
+	// streamCapture.Read, on the client's byte-forwarding path, and in a real
+	// Responses stream the overwhelming majority of frames are
+	// response.output_text.delta events that carry no `response` object at all —
+	// while response.output_item.done and response.completed carry the entire
+	// output text, which unmarshalling would walk and then discard.
+	//
+	// Every event that carries the `response` object also carries a `usage` key
+	// (null until terminal); no delta event does. Skipping a frame without one
+	// can therefore only skip an event this parser would have no-oped on — and
+	// even if some upstream omitted a null usage on response.created, the id and
+	// model are re-sent on the terminal event, which necessarily has one.
+	if !bytes.Contains(data, []byte(`"usage"`)) {
+		return
 	}
-	// OpenAI's prompt_tokens INCLUDES cached_tokens — cached is a subset of
-	// prompt, not an additional class (#114). Carve it out here (once, at
-	// emission) so Input and CacheRead never overlap; OnEvent keeps accumulating
-	// the raw wire values. Clamp cached to prompt (negatives already handled)
-	// so a contradictory payload leaves Input at 0 rather than negative.
-	cached := o.cached
-	if cached > o.prompt {
-		cached = o.prompt
+	var ev struct {
+		Response *struct {
+			ID    string                `json:"id"`
+			Model string                `json:"model"`
+			Usage *openAIResponsesUsage `json:"usage"`
+		} `json:"response"`
 	}
-	inputTok := o.prompt - cached
-	cost, billingMode := store.ComputeCostHost(host, o.model, store.CostUsage{
-		Input:     inputTok,
-		Output:    o.comp,
-		CacheRead: cached,
-	})
-	return &collector.TokenEvent{
-		Developer:      developer,
-		IssueID:        issueID,
-		Model:          o.model,
-		InputTok:       inputTok,
-		OutputTok:      o.comp,
-		CacheRead:      cached,
-		CostMicro:      cost,
-		Fidelity:       collector.FidelityRealtime,
-		IdempotencyKey: idempotencyKeyForProxy(ProviderOpenAI, o.id),
-		Host:           host,
-		BillingMode:    billingMode,
-		Timestamp:      time.Now().UTC(),
+	if err := json.Unmarshal(data, &ev); err != nil || ev.Response == nil {
+		return
 	}
+	if ev.Response.ID != "" {
+		o.id = ev.Response.ID
+	}
+	if ev.Response.Model != "" {
+		o.model = ev.Response.Model
+	}
+	// Latch only a usage block that carries counts. Last-one-wins is right for
+	// the terminal event, but an UNCONDITIONAL last-wins lets a later zeroed
+	// block destroy a correct count — the same defect anthropicStreamParser
+	// guards with `if md.Usage.OutputTokens > 0` above. A 0/0 usage is "nothing
+	// billable here", never "the answer is zero": if that is all the stream ever
+	// carried, gotUsage stays false and the caller records stream_no_usage,
+	// which is the honest outcome.
+	if u := ev.Response.Usage; u != nil && u.InputTokens+u.OutputTokens > 0 {
+		o.input = u.InputTokens
+		o.output = u.OutputTokens
+		// Reset rather than leave the previous value: a terminal block that
+		// omits input_tokens_details (Azure/LiteLLM/OpenRouter shims do) must
+		// not inherit an earlier event's cached count, which would carve tokens
+		// out of an input total that no longer contains them.
+		o.cached = 0
+		if u.InputTokensDetails != nil {
+			o.cached = u.InputTokensDetails.CachedTokens
+		}
+		o.gotUsage = true
+	}
+}
+
+func (o *openAIResponsesStreamParser) Finalise(developer, issueID, host string) *collector.TokenEvent {
+	if !o.gotUsage || o.model == "" || (o.input == 0 && o.output == 0) {
+		// Nothing usable: the stream closed before any terminal event carried
+		// usage (client disconnect, upstream cut, or an event stream this parser
+		// never saw), or it named no model, or the counts are all zero. Emit
+		// nothing rather than guess — the caller records reasonStreamNoUsage.
+		//
+		// The zero-count arm mirrors the JSON path's guard and
+		// anthropicStreamParser's, and it is not cosmetic: a 0-token event is a
+		// row representing no work AND it BURNS the idempotency key. A later
+		// re-ingest of the same resp_* id with the real cost then trips
+		// store.ErrCostConflict ("already recorded with a different cost")
+		// instead of deduping.
+		return nil
+	}
+	// Same shared builder as every other OpenAI path: input is INCLUSIVE of
+	// cached (see openAIResponsesUsage), so the carve-out and the host-qualified
+	// pricing happen there, once.
+	return openAITokenEvent(developer, issueID, host, o.id, o.model, o.input, o.output, o.cached)
 }
 
 // --- Gemini streaming parser ---
@@ -492,7 +629,7 @@ func newStreamCapture(
 	case ProviderAnthropic:
 		parser = &anthropicStreamParser{}
 	case ProviderOpenAI:
-		parser = &openAIStreamParser{}
+		parser = &openAIStreamParser{logger: logger}
 	case ProviderGemini:
 		parser = &geminiStreamParser{}
 	default:

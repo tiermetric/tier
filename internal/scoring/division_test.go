@@ -44,7 +44,7 @@ func TestAggregateKAnon_LevelAgnostic_DivisionMap(t *testing.T) {
 		"r1": "research", "r2": "research",
 	}
 
-	got := AggregateTeamsKAnon(devs, divisionOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, divisionOf, 3)
 
 	names := map[string]TeamScore{}
 	for _, ts := range got {
@@ -60,29 +60,28 @@ func TestAggregateKAnon_LevelAgnostic_DivisionMap(t *testing.T) {
 	if eng.WeightedPoints != 90 || eng.TotalCostUSD != 30 {
 		t.Errorf("engineering rollup = points %v cost %v, want 90 / 30", eng.WeightedPoints, eng.TotalCostUSD)
 	}
-	other, ok := names["other"]
-	if !ok {
-		t.Fatalf("sub-k 'research' must fold into 'other'; got %v", teamNames(got))
+	// #593: 'research' has 2 contributors, below k=3, so the residual is WITHHELD
+	// rather than published. The level-agnostic property this test exists to prove is
+	// unaffected — the fold still never inspects what the label MEANS; only what
+	// happens to a sub-k residual changed.
+	if _, ok := names["other"]; ok {
+		t.Errorf("a sub-k residual must be withheld at the division level too; got %v", teamNames(got))
 	}
-	if other.WeightedPoints != 40 || other.TotalCostUSD != 14 {
-		t.Errorf("other (research preserved) = points %v cost %v, want 40 / 14", other.WeightedPoints, other.TotalCostUSD)
+	_, sup := AggregateTeamsKAnon(devs, divisionOf, 3)
+	if !sup.Any() || sup.Developers != 2 {
+		t.Errorf("division-level suppression must be reported; got %+v, want {Residual:true Developers:2}", sup)
 	}
 	// Named rows must never carry developer identities across the boundary.
-	if eng.Developers != nil || other.Developers != nil {
-		t.Errorf("division rows must clear Developers; eng=%v other=%v", eng.Developers, other.Developers)
+	if eng.Developers != nil {
+		t.Errorf("division rows must clear Developers; eng=%v", eng.Developers)
 	}
 
-	// Totals preserved: sum of visible division rows == straight rollup over all.
-	full := RollupTeam("", devs)
-	var sumPoints, sumCost float64
-	for _, ts := range got {
-		sumPoints += ts.WeightedPoints
-		sumCost += ts.TotalCostUSD
-	}
-	if sumPoints != full.WeightedPoints || sumCost != full.TotalCostUSD {
-		t.Errorf("division rollup lost data: sum(points %v, cost %v) != total(points %v, cost %v)",
-			sumPoints, sumCost, full.WeightedPoints, full.TotalCostUSD)
-	}
+	// ⚠️ The "totals preserved" assertion that used to live here is GONE, deliberately.
+	// Summing the visible rows no longer reproduces the grand total whenever a residual
+	// was withheld — that arithmetic IS the disclosure channel (total - named = the
+	// hidden cohort), so preserving it and preserving k-anonymity cannot both hold.
+	// Steve ruled the trade (option A, 2026-08-03). The API declares the suppression
+	// instead, via data_quality.kanon_suppressed.
 }
 
 // TestAggregateKAnon_EmptyDivisionFoldsToOther documents the empty-division
@@ -99,7 +98,7 @@ func TestAggregateKAnon_EmptyDivisionFoldsToOther(t *testing.T) {
 		"e1": "engineering", "e2": "engineering", "e3": "engineering",
 		"x2": "",
 	}
-	got := AggregateTeamsKAnon(devs, divisionOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, divisionOf, 3)
 	for _, ts := range got {
 		if ts.Team == "" {
 			t.Errorf("empty division must not produce a blank-named row; got %v", teamNames(got))
@@ -111,12 +110,16 @@ func TestAggregateKAnon_EmptyDivisionFoldsToOther(t *testing.T) {
 			other = &got[i]
 		}
 	}
-	if other == nil {
-		t.Fatalf("empty-division developers must land in 'other'; got %v", teamNames(got))
+	// #593: x1+x2 are 2 contributors, below k=3, so the unnamed group is WITHHELD.
+	// The contract this test pins — an empty division never produces a blank-NAMED row
+	// — is asserted above and is unchanged; what changed is that a sub-k unnamed group
+	// is now suppressed rather than published as 'other'.
+	if other != nil {
+		t.Errorf("a sub-k unnamed-division residual must be withheld, not emitted; got %v", teamNames(got))
 	}
-	// dev(name, points, cost): x1+x2 = points 10, cost 4.
-	if other.WeightedPoints != 10 || other.TotalCostUSD != 4 {
-		t.Errorf("other (x1+x2 preserved) = points %v cost %v, want 10 / 4", other.WeightedPoints, other.TotalCostUSD)
+	_, sup := AggregateTeamsKAnon(devs, divisionOf, 3)
+	if !sup.Any() || sup.Developers != 2 {
+		t.Errorf("suppression must be reported for the unnamed group; got %+v", sup)
 	}
 }
 
@@ -134,7 +137,7 @@ func TestAggregateKAnon_EmptyLabelNeverNamedEvenAboveK(t *testing.T) {
 	}
 	divisionOf := map[string]string{} // nobody mapped -> all in the "" group
 
-	got := AggregateTeamsKAnon(devs, divisionOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, divisionOf, 3)
 
 	if len(got) != 1 || got[0].Team != "other" {
 		t.Fatalf("a >= k empty-label group must fold into a single 'other' row, never a blank-named one; got %v", teamNames(got))

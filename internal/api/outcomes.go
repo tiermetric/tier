@@ -189,6 +189,28 @@ func validateOutcomeRequest(req outcomeRequest) (store.Outcome, error) {
 	if len(req.Developer) > maxIdentifierLen || len(req.IssueID) > maxIdentifierLen {
 		return zero, fmt.Errorf("identifier fields must be <= %d chars", maxIdentifierLen)
 	}
+	// An OUTCOME may never carry the unattributed sentinel (#466). This is the path
+	// where forging actually pays: the sentinel's spend is excluded from every
+	// work-type segment, so an outcome attached to it earns weighted points whose cost
+	// the segment denominator never sees — inflating the NUMERATOR, not just shifting
+	// the denominator. It also makes one response self-contradictory, reporting that
+	// the segments can attribute $0 of a developer's spend while simultaneously
+	// denominating a segment on it. The webhook derives issue ids via issueref, which
+	// can only emit "#\d+" / "ABC-123" shapes, so no legitimate producer is affected.
+	// Strict client-surface rule (not the /events allowlist): nothing legitimately
+	// writes an outcome on the sentinel.
+	if err := validateIssueID(req.IssueID); err != nil {
+		return zero, err
+	}
+	// Nor may an outcome be filed AGAINST the sentinel developer (#619). This is the
+	// numerator mirror of the denominator attack: the "unattributed" pseudo-developer
+	// is a pool of spend that by construction has no owner and therefore no points, so
+	// an outcome posted onto it credits work to a row whose cost nobody is accountable
+	// for. No legitimate producer does this — /outcomes is a client surface, and the
+	// webhook derives its developer from the signed GitHub payload's PR author login.
+	if err := validateDeveloper(req.Developer); err != nil {
+		return zero, err
+	}
 	if req.MergeCommitSHA == "" {
 		return zero, fmt.Errorf("merge_commit_sha is required (outcome dedup depends on it)")
 	}

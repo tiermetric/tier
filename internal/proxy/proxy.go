@@ -1,26 +1,45 @@
 // Package proxy implements the TIER reverse proxy.
 //
-// Developers point ANTHROPIC_BASE_URL / OPENAI_BASE_URL at this proxy — the two
-// providers cmd/tierd actually mounts, gated behind --anthropic-target /
-// --openai-target. Every response is intercepted, the usage block extracted, and
-// a TokenEvent is written to the store. The original response is forwarded
-// unchanged.
+// Developers point ANTHROPIC_BASE_URL / OPENAI_BASE_URL at this proxy — three
+// providers cmd/tierd mounts, gated behind --anthropic-target / --openai-target
+// / --gemini-target. Gemini authenticates upstream with an `x-goog-api-key`
+// header or a `?key=` query parameter rather than an env-var base-URL swap; the
+// proxy forwards either unchanged, but the HEADER is the form to recommend —
+// a `?key=` value rides in the request line and can be logged by anything
+// sitting in front of tierd (see README's proxy section and
+// docs/how-it-works.md). Every response is intercepted, the usage block
+// extracted, and a TokenEvent is written to the store. The original response is
+// forwarded unchanged.
 //
-// A Gemini response parser (parseGemini, ProviderGemini) is present and, since
-// #300, stamps the serving Host — but cmd/tierd mounts NO /gemini/ route and has
-// no --gemini-target flag, so no Gemini traffic reaches this proxy today.
-// Pointing GEMINI_BASE_URL here would 404. Wiring a Gemini capture route is a
-// separate product decision, deliberately not done here.
+// Gemini's route (#459 task 4) is structurally complete — mounted through the
+// same registerProxy path as /anthropic/ and /openai/, onto the parseGemini /
+// geminiStreamParser pair that has existed since v1 (#1) and gained
+// thinking/cache-token handling in #122 and host stamping in #300 — but it has
+// never carried live traffic: no request has round-tripped through it to a real
+// generativelanguage.googleapis.com response. Treat it as proven-by-parser-unit-
+// tests, not proven-by-wire, until a live run exercises it (see the
+// TIER_LIVE_GEMINI_KEY-gated test in internal/integration).
 //
-// Codex is likewise NOT captured, for a different reason. The Codex CLI speaks
-// OpenAI's Responses API, which reports usage as input_tokens / output_tokens
-// (nested under `response` in the streaming events). Both OpenAI code paths here
-// read the Chat Completions shape instead — parseOpenAI on the JSON path and
-// openAIStreamParser on the SSE path Codex actually uses — so a Codex response
-// yields no TokenEvent. It is counted under tier_proxy_uncaptured_responses_total
-// (reason=stream_no_usage for the default streaming case, reason=parse for a
-// non-streaming one), so the gap is visible rather than silent. Codex writes its
-// own rollout logs; no tierd collector reads them yet (#459, #463).
+// The OpenAI route carries TWO wire shapes and parses both (#459 task 2). Chat
+// Completions reports usage as prompt_tokens / completion_tokens; the Responses
+// API (/v1/responses — what the Codex CLI speaks) reports input_tokens /
+// output_tokens with input_tokens_details.cached_tokens, nested under `response`
+// in the streaming events. Discrimination is on the PAYLOAD, never the path:
+// openAIShape on the JSON path, the `response.*` SSE event name on the streaming
+// path. A body that is not positively identified as the Responses shape parses
+// exactly as it did before, so nothing about the Chat Completions path moved.
+//
+// ⚠️ What that does and does NOT claim. The Responses parser is an ENHANCEMENT
+// covering Responses-API traffic generally; it is not what makes Codex spend
+// measurable. Codex is already captured — from its own local rollout logs, by
+// internal/collector/codexrollout under `--codex-rollout` (#464), which is the
+// path verified against real captured sessions and remains the supported one
+// (it needs no base-URL change and works with ChatGPT-subscription auth, which
+// never traverses this proxy). This parser has never round-tripped live
+// Responses traffic; #459 task 3 (credential-blocked) is what would prove it on
+// the wire. Anything it cannot parse still lands in
+// tier_proxy_uncaptured_responses_total (reason=stream_no_usage on the streaming
+// path, reason=parse on the JSON one), so a gap stays visible rather than silent.
 package proxy
 
 import (
@@ -48,10 +67,11 @@ type Provider string
 
 const (
 	ProviderAnthropic Provider = "anthropic"
-	// ProviderOpenAI selects the OpenAI Chat Completions usage shape
-	// (usage.prompt_tokens / completion_tokens) — OpenAI and any upstream that
-	// returns that same shape. It does NOT cover the Codex CLI; see the package
-	// doc for what this proxy cannot capture (#463).
+	// ProviderOpenAI selects OpenAI's usage shapes — BOTH Chat Completions
+	// (usage.prompt_tokens / completion_tokens), which every OpenAI-compatible
+	// upstream also returns, and the Responses API (usage.input_tokens /
+	// output_tokens, #459 task 2). One provider tag, two shapes, discriminated
+	// per response body; see the package doc.
 	ProviderOpenAI Provider = "openai"
 	ProviderGemini Provider = "gemini"
 )
@@ -138,9 +158,39 @@ func (p *Proxy) SetUnattributedRecorder(rec WriteRecorder) {
 	p.unattributed = rec
 }
 
-// recordUnattributed bumps tier_proxy_unattributed_total for one intercepted 2xx.
-// header is one of "developer", "issue", or "repo" (#231).
-// response missing the named X-Tier-* header (developer|issue). Nil-guarded like
+// isReservedIdentifier reports whether a client-supplied X-Tier-* attribution value
+// looks like the server-assigned unattributed sentinel family — the bare sentinel or
+// any "unattributed:<reason>" sub-bucket, compared case-INSENSITIVELY. Deliberately
+// wider than the exact read-side matcher (store.IsUnattributed): at ingest the safe
+// move is to refuse anything that resembles the sentinel, so a forged case variant
+// never becomes a stored row.
+//
+// 🔴 IT DELEGATES — it does NOT restate the rule. Under #466 this was a hand-copied
+// four-liner justified by "the proxy cannot import internal/api". That was a false
+// dichotomy: the rule belongs to NEITHER consumer, it belongs beside the sentinel it
+// is about, and internal/store imports only logsafe and repoid so it was already in
+// this package's dependency graph — there was never a cycle to avoid. The #466
+// postmortem is itself a story about a matcher silently drifting from its twin while
+// every shared constant still matched, so a third copy was the one thing not to ship.
+//
+// It is NOT issue-specific (it was named isReservedIssueID under #466, when only
+// X-Tier-Issue was guarded). The sentinel names two columns and modifyResponse now
+// screens BOTH headers through it — X-Tier-Issue (#466) and X-Tier-Developer (#619).
+func isReservedIdentifier(s string) bool {
+	return store.ResemblesUnattributed(s)
+}
+
+// recordUnattributed bumps tier_proxy_unattributed_total for one intercepted 2xx
+// response missing (or forging) the named X-Tier-* attribution header.
+//
+// header is one of "developer", "developer-forged" (#619), "issue", "issue-forged"
+// (#466) or "repo" (#231) — a fixed, low-cardinality set; no client-supplied value
+// ever becomes a label. Each "-forged" variant is deliberately DISTINCT from its
+// plain form: the stored row is identical either way, so without separate labels an
+// operator cannot tell a misconfigured client from one asserting the server-assigned
+// sentinel, and the guard would make forging exactly as effective as omission.
+// "developer-forged" is the one to alert on — a forged developer is the only one of
+// the four that RAISES the sender's own score. Nil-guarded like
 // recordWrite / recordUncaptured so tests and `tierd score` (no metrics) are
 // no-ops.
 func (p *Proxy) recordUnattributed(header string) {
@@ -279,9 +329,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     streamCapture that forwards bytes to the client unchanged while feeding
 //     an SSE framer. The TokenEvent is emitted at body Close (after the
 //     client finishes reading or disconnects). This path is what captures
-//     Claude Code, which defaults to streaming. (Codex also streams but speaks
-//     the Responses API and is not captured; Gemini CLI also streams but no
-//     /gemini/ route is mounted — see the package doc.)
+//     Claude Code, which defaults to streaming. (The Responses API streams too,
+//     and is parsed here since #459 task 2 — though never yet against live
+//     traffic, see the package doc; Gemini CLI also streams, and its
+//     /gemini/ route + geminiStreamParser are mounted since #459 task 4, but
+//     unlike Anthropic/OpenAI this path has never carried live traffic — see
+//     the package doc.)
 func (p *Proxy) modifyResponse(resp *http.Response) error {
 	// Only intercept successful API responses.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -295,8 +348,27 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	// byte-identical pass-through, and record the blindness instead of dropping
 	// it silently. Rare by construction — one WARN per such response is fine.
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
+		// ce is a free-form UPSTREAM-controlled response header. It is not one of
+		// the provably-constrained classes docs/security.md §8 licenses to be
+		// logged bare (issue refs, hex SHAs, the webhook event allowlist,
+		// validated periods, numerics), so it goes through the shared logsafe
+		// barrier: an upstream returning a multi-kilobyte header value would
+		// otherwise flood one log line, and the length cap is the live win here
+		// (slog's handlers already escape CR/LF in an attribute value — see
+		// docs/security.md §8 — so the strip is defense in depth for a
+		// non-slog consumer, not the thing stopping a forged record today).
+		//
+		// ⚠️ This is DELIBERATELY NOT the posture the X-Tier-Repo reject path
+		// takes ~45 lines below in this same function. That one logs only
+		// len(repo) and never the value, because the rejected header is
+		// attacker-supplied and carries no diagnostic worth the risk. Here the
+		// value IS the diagnostic — an operator needs to see "br" or "zstd" to
+		// know which codec defeated the Accept-Encoding strip — so it is
+		// sanitized and kept rather than dropped. Same threat, different
+		// cost/benefit, and the two must not be "made consistent" by wrapping
+		// one or dropping the other (#321, go/log-injection).
 		p.logger.Warn("proxy: skipping capture of response with unhandled Content-Encoding",
-			"provider", p.provider, "content_encoding", ce)
+			"provider", p.provider, "content_encoding", logsafe.Str(ce))
 		p.recordUncaptured(reasonEncoding)
 		return nil
 	}
@@ -320,19 +392,66 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	if repo == "" {
 		repo = requestHeader(resp.Request, headerRepo)
 	}
+	// A client may not FORGE the sentinel via X-Tier-Developer (#619) any more than via
+	// X-Tier-Issue (#466 — see below). This header is the worse of the two to leave
+	// open: a forged issue moves a dollar between buckets inside the sender's own
+	// denominator, while a forged developer moves it out of that denominator entirely
+	// and RAISES the sender's score.
+	//
+	// Treated exactly as a MISSING header, never as an error, for the same reason the
+	// issue half is: the proxy sits on the request path and must never fail a provider
+	// call over attribution metadata. The stored value is identical either way — the
+	// difference is that the counter records it as unresolved, which is the truth. The
+	// rejected value is never logged (same rule as X-Tier-Repo below).
+	forgedDeveloper := developer != "" && isReservedIdentifier(developer)
+	if forgedDeveloper {
+		developer = ""
+	}
 	if developer == "" {
 		// A proxied event with no developer would otherwise store "" and vanish
 		// from every per-developer aggregate. Default to the same "unattributed"
 		// sentinel as the missing-issue case below (symmetric, #129) and surface
 		// the misconfigured client via the counter instead of silently polluting.
 		developer = collector.UnattributedIssueID
-		p.recordUnattributed("developer")
+		// Counted under a DISTINCT label when the header was forged rather than
+		// absent (#619), mirroring issue-forged (#466): the stored row is identical
+		// either way, so without separate labels an operator cannot tell a
+		// misconfigured client from one asserting the server-assigned sentinel, and
+		// the guard would make forging exactly as effective as omission.
+		if forgedDeveloper {
+			p.recordUnattributed("developer-forged")
+		} else {
+			p.recordUnattributed("developer")
+		}
+	}
+	// A client may not FORGE the sentinel via X-Tier-Issue (#466). The header is
+	// unauthenticated and taken verbatim, so without this a caller could assert
+	// "unattributed" (or a labeled sub-bucket, or a case variant of either) about
+	// spend it is otherwise attributing to itself, moving its own dollars out of the
+	// #466 no-outcome gap and out of the attributed side of the #234 coverage split.
+	// Treated exactly as a MISSING issue rather than as an error: the proxy sits on
+	// the request path and must never fail a provider call over attribution metadata,
+	// and the outcome is the same value the server would have assigned anyway — the
+	// difference is that the counter now records it as unresolved, which is the truth.
+	// The rejected value is never logged (same rule as X-Tier-Repo below).
+	forgedIssue := issueID != "" && isReservedIdentifier(issueID)
+	if forgedIssue {
+		issueID = ""
 	}
 	if issueID == "" {
 		// Shared with the JSONL join fallback so the two capture paths cannot
 		// drift about the same dollar (spec section 4.4, #120).
 		issueID = collector.UnattributedIssueID
-		p.recordUnattributed("issue")
+		// Counted under a DISTINCT label when the header was forged rather than
+		// absent (#466). The stored row is identical either way, so without separate
+		// labels an operator cannot tell "client is misconfigured" from "client is
+		// asserting the sentinel", and the guard would make forging exactly as
+		// effective as omission instead of less.
+		if forgedIssue {
+			p.recordUnattributed("issue-forged")
+		} else {
+			p.recordUnattributed("issue")
+		}
 	}
 	// #231: canonicalize, or fall back to the sentinel + counter. A client that never
 	// sets X-Tier-Repo is not broken — the tolerant join still attaches its cost to
@@ -595,7 +714,7 @@ func parseAnthropic(body []byte, developer, issueID, host string) *collector.Tok
 	}
 }
 
-// --- OpenAI-compatible response parser (OpenAI, and any upstream returning the same Chat Completions usage shape) ---
+// --- OpenAI-compatible response parsers (OpenAI, and any upstream returning one of its two usage shapes) ---
 
 type openAIResponse struct {
 	ID    string `json:"id"` // chatcmpl-<...> — the cross-source dedup anchor
@@ -609,13 +728,99 @@ type openAIResponse struct {
 	} `json:"usage"`
 }
 
-// parseOpenAI builds a TokenEvent from an OpenAI-compatible (OpenAI, and any
-// upstream returning the same shape) Chat Completions response. It does NOT
-// handle the Responses API, which the Codex CLI speaks — see the package doc. OpenAI reports prompt_tokens
+// openAIWireShape names which of OpenAI's two usage shapes a body carries. Both
+// arrive on the SAME route (a client points OPENAI_BASE_URL at /openai/ and then
+// calls whichever endpoint it likes), so the shape has to come from the payload,
+// never from the path or the provider tag.
+type openAIWireShape int
+
+const (
+	// shapeChatCompletions is the DEFAULT: /v1/chat/completions and every
+	// OpenAI-compatible upstream that mimics it (xAI, DeepSeek, OpenRouter,
+	// Together, Ollama). Anything not positively identified as the Responses
+	// shape lands here, which is what keeps this change additive — no body that
+	// parsed before is routed anywhere new.
+	shapeChatCompletions openAIWireShape = iota
+	// shapeResponses is /v1/responses — the endpoint the Codex CLI speaks.
+	shapeResponses
+)
+
+// openAIShape discriminates the two shapes from the body alone (#459 task 2).
+//
+// Three rules, in order:
+//
+//  1. `"object"` is authoritative when present: "response" -> Responses,
+//     "chat.completion" -> Chat Completions. OpenAI itself always sets it.
+//  2. Otherwise the usage KEYS decide: input_tokens/output_tokens present AND
+//     prompt_tokens/completion_tokens absent -> Responses. Key PRESENCE (via
+//     *int), not value, so a genuine zero count is not read as "absent" — and
+//     the mutual exclusion means a hybrid body from some compatible upstream
+//     stays on the Chat path it already worked on.
+//  3. Anything else -> Chat Completions, the pre-#459 behaviour.
+//
+// The leading bytes.Contains pair is a fast path that keeps the common Chat
+// Completions response at exactly one unmarshal, as before. It is outcome-
+// neutral, but only because it screens for BOTH count keys: a body carrying
+// neither cannot satisfy rule 2, and cannot satisfy rule 1's "response" case
+// either in any way that matters, because a Responses object with no
+// input_tokens AND no output_tokens has no usage worth parsing — both parsers
+// return nil for it.
+//
+// ⚠️ Screening on "input_tokens" ALONE would not be neutral, and an earlier
+// draft of this function had exactly that bug:
+// {"object":"response","model":"m","usage":{"output_tokens":500}} would have
+// skipped the probe, routed to Chat Completions, and captured nothing, while
+// rules 1-3 say Responses and parseOpenAIResponses prices it. Not a shape OpenAI
+// emits — but the fast path must not be able to decide anything the rules would
+// decide differently, or it is a fourth rule pretending to be an optimisation.
+func openAIShape(body []byte) openAIWireShape {
+	if !bytes.Contains(body, []byte(`"input_tokens"`)) && !bytes.Contains(body, []byte(`"output_tokens"`)) {
+		return shapeChatCompletions
+	}
+	var probe struct {
+		Object string `json:"object"`
+		Usage  *struct {
+			InputTokens      *int `json:"input_tokens"`
+			OutputTokens     *int `json:"output_tokens"`
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return shapeChatCompletions
+	}
+	switch probe.Object {
+	case "response":
+		return shapeResponses
+	case "chat.completion":
+		return shapeChatCompletions
+	}
+	if probe.Usage == nil {
+		return shapeChatCompletions
+	}
+	if (probe.Usage.InputTokens != nil || probe.Usage.OutputTokens != nil) &&
+		probe.Usage.PromptTokens == nil && probe.Usage.CompletionTokens == nil {
+		return shapeResponses
+	}
+	return shapeChatCompletions
+}
+
+// parseOpenAI builds a TokenEvent from an OpenAI-compatible JSON response of
+// EITHER shape, dispatching on openAIShape. It is the single JSON entry point
+// for ProviderOpenAI; handleJSON does not know there are two shapes.
+func parseOpenAI(body []byte, developer, issueID, host string) *collector.TokenEvent {
+	if openAIShape(body) == shapeResponses {
+		return parseOpenAIResponses(body, developer, issueID, host)
+	}
+	return parseOpenAIChat(body, developer, issueID, host)
+}
+
+// parseOpenAIChat builds a TokenEvent from a Chat Completions response (OpenAI,
+// and any upstream returning the same shape). OpenAI reports prompt_tokens
 // INCLUSIVE of prompt_tokens_details.cached_tokens, so cached is carved out of
 // the input class before pricing: the emitted InputTok is prompt_tokens −
 // cached_tokens and CacheRead is cached_tokens, two non-overlapping classes.
-func parseOpenAI(body []byte, developer, issueID, host string) *collector.TokenEvent {
+func parseOpenAIChat(body []byte, developer, issueID, host string) *collector.TokenEvent {
 	var r openAIResponse
 	if err := json.Unmarshal(body, &r); err != nil || r.Model == "" {
 		return nil
@@ -627,42 +832,148 @@ func parseOpenAI(body []byte, developer, issueID, host string) *collector.TokenE
 	if r.Usage.PromptTokensDetails != nil {
 		cached = r.Usage.PromptTokensDetails.CachedTokens
 	}
+	return openAITokenEvent(developer, issueID, host, r.ID, r.Model,
+		r.Usage.PromptTokens, r.Usage.CompletionTokens, cached)
+}
+
+// --- OpenAI Responses API parser (/v1/responses — the endpoint the Codex CLI speaks) ---
+
+// openAIResponsesUsage is the Responses-API usage block.
+//
+// 🔴 THE MONEY QUESTION — input_tokens is INCLUSIVE of
+// input_tokens_details.cached_tokens, not additive. Reading it the other way
+// would bill the cached prefix at BOTH the input rate and the cache-read rate
+// (an ~11x overcharge on a fully-cached gpt-5.x call, whose cache_read_mult is
+// 0.10). The evidence, strongest first:
+//
+//   - In-tree, from REAL data: internal/collector/codexrollout parses the same
+//     usage numbers out of Codex's own rollout logs, and its checkContainment
+//     asserts total_tokens == input_tokens + output_tokens AND
+//     cached_input_tokens <= input_tokens on every event of every captured
+//     session, without ever tripping. Take the first event of
+//     testdata/rollout-duplicate-token-count.jsonl: input=17011, cached=11008,
+//     output=118, total=17129 — and 17011+118 == 17129 exactly, with cached
+//     nonzero. That EXCLUDES the additive reading in which total_tokens counts
+//     every billable token, which would have to report 28137 here.
+//
+//     Be precise about what that does NOT exclude: a reading where cached sits
+//     outside input AND outside total would satisfy both identities too. It is
+//     ruled out by the field's name rather than by the data, so this is strong
+//     evidence, not a proof — exactly the hedge parse.go already makes about its
+//     sibling field ("total == input + output is CONSISTENT with that (it does
+//     not prove it)"). What closes the residual is that the rest of the tree
+//     already PRICES Codex on the inclusive reading (parse.go's deltaFrom) and
+//     the Chat Completions precedent below; this parser agreeing with that
+//     collector is what keeps identical traffic priced identically.
+//
+//   - Shape symmetry: `input_tokens_details` is a BREAKDOWN of its parent, the
+//     same relationship Chat Completions' prompt_tokens_details.cached_tokens
+//     has to prompt_tokens (#114) and Gemini's cachedContentTokenCount has to
+//     promptTokenCount (#122). All three vendors' "details" objects decompose;
+//     none of them extend.
+//
+// ⚠️ Not verified against a live /v1/responses round trip — no key here. #459
+// task 3 (credential-blocked) is what would close that.
+//
+// output_tokens_details.reasoning_tokens is deliberately NOT a field here. It is
+// a SUBSET of output_tokens (checkContainment asserts reasoning <= output on the
+// same captured data), so reading it and adding it would bill reasoning twice.
+// This is the OPPOSITE of Gemini's thoughtsTokenCount, which is EXCLUDED from
+// candidatesTokenCount and so must be folded in (#122) — the two look alike and
+// must not be "made consistent".
+type openAIResponsesUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+}
+
+type openAIResponsesBody struct {
+	ID    string `json:"id"` // resp_<...> — the cross-source dedup anchor
+	Model string `json:"model"`
+	// Usage is a POINTER: the Responses object carries `"usage": null` until the
+	// response reaches a terminal status, and a null usage is "nothing to bill",
+	// not "zero tokens".
+	Usage *openAIResponsesUsage `json:"usage"`
+}
+
+// parseOpenAIResponses builds a TokenEvent from a non-streaming Responses-API
+// body. Same host/billing-mode treatment as the Chat Completions path — both go
+// through openAITokenEvent, which is the only place either shape's numbers reach
+// ComputeCostHost (#300).
+//
+// 🔴 DOUBLE-COUNT HAZARD with internal/collector/codexrollout. Codex writes its
+// rollout logs whether or not it is proxied, so a Codex call routed through
+// /openai/ while --codex-rollout is on is captured by BOTH, and the two rows
+// cannot dedup: this path keys on the response id (idempotencyKeyForProxy ->
+// IdempotencyKey("msg", "openai", "resp_...")) while the collector keys on
+// (session id, ordinal), because a rollout log carries no response id at all.
+// Different hashes by construction, and the store dedups on the key alone — so
+// the spend DOUBLES rather than collides. Before #459 task 2 this was
+// impossible, because this parser did not exist. cmd/tierd warns at startup
+// when both are enabled; #459 task 3's live run must disable one of them.
+func parseOpenAIResponses(body []byte, developer, issueID, host string) *collector.TokenEvent {
+	var r openAIResponsesBody
+	if err := json.Unmarshal(body, &r); err != nil || r.Model == "" || r.Usage == nil {
+		return nil
+	}
+	if r.Usage.InputTokens == 0 && r.Usage.OutputTokens == 0 {
+		return nil
+	}
+	cached := 0
+	if r.Usage.InputTokensDetails != nil {
+		cached = r.Usage.InputTokensDetails.CachedTokens
+	}
+	return openAITokenEvent(developer, issueID, host, r.ID, r.Model,
+		r.Usage.InputTokens, r.Usage.OutputTokens, cached)
+}
+
+// openAITokenEvent builds the TokenEvent for BOTH OpenAI wire shapes and BOTH
+// transports (JSON and SSE) from one set of raw wire counts. Four call sites,
+// one convention: clamping, the cached carve-out, host-qualified pricing (#300)
+// and the idempotency namespace cannot drift between Chat Completions and
+// Responses, because neither shape has its own copy of them.
+//
+// input is INCLUSIVE of cached in BOTH shapes — chat's prompt_tokens contains
+// prompt_tokens_details.cached_tokens (#114), Responses' input_tokens contains
+// input_tokens_details.cached_tokens (evidence in openAIResponsesUsage) — so the
+// carve-out is unconditional here rather than a per-shape decision.
+func openAITokenEvent(developer, issueID, host, id, model string, input, output, cached int) *collector.TokenEvent {
 	// Clamp negative usage counts on the RAW wire values first (#121), before
-	// the carve-out below. The P0-01 cached=min(cached,prompt) subtraction
-	// (#114) layers AFTER this clamp so it only ever has to reason about
-	// cached>prompt, never negatives. Count once per event.
-	if collector.ClampNegativeTokens(&r.Usage.PromptTokens, &r.Usage.CompletionTokens, &cached) {
-		collector.WarnClamp(collector.SourceProxy, r.Model)
+	// the carve-out below. The P0-01 cached=min(cached,input) subtraction (#114)
+	// layers AFTER this clamp so it only ever has to reason about cached>input,
+	// never negatives. Count once per event.
+	if collector.ClampNegativeTokens(&input, &output, &cached) {
+		collector.WarnClamp(collector.SourceProxy, model)
 		collector.RecordClamp(collector.SourceProxy)
 	}
-	// OpenAI's prompt_tokens INCLUDES cached_tokens — cached is a subset of
-	// prompt, not an additional class (#114). Carve it out so the two classes
-	// never overlap: Input is the fresh (non-cached) prompt, CacheRead is the
-	// cached remainder. Clamp cached to [0, prompt] (negatives already handled
-	// above) so a contradictory cached>prompt payload leaves Input at 0 rather
-	// than going negative. This matches Anthropic, whose input_tokens already
-	// excludes cache classes.
-	if cached > r.Usage.PromptTokens {
-		cached = r.Usage.PromptTokens
+	// Carve cached out of input so the two classes never overlap: Input is the
+	// fresh (non-cached) input, CacheRead is the cached remainder. Clamp cached
+	// to [0, input] (negatives already handled above) so a contradictory
+	// cached>input payload leaves Input at 0 rather than going negative. This
+	// matches Anthropic, whose input_tokens already excludes cache classes.
+	if cached > input {
+		cached = input
 	}
-	inputTok := r.Usage.PromptTokens - cached
+	fresh := input - cached
 	// OpenAI has no cache-write SKU — both 5m and 1h buckets stay zero, and
-	// ComputeCost applies the OpenAI 0.5× multiplier to `cached`.
-	cost, billingMode := store.ComputeCostHost(host, r.Model, store.CostUsage{
-		Input:     inputTok,
-		Output:    r.Usage.CompletionTokens,
+	// ComputeCost applies the model's cache-read multiplier to `cached`.
+	cost, billingMode := store.ComputeCostHost(host, model, store.CostUsage{
+		Input:     fresh,
+		Output:    output,
 		CacheRead: cached,
 	})
 	return &collector.TokenEvent{
 		Developer:      developer,
 		IssueID:        issueID,
-		Model:          r.Model,
-		InputTok:       inputTok,
-		OutputTok:      r.Usage.CompletionTokens,
+		Model:          model,
+		InputTok:       fresh,
+		OutputTok:      output,
 		CacheRead:      cached,
 		CostMicro:      cost,
 		Fidelity:       collector.FidelityRealtime,
-		IdempotencyKey: idempotencyKeyForProxy(ProviderOpenAI, r.ID),
+		IdempotencyKey: idempotencyKeyForProxy(ProviderOpenAI, id),
 		Host:           host,
 		BillingMode:    billingMode,
 		Timestamp:      time.Now().UTC(),

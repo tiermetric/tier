@@ -324,11 +324,71 @@ issue references (<code>issue-&lt;digits&gt;</code>), commit SHAs (<code>[0-9a-f
 event type (allowlist-bounded to <code>pull_request</code> / <code>push</code> / <code>workflow_run</code>),
 upstream-validated period strings, and numeric fields such as PR numbers. Each is
 documented at its call site.</p>
+<p><strong>Errors are the sixth class, and the rule for them is narrower than &#34;wrap
+everything&#34;.</strong> An error is not exempt from the barrier just because it is an
+error: a store or validation error can <em>wrap</em> a free-form identifier (a developer
+id, org, team, or division that is length-capped but never charset-validated), and
+those sinks go through <code>logSafeErr</code> — the hierarchy writes, the <code>/outcomes</code> insert,
+and the per-developer score reads all do. The majority of <code>err</code> values are logged
+bare instead, and the discriminator is whether the error&#39;s <em>text</em> can carry a
+client value, not whether the operation touched one: the SQLite driver does not
+echo bound parameters, so a failed <code>INSERT</code> whose arguments include a hostile
+developer id still produces a constraint message that names only the table and
+column. A sweep of the request-facing packages (<code>internal/api</code>,
+<code>internal/webhook</code>, <code>internal/proxy</code>, <code>cmd/tierd</code>) found the values that <em>are</em>
+interpolated into <code>internal/store</code> error text are either operator-supplied
+(config route prefixes, DB paths, table names) or routed through <code>logsafe</code> at the
+point of construction. Wrapping the rest would add noise and blur exactly the
+client/operator distinction this barrier depends on.</p>
+<p>An earlier revision of that sentence listed <em>&#34;price-table model names&#34;</em> among the
+operator-supplied values. That was <strong>backwards</strong>, and it is corrected here rather
+than quietly dropped because the error it excused was real. The model names
+interpolated into <code>store.Reprice</code>&#39;s GUESS-gate error are by construction the
+models <strong>absent</strong> from the price table — the producer-supplied strings that
+matched no operator-curated entry, arriving through <code>POST /api/v1/events</code>, which
+length-caps <code>model</code> and applies no charset check. They are now routed through
+<code>logsafe.Join</code> at construction, pinned by
+<code>TestReprice_GuessGateErrorIsNotForgeable</code>.</p>
 <p>Note on static analysis: an automated code scanner may report these constrained
 bare fields as potential log-injection findings. They are false positives — the
 scanner cannot prove the regex/allowlist constraint that the code guarantees —
 and are triaged as such, rather than &#34;fixed&#34; by wrapping a value that already
 cannot forge a record.</p>
+<p><strong>What the barrier actually buys, measured (#321, 2026-08-04).</strong> Two honest
+qualifications, because &#34;a sanitizer is applied&#34; is not by itself a threat model:</p>
+<ul>
+<li>On a <code>log/slog</code> handler the CR/LF forge is <em>already</em> structurally blocked
+before <code>logsafe</code> runs: both <code>TextHandler</code> and <code>JSONHandler</code> quote or escape any
+attribute value containing a control byte, so a newline cannot open a second
+record through them. What <code>logsafe</code> adds on those sinks is the <strong>length cap</strong>
+and the static-analysis barrier. The cap is not theoretical: a 4 KB upstream
+header value reached one log line unbounded before this was fixed, which is what
+<code>TestProxy_ContentEncodingNotForgeable</code> now pins.</li>
+<li>The CR/LF strip is load-bearing for the sinks that are <strong>not</strong> <code>slog</code> — the
+operator-facing report writers in <code>cmd/tierd</code> that print to stdout, where
+nothing quotes — and for any log consumer that unquotes a field to render it.
+Escaping is reversible downstream; removal is not.</li>
+</ul>
+<p><strong>Code scanning does not currently check this class, on either repo.</strong> The
+<code>go/log-injection</code> query declares <code>@precision medium</code>, and GitHub&#39;s <em>default</em>
+code-scanning suite includes only <code>precision: high|very-high</code>
+(<code>misc/suite-helpers/code-scanning-selectors.yml</code>), so the query ships in
+<code>security-extended</code>. The public mirror runs default-setup with
+<code>query_suite: &#34;default&#34;</code>; the private repo is <code>not-configured</code>. Neither runs it.
+A clean Security tab is therefore <strong>not</strong> evidence that this section holds — the
+named tests are (<code>internal/logsafe</code>, <code>TestProxy_ContentEncodingNotForgeable</code>, and
+the per-sink <code>*NotForgeable</code> tests in <code>internal/api</code>, <code>internal/webhook</code>,
+<code>internal/collector</code>, <code>internal/store</code>, and <code>cmd/tierd</code>).</p>
+<p>⚠️ <strong>Read that list precisely, because it was once read too generously.</strong> Until
+2026-08-04 the only such test in <code>cmd/tierd</code> covered the <strong>access log</strong>
+(<code>TestRequestLogger_PathNotForgeable</code>), and no test covered a <strong>report writer</strong> —
+a different sink class with a different threat model, since the access log is
+<code>slog</code> (which escapes CR/LF even when the caller forgets) and a report writer is
+raw <code>fmt.Fprintf</code> (which escapes nothing). The sentence read as coverage of a
+class that had none, and <code>cmd/tierd/reprice.go</code> diverged from its
+correctly-wrapped sibling <code>repairrepo.go</code> without a single test going red. The
+report writers are now covered by <code>TestPrintRepriceResult_NotForgeable</code> and
+<code>TestPrintRepairRepoResult_NotForgeable</code>.</p>
 <hr>
 <h2 id="9-reporting-a-vulnerability">9. Reporting a vulnerability</h2>
 <p>If you find a security issue in TIER, report it <strong>privately</strong> — do not open a

@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,7 @@ func stageCodexRollout(t *testing.T, repo string) string {
 // what "did Codex spend actually arrive" means at the store grain.
 func sourceStarts(t *testing.T, db *store.DB) map[string]time.Time {
 	t.Helper()
-	starts, err := db.SourceCoverageStart(context.Background())
+	starts, err := db.SourceCoverageStart(context.Background(), store.FleetWide)
 	if err != nil {
 		t.Fatalf("SourceCoverageStart: %v", err)
 	}
@@ -219,6 +220,15 @@ func TestRunShip_CodexRollout(t *testing.T) {
 	if !strings.Contains(out, "Shipped 5 events") {
 		t.Errorf("expected 1 Claude + 4 Codex events shipped; got:\n%s", out)
 	}
+	// #549 arm 4 NEGATIVE arm: with --codex-rollout ON, the completion line
+	// must NOT claim Codex is missing — this run's whole point is that Codex
+	// DID ship. Without this check, the positive arm in
+	// TestRunShip_CompletionLine_NamesCodexOmissionWhenOff could pass on a
+	// build that prints the omission note unconditionally, which would be
+	// actively misleading on exactly this run.
+	if strings.Contains(out, "Codex NOT included") {
+		t.Errorf("completion line wrongly claims Codex was not included, despite --codex-rollout; got:\n%s", out)
+	}
 
 	// THE ACTUAL BUG. Rows landing is not enough — #492's damage was cost
 	// reading as ZERO while outcomes counted, so a money assertion is the only
@@ -303,5 +313,130 @@ func TestRunShip_CodexRolloutOffByDefault(t *testing.T) {
 	}
 	if _, ok := starts[collector.SourceJSONL]; !ok {
 		t.Fatalf("the Claude Code path shipped nothing either — this run proves nothing about the flag. Sources: %v", starts)
+	}
+}
+
+// TestRunShip_CodexOnly_ZeroClaudeSessions_StillExitsZero is the highest-value
+// #549 arm 3 regression: this is the exact incident two independent Opus
+// reviews reproduced against the first draft. A healthy Codex-only machine —
+// --repo pointed at a repo with ZERO Claude Code sessions, real Codex spend
+// landing via --codex-rollout — must exit 0 and ship the Codex events, not
+// die claiming "almost always a wrong --repo path".
+//
+// shipRecoveredNothing's `shipped` parameter is what this test pins: Codex
+// ingests through the raw shipper client, bypassing repoTally entirely, so
+// repoTally sees SessionsWithEvents==0 for this repo regardless of how
+// healthy the Codex scan was. Gating the exit on allReposEmpty(summaries)
+// ALONE — the first draft's bug — makes this exact run exit 1 even though 4
+// real Codex events and real dollars landed in the store one line earlier.
+func TestRunShip_CodexOnly_ZeroClaudeSessions_StillExitsZero(t *testing.T) {
+	t.Setenv("TIER_CODEX_ROLLOUT", "")
+	loadDeterministicPrices(t)
+	repo := initGitRepo(t)
+	claudeDir := t.TempDir() // deliberately no writeSessionFixture: zero Claude Code sessions
+	sessionsDir := stageCodexRollout(t, repo)
+	srv, db := newShipTestServer(t, "")
+
+	out := captureStdout(t, func() {
+		runShip([]string{
+			"--server", srv.URL,
+			"--repo", repo,
+			"--claude-dir", claudeDir,
+			"--codex-rollout",
+			"--codex-sessions-dir", sessionsDir,
+			"--since", "2026-01-01",
+			"--developer", "alice",
+			// deliberately no --allow-empty: the whole point is that this run
+			// must succeed WITHOUT the escape hatch, because it did not
+			// recover nothing.
+		})
+	})
+
+	if strings.Contains(out, "every --repo target kept 0 sessions") {
+		t.Fatalf("ship reported the #549 arm 3 empty-run failure on a healthy Codex-only machine — reproduces the false green two independent reviews caught; got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Shipped %d events", cleanSessionBillableCalls)) {
+		t.Errorf("expected the %d Codex events to ship (zero from Claude Code, since no session fixture was written); got:\n%s", cleanSessionBillableCalls, out)
+	}
+
+	starts := sourceStarts(t, db)
+	if _, ok := starts[collector.SourceCodexRollout]; !ok {
+		t.Fatalf("no Codex rows landed — this run proves nothing about the exit guard if Codex itself never shipped. Sources: %v", starts)
+	}
+	if _, ok := starts[collector.SourceJSONL]; ok {
+		t.Errorf("Claude Code rows landed despite no session fixture being written — this run's premise (zero Claude sessions) does not hold. Sources: %v", starts)
+	}
+	if got := totalMicro(t, db); got == 0 {
+		t.Error("total cost is zero despite Codex events landing — rows-shipped-but-no-money is the #492 failure mode in a different disguise")
+	}
+}
+
+// TestRunShip_PerRepoSummary_CodexRowPresentWhenEnabled is the positive arm
+// for #549 arm 2's Codex row: printRepoSummary's "codex-rollout (all repos)"
+// line must appear, with the correct count, whenever --codex-rollout is on.
+// See TestRunShip_CodexRolloutOffByDefault's sourceStarts assertions for the
+// underlying flag-gating behavior; this test is specifically about the
+// SUMMARY LINE's text, which nothing else in the suite pins.
+func TestRunShip_PerRepoSummary_CodexRowPresentWhenEnabled(t *testing.T) {
+	t.Setenv("TIER_CODEX_ROLLOUT", "")
+	loadDeterministicPrices(t)
+	repo := initGitRepo(t)
+	claudeDir := t.TempDir()
+	writeSessionFixture(t, claudeDir, repo) // 1 Claude Code event
+	sessionsDir := stageCodexRollout(t, repo)
+	srv, _ := newShipTestServer(t, "")
+
+	out := captureStdout(t, func() {
+		runShip([]string{
+			"--server", srv.URL,
+			"--repo", repo,
+			"--claude-dir", claudeDir,
+			"--codex-rollout",
+			"--codex-sessions-dir", sessionsDir,
+			"--since", "2026-01-01",
+			"--developer", "alice",
+		})
+	})
+
+	// totalShipped (1 Claude + 4 Codex = 5) minus the per-repo Claude tally
+	// (1) is the Codex row's derivation (see printRepoSummary) — asserting
+	// the exact number, not just presence, catches a build that prints the
+	// line but always at 0 or at the raw totalShipped.
+	want := fmt.Sprintf("  codex-rollout (all repos): events_shipped=%d", cleanSessionBillableCalls)
+	if !strings.Contains(out, want) {
+		t.Errorf("summary row %q not found with --codex-rollout on; got:\n%s", want, out)
+	}
+}
+
+// TestRunShip_PerRepoSummary_CodexRowAbsentWhenDisabled is the CONTROL arm:
+// the identical fixture set, without --codex-rollout, must NOT print the
+// Codex row at all — "Codex ran and shipped 0" and "Codex never ran" are
+// different facts (see printRepoSummary's own comment), and without this test
+// the positive arm above could pass on a build that always prints the row.
+func TestRunShip_PerRepoSummary_CodexRowAbsentWhenDisabled(t *testing.T) {
+	t.Setenv("TIER_CODEX_ROLLOUT", "")
+	loadDeterministicPrices(t)
+	repo := initGitRepo(t)
+	claudeDir := t.TempDir()
+	writeSessionFixture(t, claudeDir, repo)
+	sessionsDir := stageCodexRollout(t, repo)
+	srv, _ := newShipTestServer(t, "")
+
+	out := captureStdout(t, func() {
+		runShip([]string{
+			"--server", srv.URL,
+			"--repo", repo,
+			"--claude-dir", claudeDir,
+			// deliberately no --codex-rollout; --codex-sessions-dir still
+			// points at real staged Codex data so a passing build proves the
+			// FLAG gates the row, not merely that there was nothing to report.
+			"--codex-sessions-dir", sessionsDir,
+			"--since", "2026-01-01",
+			"--developer", "alice",
+		})
+	})
+
+	if strings.Contains(out, "codex-rollout (all repos)") {
+		t.Errorf("Codex summary row printed without --codex-rollout; got:\n%s", out)
 	}
 }

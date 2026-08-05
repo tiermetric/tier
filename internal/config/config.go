@@ -10,8 +10,11 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	// go.yaml.in/yaml/v3 is the YAML org's maintained continuation of the
 	// archived gopkg.in/yaml.v3 (#52). It is a same-API, import-path-only
@@ -67,6 +70,238 @@ type Config struct {
 	// --k-anonymity (env TIER_K_ANONYMITY). Absent → nil → the flag default (5);
 	// the caller rejects any value below the hard minimum of 3 at startup.
 	KAnonymity *int `yaml:"k_anonymity,omitempty"`
+	// Subscriptions declares the flat monthly FEES the org pays for
+	// subscription-billed model routes (#113, list-rate inversion). It is
+	// deliberately the fee ONLY: what a subscription route's tokens are worth in
+	// the TIER denominator is a PRICE-TABLE fact (`billing_mode: subscription`
+	// plus a comparable list rate), not a config fact, so the two artifacts each
+	// hold exactly one truth and cannot disagree about pricing.
+	//
+	// A slice, not a pointer: list-valued, config-only (no CLI flag or env var —
+	// a per-route fee is a deployment fact, not a switch), and an explicit `[]`
+	// is the documented "no subscriptions" state the shipped example carries.
+	Subscriptions []Subscription `yaml:"subscriptions"`
+}
+
+// Subscription is one flat-fee plan the org pays for a subscription-billed
+// model route (#113). Steve's 2026-07-02 ruling (the list-rate INVERSION, over
+// the originally-ordered amortized divisor) splits the money in two:
+//
+//   - the route's TOKENS are priced at the comparable list rate carried by its
+//     price-table entry — a local, per-call, window-independent number, so a
+//     developer's cost never depends on how much a colleague used the route;
+//   - MonthlyFeeUSD — the dollars actually paid — enters ONLY the actual-paid
+//     side of Spend Leverage, delta-posted into org_actual_spend by the
+//     reconciler in cmd/tierd. It NEVER enters the TIER denominator.
+//
+// Unlike the pointer fields elsewhere in this package these are plain values:
+// every required field is validated non-empty / > 0 at Load, so "absent" and
+// "zero" are both loud errors rather than states a caller must tell apart.
+type Subscription struct {
+	// RoutePrefix identifies the route this fee pays for, as a prefix of the
+	// PRICE-TABLE KEY — either a normalized model (`glm-5.2`) or the
+	// host-qualified `model@host` form (`glm-5.2@ollama.com`, store.HostModelKey).
+	// It must be lowercase (table keys are normalized lowercase) and must
+	// prefix-match at least one `billing_mode: subscription` entry in the ACTIVE
+	// price table; `tierd serve` refuses to start otherwise, because a fee posted
+	// for a route TIER does not price as subscription silently inflates
+	// actual-paid with no matching list value.
+	RoutePrefix string `yaml:"route_prefix"`
+	// Plan is informational (e.g. "max") and appears in logs only.
+	Plan string `yaml:"plan,omitempty"`
+	// MonthlyFeeUSD is the real flat fee paid per calendar MONTH (> 0, finite).
+	// There is no proration: the org owes the whole fee for any month the plan is
+	// active, so a partial month posts the full amount.
+	MonthlyFeeUSD float64 `yaml:"monthly_fee_usd"`
+	// Org is the org_actual_spend key the fee posts under. Set it to the org your
+	// developers are enrolled in (org_hierarchy / period_membership) so the fee
+	// allocates to seats and reaches Spend Leverage. Optional: when empty the fee
+	// posts under the route prefix with any trailing '/' trimmed — visible in the
+	// ledger, but allocated to nobody until seats exist under that org.
+	Org string `yaml:"org,omitempty"`
+	// ActiveSince is the FIRST period (YYYY-MM) the plan was active (#155). When
+	// set, the startup reconcile pass catches up every unposted period from here
+	// through the current one, so a tierd that was offline across a month boundary
+	// does not leave that month's actual-paid understated by the whole fee. Absent
+	// keeps the current-period-only behaviour — there is deliberately no inferred
+	// start date and no unbounded backfill.
+	ActiveSince string `yaml:"active_since,omitempty"`
+}
+
+// OrgKey returns the org_actual_spend key this subscription's fee posts under:
+// the explicit Org when set, else the route prefix with any trailing '/'
+// trimmed. See the Org field docs for the allocation caveat.
+func (s Subscription) OrgKey() string {
+	if s.Org != "" {
+		return s.Org
+	}
+	return strings.TrimSuffix(s.RoutePrefix, "/")
+}
+
+// maxSubscriptionIdentifierLen caps the identifier-ish subscription fields at
+// the same 256 chars the API layer allows for an identifier, so a config-sourced
+// org can never exceed what a POST /api/v1/org_actual_spend body could carry.
+const maxSubscriptionIdentifierLen = 256
+
+// maxBackfillPeriods bounds the #155 startup catch-up at 20 years of months.
+// active_since is operator-declared and already bounds the backfill, so this is
+// not a policy limit — it is a TYPO limit: `0226-06` parses, validates as <=
+// now, and would silently issue ~21,000 reconcile transactions at every boot.
+// Refusing it names the mistake instead of making startup mysteriously slow.
+const maxBackfillPeriods = 240
+
+// maxMonthlyFeeUSD mirrors store.MaxCostUSD — the trust-boundary magnitude cap
+// every other money entry point in this system enforces (POST /api/v1/costs,
+// POST /api/v1/org_actual_spend). It is DUPLICATED rather than imported for the
+// same reason periodRE is: internal/config has no production dependency on
+// internal/store, and one float constant is a cheaper price than that edge.
+// TestMonthlyFeeCapMatchesStore pins the two equal, so the duplicate cannot
+// drift into being the loose one.
+const maxMonthlyFeeUSD = 1e12
+
+// minMonthlyFeeUSD is the smallest fee that is REPRESENTABLE in the integer
+// micro-dollars org_actual_spend stores — one micro-dollar. Positivity and the
+// magnitude cap above are both satisfied by a value like 4e-7, but
+// store.DollarsToMicro(4e-7) is 0, and a zero fee is not merely useless here: it
+// is DESTRUCTIVE, because of how #155's backfill remembers what it has done.
+//
+// PostSubscriptionFeeIfUnposted treats "this period has any row" as posted, so a
+// zero-valued row permanently marks the period covered. Worse, it returns 0 —
+// indistinguishable from "already covered" — so the reconciler takes its
+// `delta == 0 → continue` branch and logs NOTHING. The rows are written
+// invisibly, and later correcting monthly_fee_usd can never repair those months,
+// because the backfill will keep finding a row and skipping them. That defeats
+// the function's own stated invariant, which reserves a period that "nets to
+// zero" for a DELIBERATE human correction.
+//
+// So the bound is representability, checked once here at the single config entry
+// point, rather than a second guard smeared across the store. (A value between
+// 5e-7 and 1e-6 would in fact round to one micro-dollar, so this rejects a hair
+// more than it strictly must — one micro-dollar is the honest unit to state, and
+// nobody's real plan costs less than it.)
+const minMonthlyFeeUSD = 1e-6
+
+// periodRE matches a billing period: YYYY-MM with a real month (01-12). It is
+// deliberately stricter than time.Parse("2006-01", …), which accepts a
+// single-digit month ("2026-7") that would later violate the
+// GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' CHECK on org_actual_spend.period —
+// turning a config typo into a runtime INSERT failure hours after startup.
+// (Duplicated from store.ValidPeriod rather than imported: internal/config has
+// no dependency on internal/store today, and one regexp is a cheaper price than
+// that edge. store.ValidPeriod is the enforcement point; this is the
+// fail-early copy, and TestActiveSincePeriodShapeMatchesStore pins them equal.)
+var periodRE = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])$`)
+
+// validateSubscriptions fail-loud-checks the `subscriptions:` block (#113/#155).
+// Everything here feeds money math or a UTC-month key, so a malformed block must
+// fail the LOAD — not surface later as a $0 fee, an INSERT that violates a CHECK
+// constraint, or a backfill that silently posts nothing.
+//
+// now is the clock the active_since upper bound is judged against; Load passes
+// time.Now(). A future active_since is rejected because it can only be a typo:
+// it would make the catch-up range inverted, and the reconciler would post
+// nothing at all for a plan the operator believes is being billed.
+func validateSubscriptions(subs []Subscription, now time.Time) error {
+	for i, s := range subs {
+		at := fmt.Sprintf("subscriptions[%d]", i)
+		if s.RoutePrefix == "" {
+			return fmt.Errorf("%s: route_prefix is required", at)
+		}
+		if len(s.RoutePrefix) > maxSubscriptionIdentifierLen {
+			return fmt.Errorf("%s: route_prefix must be <= %d chars", at, maxSubscriptionIdentifierLen)
+		}
+		if s.RoutePrefix != strings.ToLower(s.RoutePrefix) {
+			return fmt.Errorf("%s: route_prefix %q must be lowercase — it is matched against normalized price-table keys, which are lowercase", at, s.RoutePrefix)
+		}
+		if !positiveFinite(s.MonthlyFeeUSD) {
+			return fmt.Errorf("%s (%s): monthly_fee_usd must be > 0 and finite, got %v", at, s.RoutePrefix, s.MonthlyFeeUSD)
+		}
+		// REPRESENTABILITY, a distinct failure from positivity: a fee that is
+		// positive but rounds to zero micro-dollars writes a ZERO row that
+		// permanently marks the period posted, silently and unrepairably. See
+		// minMonthlyFeeUSD.
+		if s.MonthlyFeeUSD < minMonthlyFeeUSD {
+			return fmt.Errorf("%s (%s): monthly_fee_usd must be >= %g (one micro-dollar, the storage grain), got %v — a smaller fee rounds to zero and would write an unrepairable zero-valued posting", at, s.RoutePrefix, minMonthlyFeeUSD, s.MonthlyFeeUSD)
+		}
+		// MAGNITUDE bound, not just positivity — this is a money entry point and
+		// must not be the one that skips the cap every other one enforces.
+		// store.DollarsToMicro SATURATES to MaxInt64 rather than erroring, and one
+		// saturated org_actual_spend row makes the allocation read's
+		// SUM(actual_paid_micro) fail with "integer overflow" as soon as any second
+		// row shares its (org, period) — so a fat-fingered fee does not merely
+		// report a wrong number, it takes /scores down. POST /api/v1/org_actual_spend
+		// already rejects the same magnitude (handler.go, store.MaxCostUSD); this is
+		// that guard on the config path.
+		if s.MonthlyFeeUSD > maxMonthlyFeeUSD {
+			return fmt.Errorf("%s (%s): monthly_fee_usd must be <= %g, got %v", at, s.RoutePrefix, maxMonthlyFeeUSD, s.MonthlyFeeUSD)
+		}
+		if len(s.Org) > maxSubscriptionIdentifierLen {
+			return fmt.Errorf("%s (%s): org must be <= %d chars", at, s.RoutePrefix, maxSubscriptionIdentifierLen)
+		}
+		// A degenerate prefix like "/" derives an empty org key, which would post
+		// the fee under org "" — invisible to every allocation read. Reject the
+		// shape rather than write money to a key nobody queries.
+		if s.OrgKey() == "" {
+			return fmt.Errorf("%s: route_prefix %q derives an empty org key — set org explicitly", at, s.RoutePrefix)
+		}
+		if s.ActiveSince != "" {
+			if !periodRE.MatchString(s.ActiveSince) {
+				return fmt.Errorf("%s (%s): active_since %q must be YYYY-MM with month 01-12", at, s.RoutePrefix, s.ActiveSince)
+			}
+			// Zero-padded YYYY-MM compares chronologically as a plain string.
+			current := now.UTC().Format("2006-01")
+			if s.ActiveSince > current {
+				return fmt.Errorf("%s (%s): active_since %q is in the future (current period is %s) — the plan cannot have started after now", at, s.RoutePrefix, s.ActiveSince, current)
+			}
+			if n := monthsBetween(s.ActiveSince, current); n > maxBackfillPeriods {
+				return fmt.Errorf("%s (%s): active_since %q would backfill %d periods (max %d) — check for a typo in the year", at, s.RoutePrefix, s.ActiveSince, n, maxBackfillPeriods)
+			}
+		}
+		// Two entries sharing a prefix, or one shadowing another, would make the
+		// same price-table entry billable twice — the org's actual-paid would carry
+		// the fee once per overlapping entry. Reject rather than pick a winner.
+		//
+		// Scanned as an indexed loop over the PRIOR entries, not via a map: with two
+		// overlapping predecessors a map's iteration order would name a different
+		// one on each run, so the same bad config would produce two different
+		// startup errors. An error message an operator cannot reproduce is worth
+		// less than one they can.
+		for j := 0; j < i; j++ {
+			prev := subs[j].RoutePrefix
+			if strings.HasPrefix(s.RoutePrefix, prev) || strings.HasPrefix(prev, s.RoutePrefix) {
+				return fmt.Errorf("%s: route_prefix %q overlaps subscriptions[%d] %q — overlapping prefixes would post the same route's fee twice", at, s.RoutePrefix, j, prev)
+			}
+		}
+	}
+	return nil
+}
+
+// monthsBetween returns the inclusive count of YYYY-MM periods from..to. Both
+// are assumed to have already matched periodRE and to satisfy from <= to.
+func monthsBetween(from, to string) int {
+	fy, fm := periodParts(from)
+	ty, tm := periodParts(to)
+	return (ty-fy)*12 + (tm - fm) + 1
+}
+
+// periodParts splits a periodRE-matching YYYY-MM into its integer year and
+// month. The regexp has already proven both halves are digits, so the
+// conversions cannot fail and are done by hand rather than through strconv with
+// two ignored errors.
+func periodParts(p string) (year, month int) {
+	for i := 0; i < 4; i++ {
+		year = year*10 + int(p[i]-'0')
+	}
+	month = int(p[5]-'0')*10 + int(p[6]-'0')
+	return year, month
+}
+
+// positiveFinite reports whether f is a usable positive money value — strictly
+// positive AND finite. YAML happily decodes `.inf` and `.nan` into a float64,
+// and store.DollarsToMicro would turn those into MaxInt64 / 0 micro-dollars,
+// i.e. invoice-grade garbage in org_actual_spend.
+func positiveFinite(f float64) bool {
+	return f > 0 && !math.IsInf(f, 0) && !math.IsNaN(f)
 }
 
 // OutcomesConfig groups outcome-capture toggles (#196). PushCapture is a pointer
@@ -165,9 +400,10 @@ type CollectorsConfig struct {
 // credential: it reads the rollout logs the Codex CLI already writes to
 // ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl on this machine. It is the local
 // twin of the Claude Code JSONL watcher — per-developer, per-call, real-time
-// fidelity — and the ONLY path that captures Codex at all, because Codex speaks
-// the OpenAI Responses API, which the reverse proxy's Chat-Completions parser
-// cannot read (#463).
+// fidelity — and the only path that captures Codex as Codex is actually run.
+// The reverse proxy learned to parse the Responses shape Codex speaks in #459
+// task 2, but reaching it means pointing Codex at the proxy with API-key auth
+// and has never been exercised by live traffic; this block is the verified path.
 //
 // SCOPE: it attributes to the SAME repositories the JSONL watcher does, taken
 // from watch.repos / --watch-repo (and honoring watch.repo_slugs). A Codex
@@ -313,12 +549,18 @@ type AuthConfig struct {
 	Lockout *string `yaml:"lockout,omitempty"`
 }
 
-// ProxyConfig holds the two upstream URLs. Setting either field to ""
-// explicitly in YAML disables that provider's proxy (parseProxyTarget in
-// cmd/tierd treats empty as "no proxy").
+// ProxyConfig holds the upstream URLs for each provider's reverse proxy.
+// Setting a field to "" explicitly in YAML disables that provider's proxy
+// (parseProxyTarget in cmd/tierd treats empty as "no proxy").
 type ProxyConfig struct {
 	AnthropicTarget *string `yaml:"anthropic_target,omitempty"`
 	OpenAITarget    *string `yaml:"openai_target,omitempty"`
+	// GeminiTarget mounts /gemini/ (#459 task 4). The parser
+	// (internal/proxy's parseGemini) has existed since v1 (#1), extended by
+	// #122 (thinking/cache tokens) and #300 (host stamping); only the mount
+	// was missing, so pointing a Gemini client here before this landed
+	// 404'd. Defaults to "https://generativelanguage.googleapis.com".
+	GeminiTarget *string `yaml:"gemini_target,omitempty"`
 }
 
 // WatchConfig holds the JSONL watch-repo list. Setting Repos to an explicit
@@ -378,6 +620,12 @@ func Load(path string) (*Config, error) {
 	// so it must fail loud at startup regardless of which caller wires the value
 	// through (#244).
 	if err := validateSizeLabels(cfg.Outcomes.SizeLabels); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+	// Subscriptions feed money math and a UTC-month key (#113/#155). A malformed
+	// block must fail the load rather than surface later as a $0 fee, a CHECK
+	// violation on INSERT, or a backfill that posts nothing.
+	if err := validateSubscriptions(cfg.Subscriptions, time.Now()); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	return &cfg, nil

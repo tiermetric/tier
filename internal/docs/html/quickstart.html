@@ -146,8 +146,10 @@ it to, and <code>serve</code> now refuses to start rather than silently capturin
 nothing.</li>
 <li><strong><code>tierd score</code> does not capture Codex</strong> — it reads Claude Code sessions
 only. Codex is captured by <code>serve</code> and by <code>ship</code> (below), from Codex&#39;s own
-local rollout logs. The reverse proxy cannot capture it at all, because Codex
-speaks the OpenAI Responses API rather than Chat Completions.</li>
+local rollout logs. The reverse proxy can parse the OpenAI Responses API that
+Codex speaks (#459), but only for traffic you deliberately point at it with
+API-key auth, and that path has not been verified against live traffic — the
+rollout logs are the supported way to capture Codex.</li>
 </ul>
 <p><strong>If the server runs centrally and Codex runs on a laptop,</strong> the same flag goes
 on the shipper — it is off by default there too:</p>
@@ -161,11 +163,23 @@ reads as &#34;Codex work was free&#34;, which inflates the score of exactly the
 developers moving onto the cheaper path (#492).</p>
 <p>⚠️ <strong>Pass <code>--repo</code> explicitly on <code>ship</code>.</strong> It defaults to <code>.</code>, and a cron or
 launchd job usually runs from <code>$HOME</code>. If <code>$HOME</code> is not a git checkout the run
-fails loudly — exit 1, <em>&#34;does not appear to be a git repository&#34;</em>. But if <code>$HOME</code>
-<strong>is</strong> a checkout, such as a dotfiles repo, every Codex session belonging to
-another repository falls outside the scope, nothing ships, and the run <strong>exits
-0</strong>. Unlike <code>serve</code>, which refuses to start when <code>--codex-rollout</code> has no
-repository to attribute to, that case is silent.</p>
+fails loudly — exit 1, <em>&#34;does not appear to be a git repository&#34;</em>. And if <code>$HOME</code>
+<strong>is</strong> a checkout, such as a dotfiles repo, every session belonging to another
+repository falls outside the scope and nothing ships — which as of #549 is also
+<strong>exit 1</strong>, with a per-repo summary naming the zero rows:</p>
+<pre><code>Per-repo summary:
+  /Users/you: sessions_with_events=0 events_shipped=0
+ship: every --repo target kept 0 sessions since 2026-05-05 — this is almost
+always a wrong --repo path, not a legitimately idle repo. Pass --allow-empty if
+zero is genuinely expected.
+</code></pre>
+<p>That case used to exit 0 silently, so &#34;ship reported success&#34; and &#34;ship recovered
+nothing&#34; were indistinguishable without diffing the store by hand. If a repo is
+<em>legitimately</em> idle for the whole window, pass <code>--allow-empty</code> (env
+<code>TIER_SHIP_ALLOW_EMPTY</code>) to get exit 0 back.</p>
+<p>The guard measures the <strong>whole run</strong>, not just Claude Code: a machine that only
+produces Codex spend exits 0 normally, because the Codex events count even
+though they are scanned once across all repos rather than per repo.</p>
 <h2 id="7-viewing-the-dashboard-from-another-machine">7. Viewing the dashboard from another machine</h2>
 <p><strong>The demo is safe to expose directly</strong> — it is read-only and every row is
 synthetic:</p>

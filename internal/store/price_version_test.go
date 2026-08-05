@@ -266,7 +266,7 @@ func TestDistinctPriceVersionsWindow(t *testing.T) {
 		insertPricedEvent(t, db, "issue-b", 1, base.Add(time.Minute))
 		insertPricedEvent(t, db, "issue-c", 2, base.Add(2*time.Minute)) // dup of 2
 
-		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour))
+		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour), FleetWide)
 		if err != nil {
 			t.Fatalf("DistinctPriceVersionsWindow: %v", err)
 		}
@@ -282,7 +282,7 @@ func TestDistinctPriceVersionsWindow(t *testing.T) {
 		insertPricedEvent(t, db, "issue-a", 7, base)
 		insertPricedEvent(t, db, "issue-b", 7, base.Add(time.Minute))
 
-		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour))
+		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour), FleetWide)
 		if err != nil {
 			t.Fatalf("DistinctPriceVersionsWindow: %v", err)
 		}
@@ -297,7 +297,7 @@ func TestDistinctPriceVersionsWindow(t *testing.T) {
 		// One event well outside the queried window.
 		insertPricedEvent(t, db, "issue-a", 3, base)
 
-		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(24*time.Hour), base.Add(48*time.Hour))
+		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(24*time.Hour), base.Add(48*time.Hour), FleetWide)
 		if err != nil {
 			t.Fatalf("DistinctPriceVersionsWindow: %v", err)
 		}
@@ -312,7 +312,7 @@ func TestDistinctPriceVersionsWindow(t *testing.T) {
 		insertPricedEvent(t, db, "issue-a", 5, base)                // in window
 		insertPricedEvent(t, db, "issue-b", 6, base.Add(time.Hour)) // exactly at `until` → excluded
 
-		got, err := db.DistinctPriceVersionsWindow(ctx, base, base.Add(time.Hour))
+		got, err := db.DistinctPriceVersionsWindow(ctx, base, base.Add(time.Hour), FleetWide)
 		if err != nil {
 			t.Fatalf("DistinctPriceVersionsWindow: %v", err)
 		}
@@ -333,7 +333,7 @@ func TestDistinctPriceVersionsWindow(t *testing.T) {
 			t.Fatalf("zero price_version: %v", err)
 		}
 
-		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour))
+		got, err := db.DistinctPriceVersionsWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour), FleetWide)
 		if err != nil {
 			t.Fatalf("DistinctPriceVersionsWindow: %v", err)
 		}

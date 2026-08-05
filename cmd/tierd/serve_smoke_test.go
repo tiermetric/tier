@@ -167,6 +167,75 @@ func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
 	}
 }
 
+// TestServeSmoke_ProxiesMountedInNormalMode is the POSITIVE counterpart to
+// TestServeSmoke_ReadOnlyOmitsWrites' 404 assertions: that test proves the
+// three proxy routes are OFF the mux under --read-only; nothing anywhere
+// proved they are actually ON the mux otherwise. A typo in any of the three
+// registerProxy(mux, "/anthropic"|"/openai"|"/gemini", ...) calls (main.go) —
+// e.g. "/gemni" — would 404 here exactly like the read-only case and pass
+// every other test in the tree, including #459 task 4's own headline
+// deliverable (the /gemini/ mount).
+//
+// Proxy targets point at a DEAD loopback address (127.0.0.1:1, matching the
+// read-only test's pattern) so this stays hermetic — no real network call to
+// any provider — and --api-token is set so an unauthenticated POST gets a
+// clean 401 (mounted + auth-gated) rather than the reverse proxy actually
+// attempting to dial the dead upstream (which ProxyAuth would allow through
+// unauthenticated, per its own "no token configured -> open" contract, and
+// which would then race a connection-refused 502 instead of cleanly proving
+// the mount).
+func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	addr := freeLoopbackPort(t)
+	dbPath := filepath.Join(t.TempDir(), "proxy-mount-smoke.db")
+
+	childArgs := strings.Join([]string{
+		"serve",
+		"--addr", addr,
+		"--db", dbPath,
+		"--aggregation", "developer",
+		"--api-token", "smoke-test-api-token",
+		"--anthropic-target", "http://127.0.0.1:1/",
+		"--openai-target", "http://127.0.0.1:1/",
+		"--gemini-target", "http://127.0.0.1:1/",
+	}, "\n")
+
+	cmd := exec.Command(self)
+	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start tierd child: %v", err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Signal(syscall.SIGKILL) })
+
+	base := "http://" + addr
+	waitUntilLive(t, base+"/api/v1/livez", stderr, exited)
+
+	for path, route := range map[string]string{
+		"/anthropic/v1/messages":                  "/anthropic/",
+		"/openai/v1/chat/completions":             "/openai/",
+		"/gemini/v1beta/models/x:generateContent": "/gemini/",
+	} {
+		t.Run(route, func(t *testing.T) {
+			resp, err := http.Post(base+path, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
+			if err != nil {
+				t.Fatalf("POST %s: %v", path, err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("unauthenticated POST %s = %d, want 401 (mounted + auth-gated, not 404 off-the-mux)", path, resp.StatusCode)
+			}
+		})
+	}
+}
+
 // TestServeSmoke_BootsWithExampleConfig boots a REAL `tierd serve` using the
 // SHIPPED config.example.yaml verbatim — only --addr is overridden (a free
 // loopback port instead of the example's fixed 8080), and the child runs in a
@@ -269,6 +338,7 @@ func TestServeSmoke_ReadOnlyOmitsWrites(t *testing.T) {
 		"--read-only",
 		"--anthropic-target", "http://127.0.0.1:1/",
 		"--openai-target", "http://127.0.0.1:1/",
+		"--gemini-target", "http://127.0.0.1:1/",
 		"--watch-repo", filepath.Join(t.TempDir(), "nonexistent-repo"),
 		// The Codex collector is an INGEST path, so the demo must neutralize it
 		// too (#464). Handed on deliberately: the assertion below is the only
@@ -316,11 +386,11 @@ func TestServeSmoke_ReadOnlyOmitsWrites(t *testing.T) {
 	// NOT the 401 a mounted-but-auth-gated route (or a mounted proxy) would give —
 	// proof the route is off the mux, not merely token-gated. The proxy paths are
 	// the Y2 regression-catcher: if the choke point stopped blanking the proxy
-	// targets, /anthropic and /openai would mount and answer 401 (proxy auth), not
-	// 404 — and would never reach the unreachable upstream.
+	// targets, /anthropic, /openai, and /gemini would mount and answer 401 (proxy
+	// auth), not 404 — and would never reach the unreachable upstream.
 	for _, w := range []string{
 		"/api/v1/events", "/api/v1/costs", "/webhook/github",
-		"/anthropic/v1/messages", "/openai/v1/chat/completions",
+		"/anthropic/v1/messages", "/openai/v1/chat/completions", "/gemini/v1beta/models",
 	} {
 		resp, err := http.Post(base+w, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
 		if err != nil {

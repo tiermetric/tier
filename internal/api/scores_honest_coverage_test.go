@@ -142,10 +142,19 @@ func TestGetScores_UnjoinedDevelopersTeamModeCountOnly(t *testing.T) {
 	if uj.CostOnlyCount != 1 || uj.OutcomeOnlyCount != 1 {
 		t.Errorf("counts = (%d,%d), want (1,1)", uj.CostOnlyCount, uj.OutcomeOnlyCount)
 	}
-	// The attribution shares are name-free, so they must carry in team mode too: the
-	// alice cost is charged to a real issue, so attributed_cost_share == 1.0.
-	if resp.DataQuality.AttributedCostShare == nil {
-		t.Error("attributed_cost_share absent in team mode; the name-free share must carry")
+	// #593: this fixture is two developers, below the effective floor of 3, so the
+	// response IS suppressed and the cost-ratio shares are withheld — they invert to
+	// the window total that suppression exists to hide. The unjoined COUNTS asserted
+	// above are deliberately NOT withheld (review measured them non-invertible), which
+	// is what this test is actually for. The fixture cannot be padded: every added
+	// developer is cost-only, outcome-only, or joined, and each moves one of this
+	// test's own assertions — measured, flat padding turned (1,1) into (4,1).
+	if resp.DataQuality.KAnonSuppressed == nil {
+		t.Fatal("a 2-developer fixture must suppress at the effective floor of 3")
+	}
+	if resp.DataQuality.AttributedCostShare != nil {
+		t.Errorf("attributed_cost_share must be withheld under suppression; got %v",
+			*resp.DataQuality.AttributedCostShare)
 	}
 }
 
@@ -249,6 +258,13 @@ func TestGetScores_UnattributedBucketsAndExploratoryShare(t *testing.T) {
 // developer exploratory share) is emitted.
 func TestGetScores_UnattributedBucketsTeamModeNameFree(t *testing.T) {
 	h, db := newTeamModeHandler(t, 2)
+	// #593: the cohort must clear the residual floor or these shares are withheld.
+	// Padding is PROPORTIONAL — each padded developer carries the same 50/50
+	// attributed/main split as alice — because exploratory_cost_share is a ratio over
+	// total window cost, and padding with any other mix silently moves the number
+	// under test. Measured with flat padding: 0.50 became 0.03125.
+	padProportional(t, db, "padteam", 3, 0.50, 0.50)
+	enrolIn(t, db, "padteam", "alice")
 	seedCosts(t, db, "alice", "issue-1", 0.50)
 	seedCosts(t, db, "alice", store.UnattributedMainBucket, 0.50)
 
