@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -384,17 +385,20 @@ func TestScoresCompare_TeamKAnonIntersection(t *testing.T) {
 	if blue.Significant {
 		t.Fatal("team-mode rows must never be flagged significant (no bootstrap CI)")
 	}
-	// red's data is preserved in the 'other' residual, not dropped: other.A carries
-	// red's window-A cost ($30) and other.B carries r1's window-B cost ($10).
-	other, ok := teamDelta(resp, scoring.OtherCohort)
-	if !ok {
-		t.Fatal("'other' residual row should be present (red folded into it)")
+	// #593: the residual is WITHHELD, not published. It is k-safe in window A (red's 3
+	// contributors) but holds ONLY r1 in window B — and this test used to assert
+	// other.B carried r1's $10, i.e. one developer's window-B spend under an anonymized
+	// label. The floor is applied PER SIDE precisely so that cannot ship.
+	if _, ok := teamDelta(resp, scoring.OtherCohort); ok {
+		t.Fatal("SECURITY: the residual holds one developer in window B; publishing it exposes " +
+			"r1's figures under an anonymized label")
 	}
-	if other.A.TotalCostUSD != 30 {
-		t.Fatalf("other.A cost = %v, want 30 (red's window-A spend folded in)", other.A.TotalCostUSD)
+	if resp.KAnonSuppressed == nil {
+		t.Fatal("compare must DECLARE the suppression — otherwise a withheld total is " +
+			"indistinguishable from two empty windows")
 	}
-	if other.B.TotalCostUSD != 10 {
-		t.Fatalf("other.B cost = %v, want 10 (r1's window-B spend)", other.B.TotalCostUSD)
+	if resp.Total != nil {
+		t.Fatal("compare must withhold the grand-total delta alongside a suppressed residual")
 	}
 }
 
@@ -465,17 +469,20 @@ func TestScoresCompare_DivisionKAnonIntersection(t *testing.T) {
 	if blue.Significant {
 		t.Fatal("division-mode rows must never be flagged significant (no bootstrap CI)")
 	}
-	// red's data is preserved in the 'other' residual, not dropped: other.A carries
-	// red's window-A cost ($30) and other.B carries r1's window-B cost ($10).
-	other, ok := teamDelta(resp, scoring.OtherCohort)
-	if !ok {
-		t.Fatal("'other' residual row should be present (red folded into it)")
+	// #593: the residual is WITHHELD, not published. It is k-safe in window A (red's 3
+	// contributors) but holds ONLY r1 in window B — and this test used to assert
+	// other.B carried r1's $10, i.e. one developer's window-B spend under an anonymized
+	// label. The floor is applied PER SIDE precisely so that cannot ship.
+	if _, ok := teamDelta(resp, scoring.OtherCohort); ok {
+		t.Fatal("SECURITY: the residual holds one developer in window B; publishing it exposes " +
+			"r1's figures under an anonymized label")
 	}
-	if other.A.TotalCostUSD != 30 {
-		t.Fatalf("other.A cost = %v, want 30 (red's window-A spend folded in)", other.A.TotalCostUSD)
+	if resp.KAnonSuppressed == nil {
+		t.Fatal("compare must DECLARE the suppression — otherwise a withheld total is " +
+			"indistinguishable from two empty windows")
 	}
-	if other.B.TotalCostUSD != 10 {
-		t.Fatalf("other.B cost = %v, want 10 (r1's window-B spend)", other.B.TotalCostUSD)
+	if resp.Total != nil {
+		t.Fatal("compare must withhold the grand-total delta alongside a suppressed residual")
 	}
 }
 
@@ -723,5 +730,45 @@ func TestScoresCompare_EmptyWindows(t *testing.T) {
 	}
 	if resp.Total != nil {
 		t.Fatalf("total = %+v, want nil when both windows are empty", resp.Total)
+	}
+}
+
+// TestCompare_ShipsNoSegmentReconciliation pins the claim compare.go makes when it
+// declares `WithheldSegmentReconciliation: false` under a k-anon suppression: compare
+// never BUILDS a #466 block, so saying it was withheld would be a false statement about
+// what that suppression dropped.
+//
+// 🔴 The claim is currently true and nothing pinned it. If a future refactor has
+// compare share the /scores response assembly, the flag silently becomes a lie — a
+// suppressed compare would ship the whole-window reconciliation while declaring it
+// withheld nothing. Asserted on the RAW body, so an added-but-empty struct is caught
+// too, not just a populated one.
+func TestCompare_ShipsNoSegmentReconciliation(t *testing.T) {
+	h, db := newTestHandler(t)
+	// Spend that produced no outcome in BOTH windows, so a block — if one were ever
+	// built — would be non-empty and visible rather than omitempty'd away.
+	seedCostAt(t, db, "alice", "issue-a", 5.00, winAInstant)
+	seedOutcomeAt(t, db, "alice", "issue-a", 3, 1.0, winAInstant)
+	seedCostAt(t, db, "alice", "issue-a-abandoned", 2.00, winAInstant)
+	seedCostAt(t, db, "alice", "issue-b", 6.00, winBInstant)
+	seedOutcomeAt(t, db, "alice", "issue-b", 4, 1.0, winBInstant)
+	seedCostAt(t, db, "alice", "issue-b-abandoned", 3.00, winBInstant)
+
+	code, body := doRequest(t, h, http.MethodGet, compareURL(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("compare: status %d, body %s", code, body)
+	}
+	if strings.Contains(string(body), "segment_reconciliation") {
+		t.Errorf("compare shipped a segment_reconciliation key; compare.go declares "+
+			"WithheldSegmentReconciliation: false on the grounds that it never builds "+
+			"one, and that declaration is now false. body = %s", body)
+	}
+
+	// Control arm: the SAME fixture over /scores DOES ship the block — otherwise this
+	// test passes because the fixture produced nothing anywhere.
+	scores := getScores(t, h, "/api/v1/scores?since=2026-01-01&until=2026-05-01")
+	if scores.SegmentReconciliation == nil {
+		t.Fatal("control arm: /scores shipped no segment_reconciliation for this fixture, " +
+			"so the compare assertion above is vacuous")
 	}
 }

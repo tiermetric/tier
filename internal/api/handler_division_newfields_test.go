@@ -142,11 +142,19 @@ func TestGetScores_DivisionMode_UnjoinedDevelopersCountOnly(t *testing.T) {
 	// is attributed: attributed_cost_share is present and == 1.0. Pin the value (mirroring
 	// the attributed_outcome_share == 0.0 assertion below); a nil-only check would pass
 	// even if the share silently regressed to a wrong number.
-	if resp.DataQuality.AttributedCostShare == nil {
-		t.Fatal("attributed_cost_share absent in division mode; the name-free share must carry")
+	// #593: this fixture is two developers, below the effective floor of 3, so the
+	// response IS suppressed and the cost-ratio shares are withheld — they invert to
+	// the window total that suppression exists to hide. The unjoined COUNTS asserted
+	// above are deliberately NOT withheld (review measured them non-invertible), which
+	// is what this test is actually for. The fixture cannot be padded: every added
+	// developer is cost-only, outcome-only, or joined, and each moves one of this
+	// test's own assertions.
+	if resp.DataQuality.KAnonSuppressed == nil {
+		t.Fatal("a 2-developer fixture must suppress at the effective floor of 3")
 	}
-	if *resp.DataQuality.AttributedCostShare != 1.0 {
-		t.Errorf("attributed_cost_share = %v, want 1.0 (all cost attributed)", *resp.DataQuality.AttributedCostShare)
+	if resp.DataQuality.AttributedCostShare != nil {
+		t.Errorf("attributed_cost_share must be withheld under suppression; got %v",
+			*resp.DataQuality.AttributedCostShare)
 	}
 	// The single outcome (bob on issue-1) has no matching cost row under that
 	// identity, so it is unjoined: attributed_outcome_share is present and 0.0 -- a
@@ -166,6 +174,9 @@ func TestGetScores_DivisionMode_UnjoinedDevelopersCountOnly(t *testing.T) {
 // exploratory share) is emitted.
 func TestGetScores_DivisionMode_UnattributedBucketsNameFree(t *testing.T) {
 	h, db := newDivisionModeHandler(t, 2)
+	// #593: proportional padding — see the team-mode twin for why the mix must match.
+	padProportional(t, db, "paddiv", 3, 0.50, 0.50)
+	enrolIn(t, db, "paddiv", "alice")
 	seedCosts(t, db, "alice", "issue-1", 0.50)                    // attributed
 	seedCosts(t, db, "alice", store.UnattributedMainBucket, 0.50) // exploratory main
 
@@ -210,6 +221,12 @@ func TestGetScores_DivisionMode_SubKDivisionNoPerDevFieldReExposure(t *testing.T
 	seedDivisionMember(t, db, "eng_dev_three", "i-e3", "infra_team", "engineering", 10, 5)
 	seedDivisionMember(t, db, "res_dev_one", "i-r1", "research_team", "research", 8, 4)
 	seedDivisionMember(t, db, "res_dev_two", "i-r2", "research_team", "research", 8, 4)
+	// #593: a THIRD sub-k division so the residual pools to 3 contributors and CLEARS
+	// the floor. Without it the residual would be withheld entirely and this test could
+	// no longer exercise its actual subject — that a folded aggregate re-exposes no
+	// per-developer field. The suppression path itself is covered by
+	// TestGetScores_DivisionMode_SubKDivisionFoldsToOther and the scoring-level tests.
+	seedDivisionMember(t, db, "lab_dev_one", "i-l1", "lab_team", "labs", 8, 4)
 	seedCosts(t, db, "res_dev_one", store.UnattributedMainBucket, 4.0) // exploratory main for a sub-k dev
 
 	_, body := doRequest(t, h, http.MethodGet, "/api/v1/scores", nil)
@@ -217,7 +234,8 @@ func TestGetScores_DivisionMode_SubKDivisionNoPerDevFieldReExposure(t *testing.T
 	// No developer, team, or sub-k division identity may appear anywhere in the body.
 	for _, id := range []string{
 		"eng_dev_one", "eng_dev_two", "eng_dev_three", "res_dev_one", "res_dev_two",
-		"platform_team", "infra_team", "research_team", "research",
+		"lab_dev_one", "platform_team", "infra_team", "research_team", "research",
+		"lab_team", "labs",
 	} {
 		if bytes.Contains(body, []byte(id)) {
 			t.Errorf("division mode re-exposed identity %q from a sub-k cohort:\n%s", id, raw)
@@ -240,23 +258,27 @@ func TestGetScores_DivisionMode_SubKDivisionNoPerDevFieldReExposure(t *testing.T
 	}
 	other := teamByName(resp.Teams, "other")
 	if other == nil {
-		t.Fatalf("expected an 'other' fold for the sub-k division; got %v", teamJSONNames(resp.Teams))
+		t.Fatalf("expected an 'other' fold: the residual pools research+labs = 3 contributors, "+
+			"which CLEARS the floor and must still be emitted (#593 withholds only a sub-k "+
+			"residual); got %v", teamJSONNames(resp.Teams))
 	}
 	// The folded aggregate carries a name-free cost_per_point on its own summed totals.
-	// The fold's totals are deterministic: the sub-k "research" division's two developers
-	// contribute weighted points 4+4 = 8 and seeded cost 8+8 = 16, plus res_dev_one's 4.0
-	// exploratory-main spend rolls into the window cost = 20, so cost_per_point = 20/8 = 2.5.
+	// The fold's totals are deterministic. Two sub-k divisions pool into the residual:
+	//   research: 2 devs x (points 4, cost 8) = points 8,  cost 16
+	//   labs:     1 dev  x (points 4, cost 8) = points 4,  cost  8
+	//   plus res_dev_one's 4.0 exploratory-main spend, which rolls into window cost
+	//   => points 12, cost 28, cost_per_point = 28/12
 	// Pin the denominator so the consistency check asserts UNCONDITIONALLY; a
 	// `WeightedPoints > 0` guard would let a zero-denominator fixture silently skip it.
-	if other.WeightedPoints != 8 {
-		t.Errorf("'other' weighted_points = %v, want 8", other.WeightedPoints)
+	if other.WeightedPoints != 12 {
+		t.Errorf("'other' weighted_points = %v, want 12", other.WeightedPoints)
 	}
-	if other.TotalCostUSD != 20 {
-		t.Errorf("'other' total_cost_usd = %v, want 20", other.TotalCostUSD)
+	if other.TotalCostUSD != 28 {
+		t.Errorf("'other' total_cost_usd = %v, want 28", other.TotalCostUSD)
 	}
 	otherCPP := cppVal(t, other.CostPerPoint)
-	if math.Abs(otherCPP-2.5) > 1e-9 {
-		t.Errorf("'other' cost_per_point = %v, want 2.5 ($20 / 8 points)", otherCPP)
+	if math.Abs(otherCPP-28.0/12.0) > 1e-9 {
+		t.Errorf("'other' cost_per_point = %v, want %v ($28 / 12 points)", otherCPP, 28.0/12.0)
 	}
 	if math.Abs(otherCPP-other.TotalCostUSD/other.WeightedPoints) > 1e-9 {
 		t.Errorf("'other' cost_per_point %v != total/points %v", otherCPP, other.TotalCostUSD/other.WeightedPoints)

@@ -72,8 +72,34 @@ func Canonical(s string) (string, bool) {
 		return "", false
 	}
 	s = strings.ToLower(s)
-	s = strings.TrimSuffix(s, ".git")
-	s = strings.Trim(s, "/")
+	// 🔴 LOOP TO A FIXED POINT. A single pass is NOT idempotent, and the
+	// non-idempotence is exploitable rather than cosmetic (#493 review).
+	//
+	// The old order was TrimSuffix(".git") then Trim("/"), so ONE trailing slash
+	// defeated the .git strip entirely:
+	//
+	//	Canonical("owner/repo.git/")    -> "owner/repo.git"   (NOT a fixed point)
+	//	Canonical("owner/repo.git")     -> "owner/repo"
+	//	Canonical("owner/repo.git.git") -> "owner/repo.git"   (needs two passes)
+	//
+	// Why that mattered: GitHub forbids repository names ending in ".git", so
+	// `repository.full_name` never does and FromRemoteURL always strips it.
+	// "owner/repo.git" is therefore a join key NOTHING in the normal capture path
+	// can produce — cost rows written under it would never meet the outcomes
+	// written under "owner/repo", and the per-repo TIER score would be silently
+	// wrong in the QUIET direction (spend present, outcomes absent).
+	//
+	// Trimming to a fixed point makes the function total with respect to its own
+	// output, which is the property every caller already assumes when it stores
+	// the result as a join key. Bounded: each iteration strictly shortens s.
+	for {
+		before := s
+		s = strings.Trim(s, "/")
+		s = strings.TrimSuffix(s, ".git")
+		if s == before {
+			break
+		}
+	}
 	if s == "" || s == Unqualified {
 		return "", false
 	}

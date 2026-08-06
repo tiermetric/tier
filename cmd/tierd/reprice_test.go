@@ -240,3 +240,96 @@ func TestRunRepriceCmd_CommitApplies(t *testing.T) {
 		t.Errorf("after commit cost=%d version=%d, want %d/%d", cost, ver, want, active)
 	}
 }
+
+// seedProtectedOnlyDB creates a DB whose ONLY rows at or above the version floor
+// are ones a reprice must never re-derive: a caller-authoritative manual import
+// (source='api', e.g. a #346 sanctioned cost correction) and a money-carrying row
+// with no token counts to explain that money.
+func seedProtectedOnlyDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "protected.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	if err := db.InsertTokenEvent(ctx, store.TokenEvent{
+		Developer: "alice", IssueID: "issue-invoice", Model: "claude-sonnet-4",
+		InputTok: 1000, OutputTok: 500, CostMicro: 42_000_000,
+		Source: "api", Fidelity: "estimated", IdempotencyKey: "invoice-1",
+		PriceVersion: 3, Timestamp: time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed manual row: %v", err)
+	}
+	if err := db.InsertTokenEvent(ctx, store.TokenEvent{
+		Developer: "bob", IssueID: "issue-zero", Model: "claude-sonnet-4",
+		CostMicro: 7_000_000, Source: "jsonl", Fidelity: "realtime",
+		IdempotencyKey: "zero-1",
+		PriceVersion:   3, Timestamp: time.Date(2026, 7, 11, 12, 30, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed zero-token money row: %v", err)
+	}
+	return path
+}
+
+// TestRunRepriceCmd_ReportsProtectedRows proves the operator is TOLD when the
+// version floor matched rows that were deliberately not repriced. Silence here
+// would be the honesty regression the exclusion filter could otherwise introduce:
+// the rows exist, they matched the floor, and they were protected on purpose.
+func TestRunRepriceCmd_ReportsProtectedRows(t *testing.T) {
+	path := seedProtectedOnlyDB(t)
+	var out, errb bytes.Buffer
+	if code := runRepriceCmd([]string{"--db", path, "--from-version", "1"}, &out, &errb); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errb.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "protected 2 row(s)") {
+		t.Errorf("stdout = %q, want it to report the 2 protected rows", s)
+	}
+	// 🔴 The regression this guards: with every matching row protected, RowCount is
+	// 0, and the pre-existing zero-rows branch would tell the operator to check
+	// --from-version — blaming a flag that is perfectly correct.
+	if strings.Contains(s, "check --from-version") {
+		t.Errorf("stdout = %q, must NOT blame --from-version when the floor matched rows that were protected", s)
+	}
+	if !strings.Contains(s, "--from-version is not the problem") {
+		t.Errorf("stdout = %q, want the protected-only explanation", s)
+	}
+}
+
+// TestRunRepriceCmd_ProtectedRowsSurviveCommit is the end-to-end money assertion
+// behind the report above: a committed sweep leaves both protected figures
+// exactly as stored. A $42.00 sanctioned correction repriced to $0.00 is what
+// made this RED.
+func TestRunRepriceCmd_ProtectedRowsSurviveCommit(t *testing.T) {
+	path := seedProtectedOnlyDB(t)
+	var out, errb bytes.Buffer
+	if code := runRepriceCmd([]string{"--db", path, "--from-version", "1", "--commit"}, &out, &errb); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errb.String())
+	}
+
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	since := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	events, _, err := db.ListTokenEvents(context.Background(), since, since.Add(48*time.Hour), store.PageCursor{}, 100)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	got := map[string]int64{}
+	for _, e := range events {
+		got[e.IdempotencyKey] = e.CostMicro
+	}
+	if got["invoice-1"] != 42_000_000 {
+		t.Errorf("manual-import cost_micro after --commit = %d, want 42000000 UNCHANGED", got["invoice-1"])
+	}
+	if got["zero-1"] != 7_000_000 {
+		t.Errorf("zero-token money row cost_micro after --commit = %d, want 7000000 UNCHANGED", got["zero-1"])
+	}
+	if !strings.Contains(out.String(), "protected 2 row(s)") {
+		t.Errorf("stdout = %q, want the protected report on a COMMIT too, not just a dry run", out.String())
+	}
+}

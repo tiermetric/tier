@@ -200,11 +200,15 @@ func TestHierarchyWriteSurface_TeamModeNamesTeams(t *testing.T) {
 		for _, ts := range scores.Teams {
 			byTeam[ts.Team] = ts
 		}
-		// Three rows: alpha + charlie named (5 contributing each, clearing k=5),
-		// bravo folded into "other" (2 contributing, below the floor) — NOT the
-		// single-"other" collapse the bug produced.
-		if len(scores.Teams) != 3 {
-			t.Fatalf("expected 3 team rows (alpha, charlie, other); got %+v", scores.Teams)
+		// Two rows: alpha + charlie named (5 contributing each, clearing k=5). bravo's
+		// 2 contributors are below the floor, so under #593 the residual is WITHHELD
+		// rather than published as "other".
+		//
+		// The bug this test guards is unchanged and still asserted: the import must not
+		// collapse EVERYTHING into a single residual. Two named rows is the proof.
+		if len(scores.Teams) != 2 {
+			t.Fatalf("expected 2 named team rows (alpha, charlie); the sub-k 'bravo' residual is "+
+				"withheld under #593; got %+v", scores.Teams)
 		}
 		if _, ok := byTeam["alpha"]; !ok {
 			t.Errorf("team 'alpha' (5 contributing) must be named; got %+v", scores.Teams)
@@ -215,14 +219,9 @@ func TestHierarchyWriteSurface_TeamModeNamesTeams(t *testing.T) {
 		if _, ok := byTeam["bravo"]; ok {
 			t.Errorf("sub-k team 'bravo' (2 contributing) must fold into 'other', not be named; got %+v", scores.Teams)
 		}
-		other, ok := byTeam[scoring.OtherCohort]
-		if !ok {
-			t.Fatalf("expected an 'other' bucket for the sub-k team; got %+v", scores.Teams)
-		}
-		// bravo's 2 contributors: 2 outcomes x weight 3 = 6 points, 2 x $10 = $20.
-		if other.WeightedPoints != 6 || other.TotalCostUSD != 20 {
-			t.Errorf("'other' = points %v cost %v, want points 6 cost 20 (bravo's 2 devs preserved)",
-				other.WeightedPoints, other.TotalCostUSD)
+		if _, folded := byTeam[scoring.OtherCohort]; folded {
+			t.Errorf("bravo's 2 contributors are below k=5; the residual must be withheld, not "+
+				"published as 'other'; got %+v", scores.Teams)
 		}
 
 		// Second half of the audited bug: the bulk import OPENS a period_membership

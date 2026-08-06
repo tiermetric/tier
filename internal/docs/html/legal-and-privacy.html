@@ -274,8 +274,12 @@ accident. In <code>team</code> mode <code>GET /api/v1/scores</code>, the dashboa
 <code>GET /api/v1/scores/{developer}</code> <strong>never</strong> return an individual developer name:
 named rows are replaced by team aggregates, and any team with fewer than the
 k-anonymity floor of <strong>contributing</strong> developers is collapsed into an aggregate
-<strong>&#34;other&#34;</strong> bucket (its spend and outcomes remain in the totals — never
-dropped — so team numbers stay honest). The floor defaults to <strong>k = 5</strong> with a
+<strong>&#34;other&#34;</strong> bucket. ⚠️ <strong>A residual that is itself below the floor is withheld
+entirely (#593), together with the grand total and cost-composition sidecar</strong> —
+publishing them would let a reader subtract the named rows and recover the hidden
+cohort. A suppressed response therefore does NOT reconcile, and declares that via
+<code>data_quality.kanon_suppressed</code>. When the residual clears the floor it is emitted and
+its spend and outcomes remain in the totals — never
 <strong>hard minimum of 3</strong> (<code>--k-anonymity</code>, env <code>TIER_K_ANONYMITY</code>, config key
 <code>k_anonymity</code>); <code>tierd serve</code> refuses to start with a smaller value. The local
 <code>tierd score</code> CLI is a deliberate carve-out — it is a single-operator tool that
@@ -362,7 +366,9 @@ complete a DPIA before go-live.</li>
 built-in mode (#185): run <code>tierd serve --aggregation team</code> (k-anonymity floor
 <code>--k-anonymity</code>, default 5, hard minimum 3) so the API, dashboard, and
 per-developer endpoint never surface an individual name and sub-k cohorts
-collapse into &#34;other&#34; with totals preserved. <code>aggregation</code> is a required
+collapse into &#34;other&#34;; a sub-k residual is withheld outright, along with the
+totals that would reconstruct it (#593), so a suppressed response does not
+reconcile and says so. <code>aggregation</code> is a required
 setting with no silent default; the local <code>tierd score</code> CLI is not gated.</li>
 <li>TIER is <strong>single-tenant with no org isolation</strong> — separate cohorts by running
 separate instances; do not claim built-in data segregation.</li>

@@ -19,7 +19,7 @@ func TestCostCoverageStart_EmptyStoreIsNotTheEpoch(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	got, ok, err := db.CostCoverageStart(ctx)
+	got, ok, err := db.CostCoverageStart(ctx, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCoverageStart on empty store: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestCostCoverageStart_ReturnsEarliest(t *testing.T) {
 		}
 	}
 
-	got, ok, err := db.CostCoverageStart(ctx)
+	got, ok, err := db.CostCoverageStart(ctx, FleetWide)
 	if err != nil {
 		t.Fatalf("CostCoverageStart: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSourceCoverageStart_PerSourceHorizonsDiffer(t *testing.T) {
 	ins("jsonl", jsonlStart.Add(48*time.Hour), "j2")
 	ins("codex-rollout", codexStart, "c1")
 
-	got, err := db.SourceCoverageStart(ctx)
+	got, err := db.SourceCoverageStart(ctx, FleetWide)
 	if err != nil {
 		t.Fatalf("SourceCoverageStart: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestSourceCoverageStart_PerSourceHorizonsDiffer(t *testing.T) {
 	}
 	// The global horizon is the looser bound — assert it does NOT stand in for
 	// the per-source one, which is the whole point of emitting both.
-	global, ok, err := db.CostCoverageStart(ctx)
+	global, ok, err := db.CostCoverageStart(ctx, FleetWide)
 	if err != nil || !ok {
 		t.Fatalf("CostCoverageStart: %v ok=%v", err, ok)
 	}

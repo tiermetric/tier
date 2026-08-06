@@ -289,7 +289,7 @@ footer.site a { color: var(--muted); }
 <h2 id="the-rebuild-dance-precedent-in-tree">The rebuild dance (precedent in-tree)</h2>
 <p>The two PK-table rebuilds have a working precedent: the <code>dropActualSpendNonNegativeCheck()</code> function in <code>store.go</code>, which drops a <code>CHECK</code> constraint SQLite cannot <code>ALTER</code> away. It is the exact create-copy-drop-rename sequence a PK reshape needs, and a retrofit should mirror its structure:</p>
 <pre><code>sequenceDiagram
-    participant Tx as BEGIN IMMEDIATE (Serializable)
+    participant Tx as beginImmediate (write lock up front)
     participant New as __new_&amp;lt;table&amp;gt;
     participant Old as &amp;lt;table&amp;gt;
     Tx-&gt;&gt;New: CREATE TABLE with new (tenant_id, …) PK
@@ -300,7 +300,7 @@ footer.site a { color: var(--muted); }
 </code></pre>
 <p>Key properties inherited from the precedent (<code>dropActualSpendNonNegativeCheck()</code> in <code>store.go</code>):</p>
 <ul>
-<li><strong><code>BEGIN IMMEDIATE</code></strong> (<code>sql.LevelSerializable</code>) takes the <code>RESERVED</code> lock up front so <code>busy_timeout=5000</code> can retry instead of racing to <code>SQLITE_BUSY</code>.</li>
+<li><strong>Take the write lock up front</strong> via <code>store.beginImmediate</code> (<code>internal/store/store.go</code>), so <code>busy_timeout=5000</code> can retry instead of racing to <code>SQLITE_BUSY</code>. ⚠️ Do <strong>NOT</strong> use <code>sql.TxOptions{Isolation: sql.LevelSerializable}</code> for this: <code>modernc.org/sqlite</code> never reads <code>opts.Isolation</code> (<code>tx.go</code>, <code>newTx</code> — the mode comes solely from the <code>_txlock</code> DSN param, which this DSN does not set), so it yields a plain <strong>DEFERRED</strong> <code>BEGIN</code> and the deferred-to-write upgrade fails with an unretried <code>SQLITE_BUSY_SNAPSHOT</code> (517) mid-rename. The precedent function still carries the old shape — see #598.</li>
 <li><strong>Idempotent guard:</strong> the precedent inspects <code>sqlite_master</code> and no-ops if the constraint is already gone. A retrofit must likewise no-op once <code>tenant_id</code> is present, so re-running <code>Open()</code> is safe.</li>
 <li><strong>All-or-nothing:</strong> the whole dance is one transaction; a failure mid-rename rolls back to the pre-migration table.</li>
 </ul>

@@ -106,17 +106,35 @@ func TestScores_CostCompositionSidecar(t *testing.T) {
 }
 
 // TestScores_CostCompositionTeamMode pins the #185 privacy contract: the
-// cost_composition block STILL ships in team-aggregation mode (it is a whole-window,
-// name-free aggregate — coarser than the pooled `total` already present — so it
-// re-exposes no sub-k cohort), and the response is genuinely in team mode (named
-// `developers` suppressed to an empty array). A regression that gated the sidecar
-// behind developer mode, or leaked a per-developer identity into it, is caught here.
+// cost_composition block ships in team-aggregation mode when nothing was suppressed
+// (it is a whole-window, name-free aggregate), and the response is genuinely in team
+// mode (named `developers` suppressed to an empty array). A regression that gated the
+// sidecar behind developer mode, or leaked a per-developer identity into it, is caught
+// here.
+//
+// ⚠️ The original comment justified shipping the sidecar with "so it re-exposes no
+// sub-k cohort". #593 measured that claim FALSE: name-free is not the same as safe,
+// because the composition total restates whatever the named rows omit, and the
+// difference is the suppressed cohort. The sidecar is now withheld alongside `total`
+// whenever a residual is suppressed — see TestGetScores_KAnonSuppression_*. This test
+// therefore uses a fixture where NOTHING is suppressed, which is what it was really
+// about all along.
+//
+// Note the fixture needs >= scoring.MinKAnonymity (3) contributors: newTeamModeHandler
+// takes a requested k, but AggregateTeamsKAnon clamps anything below MinKAnonymity up
+// to it, so a 2-developer "k=2" cohort is enforced at 3 and collapses.
 func TestScores_CostCompositionTeamMode(t *testing.T) {
-	h, db := newTeamModeHandler(t, 2)
+	h, db := newTeamModeHandler(t, 3)
 	seedComposition(t, db)
-	// Enrol both contributing developers in one team so team mode has a cohort at
-	// the k=2 floor rather than collapsing everything into "other".
-	for _, dev := range []string{"alice", "bob"} {
+	// A third contributor so the single team clears the effective floor of 3 and no
+	// residual exists to suppress.
+	seedCosts(t, db, "carol", "issue-carol", 1.00)
+	seedOutcome(t, db, "carol", "issue-carol", 1.0, 1.0)
+	// #593: the work_type SEGMENT is scored over only developers with outcomes in that
+	// type, so it is smaller than the window — carol alone would suppress the segment
+	// and escalate to the whole response, stripping the sidecar under test.
+	padCohort(t, db, "team-x", store.WorkTypeFeature, 3, 1.0)
+	for _, dev := range []string{"alice", "bob", "carol"} {
 		if err := db.UpsertHierarchy(context.Background(), dev, "team-x", "div", "org"); err != nil {
 			t.Fatalf("UpsertHierarchy(%s): %v", dev, err)
 		}

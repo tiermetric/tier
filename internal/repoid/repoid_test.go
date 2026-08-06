@@ -17,6 +17,20 @@ func TestCanonical(t *testing.T) {
 		{"gitlab nested group keeps full path", "Group/Sub/Proj", "group/sub/proj", true},
 		{"dots and dashes and underscores", "my-org/my_repo.v2", "my-org/my_repo.v2", true},
 
+		// 🔴 THE NON-IDEMPOTENT CASES (#493 review). The old implementation ran
+		// TrimSuffix(".git") then Trim("/") ONCE, in that order, so a single
+		// trailing slash defeated the .git strip entirely: "owner/repo.git/"
+		// landed as "owner/repo.git". That is a join key NOTHING in the capture
+		// path can emit, so cost stored under it would never meet outcomes under
+		// "owner/repo" — silently, permanently, and un-repairably (the row then
+		// reads as already-qualified, so the repair refuses to touch it, and there
+		// is no --undo). These inputs are the regression, spelled out.
+		{"dot-git then slash", "owner/repo.git/", "owner/repo", true},
+		{"dot-git then two slashes", "Owner/Repo.git//", "owner/repo", true},
+		{"doubled dot-git", "owner/repo.git.git", "owner/repo", true},
+		{"uppercase dot-git", "Owner/Repo.GIT", "owner/repo", true},
+		{"slash then dot-git then slash", "/owner/repo.git/", "owner/repo", true},
+
 		{"empty", "", "", false},
 		{"bare name has no owner", "tier", "", false},
 		{"reserved sentinel cannot be forged", "unqualified", "", false},
@@ -56,7 +70,7 @@ func TestFromRemoteURL(t *testing.T) {
 		{"http", "http://ghe.internal/owner/repo.git", "owner/repo"},
 
 		// A filesystem path is not a repository identity. The webhook can never
-		// produce "users/steve/src/tier", so neither may we -- a fabricated key
+		// produce "users/alice/src/tier", so neither may we -- a fabricated key
 		// that only one producer emits is worse than an honest sentinel.
 		{"absolute local path", "/srv/git/repo.git", ""},
 		{"file scheme", "file:///srv/git/repo.git", ""},
@@ -101,5 +115,45 @@ func TestIsReal(t *testing.T) {
 	}
 	if !IsReal("owner/repo") {
 		t.Fatal("a real slug must be real")
+	}
+}
+
+// TestCanonicalIsIdempotent is a PROPERTY test, and it is the one that makes the
+// repair's fixed-point guard meaningful rather than decorative.
+//
+// Canonical's whole contract is "there is exactly one canonical form", and every
+// caller — the JSONL collector, the GitHub webhook, `ship --repo-slug`, and
+// `repair-repo` — stores its output as a JOIN KEY. If Canonical(Canonical(x)) can
+// differ from Canonical(x), then two producers looking at the same repository can
+// write two different keys and the cost<->outcome join silently misses. A table
+// of specific inputs can only ever pin the cases someone thought of; this pins
+// the property itself, over every input the table already exercises.
+func TestCanonicalIsIdempotent(t *testing.T) {
+	inputs := []string{
+		// The shapes the #493 review found, first.
+		"owner/repo.git/", "Owner/Repo.git//", "owner/repo.git.git", "Owner/Repo.GIT",
+		"/owner/repo.git/", "owner/repo.git/.git/",
+		// Then the ordinary ones, so a regression cannot hide in the common path.
+		"owner/repo", "Tiermetric/Tier", "owner/repo.git", "/owner/repo/",
+		"  owner/repo\n", "Group/Sub/Proj", "my-org/my_repo.v2",
+		// And rejected inputs: ("", false) must also be a fixed point, so a
+		// re-canonicalization of a rejection can never resurrect a value.
+		"", "tier", "unqualified", "owner//repo", "owner/../repo",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			once, ok1 := Canonical(in)
+			twice, ok2 := Canonical(once)
+			if !ok1 {
+				// A rejected input canonicalizes to "", which must itself be rejected.
+				if once != "" || ok2 {
+					t.Fatalf("Canonical(%q) = (%q, false) but Canonical(%q) = (%q, %v); a rejection must stay rejected", in, once, once, twice, ok2)
+				}
+				return
+			}
+			if !ok2 || twice != once {
+				t.Fatalf("Canonical is NOT idempotent: Canonical(%q) = %q, but Canonical(%q) = (%q, %v). Two producers could write two join keys for one repository, and the mismatch is silent.", in, once, once, twice, ok2)
+			}
+		})
 	}
 }

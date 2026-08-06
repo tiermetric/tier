@@ -132,7 +132,8 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	if c.httpClient == nil {
 		// Dedicated client, hard timeout, default TLS. NOT tierd's reverse proxy.
-		c.httpClient = &http.Client{Timeout: defaultHTTPTimeout}
+		// CheckRedirect: see noRedirect — this Client NEVER follows a redirect.
+		c.httpClient = &http.Client{Timeout: defaultHTTPTimeout, CheckRedirect: noRedirect}
 	}
 	if c.maxRetries == 0 {
 		c.maxRetries = defaultMaxRetries
@@ -148,6 +149,37 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	return c
 }
+
+// noRedirect makes an http.Client stop at the FIRST response and hand the 3xx
+// back to the caller verbatim, instead of net/http's default "follow up to 10
+// redirects" behavior. Both properties it buys are load-bearing here, and both
+// were MEASURED to be broken without it (#452 review Y1):
+//
+//  1. SECRET CONTAINMENT. net/http strips only a fixed sensitive-header set
+//     (Authorization, WWW-Authenticate, Cookie, Cookie2) when a redirect leaves
+//     the original domain — see shouldCopyHeaderOnRedirect. `x-api-key` is NOT
+//     on that list, so an upstream (or anything able to answer as one) that
+//     replies 302 to another host receives the Admin key VERBATIM. Measured
+//     against a cross-hostname httptest pair: the target saw the full key.
+//     OpenAI's Bearer token happens to be stripped by that same list, which is
+//     precisely why this must be fixed at the client and not left to luck —
+//     the two providers were silently asymmetric while sharing one doc comment.
+//
+//  2. HONEST GRADING. ProbeResult.StatusCode is the status Authorized()
+//     classifies. Following a redirect makes that the REDIRECT TARGET's status,
+//     so a probe whose real origin answered 302 was reported to the operator as
+//     `credential accepted (HTTP 200)` for a credential the provider never
+//     validated — the exact misdiagnosis #452 exists to eliminate.
+//
+// SCOPE: deliberately applied to the shared client, so doGet/fetchCost stop
+// following redirects too, not just Probe. Scoping it to the probe would leave
+// the key-leak vector (1) open on the path that actually carries the key on
+// every poll, forever, rather than once at doctor time — the strictly worse
+// half to leave unfixed. Neither Admin API endpoint redirects, so nothing legitimate
+// is lost: doGet already treats a non-2xx, non-429/5xx status as a
+// fail-loud non-retryable error, which is the correct handling of an
+// unexpected 3xx from an API that should never emit one.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // sleepCtx waits for d or until ctx cancels.
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -277,6 +309,75 @@ func (c *Client) fetchCost(ctx context.Context, start, end time.Time) ([]costBuc
 		page = rep.NextPage
 	}
 	return nil, fmt.Errorf("cost report: pagination exceeded %d pages (upstream returned has_more without terminating)", maxPages)
+}
+
+// ProbeResult is the outcome of one live reachability+authorization check
+// against the Admin API, used by `tierd doctor` (#452) to catch a
+// misconfigured or expired Admin key at setup time, rather than an adopter
+// discovering it later as a silently-empty Spend Leverage tile.
+type ProbeResult struct {
+	// StatusCode is the HTTP status of the single probe request — always the
+	// ORIGIN's status, never a redirect target's, because the Client never
+	// follows redirects (see noRedirect). Zero means the request never got a
+	// response — see Err.
+	StatusCode int
+	// Err is set only for a transport-level failure (DNS, connection refused,
+	// TLS, timeout, context deadline). A completed non-2xx HTTP response is
+	// NOT an Err — it is a normal, fully-formed StatusCode result.
+	Err error
+}
+
+// Authorized reports whether the endpoint was reached and accepted the key
+// (a 2xx response, no transport error).
+func (r ProbeResult) Authorized() bool {
+	return r.Err == nil && r.StatusCode >= 200 && r.StatusCode < 300
+}
+
+// Unauthorized reports whether the endpoint was reached but rejected the
+// key (401/403) — the specific case doctor exists to catch, distinct from
+// "endpoint unreachable" (r.Err != nil).
+func (r ProbeResult) Unauthorized() bool {
+	return r.Err == nil && (r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden)
+}
+
+// Probe makes exactly ONE authenticated GET against the cost-report endpoint
+// over a minimal (trailing 24h) window, with NO retries — a doctor check
+// should fail fast and cheap, not spend a real poll's retry/backoff budget —
+// and classifies the raw result without decoding, ingesting, or mutating
+// anything. Bypasses doGet/fetchCost deliberately: doctor needs the raw
+// status code to distinguish "unauthorized" from "unreachable" from
+// "unexpected", and doGet's non-retryable-status error collapses all of
+// those into one opaque string.
+//
+// Error hygiene matches doGet: the Admin key travels only in the x-api-key
+// header and never enters the returned ProbeResult.Err.
+func (c *Client) Probe(ctx context.Context) ProbeResult {
+	// UTC-midnight aligned, matching the shape every real poll sends
+	// (windowStart in poller.go): a real poll never requests an arbitrary
+	// time-of-day boundary for bucket_width=1d, so neither should the probe —
+	// an unaligned starting_at risks a 400 from API-side bucket validation on
+	// a perfectly valid key, which would misclassify as "unexpected status"
+	// (WARN) instead of the clean OK a valid key should get.
+	end := time.Now().UTC().Truncate(24 * time.Hour)
+	q := c.baseQuery(end.AddDate(0, 0, -1), end)
+	fullURL := c.baseURL + costPath + "?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return ProbeResult{Err: fmt.Errorf("build probe request: %w", err)}
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", anthropicVersion)
+	req.Header.Set("accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ProbeResult{Err: fmt.Errorf("probe GET %s: %w", costPath, err)}
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+	}()
+	return ProbeResult{StatusCode: resp.StatusCode}
 }
 
 // baseQuery builds the shared query params (starting_at/ending_at RFC3339 UTC,

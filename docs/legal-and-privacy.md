@@ -236,8 +236,12 @@ means reporting that never surfaces an individual developer's performance.
 > `GET /api/v1/scores/{developer}` **never** return an individual developer name:
 > named rows are replaced by team aggregates, and any team with fewer than the
 > k-anonymity floor of **contributing** developers is collapsed into an aggregate
-> **"other"** bucket (its spend and outcomes remain in the totals — never
-> dropped — so team numbers stay honest). The floor defaults to **k = 5** with a
+> **"other"** bucket. ⚠️ **A residual that is itself below the floor is withheld
+> entirely (#593), together with the grand total and cost-composition sidecar** —
+> publishing them would let a reader subtract the named rows and recover the hidden
+> cohort. A suppressed response therefore does NOT reconcile, and declares that via
+> `data_quality.kanon_suppressed`. When the residual clears the floor it is emitted and
+> its spend and outcomes remain in the totals — never
 > **hard minimum of 3** (`--k-anonymity`, env `TIER_K_ANONYMITY`, config key
 > `k_anonymity`); `tierd serve` refuses to start with a smaller value. The local
 > `tierd score` CLI is a deliberate carve-out — it is a single-operator tool that
@@ -281,7 +285,9 @@ appraisal input.
   built-in mode (#185): run `tierd serve --aggregation team` (k-anonymity floor
   `--k-anonymity`, default 5, hard minimum 3) so the API, dashboard, and
   per-developer endpoint never surface an individual name and sub-k cohorts
-  collapse into "other" with totals preserved. `aggregation` is a required
+  collapse into "other"; a sub-k residual is withheld outright, along with the
+  totals that would reconstruct it (#593), so a suppressed response does not
+  reconcile and says so. `aggregation` is a required
   setting with no silent default; the local `tierd score` CLI is not gated.
 - TIER is **single-tenant with no org isolation** — separate cohorts by running
   separate instances; do not claim built-in data segregation.

@@ -646,10 +646,13 @@ func allGenerated(paths, patterns []string) bool {
 //
 // The barrier itself lives in the shared internal/logsafe package so the webhook,
 // API, proxy, and tierd access-log sinks all sanitize identically (#321): it
-// STRIPS "\r"/"\n" — the transformation CodeQL's go/log-injection recognizes as a
-// sanitizer, which %q alone is not credited for — then %q-quotes to escape any
-// remaining control bytes, quotes, and invalid UTF-8, and caps the length. This
-// wrapper is retained so the handler's many call sites stay unchanged.
+// STRIPS "\r"/"\n", then %q-quotes to escape any remaining control bytes, quotes,
+// and invalid UTF-8, and caps the length. This wrapper is retained so the
+// handler's many call sites stay unchanged.
+//
+// See logsafe's package doc for why the strip is the primary barrier and %q the
+// backstop — the reasoning is subtler than it looks, and this comment previously
+// stated it wrongly.
 func logSafeStr(s string) string {
 	return logsafe.Str(s)
 }

@@ -42,7 +42,7 @@ func TestAggregateTeamsKAnon_FloorAndOther(t *testing.T) {
 		"a1": "alpha", "a2": "alpha", "a3": "alpha",
 		"b1": "beta", "b2": "beta",
 	}
-	got := AggregateTeamsKAnon(devs, teamOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 3)
 
 	names := map[string]TeamScore{}
 	for _, ts := range got {
@@ -54,17 +54,90 @@ func TestAggregateTeamsKAnon_FloorAndOther(t *testing.T) {
 	if _, ok := names["beta"]; ok {
 		t.Errorf("team 'beta' (2 < k=3) must NOT get a named row — it should collapse into 'other'; got %v", teamNames(got))
 	}
-	other, ok := names[OtherCohort]
-	if !ok {
-		t.Fatalf("expected an 'other' bucket for the sub-k team; got %v", teamNames(got))
+	// #593: the residual here holds only beta's 2 contributors, which is BELOW k=3, so
+	// it is WITHHELD rather than emitted. Before #593 it was published — a 2-person
+	// cohort's exact figures under a label that reads as anonymized.
+	//
+	// This test used to assert the opposite ("beta's contributions must be fully
+	// preserved in 'other'"), encoding the "totals are preserved exactly" invariant.
+	// the maintainer retired that invariant (option A, 2026-08-03): it is the property that
+	// makes the disclosure recoverable by subtraction, so preserving it and preserving
+	// k-anonymity are mutually exclusive.
+	if _, ok := names[OtherCohort]; ok {
+		t.Errorf("a residual holding only 2 contributors (< k=3) must be WITHHELD, not emitted; got %v",
+			teamNames(got))
 	}
-	// beta's contributions must be fully preserved in "other".
-	if !approx(other.WeightedPoints, 10) || !approx(other.TotalCostUSD, 40) {
-		t.Errorf("'other' = points %v cost %v, want points 10 cost 40 (beta's b1+b2 preserved, not dropped)",
-			other.WeightedPoints, other.TotalCostUSD)
+	_, sup := AggregateTeamsKAnon(devs, teamOf, 3)
+	if !sup.Any() {
+		t.Error("suppression must be REPORTED — a caller that cannot tell suppression from an " +
+			"empty window will publish an unfloored total beside the named rows")
+	}
+	if sup.Developers != 2 {
+		t.Errorf("sup.Developers = %d, want 2 (beta's b1+b2)", sup.Developers)
 	}
 }
 
+// TestAggregateTeamsKAnon_ResidualClearingFloorIsStillEmitted is the control arm for
+// the suppression rule. Without it, an implementation that withheld the residual
+// UNCONDITIONALLY would pass every suppression assertion in this file while silently
+// destroying the normal sub-k fold that #185 depends on.
+func TestAggregateTeamsKAnon_ResidualClearingFloorIsStillEmitted(t *testing.T) {
+	// Three sub-k teams that POOL into a residual of 4 contributors, >= k=3.
+	devs := []DeveloperScore{
+		dev("a1", 3, 10), dev("a2", 3, 10), dev("a3", 3, 10), // alpha: named
+		dev("b1", 5, 20), dev("b2", 5, 20), // beta:  2 -> other
+		dev("c1", 5, 20), dev("c2", 5, 20), // gamma: 2 -> other
+	}
+	teamOf := map[string]string{
+		"a1": "alpha", "a2": "alpha", "a3": "alpha",
+		"b1": "beta", "b2": "beta",
+		"c1": "gamma", "c2": "gamma",
+	}
+	got, sup := AggregateTeamsKAnon(devs, teamOf, 3)
+	names := teamNameSet(got)
+	if !names[OtherCohort] {
+		t.Errorf("a residual with 4 contributors (>= k=3) hides its members and MUST be emitted; got %v",
+			teamNames(got))
+	}
+	if sup.Any() {
+		t.Errorf("nothing should be suppressed when the residual clears the floor; got %+v", sup)
+	}
+	if names["beta"] || names["gamma"] {
+		t.Errorf("sub-k team names must not leak; got %v", teamNames(got))
+	}
+}
+
+// TestAggregateTeamsKAnon_IdleResidualIsNotSuppressed pins the third arm of the rule:
+// a residual of purely idle seats (#39, zero cost and zero outcomes) identifies nobody
+// and carries no figures, so withholding it would suppress the caller's grand total
+// for no privacy gain. Emitted, and NOT reported as a suppression.
+func TestAggregateTeamsKAnon_IdleResidualIsNotSuppressed(t *testing.T) {
+	// NOTE: dev() hardcodes SampleN: 1, so dev(x, 0, 0) still CONTRIBUTES. A genuine
+	// #39 idle seat is the zero-valued struct — the same shape
+	// TestAggregateTeamsKAnon_ZeroSeatDoesNotCount uses. Getting this wrong is how the
+	// first draft of this test failed against correct code.
+	devs := []DeveloperScore{
+		dev("a1", 3, 10), dev("a2", 3, 10), dev("a3", 3, 10),
+		{Developer: "z1", SampleN: 0}, // idle seat: contributes nothing
+	}
+	teamOf := map[string]string{"a1": "alpha", "a2": "alpha", "a3": "alpha", "z1": "ghost"}
+	got, sup := AggregateTeamsKAnon(devs, teamOf, 3)
+	if sup.Any() {
+		t.Errorf("an all-idle residual carries no figures and must not trigger suppression; got %+v", sup)
+	}
+	if !teamNameSet(got)[OtherCohort] {
+		t.Errorf("the idle residual should still be emitted (it is a harmless zero row); got %v", teamNames(got))
+	}
+}
+
+// TestAggregateTeamsKAnon_TotalsPreserved proves the reconciliation property IN THE
+// UNSUPPRESSED CASE ONLY (#593) — this fixture's residual clears the floor, so it is
+// emitted and the rows still sum. The property is NOT global any more: a sub-k residual
+// is withheld and the rows deliberately do not reconcile. Do not generalize this test's
+// name into a contract.
+//
+// Original doc follows.
+//
 // TestAggregateTeamsKAnon_TotalsPreserved proves the honesty invariant: summing
 // every returned team row (named + "other") reproduces the same grand total as a
 // straight RollupTeam over all developers. Identity is suppressed, data is not.
@@ -79,7 +152,7 @@ func TestAggregateTeamsKAnon_TotalsPreserved(t *testing.T) {
 		"a1": "alpha", "a2": "alpha", "a3": "alpha",
 		"b1": "beta", "b2": "beta",
 	}
-	got := AggregateTeamsKAnon(devs, teamOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 3)
 
 	grand := RollupTeam("", devs)
 	gotPoints, gotCost, gotPaid := sumTotals(got)
@@ -101,7 +174,7 @@ func TestAggregateTeamsKAnon_ExactBoundary(t *testing.T) {
 		"t1": "at", "t2": "at", "t3": "at", "t4": "at",
 		"u1": "under", "u2": "under", "u3": "under",
 	}
-	got := AggregateTeamsKAnon(devs, teamOf, 4)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 4)
 	names := teamNameSet(got)
 	if !names["at"] {
 		t.Errorf("team 'at' with exactly k=4 contributing must be named; got %v", teamNames(got))
@@ -109,8 +182,9 @@ func TestAggregateTeamsKAnon_ExactBoundary(t *testing.T) {
 	if names["under"] {
 		t.Errorf("team 'under' with k-1=3 contributing must collapse to 'other'; got %v", teamNames(got))
 	}
-	if !names[OtherCohort] {
-		t.Errorf("expected 'other' bucket holding the k-1 team; got %v", teamNames(got))
+	// #593: the residual holds "under"'s 3 contributors, below k=4, so it is withheld.
+	if names[OtherCohort] {
+		t.Errorf("a k-1 residual must be WITHHELD, not emitted as 'other'; got %v", teamNames(got))
 	}
 }
 
@@ -123,7 +197,7 @@ func TestAggregateTeamsKAnon_ZeroSeatDoesNotCount(t *testing.T) {
 		dev("d1", 2, 5), dev("d2", 2, 5), zero, // team delta: 2 contributing + 1 idle
 	}
 	teamOf := map[string]string{"d1": "delta", "d2": "delta", "idle": "delta"}
-	got := AggregateTeamsKAnon(devs, teamOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 3)
 	if teamNameSet(got)["delta"] {
 		t.Errorf("team 'delta' has only 2 CONTRIBUTING developers (the idle seat must not pad it to k=3); it must collapse to 'other'; got %v", teamNames(got))
 	}
@@ -141,7 +215,7 @@ func TestAggregateTeamsKAnon_OtherNameCollision(t *testing.T) {
 		dev("o1", 1, 1), dev("o2", 1, 1), dev("o3", 1, 1), // real team "other", 3 >= k
 	}
 	teamOf := map[string]string{"o1": "other", "o2": "other", "o3": "other"}
-	got := AggregateTeamsKAnon(devs, teamOf, 3)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 3)
 	if len(got) != 1 || got[0].Team != OtherCohort {
 		t.Fatalf("a real team named 'other' must fold into the reserved bucket; got %v", teamNames(got))
 	}
@@ -157,7 +231,7 @@ func TestAggregateTeamsKAnon_ClampsBelowMin(t *testing.T) {
 	// passed k=1 (which would otherwise have named it).
 	devs := []DeveloperScore{dev("p1", 1, 1), dev("p2", 1, 1)}
 	teamOf := map[string]string{"p1": "pair", "p2": "pair"}
-	got := AggregateTeamsKAnon(devs, teamOf, 1)
+	got, _ := AggregateTeamsKAnon(devs, teamOf, 1)
 	if teamNameSet(got)["pair"] {
 		t.Errorf("k=1 must clamp to MinKAnonymity=%d, so the 2-dev team collapses; got %v", MinKAnonymity, teamNames(got))
 	}
@@ -168,7 +242,8 @@ func TestAggregateTeamsKAnon_ClampsBelowMin(t *testing.T) {
 func TestAggregateTeamsKAnon_NoNamesLeak(t *testing.T) {
 	devs := []DeveloperScore{dev("a1", 1, 1), dev("a2", 1, 1), dev("a3", 1, 1)}
 	teamOf := map[string]string{"a1": "alpha", "a2": "alpha", "a3": "alpha"}
-	for _, ts := range AggregateTeamsKAnon(devs, teamOf, 3) {
+	rows, _ := AggregateTeamsKAnon(devs, teamOf, 3)
+	for _, ts := range rows {
 		if ts.Developers != nil {
 			t.Errorf("team %q leaked a Developers slice (%d entries) across the anonymity boundary", ts.Team, len(ts.Developers))
 		}
@@ -178,9 +253,13 @@ func TestAggregateTeamsKAnon_NoNamesLeak(t *testing.T) {
 // TestFormatReport_TeamMode proves the plain-text report omits the per-developer
 // leaderboard entirely in team mode and prints only the aggregate total.
 func TestFormatReport_TeamMode(t *testing.T) {
+	// SampleN is set because the TEAM TOTAL row is gated on the SUMMED ranking
+	// evidence (#606) — the per-developer Ranked flags are not what RollupTeam reads.
+	// A fixture that clears the spend floor but carries no outcomes is genuinely
+	// unranked, and this test is about mode behaviour, not about the floor.
 	scores := []DeveloperScore{
-		{Developer: "alice", TIER: 100, WeightedPoints: 3, TotalCostUSD: 10, CoveragePercent: 100, Ranked: true},
-		{Developer: "bob", TIER: 50, WeightedPoints: 1, TotalCostUSD: 10, CoveragePercent: 100, Ranked: true},
+		{Developer: "alice", TIER: 100, WeightedPoints: 3, TotalCostUSD: 10, CoveragePercent: 100, SampleN: 2, Ranked: true},
+		{Developer: "bob", TIER: 50, WeightedPoints: 1, TotalCostUSD: 10, CoveragePercent: 100, SampleN: 2, Ranked: true},
 	}
 	out := FormatReport(scores, "2026-01-01", AggregationTeam)
 	if strings.Contains(out, "alice") || strings.Contains(out, "bob") {
@@ -244,7 +323,7 @@ func TestCompareTeamsKAnon_Intersection(t *testing.T) {
 		dev("r1", 1, 10),
 	}
 
-	cmps := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
+	cmps, _ := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
 
 	if _, ok := findTeam(cmps, "red"); ok {
 		t.Fatal("red is sub-k in window B and must never be a named comparison row")
@@ -259,27 +338,28 @@ func TestCompareTeamsKAnon_Intersection(t *testing.T) {
 	if blue.A.Developers != nil || blue.B.Developers != nil {
 		t.Fatal("named comparison must not carry developer names past the k-anon boundary")
 	}
-	other, ok := findTeam(cmps, OtherCohort)
-	if !ok {
-		t.Fatal("red must fold into the 'other' residual")
+	// #593: the residual is WITHHELD, and this fixture is the clearest illustration of
+	// why the floor must be applied PER SIDE rather than to a collapsed count.
+	//
+	// The residual holds red: 3 contributors in window A (k-safe on its own) but only
+	// r1 in window B. This test previously asserted `other.B.TotalCostUSD == 10` — r1's
+	// spend, ALONE, published as an anonymized aggregate. A rule that suppressed only
+	// when BOTH sides were sub-k would keep emitting exactly that.
+	if _, ok := findTeam(cmps, OtherCohort); ok {
+		t.Fatal("the residual is k-safe in window A but holds ONE developer in window B; " +
+			"publishing it exposes r1's window-B figures under an anonymized label")
 	}
-	// other.A = red's window-A spend (3 x $10 = $30); other.B = r1's window-B spend ($10).
-	if other.A.TotalCostUSD != 30 || other.B.TotalCostUSD != 10 {
-		t.Fatalf("other cost a/b = %v/%v, want 30/10", other.A.TotalCostUSD, other.B.TotalCostUSD)
+	_, sup := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
+	if !sup.Any() {
+		t.Error("a residual that is sub-k in EITHER window must be suppressed and reported")
+	}
+	if sup.Developers != 3 {
+		t.Errorf("sup.Developers = %d, want 3 (the larger of the two sides' counts)", sup.Developers)
 	}
 
-	// Totals preserved per side: sum of every row equals the raw grand total.
-	var sumA, sumB float64
-	for _, c := range cmps {
-		sumA += c.A.TotalCostUSD
-		sumB += c.B.TotalCostUSD
-	}
-	if sumA != 42 { // 12 blue + 30 red
-		t.Fatalf("window-A total = %v, want 42", sumA)
-	}
-	if sumB != 22 { // 12 blue + 10 r1
-		t.Fatalf("window-B total = %v, want 22", sumB)
-	}
+	// ⚠️ The per-side totals assertion that used to close this test is gone. It summed
+	// every row and required 42/22 — i.e. it required the suppressed cohort's figures to
+	// be present. That is the reconciliation property #593 retired.
 }
 
 // TestCompareTeamsKAnon_PresentOneWindowOnly: a team that exists only in window A
@@ -290,7 +370,7 @@ func TestCompareTeamsKAnon_PresentOneWindowOnly(t *testing.T) {
 	aScores := []DeveloperScore{dev("g1", 1, 5), dev("g2", 1, 5), dev("g3", 1, 5)}
 	var bScores []DeveloperScore // green absent entirely in window B
 
-	cmps := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
+	cmps, _ := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
 	if _, ok := findTeam(cmps, "green"); ok {
 		t.Fatal("green is absent in window B (sub-k) and must not be named")
 	}
@@ -313,7 +393,7 @@ func TestCompareTeamsKAnon_EmptyLabelFoldsToOther(t *testing.T) {
 	aScores := []DeveloperScore{dev("u1", 1, 5), dev("u2", 1, 5), dev("u3", 1, 5)}
 	bScores := []DeveloperScore{dev("u1", 1, 5), dev("u2", 1, 5), dev("u3", 1, 5)}
 
-	cmps := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
+	cmps, _ := CompareTeamsKAnon(aScores, bScores, teamOf, 3)
 	if _, ok := findTeam(cmps, ""); ok {
 		t.Fatal("the empty '' label must never earn a named row")
 	}

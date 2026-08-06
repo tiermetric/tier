@@ -215,6 +215,29 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 	if len(req.Developer) > maxIdentifierLen || len(req.IssueID) > maxIdentifierLen || len(req.Model) > maxIdentifierLen {
 		return zero, fmt.Errorf("identifier fields must be <= %d chars", maxIdentifierLen)
 	}
+	// The unattributed sentinel may not be FORGED, but the JSONL collector that ships
+	// here legitimately assigns it, so /events allows the four exact canonical
+	// spellings and rejects every near-miss and case variant (#466). Deliberately NOT
+	// validateIssueID: that strict client-surface rule would reject the collector's
+	// own output and permanently destroy capture — see validateShippedIssueID.
+	if err := validateShippedIssueID(req.IssueID); err != nil {
+		return zero, err
+	}
+	// `developer`, by contrast, gets the STRICT rule (#619) — no allowlist, because
+	// nothing that ships here legitimately assigns the sentinel to it. The two
+	// collectors this wire admits (the `source` allowlist below is
+	// collector.ShippableSource: "jsonl" and "codex-rollout") both label every event
+	// with --developer or collector.OSUsername(), whose own no-identity fallback is
+	// "unknown", never "unattributed". The producers that DO assign the developer
+	// sentinel — the anthropic-admin and openai-usage org pollers — are excluded from
+	// this endpoint twice over: their sources are not shippable, and cmd/tierd wires
+	// them into ingester.Store(db) in-process so they never cross an HTTP boundary at
+	// all. So the /events capture-outage hazard that forced validateShippedIssueID's
+	// allowlist does not exist on this column, and an allowlist here would only make
+	// forging as effective as honesty.
+	if err := validateDeveloper(req.Developer); err != nil {
+		return zero, err
+	}
 	if req.IdempotencyKey == "" {
 		return zero, fmt.Errorf("events require idempotency_key; replay safety depends on it")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,10 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 
-	_ "modernc.org/sqlite"
+	// Named, not blank: isPromoteContention needs *sqlite.Error.Code() to tell a
+	// LOCK from a permanently unwritable database. The import still registers the
+	// driver, so the "sqlite" DSN name is unaffected.
+	sqlite "modernc.org/sqlite"
 )
+
+// maxModelsNamedInError bounds how many model names an error may interpolate.
+// The names are producer-controlled and unbounded in cardinality, so the LIST is
+// as much of a flood vector as any single element; logsafe.Str bounds the
+// elements, this bounds the list. Matches reprice's report cap so the CLI's
+// error and its report agree on how much they will name.
+const maxModelsNamedInError = 20
 
 // schemaVersion is the schema end-state this binary's migration chain produces
 // (#141). It is stamped into the SQLite header via `PRAGMA user_version` at the
@@ -463,10 +475,15 @@ CREATE INDEX IF NOT EXISTS idx_quality_history_ts_id
 -- verified or re-derived. price_effective_date + tool_version stamp the table
 -- and binary that produced the new figures (provenance).
 --
+-- APPEND-ONLY BY CONSTRUCTION -- no code path mutates it; the table itself is
+-- not protected against direct DB access (#604). That is the honest claim for
+-- every ledger in this family; only cost_correction_audit carries a schema-level
+-- guard, and only against UPDATE (see its comment).
+--
 -- schemaVersion is deliberately NOT bumped: this is a brand-new table that no
 -- pre-#294 read path touches, so an old binary opening this newer DB simply
 -- never selects it and keeps working (the schemaVersion bump convention). It
--- carries NO unique index: an audit ledger is purely append-only and needs no
+-- carries NO unique index: an audit ledger is append-only and needs no
 -- uniqueness, which also sidesteps the tenant-ordering constraint (a future
 -- tenant_id would LEAD any index later added here -- (tenant_id, reprice_id) --
 -- per the CLAUDE.md tenancy ordering rule, keeping the retrofit mechanical).
@@ -514,6 +531,9 @@ CREATE TABLE IF NOT EXISTS reprice_audit (
 -- back together (atomicity; a mid-run failure leaves no partial mutation and no
 -- orphan before-image).
 --
+-- APPEND-ONLY BY CONSTRUCTION -- no code path mutates it; the table itself is
+-- not protected against direct DB access (#604).
+--
 -- GROWTH: one row per CHANGED token_events row, so a large first-time reprice
 -- writes a proportional burst (and holds the single-writer lock for its span --
 -- run it in a maintenance window). Like reprice_audit it is append-only with no
@@ -542,6 +562,239 @@ CREATE TABLE IF NOT EXISTS reprice_row_audit (
     old_billing_mode  TEXT    NOT NULL,
     ts                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(reprice_id, token_event_id)
+);
+
+-- repo_repair_audit is the append-only AGGREGATE ledger of every
+-- tierd repair-repo run (#493) -- the repo-identity twin of reprice_audit.
+--
+-- WHY IT EXISTS: #491 fixed tierd ship dropping repo on the wire, but that
+-- fix is FORWARD-ONLY. InsertTokenEvents deliberately excludes repo from its
+-- ON CONFLICT DO UPDATE clause (see insertTokenEventSQL) so that a repo-blind
+-- producer replaying a message can never DOWNGRADE a row another producer
+-- already qualified. The consequence is that an operator who upgrades and
+-- re-ships sees no change at all: every row collides on idempotency_key and
+-- keeps repo='unqualified' while the server happily returns 201. Repairing that
+-- history therefore needs its own explicit, audited mutator -- exactly the shape
+-- tierd reprice already established for cost. repo is a JOIN KEY (the
+-- cost<->outcome join in #231), so rewriting it retroactively moves spend
+-- between per-repository TIER scores and must leave a durable record.
+--
+-- One row per distinct TARGET repo slug of one run: repair_id groups the rows of
+-- a single operation, developer records the required --developer selector that
+-- bounded it, and (from_repo -> to_repo, row_count, cost_micro_sum) captures how
+-- much spend moved into that repository's identity. tool_version stamps the
+-- binary that ran it (provenance).
+--
+-- schemaVersion is deliberately NOT bumped: this is a brand-new table that no
+-- pre-#493 read path touches, so an old binary opening this newer DB simply
+-- never selects it and keeps working (the schemaVersion bump convention -- bump
+-- ONLY for a change an old binary would MISREAD, never for a purely additive
+-- table). No ALTER TABLE ADD COLUMN is involved either, so the convergent-DEFAULT
+-- rule has nothing to converge here: CREATE TABLE IF NOT EXISTS is the whole
+-- migration and it runs identically on a fresh and an upgraded database.
+--
+-- APPEND-ONLY BY CONSTRUCTION -- no code path mutates it; the table itself is
+-- not protected against direct DB access (#604). Note it is also the one ledger
+-- in this family that is legitimately DELETEd from: it is listed in
+-- developerPIITables and EraseDeveloper hard-deletes its rows for a GDPR Art. 17
+-- request. That is exactly why #604 ruled out a BEFORE DELETE trigger anywhere --
+-- no trigger can tell lawful erasure from tampering.
+--
+-- It carries NO unique index: an audit ledger is append-only and needs no
+-- uniqueness, which also sidesteps the tenant-ordering constraint (a future
+-- tenant_id would LEAD any index later added here -- (tenant_id, repair_id) --
+-- per the CLAUDE.md tenancy ordering rule, keeping the retrofit mechanical).
+CREATE TABLE IF NOT EXISTS repo_repair_audit (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- repair_id groups every row written by ONE repair operation (a random hex
+    -- token minted per run), so a single run's per-repo rows read back together
+    -- and two runs never intermingle. Shared with repo_repair_row_audit.
+    repair_id      TEXT    NOT NULL,
+    -- developer is the operator's REQUIRED --developer selector: the run only
+    -- ever considered token_events rows owned by this developer. Recorded so the
+    -- ledger says what the run was ALLOWED to touch, not just what it did touch.
+    developer      TEXT    NOT NULL,
+    -- from_repo is always the 'unqualified' sentinel today (the only value the
+    -- repair is permitted to overwrite). Stored explicitly rather than implied so
+    -- the ledger stays readable if the permitted source value ever widens.
+    from_repo      TEXT    NOT NULL,
+    -- to_repo is the canonical owner/repo slug this group of rows was repaired to
+    -- (already normalized through internal/repoid, so it is byte-identical to what
+    -- the collector would have written).
+    to_repo        TEXT    NOT NULL,
+    row_count      INTEGER NOT NULL,
+    -- SUM(cost_micro) of the repaired rows, in integer micro-dollars: how much
+    -- spend this run moved into to_repo's identity.
+    cost_micro_sum INTEGER NOT NULL,
+    tool_version   TEXT    NOT NULL,
+    ts             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- repo_repair_row_audit is the per-ROW before-image ledger of every
+-- tierd repair-repo (#493), mirroring reprice_row_audit -- see that table's
+-- comment for the canonical description of the before-image mechanism and why a
+-- row-grain ledger beats a whole-file backup snapshot (it survives continued
+-- ingestion; a snapshot diverges the moment the next event lands).
+--
+-- Where repo_repair_audit records per-target-repo AGGREGATES, this captures, for
+-- EACH token_events row the repair changed, that row's EXACT pre-repair repo and
+-- the slug it moved to. That is what makes the repair REVERSIBLE-IN-PRINCIPLE at
+-- row grain: a future inverse-undo restores each row BY token_event_id to its
+-- stored old_repo. (The undo command is NOT built here -- #493 ships the
+-- substrate, exactly as #294 did.)
+--
+-- 🔴 IT DELIBERATELY DOES NOT STORE session_id, AND THAT IS A PRIVACY DECISION,
+-- NOT AN OMISSION. Recording the mapping key that resolved each row would be
+-- better provenance -- it would make a mis-keyed mapping diagnosable after the
+-- fact. But docs/privacy.md classifies token_events.session_id as personal data,
+-- and this ledger is designed to OUTLIVE the row it describes (see the no-FK note
+-- below). Copying a session id in here would therefore create personal data that
+-- survives a GDPR Art. 17 erasure with NO developer column for EraseDeveloper to
+-- reach it by -- a silent compliance hole of exactly the kind developerPIITables'
+-- comment warns about. While the token_events row still exists its session_id is
+-- reachable through token_event_id, which is precisely as long as it should be.
+--
+-- Every before-image is written in the SAME transaction as the row UPDATEs and
+-- the aggregate rows, so a mid-run failure leaves no partial repair and no orphan
+-- before-image.
+--
+-- APPEND-ONLY BY CONSTRUCTION -- no code path mutates it; the table itself is
+-- not protected against direct DB access (#604).
+--
+-- GROWTH: one row per CHANGED token_events row, so a large first-time repair
+-- writes a proportional burst and holds the single-writer lock for its span --
+-- run it in a maintenance window. Append-only with no pruning here; retention/GC
+-- of the audit ledgers is deferred with the broader retention work (#141).
+--
+-- schemaVersion is deliberately NOT bumped (same reasoning as repo_repair_audit).
+-- UNIQUE(repair_id, token_event_id) both enforces exactly one before-image per row
+-- per run AND honors the CLAUDE.md tenant-ordering rule -- a future tenant_id would
+-- LEAD the key, (tenant_id, repair_id, token_event_id), keeping the eventual
+-- retrofit mechanical. No FOREIGN KEY to token_events: an audit before-image must
+-- outlive the row it describes.
+CREATE TABLE IF NOT EXISTS repo_repair_row_audit (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    repair_id      TEXT    NOT NULL,
+    -- token_event_id is the token_events.id whose repo this run rewrote -- the key
+    -- a surgical inverse restores by.
+    token_event_id INTEGER NOT NULL,
+    -- the row's EXACT repo BEFORE this repair overwrote it, and the slug it was
+    -- set to.
+    old_repo       TEXT    NOT NULL,
+    new_repo       TEXT    NOT NULL,
+    ts             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(repair_id, token_event_id)
+);
+
+-- cost_correction_audit is the append-only ledger of every sanctioned
+-- POST /api/v1/costs cost-correction override (#346, ruling C -- the
+-- follow-up to #295's ruling A). #295 made a divergent KEYED re-post 409
+-- fail-loud instead of silently landing (cost_micro is immutable, #233); this
+-- is the ONE narrow, audited exception -- a caller that explicitly flags
+-- override=true (with a required actor + reason) may correct an existing
+-- row's cost_micro, and every such correction is recorded here BEFORE it is
+-- forgotten. See CorrectManualCostEvent, the sole writer.
+--
+-- IT DOES NOT MERGE INTO A PLAIN UPSERT. This table -- and the fact that the
+-- UPDATE it accompanies touches ONLY cost_micro on ONE already-identified row
+-- -- is what keeps the override from becoming the last-writer-wins semantics
+-- #233 and the org_actual_spend per-source model both depend on NOT existing
+-- (an architecture review flagged exactly this risk on #295). A
+-- correction is a targeted, attributed, reversible-in-principle edit to one
+-- row; it is never a second insert path.
+--
+-- One row per override request that ACTUALLY changed a stored cost -- i.e.
+-- corrected=true from CorrectManualCostEvent. A bare re-post that lands as a
+-- normal insert (no prior row) or that matches the stored value (the existing
+-- idempotent no-op) writes nothing here, because nothing was corrected.
+--
+-- schemaVersion is deliberately NOT bumped (same reasoning as reprice_audit /
+-- repo_repair_audit and the schemaVersion bump convention above them): a
+-- brand-new table that no pre-#346 read path touches, so an old binary
+-- opening this newer DB simply never selects it and keeps working.
+--
+-- APPEND-ONLY, AND HERE THE SCHEMA ENFORCES HALF OF IT (#604). UPDATE is
+-- REFUSED by trg_cost_correction_audit_no_update (see schemaPostMigration):
+-- an audit row's content is a historical fact and rewriting it is never
+-- legitimate, so the guard holds even against a future code path that tries.
+-- DELETE is NOT refused, deliberately and by ruling: erasure and retention are
+-- lawful reasons to remove a ledger row and no trigger can tell them from
+-- tampering (repo_repair_audit, this table's sibling, is hard-deleted by
+-- EraseDeveloper today). This table itself is not in developerPIITables and has
+-- no developer column, so EraseDeveloper does not currently reach it.
+--
+-- 🔴 THIS IS NOT TAMPER-PROOFING, AND MUST NOT BE DESCRIBED AS SUCH. DROP
+-- TRIGGER is one line for anyone holding the DB file. What the trigger buys is
+-- narrow and real: a future code path cannot silently mutate the money-rewrite
+-- ledger. Nothing more.
+--
+-- It carries NO unique index: an audit ledger is append-only (a row
+-- may legitimately be corrected more than once over its life, e.g. a second
+-- finance revision), which also sidesteps the tenant-ordering constraint (a
+-- future tenant_id would LEAD any index later added here --
+-- (tenant_id, token_event_id, ts) -- per the CLAUDE.md tenancy ordering
+-- rule, keeping the retrofit mechanical). No FOREIGN KEY to token_events: an
+-- audit row must outlive the row it describes (mirrors reprice_row_audit /
+-- repo_repair_row_audit).
+--
+-- 🔴 IT DELIBERATELY DOES NOT STORE idempotency_key, AND THAT IS A PRIVACY
+-- DECISION, NOT AN OMISSION -- the SAME shape as repo_repair_row_audit's
+-- deliberate exclusion of session_id (see that table's schema comment). An
+-- earlier version of this table copied idempotency_key in "so the ledger
+-- stays human-readable without a join back to a row that may have been
+-- erased" -- that reasoning has it backwards: idempotency_key is frequently
+-- CLIENT-CHOSEN and can embed or resemble personal data (an email, a ticket
+-- reference), and this ledger is designed to OUTLIVE the row it describes
+-- (no FOREIGN KEY, above). Copying it in would create personal data that
+-- survives a GDPR Art. 17 erasure with no developer column for
+-- EraseDeveloper to reach it by -- exactly the silent compliance hole
+-- developerPIITables' own comment warns about. token_event_id is
+-- SERVER-GENERATED and carries no client content, so it is safe to keep as
+-- the (now sole) key a future inverse would restore by; it simply stops
+-- resolving once the row it names has been erased or pruned, which is
+-- correct, not a bug. See developerPIITables' exclusion entry for this table
+-- and docs/privacy.md.
+--
+-- actor and reason are likewise excluded from erasure: they name and explain
+-- the OPERATOR who made the correction (a third party to the data subject
+-- whose spend was corrected, not the data subject), the same class as
+-- webhook_payloads' third-party identifiers (see developerPIITables). A
+-- caller MUST NOT put the data subject's own name/email in the reason field --
+-- nothing enforces that today; it is a documented expectation, not a
+-- technical guarantee.
+CREATE TABLE IF NOT EXISTS cost_correction_audit (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- token_event_id is the token_events.id whose cost_micro this override
+    -- rewrote -- the key a surgical inverse would restore by. Server-
+    -- generated, not client content -- see the privacy note above for why
+    -- this is the only row-identifying column this table carries.
+    token_event_id INTEGER NOT NULL,
+    -- the row's EXACT cost_micro BEFORE and AFTER this correction.
+    old_cost_micro INTEGER NOT NULL,
+    new_cost_micro INTEGER NOT NULL,
+    -- actor and reason are REQUIRED client-supplied fields (validated non-
+    -- empty and length-capped by the API handler before this is ever called),
+    -- so ruling C's guarantee is that an override always carries an
+    -- attribution and an explanation -- never a silent overwrite. Free text;
+    -- no enum, since a finance correction's reason is not a closed set.
+    --
+    -- 🔴 actor IS A SELF-ASSERTED CLAIM, NOT A VERIFIED IDENTITY. THE LEDGER
+    -- RECORDS WHO THE CALLER SAYS THEY ARE. It is unvalidated free text the
+    -- caller chooses; nothing checks it against the credential that made the
+    -- request, and nothing can today -- /costs is gated by ONE global write
+    -- token with no subject (internal/api requireAuth), so there is no
+    -- principal for the server to record instead. A caller authenticated with
+    -- that token can write actor = mallory and the ledger will say mallory.
+    -- This is a design consequence of single-tenancy, not a coding defect;
+    -- binding actor to a verified principal needs the identity layer tracked
+    -- as #65. Read every row here as a claim, and corroborate it against the
+    -- operator log line the handler emits if it matters. Same for reason.
+    --
+    -- See the privacy note above: these identify the OPERATOR, not the data
+    -- subject.
+    actor          TEXT    NOT NULL,
+    reason         TEXT    NOT NULL,
+    ts             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `
 
@@ -620,6 +873,42 @@ CREATE INDEX IF NOT EXISTS idx_actual_spend_dev_period_nu
     ON actual_spend(developer, period);
 CREATE INDEX IF NOT EXISTS idx_org_actual_spend_org_period_nu
     ON org_actual_spend(org, period);
+-- #604: refuse UPDATE on the money-rewrite ledger at the schema level.
+--
+-- cost_correction_audit records what a sanctioned POST /api/v1/costs override
+-- did to a stored cost (old -> new, actor, reason). Its rows are historical
+-- facts, so UPDATE is never legitimate -- unlike DELETE, which is (erasure and
+-- retention/GC are lawful reasons to remove a ledger row, and no trigger can
+-- distinguish them from tampering). That asymmetry is the whole of the #604
+-- ruling: BEFORE UPDATE here, and BEFORE DELETE nowhere. A BEFORE DELETE trigger
+-- on the sibling repo_repair_audit would break EraseDeveloper (GDPR Art. 17),
+-- which hard-deletes from it today; TestEraseDeveloper_StillDeletesAuditRows
+-- exists so that cannot be re-litigated by accident.
+--
+-- 🔴 IT IS NOT TAMPER-PROOFING. DROP TRIGGER is one line for anyone holding the
+-- DB file. What it buys: a future code path cannot silently mutate this ledger.
+-- Do not describe it as anything stronger.
+--
+-- RAISE(ABORT), never ROLLBACK or FAIL. ABORT undoes the STATEMENT and hands Go
+-- an ordinary constraint error, so a caller inside a transaction unwinds through
+-- its normal rollback path with the real cause intact. RAISE(ROLLBACK) would end
+-- the transaction underneath the caller, and the deferred Rollback/Commit would
+-- then report "no transaction" -- masking the actual error with a bookkeeping
+-- one at every one of the store's deferred-Rollback sites. (That holds
+-- whether a site is DEFERRED or IMMEDIATE, so it does not depend on #598's
+-- BEGIN IMMEDIATE sweep, which is NOT on this branch.)
+--
+-- Created here in Phase 3 rather than alongside the CREATE TABLE in Phase 1
+-- because SQLite drops a table's triggers with the table: Phase 2.5 rebuilds
+-- would silently take it with them. Phase 3 runs after every rebuild, which is
+-- exactly the guarantee this phase exists to provide. CREATE TRIGGER IF NOT
+-- EXISTS is metadata-only -- no table rewrite, no scan, O(1) on a populated DB,
+-- and idempotent across every boot.
+CREATE TRIGGER IF NOT EXISTS trg_cost_correction_audit_no_update
+BEFORE UPDATE ON cost_correction_audit
+BEGIN
+    SELECT RAISE(ABORT, 'cost_correction_audit is append-only: UPDATE is refused (#604)');
+END;
 `
 
 // DB wraps the SQLite connection.
@@ -686,7 +975,7 @@ func Open(path string) (*DB, error) {
 	// percent-decode the path and drop '#' fragments, breaking paths that
 	// work today. A path containing '?' itself is not supported (the
 	// driver's split, pre-existing in the bare-path form too).
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)", path, dsnBusyTimeoutMS)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
@@ -994,6 +1283,429 @@ func Open(path string) (*DB, error) {
 // Close closes the database.
 func (d *DB) Close() error { return d.db.Close() }
 
+// ErrWriteLockUnavailable marks the ONE failure mode of beginImmediate that means
+// "somebody else is writing this database": the promotion could not take the
+// write lock.
+//
+// It exists so a caller can tell that apart from the helper's OTHER failure —
+// BeginTx itself failing, which is a cancelled context or a dead handle, not
+// contention. Without the sentinel a caller matching on text (or, worse, wrapping
+// unconditionally) tells an operator who just pressed Ctrl-C that a `tierd serve`
+// is ingesting into their database. A diagnosis that names the wrong cause is
+// worse than none: it sends the operator to check the wrong thing.
+//
+// ⚠️ The split is drawn at BeginTx, not at the cause, so it is not perfect: a
+// cancellation landing in the window between BeginTx returning and the promote
+// Exec starting is labelled contention. That window is sub-microsecond and the
+// case is NOT guarded here on purpose. The obvious guard —
+// `if ctx.Err() != nil && errors.Is(err, ctx.Err())` — was written, measured, and
+// removed for two reasons: no test can reach the window deterministically (so it
+// is a guard whose deletion fails nothing, which this tree treats as dead code),
+// and it is not clearly safe. The SQLite busy handler ignores ctx and returns
+// only after the full busy_timeout, so a deadline that expires while the handler
+// spins is REAL contention — and if the driver's error there wraps the deadline,
+// that guard would relabel the one case the sentinel exists to catch. Prefer this
+// stated imprecision to an untestable branch that can invert the answer.
+var ErrWriteLockUnavailable = errors.New("acquire write lock")
+
+// dsnBusyTimeoutMS is the busy_timeout (milliseconds) carried in every
+// connection's DSN — how long SQLite spins waiting for a lock before giving up.
+//
+// 🔴 IT IS A CONSTANT BECAUSE beginImmediateBounded MUST RESTORE IT. That helper
+// lowers busy_timeout on one pooled connection and has to put it back exactly as
+// the DSN set it. A literal in the DSN and a second literal in the restore would
+// be free to drift, and the drift is SILENT: the restore would quietly leave the
+// process running at whatever the stale literal said, for every later caller on
+// that connection. One constant makes that class of bug unrepresentable.
+const dsnBusyTimeoutMS = 5000
+
+// requestPathBusyTimeout is the busy_timeout beginImmediateBounded installs for
+// HTTP-request-path transactions.
+//
+// WHY A SEPARATE, SHORTER VALUE. beginImmediate's promote is not bounded by ctx
+// (see below), so at the DSN's 5000ms a contended request-path promote blocks the
+// full five seconds — and with SetMaxOpenConns(1) it does not stall one request,
+// it stalls EVERY in-flight request in the process behind the single connection,
+// with a client disconnect unable to shorten it.
+//
+// 250ms is a POLICY choice, not a measurement: an order of magnitude below the
+// DSN default, comfortably inside normal HTTP client patience, and still long
+// enough to ride out a short maintenance write rather than failing on contact.
+// MEASURED at this value: a contended promote returns in ~263ms (the ~13ms over
+// is SQLite's busy-handler granularity), versus ~5.05s at the DSN default.
+const requestPathBusyTimeout = 250 * time.Millisecond
+
+// beginImmediatePromoteSQL is the no-op write beginImmediate issues to promote a
+// DEFERRED transaction to RESERVED. It matches zero rows by construction, so it
+// changes nothing and writes no WAL frames.
+//
+// 🔴 THE COLUMN CHOICE IS LOAD-BEARING, AND `repo` WOULD BE WRONG. #598 converts
+// the migration call sites to this helper, so the statement must be valid at
+// EVERY point in the migration sequence — including before Phase 2 runs
+// addColumnIfMissing(token_events, "repo") (see Open). A promote on `repo` would
+// fail "no such column" on a pre-#231 database, turning a lock acquisition into a
+// migration abort. `id` is in schemaTables' base CREATE TABLE and no migration
+// adds, renames or drops it, so `SET id = id` is valid against every schema
+// version this package can open. (It is also never executed: WHERE 0 matches
+// nothing, so the rowid is not rewritten.)
+//
+// It must stay a statement SQLite classifies as a WRITE. `SELECT` would not
+// promote, and neither would a `PRAGMA` read — the lock comes from the statement
+// being a write, not from the rows it happens to touch.
+//
+// Guard coverage: TestBeginImmediateTakesTheWriteLock drives this directly —
+// swap it for a SELECT and the test fails.
+const beginImmediatePromoteSQL = `UPDATE token_events SET id = id WHERE 0`
+
+// beginImmediate opens a transaction holding the SQLite write lock from its
+// first statement — the BEGIN IMMEDIATE semantics, obtained honestly.
+//
+// 🔴 WHY THIS EXISTS AT ALL. modernc.org/sqlite IGNORES sql.TxOptions.Isolation:
+// its newTx reads only opts.ReadOnly and the connection-global beginMode, and
+// beginMode comes solely from the `_txlock` DSN parameter, which this store's DSN
+// does not set. So db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+// emits a plain `BEGIN` — a DEFERRED transaction — and the isolation level is a
+// NO-OP. Verified against the pinned driver version, both by reading tx.go and by
+// measurement: a second connection took `BEGIN IMMEDIATE` in 17.6µs while a
+// LevelSerializable tx was open, i.e. no lock was held.
+//
+// What that costs a read-then-write transaction: a DEFERRED tx takes its read
+// snapshot at its first statement, and if another connection commits before the
+// first write, SQLite fails the deferred-to-write upgrade with
+// SQLITE_BUSY_SNAPSHOT (517). busy_timeout does NOT retry that code — measured
+// returning in ~19µs against this store's 5000ms busy_timeout. The whole
+// transaction is thrown away, and the operator sees an opaque "database is
+// locked" attributed to a statement far from the real cause.
+//
+// A no-op write is the portable promotion. A DEFERRED BEGIN takes no snapshot
+// until its first statement, so this establishes the write lock AND the read
+// snapshot atomically — there is no window between BeginTx and the promote in
+// which another writer could slip in.
+//
+// ⚠️ Do NOT "fix" the ignored isolation by setting `_txlock=immediate` in the DSN:
+// it is CONNECTION-GLOBAL, so it would promote every read transaction in the
+// serve path to a write lock too. The promotion has to be per-transaction, which
+// is what this helper is.
+//
+// ⚠️ ctx DOES NOT BOUND THE PROMOTE — READ THIS BEFORE CONVERTING A CALL SITE.
+// Under contention this call blocks for the FULL busy_timeout carried in the DSN
+// (5000ms, see Open) regardless of the caller's deadline. The driver fires
+// sqlite3_interrupt on ctx-done, but that cannot break SQLite's busy loop, so a
+// deadline changes only the error TEXT, never the duration. MEASURED on
+// darwin/arm64 against this store's DSN, with a second connection holding BEGIN
+// IMMEDIATE:
+//
+//	contended, context.Background() -> 5.0497s, "database is locked (5) (SQLITE_BUSY)"
+//	contended, 300ms deadline       -> 5.0819s, "context deadline exceeded"
+//	UNCONTENDED, 300ms deadline     -> 59µs
+//
+// TestBeginImmediateIsNotBoundedByContext is the harness for rows 2 and 3, and
+// FAILS if this stops being true — so a driver upgrade that made ctx actually
+// bound the promote cannot leave this block (or the two caveats below) quietly
+// stale. Row 1 was measured the same way and is not separately pinned: it is the
+// benign direction, and pinning it would cost a second 5s test to assert that a
+// deadline-free call waits.
+//
+// 🔴 WHICH HELPER A CALL SITE WANTS (#598 converted all nine on this split, and
+// it is not cosmetic):
+//
+//   - The SEVEN Open()-time migration/backfill sites
+//     (dropActualSpendNonNegativeCheck, migrateCacheWriteSplit,
+//     migrateCostUSDToMicro, migrateActualSpendToMicro, backfillPeriodMembership,
+//     backfillPriceVersion, recomputeKnownSourceCosts) use THIS helper. Every one
+//     passes context.Background() and runs during startup, before the process
+//     serves anything; a 5s wait there is a slow boot, which is the correct
+//     behaviour when another process holds the write lock.
+//   - The TWO request-path sites — UpsertDeveloperAlias and EraseDeveloper, both
+//     called with r.Context() from HTTP handlers — use beginImmediateBounded
+//     instead, which caps the wait at requestPathBusyTimeout. With
+//     SetMaxOpenConns(1) a 5s uninterruptible block does not stall one request, it
+//     stalls EVERY in-flight request in the process behind the single connection,
+//     and the client's disconnect cannot shorten it.
+//
+// THREE MORE SITES HAVE SINCE BEEN CONVERTED ON THE SAME SPLIT, by #346 and #610
+// rather than #598, and they are the worked example of the rule rather than
+// exceptions to it:
+//
+//   - CorrectManualCostEvent (the /costs sanctioned override) -> BOUNDED. Reached
+//     from an HTTP handler with r.Context(), so it lands on the request-path side
+//     exactly as the two above do.
+//   - InsertManualCostEvent (the /costs PLAIN branch, keyed and unkeyed) ->
+//     BOUNDED (#610). Same route, same r.Context(), same SELECT-then-upsert shape
+//     as the override branch — and while it was the one half left DEFERRED, the
+//     endpoint answered a lost race for the write lock two different ways
+//     depending on the `override` field: a bounded 503 + Retry-After on one, an
+//     unbounded 5000ms block then a permanent-looking 500 on the other.
+//   - Reprice -> UNBOUNDED, and only when opts.Commit is true. Its sole caller is
+//     `tierd reprice`, never a handler, so a 250ms cap would protect no request and
+//     would fail an operator's history rewrite over a momentary lock. Its DRY RUN —
+//     the default — stays DEFERRED because it writes nothing and must not contend
+//     with a live `tierd serve`; RepairRepo splits the same way for the same reason.
+//
+// So, for a site that takes the write lock: Open()-time or another non-request
+// caller -> beginImmediate. Anything reachable from an HTTP handler ->
+// beginImmediateBounded.
+//
+// ⚠️ THAT RULE IS NOT A DESCRIPTION OF THE TREE. "All nine" is exhaustive only
+// over the sites that previously passed sql.TxOptions{Isolation:
+// sql.LevelSerializable} — the ones whose comments claimed a lock they did not
+// take. Plenty of transactions here still open plain DEFERRED and are reachable
+// from a handler: InsertTokenEvents (POST /api/v1/events), UpdateQuality and
+// UpdateQualityForOutcome (the webhook path, and a read-then-write — the
+// SQLITE_BUSY_SNAPSHOT shape), UpsertHierarchy /
+// UpsertHierarchies / EndMembership (the org-hierarchy and period-membership
+// routes), and both subscription.go sites. (Reprice and InsertManualCostEvent
+// were on this list and have since been converted — see above.) They are knowingly
+// unconverted, NOT audited-and-cleared: #598 deliberately scoped itself to the
+// sites carrying a FALSE claim, because those were actively misleading, and left
+// the rest to be judged on their own read-then-write risk. Do not read this rule
+// as "the tree already complies".
+//
+// The returned tx is caller-owned: the caller must Commit or Rollback it. On any
+// error nothing is returned and any partially-opened tx has been rolled back, so
+// the caller never has to clean up after a failure.
+//
+// CONCURRENCY: safe for concurrent use; it is a plain database/sql call.
+func beginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, beginImmediatePromoteSQL); err != nil {
+		// Roll back here rather than leaking the transaction (and, with
+		// SetMaxOpenConns(1), the process's only connection) to a caller that
+		// has no handle to close.
+		_ = tx.Rollback()
+		if !isPromoteContention(ctx, err) {
+			return nil, fmt.Errorf("promote to write lock: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrWriteLockUnavailable, err)
+	}
+	return tx, nil
+}
+
+// isPromoteContention reports whether a FAILED promote means "another writer
+// holds the lock right now" — retryable — rather than "this database cannot be
+// written at all" — permanent.
+//
+// 🔴 WHY THE DISTINCTION IS NOT COSMETIC. Every request-path caller turns
+// ErrWriteLockUnavailable into 503 + `Retry-After: 1` + "database is busy …
+// retry shortly" (internal/api/handler.go). Wrapping the sentinel around EVERY
+// promote failure therefore tells a client to retry forever through conditions
+// that will never clear, and tells the operator not to look at the database —
+// the exact inversion of the harm the 503 exists to prevent, and on a GDPR
+// erasure endpoint and the sanctioned cost-correction endpoint at that.
+// MEASURED against modernc.org/sqlite v1.48.0 with this store's DSN, driving the
+// real helpers:
+//
+//	genuine contention (bounded)     -> *sqlite.Error code 5  (SQLITE_BUSY)
+//	contention under a ctx deadline  -> NOT a *sqlite.Error; plain ctx error
+//	read-only database file          -> *sqlite.Error code 8  (SQLITE_READONLY)
+//
+// Before this narrowing the third case was reported identically to the first.
+// SQLITE_FULL (13) and the SQLITE_IOERR family behave the same way: permanent,
+// and previously sold as "retry shortly".
+//
+// 🔴 ORDER IS LOAD-BEARING HERE TOO, FOR THE SAME REASON IT IS IN THE ALIAS
+// HANDLER. The SQLite result code is an EXACT signal from the engine about what
+// went wrong; ctx.Err() is a HEURISTIC about the caller's clock that knows nothing
+// about the failure. So the code is consulted FIRST, and the clock only when the
+// error carries no code at all. Reversed, a read-only or full database that failed
+// while the request's context happened to already be expired would be classified
+// as contention — reintroducing, one layer down, exactly the defect this function
+// exists to remove. Pinned by the expired-context arms of
+// TestPromoteFailureThatIsNotContentionIsNotRetryable.
+//
+// The ctx fallback is REQUIRED, not belt-and-braces: the promote's only reason to
+// block is waiting for the write lock, so a caller deadline reached inside it is
+// contention by construction — and MEASURED, it arrives as a context error
+// carrying no SQLite code at all. A ctx CANCELLED before the promote never reaches
+// here (it fails at BeginTx, which is why the cancelled-context control arm in
+// TestBeginImmediateTakesTheWriteLock still gets a non-contention error).
+//
+// Extended result codes are masked to their primary code, so BUSY_SNAPSHOT (517)
+// — the read-then-write failure this whole helper exists to prevent — and
+// BUSY_TIMEOUT (773) / BUSY_RECOVERY (261) classify with plain BUSY. That mask is
+// pinned by TestBusySnapshotClassifiesAsContention, which produces a REAL 517
+// rather than asserting the arithmetic.
+func isPromoteContention(ctx context.Context, err error) bool {
+	var serr *sqlite.Error
+	if errors.As(err, &serr) {
+		return serr.Code()&0xff == sqliteBusy
+	}
+	// No SQLite code: the only shape that reaches here is a context error from a
+	// promote that was blocked waiting for the lock.
+	return ctx.Err() != nil
+}
+
+// sqliteBusy is the primary SQLite result code for write-lock contention.
+// Declared here rather than pulled from modernc.org/sqlite/lib, which is a
+// cgo-free translation unit whose import would drag the whole amalgamation into
+// this package's dependency graph.
+//
+// SQLITE_LOCKED (6) is deliberately ABSENT. It signals a table locked by another
+// connection *in the same process via shared cache*, which this store never
+// enables (the DSN sets only busy_timeout and journal_mode), so nothing in this
+// tree can produce it — and an unreachable case is an unfalsifiable one. If a 6
+// ever does appear it classifies as non-contention and answers 500, which is the
+// conservative direction: a permanent-looking answer for a condition we have never
+// observed, rather than "retry shortly" for one that might not clear.
+const sqliteBusy = 5
+
+// beginImmediateBounded is beginImmediate for a REQUEST-PATH caller: same write
+// lock up front, but the wait for it is capped at busy instead of the DSN's
+// dsnBusyTimeoutMS.
+//
+// 🔴 WHY THIS EXISTS RATHER THAN JUST CALLING beginImmediate. The promote is not
+// bounded by ctx — SQLite's busy handler does not consult it, so a deadline
+// changes only the error text (see beginImmediate). With SetMaxOpenConns(1) a
+// blocked promote holds the process's ONLY connection, so an uncapped 5s wait on
+// an HTTP handler stalls every other in-flight request for those 5 seconds and
+// the client hanging up cannot shorten it. Capping busy_timeout is the only lever
+// that actually shortens the block, because it is the thing the busy handler
+// obeys.
+//
+// It is a per-CONNECTION pragma, which is why this reserves a *sql.Conn: with the
+// DSN-level value lowered instead, every read transaction in the serve path would
+// inherit the short timeout too.
+//
+// ⚠️ THE RESTORE IS LOAD-BEARING, NOT HOUSEKEEPING. MEASURED: a lowered
+// busy_timeout SURVIVES conn.Close() back into the pool — a connection set to 111
+// and returned unrestored still reports 111 on the next two acquisitions. Since
+// SetMaxOpenConns(1) means the pool hands the SAME connection to everything that
+// follows, skipping the restore would silently drop the whole process to the
+// short timeout, including the Open()-time migrations that must wait out a
+// competing process. So release() restores unconditionally, and if the restore
+// itself fails it POISONS the connection (driver.ErrBadConn via Conn.Raw) so the
+// pool discards it and the next caller gets a fresh one built from the DSN.
+// Leaving a connection of unknown busy_timeout in a one-connection pool is the
+// one outcome this must never produce — see restoreAndReleaseConn, which owns
+// both halves and is pinned by
+// TestRestoreAndReleaseConnDiscardsAConnectionItCannotRestore.
+//
+// The returned release func must be called exactly once, and is safe to defer
+// immediately: it rolls the tx back (a no-op after a successful Commit), restores
+// the pragma, and returns the connection. On error nothing is returned, the
+// connection is already released, and the caller has nothing to clean up.
+func beginImmediateBounded(ctx context.Context, db *sql.DB, busy time.Duration) (*sql.Tx, func(), error) {
+	// Acquiring the connection IS ctx-bounded (unlike the promote), so a caller
+	// whose client has already gone away fails here rather than queueing.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reserve conn: %w", err)
+	}
+	// restoreAndRelease is the single cleanup path, used by every failure return
+	// below as well as by the caller's release func, so no branch can return the
+	// connection with the lowered timeout still on it.
+	restoreAndRelease := func() { restoreAndReleaseConn(ctx, conn, busyTimeoutRestoreSQL) }
+	if _, err := conn.ExecContext(ctx, busyTimeoutPragma(busy)); err != nil {
+		restoreAndRelease()
+		return nil, nil, fmt.Errorf("lower busy_timeout: %w", err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		restoreAndRelease()
+		return nil, nil, fmt.Errorf("begin tx: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, beginImmediatePromoteSQL); err != nil {
+		_ = tx.Rollback()
+		restoreAndRelease()
+		// Only a genuine lock outcome is the retryable sentinel — see
+		// isPromoteContention. A read-only or full database answering "retry
+		// shortly" with a Retry-After is a permanent condition sold as transient.
+		if !isPromoteContention(ctx, err) {
+			return nil, nil, fmt.Errorf("promote to write lock: %w", err)
+		}
+		return nil, nil, fmt.Errorf("%w: %w", ErrWriteLockUnavailable, err)
+	}
+	return tx, func() {
+		_ = tx.Rollback() // no-op (ErrTxDone) after a successful Commit
+		restoreAndRelease()
+	}, nil
+}
+
+// busyTimeoutRestoreSQL puts the DSN's busy_timeout back on a connection
+// beginImmediateBounded borrowed and lowered.
+var busyTimeoutRestoreSQL = fmt.Sprintf("PRAGMA busy_timeout = %d", dsnBusyTimeoutMS)
+
+// busyTimeoutPragma renders the statement that installs busy as a connection's
+// busy_timeout, floored at 1ms.
+//
+// 🔴 THE FLOOR IS THE REASON THIS IS A FUNCTION. busy.Milliseconds() TRUNCATES,
+// so any sub-millisecond duration renders as `PRAGMA busy_timeout = 0` — and 0
+// does not mean "wait very briefly", it DISABLES the busy handler entirely and
+// turns every concurrent write into an instant SQLITE_BUSY. A caller passing
+// 500*time.Microsecond would get the exact opposite of what it asked for, and a
+// negative duration the same. Today's only caller passes a 250ms constant, so
+// this is unreachable in production — which is precisely why it is split out as a
+// pure function with a table test (TestBusyTimeoutPragmaFloorsAtOneMillisecond)
+// instead of an inline `if` that nothing could falsify.
+func busyTimeoutPragma(busy time.Duration) string {
+	ms := busy.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return fmt.Sprintf("PRAGMA busy_timeout = %d", ms)
+}
+
+// restoreAndReleaseConn returns conn to the pool with the DSN's busy_timeout back
+// on it — or, if it cannot, discards the connection instead of returning one whose
+// timeout is unknown.
+//
+// 🔴 THE POISON FALLBACK IS THE POINT OF THIS FUNCTION, AND IT IS NOT DEFENSIVE
+// PADDING. With SetMaxOpenConns(1) the pool hands the SAME connection to
+// everything that follows, and a lowered busy_timeout is MEASURED to survive
+// conn.Close() back into the pool (the control arm of
+// TestBeginImmediateBoundedRestoresBusyTimeout). So a connection released with a
+// failed restore does not degrade one request — it silently drops the WHOLE
+// PROCESS to the 250ms request-path timeout, including the Open()-time migrations
+// that must be able to wait out a competing process. Returning driver.ErrBadConn
+// from Conn.Raw is the documented way to mark a *sql.Conn dead; the pool then
+// closes it and builds a replacement from the DSN, which carries the right value.
+//
+// restoreSQL is a parameter for ONE reason: it is the only way to reach the
+// failure path from a test. A `PRAGMA busy_timeout` on a healthy connection does
+// not fail, so with the statement hardcoded the fallback was unreachable and
+// MEASURED unguarded — deleting it left the entire tree green.
+// TestRestoreAndReleaseConnDiscardsAConnectionItCannotRestore passes a statement
+// that does fail. Production has exactly one caller and it passes
+// busyTimeoutRestoreSQL.
+//
+// ⚠️ AND THAT PARAMETER IS WHY THIS VERIFIES THE OUTCOME RATHER THAN THE ERROR.
+// Trusting restoreSQL would reopen exactly the drift class dsnBusyTimeoutMS was
+// introduced to close: a statement that SUCCEEDS while restoring nothing takes the
+// happy path and returns the process's only connection at the short timeout. Two
+// such statements are easy to write — a wrong-but-valid `PRAGMA busy_timeout =
+// 250`, or a typo'd `PRAGMA busy_timout = 5000`, because SQLite silently IGNORES
+// unknown pragmas rather than erroring. Reading the value back and comparing it to
+// dsnBusyTimeoutMS covers all three failure modes (errored, wrong, ignored) for
+// one extra round-trip on a path that has just run a write transaction.
+//
+// ctx is used only for its VALUES (deadline stripped): the restore must run even
+// when the request's ctx is already cancelled or past its deadline, which is
+// precisely the case where the transaction failed and the connection is going back
+// to the pool. A skipped restore there is the leak this exists to prevent.
+func restoreAndReleaseConn(ctx context.Context, conn *sql.Conn, restoreSQL string) {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	restored := false
+	if _, restoreErr := conn.ExecContext(restoreCtx, restoreSQL); restoreErr == nil {
+		var ms int
+		if err := conn.QueryRowContext(restoreCtx, `PRAGMA busy_timeout`).Scan(&ms); err == nil {
+			restored = ms == dsnBusyTimeoutMS
+		}
+	}
+	if !restored {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	// Unconditional, and it is the SUCCESS path that needs it. MEASURED: a Raw
+	// that returned driver.ErrBadConn has ALREADY released the connection, so this
+	// Close is a no-op (ErrConnDone) on the poison path — do not read a passing
+	// poison-path test as cover for this line. Drop it and the restored connection
+	// is never returned; with SetMaxOpenConns(1) the next caller blocks forever.
+	_ = conn.Close()
+}
+
 // dropActualSpendNonNegativeCheck rebuilds an actual_spend-shaped table so
 // the pre-#24 `CHECK (actual_paid_usd >= 0)` constraint is dropped. SQLite
 // has no ALTER TABLE DROP CONSTRAINT, so the only path is the documented
@@ -1045,11 +1757,17 @@ func dropActualSpendNonNegativeCheck(db *sql.DB, table string) error {
 		return nil
 	}
 
-	// BEGIN IMMEDIATE (via LevelSerializable on modernc.org/sqlite) takes
-	// the RESERVED lock up front, so busy_timeout=5000 can actually retry
-	// instead of two processes racing the deferred-to-write upgrade and
-	// failing with SQLITE_BUSY.
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// The write lock is held from the transaction's first statement, so the
+	// read-then-rebuild below cannot lose a race to another PROCESS opening the
+	// same file (in-process, SetMaxOpenConns(1) already serialises it). Under
+	// contention this blocks for the DSN's full busy_timeout, which is correct
+	// here: this runs during Open(), before the process serves anything, so the
+	// cost of another process holding the lock is a slow boot rather than a
+	// failed migration. See beginImmediate — and do NOT "restore" the old
+	// sql.TxOptions{Isolation: sql.LevelSerializable} form, which the driver
+	// ignores entirely (it yielded a DEFERRED tx and an unretried
+	// SQLITE_BUSY_SNAPSHOT).
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return err
 	}
@@ -1136,9 +1854,14 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 //  1. ADD the two TTL-split columns (idempotent — addColumnIfMissing
 //     swallows the "duplicate column name" error returned when the columns
 //     already exist on fresh DBs whose schemaTables created them).
-//  2. BEGIN IMMEDIATE so concurrent Open() calls in two processes can't both
-//     race past the column-existence check. The lock is held for the rest
-//     of this function.
+//  2. Open a transaction via beginImmediate and re-check under it, so two
+//     processes calling Open() concurrently cannot both race past the
+//     column-existence check: the loser blocks on the write lock instead of
+//     proceeding. (⚠️ This step long claimed that property while passing
+//     sql.TxOptions{Isolation: sql.LevelSerializable}, which the driver ignores
+//     — that tx was DEFERRED, held no lock until the UPDATE at step 4, and the
+//     loser got an unretried SQLITE_BUSY_SNAPSHOT (517). SetMaxOpenConns(1) was
+//     covering it in-PROCESS only. Do not reintroduce that form.)
 //  3. Re-check whether the legacy `cache_write` column still exists, using
 //     the tx (so we see the same schema view as the subsequent UPDATE/DROP).
 //  4. Backfill its values into `cache_write_5m` (matches Anthropic's
@@ -1166,9 +1889,10 @@ func migrateCacheWriteSplit(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "token_events", "cache_write_1h", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	// Lock first, check second — see step (2)/(3) in the doc comment for
-	// the race-window argument.
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// Take the write lock, then check under it — see step (2)/(3) in the doc
+	// comment. context.Background() is deliberate: this is Open()-time, so
+	// waiting out another process's lock is the correct behaviour.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return err
 	}
@@ -1220,9 +1944,14 @@ func columnExistsTx(tx *sql.Tx, table, column string) (bool, error) {
 //
 //  1. ADD cost_micro (idempotent — addColumnIfMissing swallows the duplicate-
 //     column error on fresh DBs whose schemaTables already created it).
-//  2. BEGIN IMMEDIATE, then re-check (under the lock) whether the legacy
-//     cost_usd column still exists, so two racing Open() calls can't both run
-//     the conversion.
+//  2. Open a transaction via beginImmediate — under the write lock, genuinely —
+//     then re-check under it whether the legacy cost_usd column still exists.
+//     Two racing Open() calls in the SAME process were already excluded by
+//     SetMaxOpenConns(1); the lock is what stops two racing PROCESSES from both
+//     reaching step 3. (⚠️ This step previously claimed the lock while passing
+//     sql.TxOptions{Isolation: sql.LevelSerializable}, which the driver ignores:
+//     the tx was DEFERRED and the loser got an unretried SQLITE_BUSY_SNAPSHOT
+//     (517). Do not reintroduce that form.)
 //  3. Backfill cost_micro = round(cost_usd × 1e6). SQLite ROUND is half-away-
 //     from-zero rather than the half-to-even DollarsToMicro uses for live
 //     events; the ≤0.5 micro-dollar divergence on this one-time legacy
@@ -1241,7 +1970,11 @@ func migrateCostUSDToMicro(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "token_events", "cost_micro", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// Holds the write lock from the first statement, so this is atomic against
+	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
+	// the latter). Open()-time, so context.Background() and a possible full
+	// busy_timeout wait are correct: a slow boot beats a failed migration.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return err
 	}
@@ -1290,7 +2023,11 @@ func migrateActualSpendToMicro(db *sql.DB, table string) error {
 	if err := addColumnIfMissing(db, table, "actual_paid_micro", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// Holds the write lock from the first statement, so this is atomic against
+	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
+	// the latter). Open()-time, so context.Background() and a possible full
+	// busy_timeout wait are correct: a slow boot beats a failed migration.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return err
 	}
@@ -1347,7 +2084,11 @@ func backfillPeriodMembership(db *sql.DB) error {
 	// Seed + marker in one tx so a crash between them can't leave the table
 	// seeded without the marker (which would re-seed duplicates on next boot) —
 	// matches the recomputeKnownSourceCosts pattern.
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	//
+	// beginImmediate adds the write lock to that crash-atomicity: the seed reads
+	// and the marker insert are now also excluded against a second PROCESS, not
+	// just against this one. Open()-time, so context.Background() is correct.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("begin period_membership backfill tx: %w", err)
 	}
@@ -1396,7 +2137,11 @@ func backfillPriceVersion(db *sql.DB) error {
 		return fmt.Errorf("check tier_migrations: %w", err)
 	}
 	activeVersion := ActivePriceTableInfo().Version
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// Holds the write lock from the first statement, so this is atomic against
+	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
+	// the latter). Open()-time, so context.Background() and a possible full
+	// busy_timeout wait are correct: a slow boot beats a failed migration.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return fmt.Errorf("begin price_version backfill tx: %w", err)
 	}
@@ -1506,7 +2251,13 @@ func recomputeKnownSourceCosts(db *sql.DB) error {
 	// Open a single tx for both the cost updates and the marker insert so
 	// a crash between the two leaves no half-finished state — either the
 	// recompute ran and the marker is recorded, or neither.
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	//
+	// This method is read-then-write (the SELECT above, the UPDATEs below), which
+	// is exactly the shape a DEFERRED tx loses to an unretried
+	// SQLITE_BUSY_SNAPSHOT (517) cross-process. beginImmediate takes the write
+	// lock before the read, so the loser waits out busy_timeout instead — the
+	// correct trade at Open() time, where a slow boot beats a failed recompute.
+	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
 		return err
 	}
@@ -1756,6 +2507,43 @@ func (d *DB) InsertTokenEvent(ctx context.Context, e TokenEvent) error {
 // float cost_usd rounds to the same micro value is NOT a conflict.
 var ErrCostConflict = errors.New("idempotency_key already recorded with a different cost")
 
+// ErrCostCorrectionIdentityMismatch reports that a #346 override request's
+// idempotency_key resolves to an EXISTING row, but that row's (developer,
+// issue_id, model, source, fidelity) does not match what the request claims.
+// idempotency_key is globally unique across every producer (the partial
+// unique index carries no other column — see insertTokenEventSQL), so a key
+// collision across identities is not hypothetical: two different clients (or
+// one client with a copy-pasted key) can reuse the same string. Without this
+// check, CorrectManualCostEvent would locate a row by key ALONE and rewrite
+// its cost regardless of whose row it actually is — turning a key collision
+// that used to be a safe 409 (#295) into a correction landing on someone
+// else's money. Returned by CorrectManualCostEvent; the caller is expected to
+// surface this as an HTTP 409, same status family as ErrCostConflict, and
+// MUST NOT echo the stored identity back to the caller (a client that merely
+// guessed a key should not learn whose row it belongs to).
+//
+// 🔴 WHAT THIS IS AND IS NOT. It is a CONSISTENCY check against an ACCIDENTAL
+// key collision — a copy-pasted or coincidentally-reused key landing a
+// correction on a row the request did not mean. It is NOT an ownership or
+// authorization boundary, and must never be described as one:
+//
+//   - The endpoint's credential is a SINGLE GLOBAL write token with no subject
+//     (internal/api requireAuth). Nothing binds the authenticating principal to
+//     the `developer` field, and there is no tenant_id column anywhere to put
+//     such a binding in — TIER is single-tenant by design today (CLAUDE.md).
+//   - The tuple this compares is not secret. The read-scoped
+//     GET /api/v1/events export publishes every idempotency_key ALONGSIDE its
+//     full identity tuple, so a read token is enough to learn any key's exact
+//     (developer, issue_id, model, source, fidelity).
+//
+// So this check stops a blind collision; it does NOT stop a holder of the write
+// token who states the correct tuple deliberately. Closing that requires an
+// identity layer that binds principal to developer, which is #65 and is out of
+// scope for this endpoint. The "MUST NOT echo the stored identity" rule above
+// stands regardless — it is defense in depth against the blind case, not a
+// secrecy guarantee the export already breaks.
+var ErrCostCorrectionIdentityMismatch = errors.New("idempotency_key belongs to a different developer/issue/model/source/fidelity; refusing to correct a row this request does not identify")
+
 // InsertManualCostEvent is InsertTokenEvent for the untrusted manual-import
 // surface (POST /api/v1/costs). It preserves the existing idempotent behavior —
 // a re-post whose cost_micro exactly matches the stored value is a no-op that
@@ -1763,50 +2551,350 @@ var ErrCostConflict = errors.New("idempotency_key already recorded with a differ
 // dropping a CHANGED cost: when a row already exists under the same
 // idempotency_key with a different cost_micro, it writes NOTHING and returns
 // ErrCostConflict (#295). cost_micro remains immutable (#233): a 409 rejects, it
-// never overwrites. An unkeyed insert cannot collide, so it takes the plain path.
+// never overwrites. An unkeyed insert cannot collide, so it skips the pre-check.
 //
 // The pre-check and the insert run in one transaction, and under
 // SetMaxOpenConns(1) (see Open) that transaction owns the store's single
 // connection for its whole lifetime — so no other in-process writer can slip a
-// row in between the SELECT and the INSERT. That serialization, NOT the deferred
-// transaction on its own (a nil-tx reads a snapshot and only takes the write lock
-// at the INSERT), is what makes the divergence decision atomic; this is the same
-// read-then-write-in-a-nil-tx pattern UpdateQuality relies on. On ErrCostConflict
-// the deferred Rollback leaves the stored row — cost_micro AND token counts —
-// untouched.
+// row in between the SELECT and the INSERT. That serialization is what makes the
+// divergence decision atomic in-process; the BEGIN IMMEDIATE below is what makes
+// it atomic against another PROCESS. On ErrCostConflict the deferred rollback
+// leaves the stored row — cost_micro AND token counts — untouched.
+//
+// 🔴 BOUNDED BEGIN IMMEDIATE, AND BOTH HALVES OF THAT ARE LOAD-BEARING (#610).
+//
+// IMMEDIATE, because this is a read-then-write whose read is the guard: SELECT
+// the stored cost_micro, decide from it, then INSERT. Under a DEFERRED begin
+// (which is what a plain BeginTx gives — modernc.org/sqlite ignores
+// opts.Isolation outright, see beginImmediate) the SELECT takes a read snapshot
+// and any other CONNECTION committing before the INSERT fails the
+// deferred-to-write upgrade with SQLITE_BUSY_SNAPSHOT (517), which busy_timeout
+// does NOT retry. The #295 divergence verdict would then have been decided
+// against a snapshot the write no longer applies to.
+//
+// BOUNDED, because internal/api handlePostCosts is the only caller and it passes
+// r.Context(). With SetMaxOpenConns(1) an unbounded acquisition blocks for the
+// DSN's full 5000ms busy_timeout — uninterruptibly, since ctx does not bound the
+// promote — and that does not stall one request, it stalls EVERY in-flight
+// request in the process behind the single connection.
+//
+// ⚠️ THIS SITE CARRIES THE #598 DEFECT CLASS AND IT CLOSES #610's ASYMMETRY, so
+// do not convert it back "for symmetry with InsertTokenEvent". (It was described
+// here as "the tenth #598 site". Do not restore an ordinal: #598 converted nine,
+// but RepairRepo predates it and #346 converted two more, so no count of "sites
+// like this one" is stable enough to be worth maintaining. The list that IS
+// maintained is the one in beginImmediate's doc block.) Before #610 the
+// override=true half of POST /api/v1/costs (CorrectManualCostEvent) answered
+// contention with a 250ms-bounded 503 + Retry-After while THIS half — the same
+// SELECT-then-upsert shape, the same route, the same r.Context() — blocked the
+// full 5000ms and then answered 500. One endpoint cannot tell a caller that
+// contention is retryable on one request field and permanent on another.
+//
+// ⚠️ THE UNKEYED BRANCH IS BOUNDED TOO, and that is why it no longer delegates
+// to InsertTokenEvent. It needs no pre-check, but it is reached from the same
+// handler on the same connection, so leaving it as a bare ExecContext would just
+// move #610's split from keyed-vs-override to unkeyed-vs-everything-else.
+//
+// ⚠️ INSERTTOKENEVENT ITSELF IS LEFT ALONE, AND ITS EXEMPTION IS NARROWER THAN IT
+// LOOKS — do not cite it as "the capture path is background". It has exactly ONE
+// production caller, ingester's storeAdapter.Ingest, and that adapter is the sink
+// for BOTH the JSONL collector (genuinely background) and the reverse proxy,
+// whose writes are SYNCHRONOUS inside modifyResponse (see internal/proxy
+// recordWrite's note). So the unbounded 5000ms wait IS reachable from a live
+// response path, with the same stall-everyone-behind-the-single-connection
+// consequence described above. It stays unbounded because bounding it would drop
+// a captured event rather than fail a request the client can retry — a 503 is an
+// answer, a discarded token record is silent data loss — and because the two
+// callers want opposite things through one method. That is a real gap, not a
+// cleared one: it wants its own issue and its own measurement, and #610 does not
+// close it. This comment used to say the other callers were "the watcher, the
+// bulk ingester"; the bulk ingester is InsertTokenEvents, a different method, and
+// the proxy was missing entirely. Do not restore that sentence.
 func (d *DB) InsertManualCostEvent(ctx context.Context, e TokenEvent) error {
-	if e.IdempotencyKey == "" {
-		return d.InsertTokenEvent(ctx, e)
-	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	// release rolls the tx back (a no-op after a successful Commit) AND restores
+	// the borrowed connection's busy_timeout, so it replaces the plain deferred
+	// Rollback this site used to carry — it must not be doubled up.
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
-	var stored int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT cost_micro FROM token_events WHERE idempotency_key = ?`,
-		e.IdempotencyKey,
-	).Scan(&stored)
-	switch {
-	case err == nil:
-		// A row already owns this key. Exact-equal on the stored integer micros:
-		// an identical re-post falls through to the idempotent upsert; a divergent
-		// cost fails loud without mutating the row.
-		if stored != e.CostMicro {
-			return ErrCostConflict
+	if e.IdempotencyKey != "" {
+		var stored int64
+		err = tx.QueryRowContext(ctx,
+			`SELECT cost_micro FROM token_events WHERE idempotency_key = ?`,
+			e.IdempotencyKey,
+		).Scan(&stored)
+		switch {
+		case err == nil:
+			// A row already owns this key. Exact-equal on the stored integer micros:
+			// an identical re-post falls through to the idempotent upsert; a divergent
+			// cost fails loud without mutating the row.
+			if stored != e.CostMicro {
+				return ErrCostConflict
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			// Brand-new key — first writer. Fall through to the insert.
+		default:
+			return err
 		}
-	case errors.Is(err, sql.ErrNoRows):
-		// Brand-new key — first writer. Fall through to the insert.
-	default:
-		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, insertTokenEventSQL, insertTokenEventArgs(e)...); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// CostCorrection describes what CorrectManualCostEvent did, so the API
+// handler can tell an actual correction (200, audited) apart from a request
+// that happened to need no correction at all (which InsertManualCostEvent's
+// ordinary semantics already cover — 201 on a fresh key, idempotent no-op on
+// a matching re-post).
+type CostCorrection struct {
+	// Corrected is true iff an existing row's cost_micro DIFFERED from e's and
+	// was rewritten — the only case that appends a cost_correction_audit row.
+	Corrected    bool
+	TokenEventID int64
+	OldCostMicro int64
+	NewCostMicro int64
+}
+
+// CorrectManualCostEvent implements POST /api/v1/costs's sanctioned override
+// path (#346, ruling C — the follow-up to #295's ruling A, which made a
+// divergent KEYED re-post 409 instead of silently landing; see ErrCostConflict
+// and cost_correction_audit's schema comment). It is the ONLY path — besides
+// `tierd reprice`, an offline batch tool — that may ever rewrite an existing
+// token_events row's cost_micro.
+//
+// e.IdempotencyKey, actor, and reason MUST all be non-empty — checked here
+// (not left to the caller) because a store method silently accepting an
+// unattributed correction would be exactly the "silent overwrite" #295/#346
+// exist to prevent, and this is cheap enough to assert as a hard contract
+// rather than trust every future caller to remember.
+//
+// Behavior, in order:
+//  1. No row exists for this key: inserts normally (the same upsert
+//     InsertManualCostEvent uses). Nothing to correct — Corrected=false, no
+//     audit row.
+//  2. A row exists, but its (developer, issue_id, model, source, fidelity)
+//     does not match e's: refuses with ErrCostCorrectionIdentityMismatch and
+//     mutates NOTHING. idempotency_key is globally unique with no other column
+//     in its partial index (see insertTokenEventSQL), so a key collision across
+//     identities is real, not hypothetical — locating the row by key ALONE
+//     would let a correction land on a row this request does not actually
+//     identify. That tuple is every column a /costs request can vary, and no
+//     more. This catches an ACCIDENTAL collision and is not an ownership
+//     boundary — see ErrCostCorrectionIdentityMismatch for what it does and
+//     does not defend against.
+//  3. A row exists, identity matches, SAME cost_micro: the ordinary
+//     idempotent path (token counts MAX-merge), identical to an un-overridden
+//     matching re-post. Not a correction — Corrected=false, no audit row. An
+//     override flag on a request that turns out not to diverge is not an
+//     error; it is simply a no-op.
+//  4. A row exists, identity matches, DIFFERENT cost_micro: atomically
+//     UPDATEs ONLY cost_micro on that row — token counts, model, source,
+//     fidelity, price_version, and billing_mode are all left exactly as first
+//     recorded, so this is a surgical one-column correction, never a
+//     last-writer-wins upsert of the whole row (the risk architecture-review
+//     flagged during #295's review) — and appends one cost_correction_audit
+//     row (old → new, actor, reason) in the SAME transaction, so the update
+//     and its audit trail commit or roll back together. Corrected=true.
+//
+// REPRICE-SAFE. `tierd reprice --from-version N --commit` recomputes
+// cost_micro from CURRENT token counts for the rows it examines, and a
+// corrected row is not one of them: Reprice excludes source='api' outright
+// (see repriceExcludedWhereSQL), the same rule recomputeKnownSourceCosts has
+// always applied, because a manual-import cost is the caller's authoritative
+// figure and re-deriving it from token counts that may not exist yields $0.00.
+// Before that exclusion existed, a reprice sweep silently rewrote a corrected
+// $42.00 to $0.00 while cost_correction_audit went on asserting the old→new
+// pair — a ledger left affirmatively false with no marker. The exclusion is
+// pinned by TestReprice_NeverRepricesManualCostRows and
+// TestReprice_SanctionedCorrectionSurvivesReprice.
+//
+// The guarantee is bounded, and the bound is checkable. FOUR statements in this
+// package write token_events.cost_micro: this function, Reprice (excluded
+// above), and two one-shot Open() migrations -- migrateCostUSDToMicro and
+// recomputeKnownSourceCosts. Neither migration can reach a correction:
+// migrateCostUSDToMicro runs only while the pre-#69 cost_usd column still
+// exists, and a #346 correction can only be created on a post-#69 schema; and
+// recomputeKnownSourceCosts excludes source='api' outright. `tierd repair-repo`
+// (#493) rewrites repo, not cost. Re-derive that list with
+// `grep 'UPDATE token_events SET cost_micro'` before trusting this sentence --
+// it is a claim about a grep, not a law.
+//
+// EVERYTHING below runs inside ONE transaction that owns the store's single
+// connection for its whole lifetime (SetMaxOpenConns(1), see Open) — cases
+// 1/3/4 all commit through the SAME tx that ran the identity lookup, so the
+// divergence decision is atomic against any other in-process writer with no
+// window where the connection is released and reacquired. (An earlier version
+// of this function delegated cases 1/3 to InsertManualCostEvent after an
+// explicit Rollback, which reopened exactly that window: a concurrent writer
+// could land between the Rollback and the delegated call's own BeginTx, and
+// InsertManualCostEvent's ErrCostConflict — meant for a different caller —
+// would surface here as an unmapped error. Inlining removes both problems.)
+func (d *DB) CorrectManualCostEvent(ctx context.Context, e TokenEvent, actor, reason string) (CostCorrection, error) {
+	if e.IdempotencyKey == "" {
+		return CostCorrection{}, fmt.Errorf("cost correction requires a non-empty idempotency_key to identify which row to correct")
+	}
+	if actor == "" || reason == "" {
+		return CostCorrection{}, fmt.Errorf("cost correction requires both actor and reason (an override must be attributed and explained, never silent)")
+	}
+
+	// 🔴 THIS TRANSACTION MUST HOLD THE WRITE LOCK FROM ITS FIRST STATEMENT. It is
+	// the read-then-write shape in its purest form — SELECT the row by
+	// idempotency_key, decide from what it read, then UPDATE that same row's
+	// cost_micro — and it is the ONLY path in this project that rewrites already-
+	// captured money rather than appending to it. Under a DEFERRED begin (which is
+	// what a plain BeginTx gives, including one passed sql.LevelSerializable:
+	// modernc.org/sqlite ignores opts.Isolation outright — see beginImmediate) the
+	// SELECT takes a read snapshot, and any other connection committing before the
+	// UPDATE fails the deferred-to-write upgrade with SQLITE_BUSY_SNAPSHOT (517),
+	// which busy_timeout does NOT retry. The correction is thrown away under an
+	// opaque "database is locked" — and the identity check below, which is what
+	// stops one developer's key rewriting another's money (#346), would have been
+	// decided against a snapshot the write no longer applies to.
+	//
+	// ⚠️ BOUNDED, NOT PLAIN beginImmediate, BECAUSE THIS IS REQUEST PATH. The sole
+	// caller is POST /api/v1/costs with override=true, which passes r.Context()
+	// (internal/api/handler.go). With SetMaxOpenConns(1) an unbounded acquisition
+	// blocks for the DSN's full 5000ms busy_timeout — uninterruptibly, since ctx
+	// does not bound the promote — and that does not stall one request, it stalls
+	// EVERY in-flight request in the process behind the single connection. The
+	// 250ms cap turns contention into a retryable 503 + Retry-After instead;
+	// handlePostCosts maps ErrWriteLockUnavailable to writeStoreContention, and that
+	// errors.Is check runs BEFORE any other classification for the reason spelled
+	// out at the alias site.
+	//
+	// ⚠️ THE OTHER BRANCH IS NOW CONVERTED TOO (#610), AND THEY MUST STAY IN STEP.
+	// This conversion originally covered only override=true, leaving the
+	// non-override InsertManualCostEvent on a plain DEFERRED BeginTx — so one
+	// endpoint answered contention two ways: a bounded 503 + Retry-After here, and
+	// a full 5000ms block then 500 there. #610 converted that half to the same
+	// helper with the same requestPathBusyTimeout. Do not re-split them: both
+	// halves of POST /api/v1/costs are request-path read-then-writes on the same
+	// connection, and a caller cannot reasonably retry one and not the other.
+	//
+	// release rolls the tx back (a no-op after a successful Commit) AND restores
+	// the borrowed connection's busy_timeout, so it replaces the plain deferred
+	// Rollback this site used to carry — it must not be doubled up.
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
+	if err != nil {
+		return CostCorrection{}, err
+	}
+	defer release()
+
+	var (
+		tokenEventID                 int64
+		stored                       int64
+		storedDeveloper, storedIssue string
+		storedModel, storedSource    string
+		storedFidelity               string
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, developer, issue_id, model, source, fidelity, cost_micro FROM token_events WHERE idempotency_key = ?`,
+		e.IdempotencyKey,
+	).Scan(&tokenEventID, &storedDeveloper, &storedIssue, &storedModel, &storedSource, &storedFidelity, &stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Brand-new key: nothing exists to correct. Insert normally, IN THIS
+		// tx — no delegation, no released-and-reacquired connection.
+		if _, err := tx.ExecContext(ctx, insertTokenEventSQL, insertTokenEventArgs(e)...); err != nil {
+			return CostCorrection{}, err
+		}
+		return CostCorrection{}, tx.Commit()
+	case err != nil:
+		return CostCorrection{}, err
+	}
+
+	// Identity check (case 2 above): a key match alone is not enough. Compare
+	// every column the client's request itself claims — a mismatch on ANY of
+	// them means this key does not identify the row the client thinks it does.
+	//
+	// The tuple is the set of stored columns a /costs request can vary, and it
+	// is derived, not chosen: developer/issue_id/model come straight off the
+	// request body, and the handler validates BOTH source (only "api" or
+	// omitted) and fidelity ("daily"/"estimated"/omitted) as client-asserted
+	// enums. fidelity belongs here for the same reason source does — a client
+	// that asserts the wrong one has not identified this row.
+	//
+	// ⚠️ ONE ROW CLASS IS UNCORRECTABLE BY THIS PATH, and it is a real
+	// consequence of adding fidelity, not a hypothetical. #82 narrowed /costs to
+	// daily|estimated|omitted; fidelity is INSERT-only (absent from the ON
+	// CONFLICT DO UPDATE set), so a PRE-#82 source='api' row can still carry a
+	// value no request can now express — 'realtime' being the live example.
+	// Stating it is a 400, omitting it defaults to "estimated", and both
+	// mismatch, so every possible request 409s. For those rows the remedy is the
+	// one #295 already documents: re-post under a NEW idempotency_key. Pinned by
+	// TestCorrectManualCostEvent_LegacyFidelityIsUncorrectable so the dead end is
+	// visible behaviour rather than a surprise in production, and documented in
+	// docs/api-compatibility.md.
+	//
+	// It is deliberately NOT wider. repo, host, billing_mode, session_id, and
+	// ts are FORCED by the /costs handler (repo is left unset to the
+	// 'unqualified' sentinel, host/billing_mode are stamped at insert, ts is
+	// server clock) — a client cannot vary them from this surface, so comparing
+	// them would reject on a column the caller was never asked for. Widen this
+	// tuple if and only if /costs starts accepting the column.
+	//
+	// Read ErrCostCorrectionIdentityMismatch before describing this as a
+	// security control: it catches an ACCIDENTAL collision, not a deliberate
+	// one. Auth here is a single global write token with no subject, and the
+	// read-scoped /api/v1/events export publishes every key next to its full
+	// identity tuple, so nothing about this tuple is secret.
+	if storedDeveloper != e.Developer || storedIssue != e.IssueID ||
+		storedModel != e.Model || storedSource != e.Source || storedFidelity != e.Fidelity {
+		return CostCorrection{}, ErrCostCorrectionIdentityMismatch
+	}
+
+	if stored == e.CostMicro {
+		// Already matches, same identity: the ordinary idempotent path
+		// (token-count MAX-merge), identical to what an un-overridden
+		// matching re-post already does. Not a correction. Same in-tx
+		// reasoning as the fresh-key case above.
+		if _, err := tx.ExecContext(ctx, insertTokenEventSQL, insertTokenEventArgs(e)...); err != nil {
+			return CostCorrection{}, err
+		}
+		return CostCorrection{}, tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE token_events SET cost_micro = ? WHERE id = ?`,
+		e.CostMicro, tokenEventID,
+	); err != nil {
+		return CostCorrection{}, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO cost_correction_audit
+		    (token_event_id, old_cost_micro, new_cost_micro, actor, reason)
+		 VALUES (?, ?, ?, ?, ?)`,
+		tokenEventID, stored, e.CostMicro, actor, reason,
+	); err != nil {
+		return CostCorrection{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CostCorrection{}, err
+	}
+	return CostCorrection{
+		Corrected:    true,
+		TokenEventID: tokenEventID,
+		OldCostMicro: stored,
+		NewCostMicro: e.CostMicro,
+	}, nil
+}
+
+// CostCorrectionAuditCount returns the total number of #346 sanctioned
+// cost-correction override rows ever recorded, across every key — a cheap
+// operator-visibility primitive ("has anyone ever used the override, and how
+// often") and the seam a future GET surface over cost_correction_audit would
+// build on (none exists yet — see that table's schema comment). Unfiltered
+// by design: this is a COUNT(*), not a report.
+func (d *DB) CostCorrectionAuditCount(ctx context.Context) (int, error) {
+	var n int
+	err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cost_correction_audit`).Scan(&n)
+	return n, err
 }
 
 // InsertTokenEvents bulk-inserts token events within a single transaction.
@@ -1877,10 +2965,22 @@ type RepriceResult struct {
 	EffectiveDate string // active table effective_date (provenance)
 	Committed     bool   // true = the reprice was applied; false = dry run, nothing written
 
-	RowCount        int64 // rows examined (price_version >= FromVersion)
+	RowCount        int64 // rows examined (matched the floor AND are repriceable)
 	ChangedRowCount int64 // subset whose cost_micro/price_version/billing_mode actually changed
-	OldCostMicroSum int64 // SUM(cost_micro) over the CHANGED rows, before
-	NewCostMicroSum int64 // SUM(cost_micro) over the CHANGED rows, after (net delta = New - Old)
+	// ExcludedRowCount is the count of rows that MATCHED price_version >=
+	// FromVersion but were deliberately NOT REPRICED, because their cost is not
+	// derived from their token counts and re-deriving it would destroy the
+	// figure — caller-authoritative manual imports (source='api') and
+	// money-carrying rows with no token counts. See repriceExcludedWhereSQL.
+	// They ARE counted (that is this field), so "excluded" means excluded from
+	// the recompute, not invisible.
+	//
+	// It is reported rather than silently dropped so the operator is never told
+	// "nothing matched --from-version" about rows that matched and were
+	// protected. Present identically on a dry run and a commit.
+	ExcludedRowCount int64
+	OldCostMicroSum  int64 // SUM(cost_micro) over the CHANGED rows, before
+	NewCostMicroSum  int64 // SUM(cost_micro) over the CHANGED rows, after (net delta = New - Old)
 	// GuessedRowCount is the subset of CHANGED rows whose (host, model) has NO
 	// exact entry in the active price table, so the recompute priced them at the
 	// self-hosted GUESS fallback rather than an audited rate (#267/#294). A model
@@ -1907,6 +3007,68 @@ type RepriceResult struct {
 	RepriceID string
 }
 
+// repriceExcludedWhereSQL is the predicate for token_events rows a reprice must
+// NEVER re-derive, because their stored cost_micro is NOT a function of their
+// token counts. Repricing such a row does not correct it — it recomputes it to
+// $0.00 and destroys the figure.
+//
+// It serves the SAME INTENT as recomputeKnownSourceCosts -- an /api/v1/costs
+// row's caller-authoritative cost is never silently overwritten -- but it is
+// deliberately the OPPOSITE SHAPE, and that difference matters:
+// recomputeKnownSourceCosts is a closed ALLOWLIST (source IN ('jsonl','proxy',
+// 'copilot-api','anthropic-admin')), which fails SAFE -- a new source is simply
+// not touched. This is an open DENYLIST, which fails DESTRUCTIVE -- a future
+// source whose cost is caller-authoritative gets repriced unless someone adds
+// it here. A denylist is nonetheless right for reprice, whose whole purpose is
+// that the default must stay "reprice it"; an allowlist would silently stop
+// repricing every new collector. TestRepriceClassifiesEverySource is the
+// compensating control: it iterates collector.AllSources() and fails when the
+// enum grows, so a new source cannot land unclassified. (The two lists already
+// disagree -- codex-rollout and openai-usage postdate the allowlist and were
+// never added to it -- which is exactly why "the same rule" would have been the
+// wrong thing to write.) Reprice simply never got the treatment — a defect that pre-dates #346 but became money-
+// destroying once /costs became the sanctioned durable correction surface: a
+// $42.00 finance correction reprices to $0.00 while cost_correction_audit goes
+// on asserting the old→new pair as though it still held, leaving the ledger
+// affirmatively false with no marker.
+//
+// Two disjunctions, each measured, each independently load-bearing:
+//
+//   - source = 'api' — the manual-import surface (POST /api/v1/costs). Its
+//     cost_usd is the CALLER's authoritative figure (a finance team posting a
+//     reconciled invoice number); token counts are optional there and routinely
+//     absent. This is the same exclusion recomputeKnownSourceCosts makes, and
+//     the ONLY source in the tree whose cost is not server-derived: every other
+//     producer prices from raw token counts with the server's own table
+//     ('jsonl'/'proxy'/'codex-rollout' collectors, the 'anthropic-admin' /
+//     'openai-usage' org pollers via ComputeCostHost, and POST /api/v1/events,
+//     which re-prices what a shipper posts, #233). So this filter excludes
+//     exactly the rows that cannot be repriced and nothing that should be.
+//
+//   - a MONEY-CARRYING row with no tokens at all — cost_micro <> 0 while every
+//     token column is 0. Whatever produced that cost, it was not the token
+//     counts, so re-deriving it can only zero it. This is not redundant with the
+//     source filter: store.InsertTokenEvent is exported and takes CostMicro
+//     verbatim, so such a row is reachable under ANY source, and the measured
+//     behavior was the same $42 → $0.
+//
+// The cost_micro <> 0 qualifier is deliberate and was ALSO settled by
+// measurement: an unqualified zero-token guard would over-exclude. A zero-token
+// row whose cost is legitimately 0 still needs its price_version and
+// billing_mode reconciled (measured: such a row correctly moves v1 → the active
+// version), and skipping it would be a real behavioral regression. Repricing it
+// is a no-op on the cost by construction, so it is safe to keep.
+//
+// Shared verbatim by the candidate SELECT (negated) and the excluded-row COUNT
+// (asserted), so the set reprice skips and the set it reports as skipped cannot
+// drift apart. TestReprice_ExaminedAndExcludedPartitionTheFloor pins that as a
+// behavioral invariant: examined + excluded == every row at or above the floor.
+const repriceExcludedWhereSQL = `(
+       source = 'api'
+    OR (cost_micro <> 0 AND input_tok = 0 AND output_tok = 0
+        AND cache_read = 0 AND cache_write_5m = 0 AND cache_write_1h = 0)
+  )`
+
 // repriceCandidate columns pulled per row for the recompute. Kept minimal — only
 // what ComputeCostHost needs plus the identity/provenance fields — because the
 // candidate set can be large (a window over the whole priced history).
@@ -1914,10 +3076,20 @@ const repriceSelectSQL = `
 SELECT id, developer, host, model, input_tok, output_tok, cache_read,
        cache_write_5m, cache_write_1h, cost_micro, price_version, billing_mode
 FROM token_events
-WHERE price_version >= ?
+WHERE price_version >= ? AND NOT ` + repriceExcludedWhereSQL + `
 ORDER BY id`
 
-// Reprice recomputes token_events.cost_micro for every row priced at
+// repriceExcludedCountSQL counts the rows that MATCHED the operator's
+// --from-version floor but are excluded from the recompute by
+// repriceExcludedWhereSQL. Without it the report would lie: a floor whose only
+// matches are manual-import rows would print "no rows have price_version >= vN
+// — nothing examined (check --from-version)", telling the operator their flag
+// was wrong when in fact the rows exist and were deliberately protected.
+const repriceExcludedCountSQL = `
+SELECT COUNT(*) FROM token_events
+WHERE price_version >= ? AND ` + repriceExcludedWhereSQL
+
+// Reprice recomputes token_events.cost_micro for every REPRICEABLE row priced at
 // price_version >= opts.FromVersion using the CURRENTLY-ACTIVE price table, bumps
 // those rows to the active version, and (on commit) writes an audit ledger of the
 // change (#294). It is the ONLY sanctioned mutator of a priced cost — the normal
@@ -1957,6 +3129,14 @@ ORDER BY id`
 // fallback (their model has no exact active-table entry, e.g. a model dropped since
 // the row was first priced), so a caller can warn loudly before the reprice rewrites
 // audited history to an estimate.
+//
+// NOT EVERY ROW AT OR ABOVE THE FLOOR IS A CANDIDATE. A row whose cost_micro is
+// not a function of its token counts is never re-derived — re-deriving it does
+// not correct it, it zeroes it. repriceExcludedWhereSQL defines that set
+// (caller-authoritative source='api' manual imports, and money-carrying rows
+// with no token counts); ExcludedRowCount reports how many the floor matched, so
+// a protected row is visibly protected rather than silently missing. This is why
+// a sanctioned #346 cost correction now SURVIVES a reprice sweep.
 func (d *DB) Reprice(ctx context.Context, opts RepriceOptions) (RepriceResult, error) {
 	if opts.FromVersion < 1 {
 		return RepriceResult{}, fmt.Errorf("reprice: from-version must be >= 1, got %d (refusing to reprice the whole table by accident)", opts.FromVersion)
@@ -1972,9 +3152,63 @@ func (d *DB) Reprice(ctx context.Context, opts RepriceOptions) (RepriceResult, e
 	// run reads a consistent snapshot and a committed run is all-or-nothing. The
 	// deferred Rollback is a no-op after a successful Commit; on the dry-run path
 	// it is what discards the (read-only) transaction.
-	tx, err := d.db.BeginTx(ctx, nil)
-	if err != nil {
-		return RepriceResult{}, fmt.Errorf("reprice: begin tx: %w", err)
+	//
+	// 🔴 A COMMIT MUST TAKE THE WRITE LOCK BEFORE IT READS — the same rule, and the
+	// same shape, as RepairRepo (internal/store/repairrepo.go); see beginImmediate
+	// for why a plain BeginTx does not, including one passed sql.LevelSerializable,
+	// which modernc.org/sqlite ignores outright. This function is the widest
+	// read-then-write in the package: it scans EVERY token_events row at or above
+	// the floor, buffers the changed ones, and only then issues its first UPDATE.
+	// Under a DEFERRED begin that whole scan runs on a read snapshot, and any other
+	// connection committing before the first write fails the deferred-to-write
+	// upgrade with SQLITE_BUSY_SNAPSHOT (517) — which busy_timeout does NOT retry.
+	// The entire scan is discarded, after all the work, under an opaque "database
+	// is locked". Fail at acquisition instead, where a failure costs nothing.
+	//
+	// ⚠️ UNBOUNDED beginImmediate, NOT beginImmediateBounded, AND THAT IS THE
+	// CORRECT SIDE. Reprice has exactly one caller, `tierd reprice`
+	// (cmd/tierd/reprice.go) — it is never reachable from an HTTP handler, so the
+	// 250ms requestPathBusyTimeout would not be protecting a request. It would just
+	// convert a working operator command into a spurious failure whenever a live
+	// tierd happened to hold the lock for a quarter second. An operator rewriting
+	// priced history should wait out the DSN's busy_timeout, which is what an
+	// unbounded acquisition does.
+	//
+	// A DRY RUN deliberately does NOT promote. Commit is false by DEFAULT, so the
+	// dry run is the common invocation; it writes nothing, and promoting it would
+	// hold the exclusive write lock across a full-table scan and stall every writer
+	// in a live `tierd serve`. A diagnostic an operator cannot run without taking
+	// the database down is a diagnostic nobody runs.
+	var tx *sql.Tx
+	var err error
+	if opts.Commit {
+		tx, err = beginImmediate(ctx, d.db)
+		// The contention hint is attached ONLY to the contention error.
+		// beginImmediate also fails when BeginTx itself fails — a cancelled context
+		// (this command installs a SIGINT handler), a closed handle — and telling an
+		// operator who just pressed Ctrl-C that a `tierd serve` is ingesting sends
+		// them to check the wrong thing. A diagnosis naming the wrong cause is worse
+		// than none.
+		switch {
+		case errors.Is(err, ErrWriteLockUnavailable):
+			return RepriceResult{}, fmt.Errorf("reprice: %w (is a tierd serve ingesting into this database? run the reprice against a quiesced database)", err)
+		case err != nil:
+			// NO STAGE LABEL HERE, and that matches RepairRepo deliberately.
+			// beginImmediate has two non-contention failures and labels them
+			// itself — "begin tx: …" when BeginTx fails, "promote to write lock:
+			// …" when the promote fails permanently (read-only file, disk full).
+			// Stamping "begin tx:" over both would render the second as
+			// "reprice: begin tx: promote to write lock: attempt to write a
+			// readonly database", naming a stage that did not fail. The else
+			// branch below DOES label, because there BeginTx is the only thing
+			// that can fail.
+			return RepriceResult{}, fmt.Errorf("reprice: %w", err)
+		}
+	} else {
+		tx, err = d.db.BeginTx(ctx, nil)
+		if err != nil {
+			return RepriceResult{}, fmt.Errorf("reprice: begin tx: %w", err)
+		}
 	}
 	committed := false
 	defer func() {
@@ -2001,6 +3235,14 @@ func (d *DB) Reprice(ctx context.Context, opts RepriceOptions) (RepriceResult, e
 	deltaByVersion := map[int]*RepriceVersionDelta{}
 	devSet := map[string]struct{}{}
 	guessedSet := map[string]struct{}{}
+
+	// Counted in the SAME transaction (and therefore the same snapshot) as the
+	// candidate scan below, so "examined + excluded" is a consistent partition of
+	// the rows at or above the floor, never two reads of a moving table.
+	if err := tx.QueryRowContext(ctx, repriceExcludedCountSQL, opts.FromVersion).
+		Scan(&res.ExcludedRowCount); err != nil {
+		return RepriceResult{}, fmt.Errorf("reprice: count excluded rows: %w", err)
+	}
 
 	rows, err := tx.QueryContext(ctx, repriceSelectSQL, opts.FromVersion)
 	if err != nil {
@@ -2095,8 +3337,16 @@ func (d *DB) Reprice(ctx context.Context, opts RepriceOptions) (RepriceResult, e
 	// write, mutating nothing — the deferred Rollback discards the read-only tx —
 	// so audited history is never silently rewritten to an estimate. A dry run
 	// never reaches here; it only reports the same GuessedRowCount as a warning.
+	//
+	// The model names go through logsafe.Join, not strings.Join (#321 review,
+	// 2026-08-04). They are the models ABSENT from the price table — i.e. by
+	// construction the ones nothing in this repo has ever validated — and they
+	// arrive from POST /api/v1/events, which applies no charset check. This error
+	// is Fprintf'd straight to the reprice CLI's stderr, so an unsanitized name
+	// carrying CR/LF forges a standalone line in an operator's maintenance log.
+	// Same barrier, same reasoning, as repairrepo.go's errors two files away.
 	if res.GuessedRowCount > 0 && !opts.AllowGuessed {
-		return RepriceResult{}, fmt.Errorf("reprice: refusing to commit: %d of %d changed row(s) would be repriced to a self-hosted GUESS estimate (model(s) not in the active price table: %s) — audited historical cost would be rewritten to an estimate. Add the missing model(s) to the price table for an accurate reprice, or re-run with --allow-guessed to proceed anyway", res.GuessedRowCount, res.ChangedRowCount, strings.Join(res.GuessedModels, ", "))
+		return RepriceResult{}, fmt.Errorf("reprice: refusing to commit: %d of %d changed row(s) would be repriced to a self-hosted GUESS estimate (model(s) not in the active price table: %s) — audited historical cost would be rewritten to an estimate. Add the missing model(s) to the price table for an accurate reprice, or re-run with --allow-guessed to proceed anyway", res.GuessedRowCount, res.ChangedRowCount, logsafe.Join(res.GuessedModels, maxModelsNamedInError))
 	}
 
 	// A commit with nothing to change writes no rows and no audit — there is no
@@ -2108,7 +3358,7 @@ func (d *DB) Reprice(ctx context.Context, opts RepriceOptions) (RepriceResult, e
 		return res, nil
 	}
 
-	repriceID, err := newRepriceID()
+	repriceID, err := newAuditID()
 	if err != nil {
 		return RepriceResult{}, fmt.Errorf("reprice: mint reprice id: %w", err)
 	}
@@ -2199,11 +3449,13 @@ func guessedModelKey(host, model string) string {
 	return model + "@" + host
 }
 
-// newRepriceID mints the random hex token that correlates every reprice_audit row
-// of one operation. crypto/rand makes it collision-free across runs without a
-// sequence column; a rand failure is surfaced (the reprice aborts) rather than
-// silently writing an unkeyed audit.
-func newRepriceID() (string, error) {
+// newAuditID mints the random hex token that correlates every audit-ledger row of
+// one maintenance operation — reprice_audit/reprice_row_audit (#294) and
+// repo_repair_audit/repo_repair_row_audit (#493) alike. crypto/rand makes it
+// collision-free across runs without a sequence column; a rand failure is
+// surfaced (the operation aborts) rather than silently writing an unkeyed audit,
+// which would leave a mutation no operator could correlate back to a run.
+func newAuditID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
@@ -3001,7 +4253,7 @@ type DeveloperCost struct {
 // DeveloperCosts returns cost totals per developer since the given time, in
 // micro-dollars.
 func (d *DB) DeveloperCosts(ctx context.Context, since time.Time) ([]DeveloperCost, error) {
-	return d.DeveloperCostsWindow(ctx, since, time.Time{})
+	return d.DeveloperCostsWindow(ctx, since, time.Time{}, FleetWide)
 }
 
 // tsWindow returns the ts-column predicate and its bound args for a half-open
@@ -3018,20 +4270,155 @@ func tsWindow(since, until time.Time) (clause string, args []any) {
 	return "ts >= ? AND ts < ?", []any{since.UTC(), until.UTC()}
 }
 
+// RepoScope narrows a windowed read to ONE repository (#590). The zero value,
+// FleetWide, adds no predicate and reads every repository — the pre-#590 behavior,
+// byte-for-byte.
+//
+// 🔴 SCOPING IS STRICT, AND IT DELIBERATELY DIVERGES FROM RepoMatch. The tolerant
+// join rule treats 'unqualified' as matching anything, because for JOINING, strict
+// would silently de-attribute the cost of every repo-blind producer (the reverse
+// proxy structurally cannot know a repository). That reasoning does NOT transfer to
+// FILTERING, where it inverts into the exact defect #590 exists to close: a tolerant
+// `repo = ? OR repo = 'unqualified'` would attribute EVERY repo-blind row in the
+// fleet to whichever single repository the caller happened to name, and hand back a
+// confidently over-counted figure that looks scoped. A scoped read must never be
+// able to over-attribute.
+//
+// The cost of strictness is that genuinely-in-scope spend recorded blind is dropped.
+// That is real, so it is not left silent: UnqualifiedExclusion reports exactly what a
+// scope excluded, and the /scores data_quality block surfaces it. Strict + disclosed
+// under-counts VISIBLY; tolerant over-counts INVISIBLY. the maintainer ruled this shape
+// (option C) on 2026-08-03.
+//
+// The value is a canonical slug — callers validate at the trust boundary with
+// repoid.Canonical, which also refuses the reserved 'unqualified' sentinel, so a
+// caller cannot ask to be scoped to repo-blindness itself.
+type RepoScope string
+
+// FleetWide is the unscoped RepoScope: every repository, no predicate.
+const FleetWide RepoScope = ""
+
+// IsFleetWide reports whether this scope adds no repository predicate.
+func (s RepoScope) IsFleetWide() bool { return s == FleetWide }
+
+// String returns the scoped slug, or "" when fleet-wide.
+func (s RepoScope) String() string { return string(s) }
+
+// clause returns the trailing repository predicate and its bound arg for a scoped
+// read, or ("", nil) when fleet-wide. It is written to be APPENDED to an existing
+// WHERE — it leads with " AND " and its arg must therefore be appended to the arg
+// slice in the same text order, after every bind that appears earlier in the query.
+func (s RepoScope) clause() (clause string, args []any) {
+	if s.IsFleetWide() {
+		return "", nil
+	}
+	return " AND repo = ?", []any{string(s)}
+}
+
+// UnqualifiedExclusion is what a strict repo scope DROPPED from a window because the
+// rows carry the 'unqualified' sentinel rather than a real repository (#590). It is
+// the disclosure half of ruling C: strict scoping cannot over-attribute, but it can
+// under-count, and an under-count nobody can see is exactly the kind of confidently
+// wrong number this project refuses to publish.
+//
+// These counts are NOT a claim that the excluded rows belong to the scoped repository.
+// They are unattributable by construction — that is what the sentinel means. The
+// honest reading is "this much of the window could not be placed, so a scoped figure
+// drawn from it is a lower bound, not a total".
+type UnqualifiedExclusion struct {
+	// TokenEvents is the number of token_events rows in the window carrying the
+	// sentinel, and CostMicro their summed cost in integer micro-dollars (#69).
+	TokenEvents    int64
+	CostMicro      int64
+	OutcomeRecords int64 // outcomes rows in the window carrying the sentinel
+}
+
+// Any reports whether the scope excluded anything at all. A false here is the clean
+// case: every row in the window named a real repository, so the scoped figure is a
+// true total rather than a lower bound.
+func (u UnqualifiedExclusion) Any() bool {
+	return u.TokenEvents > 0 || u.CostMicro != 0 || u.OutcomeRecords > 0
+}
+
+// UnqualifiedExclusionWindow measures what a strict repo scope excluded from the
+// half-open [since, until) window (#590) — the repo-blind rows that a fleet-wide read
+// would have counted and a scoped read drops.
+//
+// It deliberately takes the WINDOW ONLY and no scope: the sentinel rows are the same
+// set whichever repository the caller scoped to, because 'unqualified' means the
+// producer could not determine ANY repository. Passing a scope would imply these rows
+// were weighed against it and found not to match, which is not what happened.
+//
+// 🔴 THE LOWER BOUND IS DELIBERATELY WIDENED BY AttributableWindow, and the reason is
+// a real defect this nearly shipped with. The token-side count reaches back
+// `since - AttributableWindow`, NOT `since`.
+//
+// Why: strict scoping also applies inside OutcomeTokenTotals, whose per-outcome
+// attributable window is [merge-14d, merge] and therefore intentionally reaches
+// BEFORE `since` ("tokens spent last month can fund this month's merge"). So a
+// repo-blind token row sitting in that look-back — outside the reporting window — can
+// be excluded by a scope, flip a zero-token tripwire against a NAMED developer, and be
+// entirely invisible to a disclosure that only measured [since, until). Measured
+// before this fix: a scoped read produced a new zero_token_outcomes entry while
+// repo_scope_excluded was ABSENT, i.e. reporting "clean".
+//
+// That is precisely the hole ruling C exists to close — an exclusion nobody can see —
+// so the disclosure is widened to cover every row the scope could have suppressed.
+// The cost is slight OVER-reporting: sentinel rows in the look-back are counted even
+// when no outcome's window actually reached them. That direction is the safe one. A
+// disclosure that overstates makes a reader check; one that understates makes them
+// trust a number they should not.
+//
+// The OUTCOME count keeps the plain [since, until) bound — outcomes are the reporting
+// population itself, not a look-back input, so widening it would inflate the figure
+// with records that were never in scope to begin with.
+//
+// Two statements rather than a UNION: the tables carry different grains (cost-bearing
+// events vs. outcome records) and fusing them would invite summing a row count against
+// a dollar figure.
+func (d *DB) UnqualifiedExclusionWindow(ctx context.Context, since, until time.Time) (UnqualifiedExclusion, error) {
+	tokenWhere, tokenArgs := tsWindow(since.Add(-AttributableWindow), until)
+	where, args := tsWindow(since, until)
+	var u UnqualifiedExclusion
+	// COALESCE on the SUM: an empty match set yields NULL, which will not scan into
+	// int64. COUNT is already 0-valued.
+	err := d.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(cost_micro), 0)
+		FROM token_events
+		WHERE `+tokenWhere+` AND repo = ?`,
+		append(append([]any{}, tokenArgs...), repoid.Unqualified)...,
+	).Scan(&u.TokenEvents, &u.CostMicro)
+	if err != nil {
+		return UnqualifiedExclusion{}, fmt.Errorf("token_events exclusion: %w", err)
+	}
+	err = d.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM outcomes
+		WHERE `+where+` AND repo = ?`,
+		append(append([]any{}, args...), repoid.Unqualified)...,
+	).Scan(&u.OutcomeRecords)
+	if err != nil {
+		return UnqualifiedExclusion{}, fmt.Errorf("outcomes exclusion: %w", err)
+	}
+	return u, nil
+}
+
 // DeveloperCostsWindow is the half-open [since, until) form of DeveloperCosts
 // (#276): the scores-path denominator, bounded above so a caller can score a
 // closed period ("Team TIER for March") or the BEFORE leg of a before/after
 // comparison. A zero `until` is open-ended and behaves exactly like the legacy
 // DeveloperCosts.
-func (d *DB) DeveloperCostsWindow(ctx context.Context, since, until time.Time) ([]DeveloperCost, error) {
+func (d *DB) DeveloperCostsWindow(ctx context.Context, since, until time.Time, scope RepoScope) ([]DeveloperCost, error) {
 	where, args := tsWindow(since, until)
+	scopeSQL, scopeArgs := scope.clause()
+	args = append(args, scopeArgs...)
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT
 			developer,
 			SUM(cost_micro)                                         AS total_cost,
 			SUM(CASE WHEN fidelity = 'realtime' THEN cost_micro ELSE 0 END) AS realtime_cost
 		FROM token_events
-		WHERE `+where+`
+		WHERE `+where+scopeSQL+`
 		GROUP BY developer`,
 		args...,
 	)
@@ -3070,19 +4457,29 @@ type DevIssueCost struct {
 // time, in micro-dollars (#187). Same windowing and realtime-split as
 // DeveloperCosts, only grouped one level finer; the caller maps each (developer,
 // issue) onto the work_type of that issue's outcome to build per-type denominators.
-// Issues with token spend but no outcome (unattributed exploration) appear here but
-// map to no type segment — that is intentional, and the separate zero-token
-// tripwire (#136) surfaces such gaps.
+//
+// Issues with token spend but NO outcome appear here and map to no type segment,
+// because work_type is a property of the outcome — a spend-only issue has no category
+// to be filed under. That exclusion is structural, but it must never be silent: left
+// unreported it makes every per-type TIER better than the pooled score (#466), and
+// hides the thrash it is evidence of precisely where a reader would go looking for it.
+// The API reconciles the gap explicitly via
+// segment_reconciliation.no_outcome_cost_usd. Note this is NOT the same thing as
+// unattributed spend (IsUnattributed): that is cost which could not be tied to any
+// issue at all, whereas this is cost tied to a real issue that produced no outcome in
+// the window.
 func (d *DB) DeveloperIssueCosts(ctx context.Context, since time.Time) ([]DevIssueCost, error) {
-	return d.DeveloperIssueCostsWindow(ctx, since, time.Time{})
+	return d.DeveloperIssueCostsWindow(ctx, since, time.Time{}, FleetWide)
 }
 
 // DeveloperIssueCostsWindow is the half-open [since, until) form of
 // DeveloperIssueCosts (#276): the per-(developer, issue) cost the work-type
 // segmentation denominates on, bounded above by the same window as
 // DeveloperCostsWindow. A zero `until` is open-ended.
-func (d *DB) DeveloperIssueCostsWindow(ctx context.Context, since, until time.Time) ([]DevIssueCost, error) {
+func (d *DB) DeveloperIssueCostsWindow(ctx context.Context, since, until time.Time, scope RepoScope) ([]DevIssueCost, error) {
 	where, args := tsWindow(since, until)
+	scopeSQL, scopeArgs := scope.clause()
+	args = append(args, scopeArgs...)
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT
 			developer,
@@ -3091,7 +4488,7 @@ func (d *DB) DeveloperIssueCostsWindow(ctx context.Context, since, until time.Ti
 			SUM(cost_micro)                                                 AS total_cost,
 			SUM(CASE WHEN fidelity = 'realtime' THEN cost_micro ELSE 0 END) AS realtime_cost
 		FROM token_events
-		WHERE `+where+`
+		WHERE `+where+scopeSQL+`
 		GROUP BY developer, repo, issue_id`,
 		args...,
 	)
@@ -3132,14 +4529,114 @@ const (
 	UnattributedNoIssueBucket      = UnattributedIssueID + ":branch-without-issue"
 )
 
-// unattributedLikePattern matches the LABELED unattributed sub-buckets
+// UnattributedBuckets enumerates the LABELED sub-buckets, so a consumer can iterate
+// the family instead of hardcoding a copy of it (#466).
+//
+// 🔴 THIS EXISTS BECAUSE AN ALLOWLIST HARDCODED THE FAMILY. api.validateShippedIssueID
+// permits exactly the collector's canonical spellings on POST /api/v1/events; adding a
+// FIFTH bucket to internal/collector without touching that switch compiles cleanly, and
+// the collector then ships an id the endpoint 400s. That is not a degraded number: the
+// endpoint validates all-or-nothing, the shipper treats 4xx as terminal with no retry,
+// and it is stateless — so the next run rebuilds the identical batch and fails
+// identically, forever, losing 100% of that developer's capture. Everything that needs
+// the family iterates this slice, and TestUnattributedIssueIDMatchesStore compares it
+// element-wise with collector's mirror, so a one-sided addition fails the build.
+var UnattributedBuckets = []string{
+	UnattributedMainBucket,
+	UnattributedDetachedHEADBucket,
+	UnattributedNoIssueBucket,
+}
+
+// UnattributedFamily is the bare sentinel followed by every labeled sub-bucket — the
+// complete set of ids a legitimate producer may assign. Returned as a fresh slice so a
+// caller cannot mutate the package's own state.
+func UnattributedFamily() []string {
+	out := make([]string, 0, len(UnattributedBuckets)+1)
+	out = append(out, UnattributedIssueID)
+	return append(out, UnattributedBuckets...)
+}
+
+// unattributedGlobPattern matches the LABELED unattributed sub-buckets
 // (collector.UnattributedMain/DetachedHEAD/NoIssue) — every issue_id of the form
 // "unattributed:<reason>". The attributed/unattributed split (#234) and the bucket
 // breakdown MUST treat the whole family as unattributed: a `= UnattributedIssueID`
 // exact match would count the labeled buckets as ATTRIBUTED and silently inflate
-// coverage. Kept adjacent to the sentinel so the two never drift. ':' is a literal
-// in LIKE; only '%' and '_' are wildcards, and neither appears before the '%' here.
-const unattributedLikePattern = UnattributedIssueID + ":%"
+// coverage. Kept adjacent to the sentinel so the two never drift.
+//
+// GLOB, NOT LIKE — this is load-bearing (#466). SQLite's LIKE is ASCII
+// case-INSENSITIVE by default, so `LIKE 'unattributed:%'` also matches
+// "UNATTRIBUTED:MAIN" and "Unattributed:Main". GLOB is case-SENSITIVE and so agrees
+// exactly with the Go matcher IsUnattributed below. When the two disagreed, a forged
+// mixed-case sentinel was counted as unattributed by the SQL-side split (#234) and
+// simultaneously as spend-on-a-real-issue by the Go-side reconciliation (#466) — the
+// same dollar reported as two different, non-additive things in one response, with
+// the fabricated figure attached to a named developer. Case-blind sentinel matching
+// was never intended; the fix is to make SQL exact rather than to loosen Go. GLOB
+// metacharacters are '*', '?' and '['— none appears in this pattern, and ':' is a
+// literal.
+const unattributedGlobPattern = UnattributedIssueID + ":*"
+
+// unattributedFamilyPredicate is THE SQL family match, in one place. Every read that
+// splits attributed from unattributed spend embeds this exact string, and it binds two
+// args in order: UnattributedIssueID, then unattributedGlobPattern.
+//
+// It is a shared constant rather than two copies so a guard test can build its SQL
+// from the SAME text the queries use (TestUnattributedMatcherAgreesWithSQL), instead
+// of restating the operator and merely claiming to track it. Restating is how the
+// LIKE/GLOB drift survived its first guard: the constants matched, so a test that
+// shared only the constants stayed green while the queries diverged.
+const unattributedFamilyPredicate = `issue_id = ? OR issue_id GLOB ?`
+
+// IsUnattributed reports whether an issue id is the base unattributed sentinel or any
+// of its labeled sub-buckets — the in-Go mirror of the SQL family predicate
+// (`issue_id = ? OR issue_id GLOB ?`), for read paths that classify already-fetched
+// rows rather than filtering in SQL (the #466 segment reconciliation). Callers MUST
+// use this rather than an exact `== UnattributedIssueID` compare, or the labeled
+// buckets are mis-counted as attributed.
+//
+// This must stay semantically identical to that SQL predicate, not merely share its
+// constants. Constant equality is NOT sufficient: LIKE-vs-GLOB drift changed the
+// MATCHER while every constant still matched (#466). TestUnattributedMatcherAgreesWithSQL
+// pins the two by running a table of edge-case ids through the live SQL predicate and
+// this function, failing on any disagreement. It is also byte-identical to
+// collector.IsUnattributed, which cannot share code because collector imports store.
+func IsUnattributed(issueID string) bool {
+	return issueID == UnattributedIssueID ||
+		strings.HasPrefix(issueID, UnattributedIssueID+":")
+}
+
+// ResemblesUnattributed is the WRITE-side counterpart of IsUnattributed, and the one
+// predicate every ingest guard in the tree calls (#619). It reports whether a
+// client-supplied identifier merely LOOKS like the server-assigned sentinel family:
+// case-INSENSITIVELY, after trimming surrounding whitespace.
+//
+// 🔴 THE CONTAINMENT INVARIANT, which is what makes every caller sound: this must
+// reject a STRICT SUPERSET of what IsUnattributed matches. Rejecting more at ingest
+// than you match at read is the safe direction — the reverse is a hole, because a
+// value the read paths count as unattributed could then be written by a client.
+// api.TestWriteGuardStrictlyContainsTheReadMatcher pins it.
+//
+// IT LIVES HERE, BESIDE IsUnattributed, DELIBERATELY. It was three near-copies —
+// internal/api's, and internal/proxy's, each restating the rule on the theory that
+// "proxy cannot import internal/api". That was a false dichotomy: the shared rule
+// belongs to neither consumer, it belongs next to the sentinel it is about. store
+// imports only logsafe and repoid and is ALREADY in both packages' dependency graphs,
+// so there is no cycle. Copies of a security predicate drift, and the #466 postmortem
+// is precisely a story about a matcher drifting from its twin while every constant
+// still matched.
+//
+// The byte-slice is safe for a structural reason: fold-matching the 13-byte ASCII
+// prefix "unattributed:" requires 13 runes in 13 bytes, which forces all 13 to be
+// ASCII, so no multi-byte rune can ever fold INTO the prefix. Measured exhaustively —
+// no rune of "unattributed:" has a non-ASCII simple-fold partner in either direction.
+func ResemblesUnattributed(s string) bool {
+	t := strings.TrimSpace(s)
+	if strings.EqualFold(t, UnattributedIssueID) {
+		return true
+	}
+	prefix := UnattributedIssueID + ":"
+	return len(t) >= len(prefix) && strings.EqualFold(t[:len(prefix)], prefix)
+}
 
 // ModelClassCost is one (host, model) group's windowed cost and per-class token
 // totals — the raw, un-derived input to BuildCostComposition (#234). host and
@@ -3289,36 +4786,75 @@ func BuildCostComposition(rows []ModelClassCost) CostComposition {
 	return comp
 }
 
-// CostCompositionWindow aggregates token_events over the half-open [since, until)
-// window (#234) into the cost-composition sidecar: cost by normalized model, the
-// per-class token composition, and attributed vs unattributed spend, with the
-// cache-read and premium-model levers derived. A zero `until` is open-ended
-// (mirrors DeveloperCostsWindow). One GROUP BY over (host, model) — the same
-// idx_token_events index the scores path already scans — then BuildCost
-// composition does the pure folding and share math in Go (premium classification
-// is host-aware and lives in the price table, not SQL).
-func (d *DB) CostCompositionWindow(ctx context.Context, since, until time.Time) (CostComposition, error) {
+// costCompositionStmt builds the ENTIRE cost-composition read — predicates,
+// statement text, and binds — for the [since, until) window under scope.
+//
+// It exists as one named function, rather than as inline construction in
+// CostCompositionWindow, so that a test can EXPLAIN QUERY PLAN exactly what
+// production executes. The seam has to sit HERE, above predicate construction,
+// not merely around the SQL literal: a plan test that rebuilds the `where` clause
+// itself is still pinning a copy. Measured, not assumed — with the seam one level
+// lower (a costCompositionSQL(where, scopeSQL) taking an already-built predicate),
+// injecting `+ts >= ?` into the real predicate degraded the production plan from
+// SEARCH to SCAN and the plan test still PASSED, because the test built its own
+// `where`. SQLite's unary plus preserves the value exactly and strips index
+// affinity, so no behavioural test sees it either.
+//
+// Anything that shapes the read must therefore be inside this function.
+func costCompositionStmt(since, until time.Time, scope RepoScope) (string, []any) {
 	where, args := tsWindow(since, until)
+	scopeSQL, scopeArgs := scope.clause()
 	// The unattributed-family binds come first in text order, so their args lead
 	// the tsWindow bounds. Bound (not interpolated) even though they are trusted
 	// consts — keeps the one query-shaping convention uniform. The family match
 	// (exact base sentinel OR any "unattributed:<reason>" bucket) keeps the
 	// attributed/unattributed split correct after the labeled-bucket split — an
-	// exact `= ?` would count the buckets as attributed.
-	args = append([]any{UnattributedIssueID, unattributedLikePattern}, args...)
-	rows, err := d.db.QueryContext(ctx, `
+	// exact `= ?` would count the buckets as attributed. GLOB (not LIKE) so the match
+	// is case-SENSITIVE and agrees with Go's IsUnattributed — see
+	// unattributedGlobPattern (#466).
+	args = append([]any{UnattributedIssueID, unattributedGlobPattern}, args...)
+	// The scope predicate is the LAST term in text order, so its bind trails every
+	// other arg — including the unattributed-family binds prepended just above.
+	args = append(args, scopeArgs...)
+	return `
 		SELECT
 			host,
 			model,
 			SUM(cost_micro)                                                        AS cost,
-			SUM(CASE WHEN issue_id = ? OR issue_id LIKE ? THEN cost_micro ELSE 0 END) AS unattributed_cost,
+			SUM(CASE WHEN ` + unattributedFamilyPredicate + ` THEN cost_micro ELSE 0 END) AS unattributed_cost,
 			SUM(input_tok), SUM(output_tok), SUM(cache_read),
 			SUM(cache_write_5m), SUM(cache_write_1h)
 		FROM token_events
-		WHERE `+where+`
-		GROUP BY host, model`,
-		args...,
-	)
+		WHERE ` + where + scopeSQL + `
+		GROUP BY host, model`, args
+}
+
+// CostCompositionWindow aggregates token_events over the half-open [since, until)
+// window (#234) into the cost-composition sidecar: cost by normalized model, the
+// per-class token composition, and attributed vs unattributed spend, with the
+// cache-read and premium-model levers derived. A zero `until` is open-ended
+// (mirrors DeveloperCostsWindow). One GROUP BY over (host, model), then
+// BuildCostComposition does the pure folding and share math in Go (premium
+// classification is host-aware and lives in the price table, not SQL).
+//
+// Query plan, measured (#333, 2026-08-04) — NOT the same index DeveloperCostsWindow
+// uses, which an earlier revision of this comment claimed:
+//
+//	SEARCH token_events USING INDEX idx_token_events_ts_id (ts>?)
+//	USE TEMP B-TREE FOR GROUP BY
+//
+// i.e. a ts-window seek plus a per-row heap lookup for the summed columns, and a
+// sort to group (only ~9 distinct (host, model) pairs, so the sort — not the
+// grouping — is the cost). DeveloperCostsWindow instead rides
+// idx_token_events_scores, which leads with `developer`. The cost here is
+// WINDOW-proportional, and the #333 DECISION is to keep it that way, taken on the
+// measurement that it beats every index option. (The issue is still OPEN pending
+// the evidence being posted; this comment records the measurement, not a closure.)
+// See the handler's call site for the numbers before adding an index that leads
+// with (host, model).
+func (d *DB) CostCompositionWindow(ctx context.Context, since, until time.Time, scope RepoScope) (CostComposition, error) {
+	stmt, args := costCompositionStmt(since, until, scope)
+	rows, err := d.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return CostComposition{}, err
 	}
@@ -3359,15 +4895,17 @@ type UnattributedBucketCost struct {
 // bucket); attributed spend is excluded by construction. Name-carrying by design:
 // the handler suppresses the Developer names in team-aggregation mode (#185),
 // exactly as it does for the other per-developer data_quality fields.
-func (d *DB) UnattributedBucketCostsWindow(ctx context.Context, since, until time.Time) ([]UnattributedBucketCost, error) {
+func (d *DB) UnattributedBucketCostsWindow(ctx context.Context, since, until time.Time, scope RepoScope) ([]UnattributedBucketCost, error) {
 	where, args := tsWindow(since, until)
 	// Family binds lead the tsWindow bounds in text order (same convention as
-	// CostCompositionWindow).
-	args = append([]any{UnattributedIssueID, unattributedLikePattern}, args...)
+	// CostCompositionWindow); the scope predicate trails both.
+	args = append([]any{UnattributedIssueID, unattributedGlobPattern}, args...)
+	scopeSQL, scopeArgs := scope.clause()
+	args = append(args, scopeArgs...)
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT developer, issue_id, SUM(cost_micro) AS cost
 		FROM token_events
-		WHERE (issue_id = ? OR issue_id LIKE ?) AND `+where+`
+		WHERE (`+unattributedFamilyPredicate+`) AND `+where+scopeSQL+`
 		GROUP BY developer, issue_id`,
 		args...,
 	)
@@ -3410,12 +4948,14 @@ func (d *DB) UnattributedBucketCostsWindow(ctx context.Context, since, until tim
 // heap lookup for price_version (a window-bounded scan, same class as
 // CostCompositionWindow, see #333). Fine at single-tenant, window-bounded scale;
 // revisit alongside #333 if token_events grows.
-func (d *DB) DistinctPriceVersionsWindow(ctx context.Context, since, until time.Time) ([]int, error) {
+func (d *DB) DistinctPriceVersionsWindow(ctx context.Context, since, until time.Time, scope RepoScope) ([]int, error) {
 	where, args := tsWindow(since, until)
+	scopeSQL, scopeArgs := scope.clause()
+	args = append(args, scopeArgs...)
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT DISTINCT price_version
 		FROM token_events
-		WHERE `+where+` AND price_version > 0
+		WHERE `+where+` AND price_version > 0`+scopeSQL+`
 		ORDER BY price_version`,
 		args...,
 	)
@@ -3479,10 +5019,23 @@ type WindowActivity struct {
 // "unsupported Scan, storing driver.Value type string into type *time.Time".
 // The ORDER BY form is a direct column read, keeps the driver's type mapping, and
 // is equally cheap — it walks one row of the ts index rather than scanning.
-func (d *DB) CostCoverageStart(ctx context.Context) (time.Time, bool, error) {
+// Scoping (#590): under a non-FleetWide scope this reports the horizon of THAT
+// repository, not the installation's. Threading it is not cosmetic — an installation
+// capturing since January that onboarded a repo in June would otherwise answer
+// "January" for that repo and set window_predates_cost_capture=false, asserting a
+// scoped window is fully covered on the strength of a DIFFERENT repository's data,
+// and handing the operator a cost_coverage_safe_since months before the scope has any
+// data at all. That is this issue's own defect class relocated from the headline
+// figure into the annotation that exists to prevent silently-wrong coverage claims.
+func (d *DB) CostCoverageStart(ctx context.Context, scope RepoScope) (time.Time, bool, error) {
+	scopeSQL, scopeArgs := scope.clause()
+	// clause() is written to follow an existing predicate, so this read — which has
+	// no WHERE of its own — supplies a vacuous one rather than special-casing the
+	// fragment. `1 = 1` costs nothing and keeps a single clause shape in the package.
 	var ts sql.NullTime
 	err := d.db.QueryRowContext(ctx,
-		`SELECT ts FROM token_events ORDER BY ts LIMIT 1`,
+		`SELECT ts FROM token_events WHERE 1 = 1`+scopeSQL+` ORDER BY ts LIMIT 1`,
+		scopeArgs...,
 	).Scan(&ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
@@ -3510,8 +5063,14 @@ func (d *DB) CostCoverageStart(ctx context.Context) (time.Time, bool, error) {
 // row per source, rather than as a GROUP BY aggregate that would scan back as an
 // unparseable string. The source set is tiny and bounded by the Source*
 // constants, so the per-source round trip is cheaper than it looks.
-func (d *DB) SourceCoverageStart(ctx context.Context) (map[string]time.Time, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT DISTINCT source FROM token_events`)
+// Scoping (#590): same reasoning as CostCoverageStart. Left unscoped, a scoped
+// response would list capture sources that contributed nothing to the scope — I
+// measured a scoped response advertising a `proxy` horizon when every proxy row had
+// been strictly excluded by that same scope.
+func (d *DB) SourceCoverageStart(ctx context.Context, scope RepoScope) (map[string]time.Time, error) {
+	scopeSQL, scopeArgs := scope.clause()
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT DISTINCT source FROM token_events WHERE 1 = 1`+scopeSQL, scopeArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -3540,8 +5099,10 @@ func (d *DB) SourceCoverageStart(ctx context.Context) (map[string]time.Time, err
 	out := make(map[string]time.Time, len(sources))
 	for _, src := range sources {
 		var ts sql.NullTime
+		// Scope trails the source bind, matching text order.
 		err := d.db.QueryRowContext(ctx,
-			`SELECT ts FROM token_events WHERE source = ? ORDER BY ts LIMIT 1`, src,
+			`SELECT ts FROM token_events WHERE source = ?`+scopeSQL+` ORDER BY ts LIMIT 1`,
+			append([]any{src}, scopeArgs...)...,
 		).Scan(&ts)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -3648,7 +5209,14 @@ const tokenTotalsBatchSize = 240
 //
 // Returned map omits pairs with no matching events; the caller treats an absent
 // key as a zero total.
-func (d *DB) OutcomeTokenTotals(ctx context.Context, outcomes []Outcome) (map[DevIssue]int64, error) {
+// Scoping (#590): under a non-FleetWide scope the per-window predicate goes STRICT —
+// the 'unqualified' sentinel is no longer admitted. This matters because the tripwire
+// is a data-quality signal, not just a cost figure: leaving the join tolerant inside a
+// scoped read would let a repo-blind token row belonging to some OTHER repository
+// "fund" a scoped outcome and suppress a zero-token flag that should have fired. A
+// false negative on a tripwire is worse than a missing one, so a scoped read tolerates
+// nothing it cannot attribute.
+func (d *DB) OutcomeTokenTotals(ctx context.Context, outcomes []Outcome, scope RepoScope) (map[DevIssue]int64, error) {
 	totals := map[DevIssue]int64{}
 	if len(outcomes) == 0 {
 		return totals, nil
@@ -3747,10 +5315,18 @@ func (d *DB) OutcomeTokenTotals(ctx context.Context, outcomes []Outcome) (map[De
 				sb.WriteString(" OR ")
 			}
 			w := windows[k]
-			if repoid.IsReal(k.repo) {
+			switch {
+			case !scope.IsFleetWide():
+				// Scoped (#590): strict, and bound to the SCOPE rather than to k.repo.
+				// Binding the scope is what makes this defensive rather than merely
+				// consistent — a caller that hands us an out-of-scope outcome cannot
+				// pull that repository's tokens in through the back door.
+				sb.WriteString("(issue_id = ? AND ts >= ? AND ts <= ? AND repo = ?)")
+				args = append(args, k.issue, w.low, w.high, scope.String())
+			case repoid.IsReal(k.repo):
 				sb.WriteString("(issue_id = ? AND ts >= ? AND ts <= ? AND (repo = ? OR repo = 'unqualified'))")
 				args = append(args, k.issue, w.low, w.high, k.repo)
-			} else {
+			default:
 				sb.WriteString("(issue_id = ? AND ts >= ? AND ts <= ?)")
 				args = append(args, k.issue, w.low, w.high)
 			}
@@ -3882,7 +5458,7 @@ func (d *DB) DeveloperOutcomes(ctx context.Context, developer string, since time
 
 // AllOutcomesSince returns all outcomes since the given time.
 func (d *DB) AllOutcomesSince(ctx context.Context, since time.Time) ([]Outcome, error) {
-	return d.AllOutcomesWindow(ctx, since, time.Time{})
+	return d.AllOutcomesWindow(ctx, since, time.Time{}, FleetWide)
 }
 
 // AllOutcomesWindow is the half-open [since, until) form of AllOutcomesSince
@@ -3896,8 +5472,10 @@ func (d *DB) AllOutcomesSince(ctx context.Context, since time.Time) ([]Outcome, 
 // upper bound. Its 14-day look-back intentionally reaches BEFORE `since` (tokens
 // spent last month can fund this month's merge); that is a data-quality window,
 // not a reporting window, and must not be clamped to since.
-func (d *DB) AllOutcomesWindow(ctx context.Context, since, until time.Time) ([]Outcome, error) {
+func (d *DB) AllOutcomesWindow(ctx context.Context, since, until time.Time, scope RepoScope) ([]Outcome, error) {
 	where, args := tsWindow(since, until)
+	scopeSQL, scopeArgs := scope.clause()
+	args = append(args, scopeArgs...)
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT developer, issue_id, COALESCE(pr_number,0), weight, quality,
 		       COALESCE(weight_source, 'legacy'), COALESCE(additions, 0),
@@ -3905,7 +5483,7 @@ func (d *DB) AllOutcomesWindow(ctx context.Context, since, until time.Time) ([]O
 		       COALESCE(source, 'github-webhook'),
 		       COALESCE(work_type, 'feature'), COALESCE(work_type_source, 'legacy'),
 		       COALESCE(repo, 'unqualified'), ts
-		FROM outcomes WHERE `+where, args...,
+		FROM outcomes WHERE `+where+scopeSQL, args...,
 	)
 	if err != nil {
 		return nil, err
@@ -4794,11 +6372,30 @@ func (d *DB) DivisionsForDevelopers(ctx context.Context) (map[string]string, err
 // itself be a canonical. This method is the sole enforcement point for that
 // invariant, so the score-join read path can trust one lookup resolves fully.
 //
-// BEGIN IMMEDIATE (via LevelSerializable, matching the schema-rebuild and
-// backfill transactions elsewhere in this file) takes the write lock up front
-// so the chain check and the upsert are one atomic unit -- two racing calls
-// can't each pass the check and then jointly form a chain. SetMaxOpenConns(1)
-// already serialises writers, so this is belt-and-braces, not the sole guard.
+// 🔴 THE CHECK-THEN-ACT IS ATOMIC ACROSS PROCESSES ONLY BECAUSE OF THE WRITE
+// LOCK. In-process, SetMaxOpenConns(1) is what stops two racing calls from each
+// passing the chain check and jointly forming a chain; it says nothing about a
+// second process. This site formerly passed
+// sql.TxOptions{Isolation: sql.LevelSerializable} and its comment claimed that
+// took the lock up front — it did not. modernc.org/sqlite ignores
+// sql.TxOptions.Isolation entirely (newTx reads only opts.ReadOnly and the
+// connection-global beginMode, which comes solely from a `_txlock` DSN parameter
+// this store does not set), so that transaction was DEFERRED and the
+// deferred-to-write upgrade failed with an unretried SQLITE_BUSY_SNAPSHOT (517).
+//
+// ⚠️ IT USES beginImmediateBounded, NOT beginImmediate, AND THAT IS DELIBERATE —
+// this is REQUEST PATH. ctx here is r.Context() (handlePostDeveloperAlias,
+// internal/api/handler.go), and the promote is NOT bounded by ctx: at the DSN's
+// busy_timeout a contended promote blocks ~5s (measured 5.08s even under a 300ms
+// deadline), and with SetMaxOpenConns(1) that stalls every OTHER in-flight
+// request in the process too, with a client disconnect unable to shorten it.
+// The bounded helper caps that wait at requestPathBusyTimeout. Do not "simplify"
+// this to beginImmediate — and that is no longer a bare instruction:
+// TestRequestPathWritersTakeTheBoundedWriteLock/UpsertDeveloperAlias fails on
+// BOTH the reverts that were measured to survive the whole tree — back to
+// `BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})` (it stops
+// wrapping ErrWriteLockUnavailable) and sideways to unbounded beginImmediate (it
+// stops returning inside the cap).
 func (d *DB) UpsertDeveloperAlias(ctx context.Context, alias, canonical string) error {
 	if alias == "" {
 		return errors.New("developer_alias: alias must not be empty")
@@ -4810,11 +6407,11 @@ func (d *DB) UpsertDeveloperAlias(ctx context.Context, alias, canonical string) 
 		return errors.New("developer_alias: alias and canonical must differ")
 	}
 
-	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	// Chain guard, single-hop invariant:
 	//   1. canonical must not already be an alias (else alias -> canonical -> X).
@@ -4909,6 +6506,24 @@ func (d *DB) DeveloperAliases(ctx context.Context) (map[string]string, error) {
 //     without a real re-derivation story — the bodies are keyed by delivery, not
 //     developer, and carry third-party (not data-subject) identifiers.
 //   - watcher_checkpoint — derived operational tail-state, no developer column.
+//   - reprice_audit / reprice_row_audit — cost-only ledgers with no developer
+//     column and no other identifier (#294).
+//   - repo_repair_row_audit — the #493 per-row before-image ledger. It carries
+//     only (repair_id, token_event_id, old_repo, new_repo): no developer column
+//     and, deliberately, no session_id — see its schema comment for why copying
+//     one in would have created erasure-proof personal data. Its parent
+//     repo_repair_audit rows ARE erased below, so nothing developer-identifying
+//     survives; what remains is a dangling integer row id, exactly like
+//     reprice_row_audit.
+//   - cost_correction_audit — the #346 sanctioned cost-correction ledger. No
+//     developer column and, deliberately, no idempotency_key (client-chosen
+//     and potentially personal-data-bearing) — see its schema comment, the
+//     SAME reasoning as repo_repair_row_audit's session_id exclusion above.
+//     token_event_id is server-generated and simply stops resolving once the
+//     row it names is erased or pruned. actor/reason name and explain the
+//     OPERATOR who made the correction — a third party to the data subject
+//     whose spend was corrected, the same class as webhook_payloads' third-
+//     party identifiers, not personal data ABOUT the subject.
 //
 // developer_alias is handled separately (it is keyed by alias/canonical, not a
 // `developer` column) but is equally covered by both erase and export.
@@ -4920,6 +6535,13 @@ var developerPIITables = []string{
 	"period_membership",
 	"quality_events",
 	"quality_history",
+	// #493: repo_repair_audit names the developer whose cost rows a
+	// `tierd repair-repo` run re-attributed, alongside the repositories their
+	// spend moved into — personal data by the same reasoning as every table
+	// above, and reachable by the same `developer IN (…)` shape. Added in the
+	// SAME change that created the table, because a table that lands here late
+	// is a compliance hole for exactly as long as it takes someone to notice.
+	"repo_repair_audit",
 }
 
 // rowQuerier is the read surface shared by *sql.DB and *sql.Tx, so the
@@ -5006,17 +6628,37 @@ func inClause(ids []string) (placeholders string, args []any) {
 // with no rows, deletes nothing, and returns all-zero counts with no error. The
 // API layer maps an all-zero result to 404.
 //
-// Isolation LevelSerializable (BEGIN IMMEDIATE) takes the write lock up front so
-// the alias read and the cascade are one atomic unit, matching UpsertDeveloperAlias.
+// 🔴 The alias read and the cascade are one atomic unit against another PROCESS
+// only because beginImmediateBounded holds the write lock from the first
+// statement; in-process, SetMaxOpenConns(1) is what serialises it. This site
+// formerly passed sql.TxOptions{Isolation: sql.LevelSerializable} and claimed
+// that was "BEGIN IMMEDIATE ... takes the write lock up front". It was not:
+// modernc.org/sqlite never reads sql.TxOptions.Isolation, so the transaction was
+// DEFERRED and took no lock until its first DELETE, and cross-process the
+// read-then-write degraded to an unretried SQLITE_BUSY_SNAPSHOT (517) — a FAILED
+// erasure rather than a partial one (the tx was still all-or-nothing), but an
+// opaque one.
+//
+// ⚠️ BOUNDED, NOT PLAIN beginImmediate, BECAUSE THIS IS REQUEST PATH. ctx is
+// r.Context() (handleEraseDeveloper, internal/api/handler.go) and the promote is
+// NOT bounded by ctx: at the DSN's busy_timeout a contended promote blocks ~5s
+// (measured 5.08s even under a 300ms deadline), and with SetMaxOpenConns(1) that
+// stalls every OTHER in-flight request in the process behind the single
+// connection. requestPathBusyTimeout caps it. Do not "simplify" to beginImmediate
+// — TestRequestPathWritersTakeTheBoundedWriteLock/EraseDeveloper fails on BOTH the
+// reverts that were measured to survive the whole tree: back to
+// `BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})` (it stops
+// wrapping ErrWriteLockUnavailable) and sideways to unbounded beginImmediate (it
+// stops returning inside the cap).
 func (d *DB) EraseDeveloper(ctx context.Context, id string) (map[string]int64, error) {
 	if id == "" {
 		return nil, errors.New("EraseDeveloper: id must not be empty")
 	}
-	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	canonical, ids, err := developerIdentifierSet(ctx, tx, id)
 	if err != nil {
@@ -5076,7 +6718,14 @@ type DeveloperExport struct {
 	PeriodMembership []ExportPeriodMembership `json:"period_membership"`
 	QualityEvents    []ExportQualityEvent     `json:"quality_events"`
 	QualityHistory   []ExportQualityHistory   `json:"quality_history"`
-	DeveloperAlias   []ExportDeveloperAlias   `json:"developer_alias"`
+	// RepoRepairAudit is the #493 ledger of every `tierd repair-repo` run that
+	// re-attributed THIS person's cost rows to a repository. Disclosed because a
+	// record saying "N of your rows and $X of your spend were moved into
+	// owner/repo by this binary on this date" is personal data about the subject,
+	// and because a DSAR that omitted it would leave the subject unable to see a
+	// retroactive change to how their own spend is attributed.
+	RepoRepairAudit []ExportRepoRepairAudit `json:"repo_repair_audit"`
+	DeveloperAlias  []ExportDeveloperAlias  `json:"developer_alias"`
 }
 
 // RowCount is the total number of stored rows in the export across every table.
@@ -5084,7 +6733,7 @@ type DeveloperExport struct {
 func (e DeveloperExport) RowCount() int {
 	return len(e.TokenEvents) + len(e.Outcomes) + len(e.ActualSpend) +
 		len(e.OrgHierarchy) + len(e.PeriodMembership) + len(e.QualityEvents) +
-		len(e.QualityHistory) + len(e.DeveloperAlias)
+		len(e.QualityHistory) + len(e.RepoRepairAudit) + len(e.DeveloperAlias)
 }
 
 // Export row types mirror the STORED columns of each PII table (not the insert
@@ -5170,6 +6819,22 @@ type ExportQualityHistory struct {
 	Reason     string    `json:"reason"`
 	SourceRef  string    `json:"source_ref"`
 	Timestamp  time.Time `json:"ts"`
+}
+
+// ExportRepoRepairAudit mirrors one stored repo_repair_audit row (#493): one
+// `tierd repair-repo` run's effect on ONE target repository for this subject.
+// RepairID correlates it with the per-row before-images in repo_repair_row_audit
+// (which hold no personal data of their own — see that table's schema comment).
+type ExportRepoRepairAudit struct {
+	ID           int64     `json:"id"`
+	RepairID     string    `json:"repair_id"`
+	Developer    string    `json:"developer"`
+	FromRepo     string    `json:"from_repo"`
+	ToRepo       string    `json:"to_repo"`
+	RowCount     int64     `json:"row_count"`
+	CostMicroSum int64     `json:"cost_micro_sum"`
+	ToolVersion  string    `json:"tool_version"`
+	Timestamp    time.Time `json:"ts"`
 }
 
 type ExportDeveloperAlias struct {
@@ -5315,6 +6980,23 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 				return err
 			}
 			exp.QualityHistory = append(exp.QualityHistory, r)
+			return nil
+		}); err != nil {
+		return DeveloperExport{}, err
+	}
+
+	// repo_repair_audit (#493)
+	if err := d.queryRows(ctx,
+		`SELECT id, repair_id, developer, from_repo, to_repo, row_count,
+		        cost_micro_sum, tool_version, ts
+		 FROM repo_repair_audit WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
+		func(rows *sql.Rows) error {
+			var r ExportRepoRepairAudit
+			if err := rows.Scan(&r.ID, &r.RepairID, &r.Developer, &r.FromRepo, &r.ToRepo,
+				&r.RowCount, &r.CostMicroSum, &r.ToolVersion, &r.Timestamp); err != nil {
+				return err
+			}
+			exp.RepoRepairAudit = append(exp.RepoRepairAudit, r)
 			return nil
 		}); err != nil {
 		return DeveloperExport{}, err

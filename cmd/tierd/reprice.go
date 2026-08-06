@@ -27,6 +27,12 @@ package main
 //   - Every committed run writes two ledgers: reprice_audit (one row per affected
 //     price_version — the per-version aggregate shift) and reprice_row_audit (one
 //     before-image per changed row: its exact old cost/version/billing_mode).
+//   - Rows whose cost is NOT derived from their token counts are never touched,
+//     at any --from-version: caller-authoritative manual imports (source='api',
+//     which is where a #346 sanctioned cost correction lives) and money-carrying
+//     rows with no token counts. Re-deriving those does not correct them, it
+//     recomputes them to $0.00. The report names how many were protected, so an
+//     operator can tell "protected" from "did not match the floor".
 //
 // OPERATIONAL NOTES:
 //   - The per-row reprice_row_audit before-images make a reprice reversible at row
@@ -48,9 +54,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -101,7 +107,7 @@ func runRepriceCmd(args []string, stdout, stderr io.Writer) int {
 			*pricesPath, info.Version, info.EffectiveDate, info.ModelCount)
 	} else {
 		info := store.ActivePriceTableInfo()
-		_, _ = fmt.Fprintf(stderr, "price table: embedded default (version %d, %s, %d models)\n",
+		_, _ = fmt.Fprintf(stderr, store.EmbeddedPriceStampFormat+"\n",
 			info.Version, info.EffectiveDate, info.ModelCount)
 	}
 
@@ -125,7 +131,21 @@ func runRepriceCmd(args []string, stdout, stderr io.Writer) int {
 		ToolVersion:  versionString(),
 	})
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "reprice: %v\n", err)
+		// logsafe.Err, not %v. store.Reprice's GUESS-gate error interpolates the
+		// missing model names, which are producer-controlled, and this is the sink
+		// that prints them. The store side sanitizes at construction (the repo
+		// convention), so the common case is quoted twice — accepted deliberately:
+		// this sink also carries errors nobody enumerated (driver errors that echo
+		// column values, price-table parse errors naming a model), and a barrier
+		// that only holds for the errors someone thought of is the defect this
+		// review found. Legibility cost is one extra pair of quotes on stderr.
+		//
+		// ⚠️ NOT INDEPENDENTLY TESTED, and that is measured rather than assumed:
+		// reverting this to %v leaves TestRunRepriceCmd_StderrIsNotForgeable green,
+		// because the one error reachable here is already sanitized by the store.
+		// Exercising this wrap would need fault injection the command has no seam
+		// for. Keep it anyway — see that test's doc for the full reasoning.
+		_, _ = fmt.Fprintf(stderr, "reprice: %s\n", logsafe.Err(err))
 		return 1
 	}
 
@@ -145,13 +165,29 @@ func printRepriceResult(w io.Writer, res store.RepriceResult) {
 	}
 	_, _ = fmt.Fprintf(w, "reprice %s: from-version %d -> active table version %d (effective %s)\n",
 		verb, res.FromVersion, res.ToVersion, res.EffectiveDate)
-	_, _ = fmt.Fprintf(w, "  examined %d row(s) priced >= v%d; %d %s\n",
-		res.RowCount, res.FromVersion, res.ChangedRowCount, changeVerb)
+	_, _ = fmt.Fprintf(w, "  examined %d of %d row(s) priced >= v%d; %d %s\n",
+		res.RowCount, res.RowCount+res.ExcludedRowCount, res.FromVersion, res.ChangedRowCount, changeVerb)
+
+	// Rows the floor MATCHED but that are never re-derived, because their cost is
+	// not a function of their token counts (see store.repriceExcludedWhereSQL).
+	// Reported unconditionally so a protected row reads as protected rather than
+	// as a row that quietly failed to exist — the difference between "your
+	// finance corrections are safe" and "where did my rows go".
+	if res.ExcludedRowCount > 0 {
+		_, _ = fmt.Fprintf(w, "  protected %d row(s) at or above the floor from repricing: caller-authoritative manual imports (source=api, e.g. #346 cost corrections) and money-carrying rows with no token counts. Their cost is not derived from tokens, so re-deriving it would zero it.\n",
+			res.ExcludedRowCount)
+	}
 
 	// Distinguish "the floor matched no rows" (likely a mis-typed --from-version)
 	// from "rows matched but were already correctly priced" — reporting the former
-	// as the latter would mask an operator's typo as a successful no-op.
+	// as the latter would mask an operator's typo as a successful no-op. A floor
+	// whose only matches were PROTECTED is a third case and must not be reported
+	// as the first: the rows do exist and the flag was not wrong.
 	if res.RowCount == 0 {
+		if res.ExcludedRowCount > 0 {
+			_, _ = fmt.Fprintf(w, "  every row with price_version >= v%d is protected from repricing (above) — nothing to reprice, and --from-version is not the problem\n", res.FromVersion)
+			return
+		}
 		_, _ = fmt.Fprintf(w, "  no rows have price_version >= v%d — nothing examined (check --from-version)\n", res.FromVersion)
 		return
 	}
@@ -195,11 +231,40 @@ func printRepriceResult(w io.Writer, res store.RepriceResult) {
 	_, _ = fmt.Fprintln(w, "  NOTHING was written. Re-run with --commit to apply this reprice.")
 }
 
-// joinOrNone renders a developer list for the report, collapsing an empty set to a
-// readable placeholder rather than a blank line.
-func joinOrNone(devs []string) string {
-	if len(devs) == 0 {
+// maxListedInReport bounds how many developers or models this report names
+// before collapsing the rest to a count.
+//
+// Deliberately far larger than doctor's 3. The GUESSED-MODEL warning exists to
+// tell an operator EXACTLY which models to add to prices.yaml; a list cut at
+// three sends them round the loop repeatedly, discovering one more missing model
+// per reprice. It is still capped, because the model strings come from
+// token_events — producer-controlled and unbounded in cardinality — so an
+// uncapped list is a terminal flood with an operator-facing excuse.
+const maxListedInReport = 20
+
+// joinOrNone renders a developer or model list for the report, collapsing an
+// empty set to a readable placeholder rather than a blank line.
+//
+// 🔴 EVERY ELEMENT GOES THROUGH THE logsafe BARRIER (#321 review, 2026-08-04).
+// It did not, and that was a live forgery: POST /api/v1/events accepts CR/LF in
+// `developer` and `model` (internal/api/events.go validates non-empty and a
+// length cap, and applies no charset check anywhere), those values land in
+// token_events, and this report reads them back and Fprintf's them with nothing
+// that quotes. A reviewer posted a CRLF payload through the real handler, read it
+// back from the real store, ran the real CLI, and got a standalone forged
+//
+//	time=... level=ERROR msg="reprice COMMITTED" rows=40000 repriced_by=root
+//
+// record in the raw stdout of a DRY RUN whose own final line says "NOTHING was
+// written." The sibling report in repairrepo.go, which already wrapped, produced
+// one physical line from the identical string — the format is not inherently
+// unforgeable, the missing wrap was the whole cause.
+//
+// TestPrintRepriceResult_NotForgeable and TestPrintRepairResult_NotForgeable in
+// report_forge_test.go fail if either report loses its wrap.
+func joinOrNone(vals []string) string {
+	if len(vals) == 0 {
 		return "(none)"
 	}
-	return strings.Join(devs, ", ")
+	return logsafe.Join(vals, maxListedInReport)
 }

@@ -38,7 +38,8 @@
       --grid: #23272d;
       --text: #e8eaed;
       --text-muted: #8b939c;
-      --text-faint: #5c646d;
+      --text-faint: #7a828b;   /* AA 4.5:1 on --surface, its worst TEXT background (#534). --grid 3.85 and
+         --border 3.46 are lower, and are where the non-text roles sit at a 3.0:1 bar. */
       --yield: #3ddc84;        /* GREEN -- yield only */
       --yield-dim: #1f6b43;    /* below-floor / track fill for yield */
       --trust: #f0a935;        /* AMBER -- fidelity, data quality */
@@ -60,7 +61,9 @@
       --grid: #e6eaef;
       --text: #10151b;
       --text-muted: #5a636d;
-      --text-faint: #99a2ac;
+      --text-faint: #69727c;   /* AA 4.5:1 on --bg, its worst TEXT background (#534) -- and only just:
+         4.51:1. Darkening --bg breaks it. --grid 4.04 / --border 3.61 are lower and
+         carry the non-text roles at a 3.0:1 bar. */
       --yield: #1a8f4e;
       --yield-dim: #a9e2c2;
       --trust: #b56a06;
@@ -80,7 +83,7 @@
       :root:not([data-theme]) {
         --bg: #f4f6f8; --surface: #ffffff; --surface-2: #f0f3f6;
         --border: #d8dee5; --grid: #e6eaef; --text: #10151b;
-        --text-muted: #5a636d; --text-faint: #99a2ac; --yield: #1a8f4e;
+        --text-muted: #5a636d; --text-faint: #69727c; --yield: #1a8f4e;
         --yield-dim: #a9e2c2; --trust: #b56a06; --trust-bg: #fdf4e3;
         --trust-border: #e8c383; --accent: #2563eb; --accent-strong: #1d4ed8;
         --danger: #c23a30; --danger-bg: #fdecea; --danger-border: #f0b4ae;
@@ -181,7 +184,7 @@
        detail: caveat prose wraps more as the viewport narrows, so a NARROWER
        window puts the KPI row LOWER than these figures, never higher.
 
-       ⚠️ MOBILE IS DELIBERATELY A SCROLL EXPERIENCE — Steve ruled 2026-07-29.
+       ⚠️ MOBILE IS DELIBERATELY A SCROLL EXPERIENCE — the maintainer ruled 2026-07-29.
        At 390px the band alone measures ~497px (same Chrome method), so the KPI row cannot be brought above
        the fold on a phone by any amount of chrome tuning; the only lever left is
        folding caveat sub-prose, and that is exactly what
@@ -225,7 +228,12 @@
     }
     /* The collective frame line: what turns four alarms into one instrument
        reporting on itself. Never faint -- it is the sentence that reclassifies
-       everything below it, and --text-faint fails WCAG AA in both themes. */
+       everything below it, and the faint tier is the page's QUIETEST voice.
+       ⚠️ The reason used to be stated as "--text-faint fails WCAG AA in both themes".
+       That became false when #534 fixed the token, and the rule it justified did not
+       change -- so the sentence was preserved and its reason corrected. A comment that
+       outlives its own justification is how a rule gets deleted by someone who checks
+       the reason, finds it untrue, and reasonably concludes the rule lapsed too. */
     #dq-frame {
       margin: 0 0 0.5rem; padding-bottom: 0.45rem;
       font-size: 0.78rem; color: var(--text);
@@ -479,12 +487,16 @@
        trust a headline drawn from a small slice of spend. Complements, does not
        replace, the red #354 coverage banner. */
     .kpi .kpi-value.provisional { opacity: 0.45; }
-    /* NO SCORE headline: spend but no accepted outcome. Reads as a faint label,
-       not a green number, so it can never be mistaken for a yield of zero. Drops
-       the oversized numeric scale and the --yield green (both inherited from
-       .kpi-value.yield). */
+    /* Withheld-headline treatment. Reads as a faint label, not a green number, so
+       it can never be mistaken for a yield of zero. Drops the oversized numeric
+       scale and the --yield green (both inherited from .kpi-value.yield). ONE
+       class for all three causes -- NO SCORE (#500), FREE (#499) and the
+       below-evidence-floor badge (#502) -- so "there is no headline number here"
+       has a single visual vocabulary. line-height is restored from .kpi-value's
+       1, because these are wrapping phrases, not one-line numerals: at 1 the
+       lines of a wrapped badge touch. */
     .kpi .kpi-value.kpi-noscore { font-size: 1.0rem; font-weight: 600;
-      letter-spacing: 0.06em; color: var(--text-faint); }
+      letter-spacing: 0.06em; color: var(--text-faint); line-height: 1.3; }
     .kpi .kpi-sub.provisional-note { color: var(--danger); }
 
     /* Capture-fidelity meter -- amber, because fidelity is a trust metric. */
@@ -520,6 +532,18 @@
       display: grid; grid-template-columns: minmax(72px, 34%) 1fr auto;
       align-items: center; gap: 0.55rem; padding: 0.28rem 0;
     }
+    /* Text carried by a row for screen readers only: the ranking verdict, which a
+       sighted reader gets from the muted colour of everything else in the row
+       (WCAG 2.1 SC 1.4.1). Clipped, NOT display:none — display:none would drop it
+       from the accessibility tree, which is the only place it is meant to exist.
+       position:absolute also takes it out of .ybar-row's 3-column grid, so it
+       cannot open a fourth track. Same recipe as .dq-sr; kept separate because the
+       two are read by different components and neither should silently restyle
+       the other. */
+    .ybar-sr {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip-path: inset(50%); white-space: nowrap;
+    }
     .ybar-label {
       font-size: 0.8rem; white-space: nowrap; overflow: hidden;
       text-overflow: ellipsis; min-width: 0;
@@ -536,9 +560,21 @@
       position: absolute; top: 0; left: 0; height: 100%;
       border-radius: 4px; background: var(--yield); min-width: 2px;
     }
-    /* Below the ranking floor: muted fill so a low-evidence number can never be
-       mistaken for a ranked, green yield. */
-    .ybar-fill.below { background: var(--text-faint); }
+    /* Below the ranking floor: an OUTLINE, not a fill (#534).
+       🔴 It was a muted fill, and the AA fix broke it. Measured light theme, both
+       marks on the --grid track: ranked --yield #1a8f4e is 3.42:1, while the AA-passing
+       faint #69727c is 4.04:1 — so the below-floor bar OUT-CONTRASTED the ranked one
+       (salience ratio 1.60x before, 0.85x after). The lowest-evidence row carried the
+       heaviest mark in the panel, which is the exact inverse of the rule that a
+       below-floor value must never read as full-authority evidence.
+       An unfilled bar reads as "not a ranked measurement" at ANY grey value, so the
+       subordination stops depending on a knife-edge contrast window (the accessible-
+       and-subordinate band against light --yield is only 3.0-3.4). A 1px stroke is
+       judged at 3.0:1 under SC 1.4.11, which the token clears in both themes
+       (3.85 dark / 4.04 light on --grid). Same channel .cmp-db-dot.a and
+       .cmp-db-connect.insignificant already use -- this makes the panel consistent
+       rather than adding a convention. */
+    .ybar-fill.below { background: transparent; border: 1px solid var(--text-faint); }
 
     /* 95%-CI whisker: end caps + connecting rule, positioned from ci_low/ci_high
        on the SAME scale as the bar. Only ranked developer rows carry a CI. */
@@ -572,8 +608,14 @@
        rule above (.ybar-value.below .ybar-tier, specificity 0,3,0) would
        otherwise win the color/weight cascade over a bare .ybar-noscore (0,1,0)
        and mute the label back to a number's styling. */
+    /* weight 500, not 600 (#534). This sits beside .ybar-cpp, which is --text-muted
+       at weight 400. The faint tier is meant to read as the QUIETER of the two, and it
+       did while the lightness gap was ΔL* 18.6 — enough to overcome a 200-unit weight
+       gap. The AA fix narrows that gap to ΔL* 6.6, at which point 600-vs-400 wins and
+       the "weaker" tier renders as the heavier mark on the same row. The uppercase and
+       tracking already say "label, not a number", so the extra weight was redundant. */
     .ybar-value.below .ybar-noscore,
-    .ybar-noscore { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em;
+    .ybar-noscore { font-size: 0.62rem; font-weight: 500; letter-spacing: 0.06em;
                     text-transform: uppercase; color: var(--text-faint); }
     .ybar-cpp { font-size: 0.68rem; line-height: 1.1; color: var(--text-muted); }
 
@@ -636,6 +678,20 @@
     }
     .cmp-total-value { font-size: 1.6rem; font-weight: 700; line-height: 1; }
     .cmp-total-sub { font-size: 0.72rem; color: var(--text-muted); }
+    /* Off-screen text stating that a cell's reading is WITHHELD below the ranking
+       floor (#605), so the verdict is not a sighted-only affordance. Clipped, NOT
+       display:none — display:none would drop it from the accessibility tree, which
+       is the only place it is meant to exist. An aria-label would not do: a
+       .cmp-total-cell is a bare <div>, i.e. role="generic", and the accessible-name
+       computation refuses to name a generic element, so the label would be computed
+       and discarded. position:absolute also takes it out of the cell's flex column
+       so it cannot open a fourth line. Same recipe as .ybar-sr and .dq-sr; kept
+       separate because the three are read by different components and none should
+       silently restyle the others. */
+    .cmp-total-sr {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip-path: inset(50%); white-space: nowrap;
+    }
     /* Δ direction: green only for an INCREASE in yield (green stays yield-only);
        danger for a decrease; muted for flat. Applied to the delta cell only. */
     .cmp-delta.up { color: var(--yield); }
@@ -663,8 +719,24 @@
     .cmp-legend .lg-a { background: transparent; border: 2px solid var(--text-faint); }
     .cmp-legend .lg-b { background: var(--accent); }
 
+    /* 🔴 The third track is FIXED, not `auto` (#613). Each row is its own grid
+       container -- #cmp-rows is a plain block, no subgrid -- so an `auto` third
+       column is sized by THAT ROW's content, and the 1fr track absorbs the
+       difference. Withholding changes what column 3 contains ('below ranking floor'
+       and a pair of em dashes are narrower than 'aggregate - not tested' beside
+       "17.5 -> 19.8"), so a withheld row got a WIDER track and the same TIER landed
+       at a different screen x than on the row above it. The dumbbells are sold as a
+       SHARED scale; a per-row track silently makes them three different scales.
+       The ruling's "layout must not reflow" was being met vertically and violated
+       horizontally.
+       Fixed at 7.5rem: wide enough for the longest TEAM-mode tag. The developer
+       row's combined below-floor tag ('below ranking floor, no outcomes in selected')
+       is ~43 chars and DOES wrap here, deliberately -- a wrapped tag is cosmetic, a
+       shifted scale is a comparison defect, and only one of the two can be avoided
+       while each row is its own grid container. text-align on .cmp-db-value keeps a
+       wrapped tag flush right with the cells above it. */
     .cmp-db-row {
-      display: grid; grid-template-columns: minmax(72px, 22%) 1fr minmax(96px, auto);
+      display: grid; grid-template-columns: minmax(72px, 22%) 1fr 7.5rem;
       align-items: center; gap: 0.6rem; padding: 0.4rem 0;
     }
     .cmp-db-label {
@@ -706,11 +778,30 @@
     .cmp-db-dot.b { background: var(--accent); }
     .cmp-db-dot.b.up { background: var(--yield); }
     .cmp-db-dot.b.down { background: var(--danger); }
-    .cmp-db-dot.b.below { background: var(--text-faint); }
+    /* Below the ranking floor: hollow AND smaller (#534), for the reason spelled out
+       on .ybar-fill.below. Filled, the AA-passing grey put this dot in the same
+       lightness band as the three CONFIDENT b-states (L* 45.2-52.3 light theme),
+       leaving hue as the only separator -- and hue-only severity encoding collapses
+       under deuteranopia, where the ranked/below pair falls to 1.13:1.
+       Hollow subordinates it without relying on hue; 9px (vs 12px) keeps it
+       distinguishable from the hollow .cmp-db-dot.a beside it, which would otherwise
+       render near-identically. SIZE is a channel nothing else on this row uses. */
+    .cmp-db-dot.b.below {
+      background: var(--surface); border: 2px solid var(--text-faint);
+      width: 9px; height: 9px;
+    }
 
     /* The value cell: the Δ TIER on top, and a significance/status tag beneath. */
     .cmp-db-value {
       display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem;
+      /* A wrapped tag's flex item resolves to the full fixed track, and its inner
+         text would stay start-aligned while the Δ and A→B cells sit flush right.
+         Only reachable since the third track became fixed (#613). */
+      text-align: right;
+      /* Containment made structural rather than incidental: grid items default to
+         min-width:auto, so a long unbreakable token could otherwise push past the
+         track it is supposed to be bounded by. */
+      min-width: 0;
     }
     .cmp-db-delta { font-size: 0.82rem; font-weight: 600; line-height: 1.15; }
     .cmp-db-delta.up { color: var(--yield); }
@@ -723,6 +814,21 @@
     .cmp-db-ab {
       font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono);
       line-height: 1.1;
+    }
+    /* Off-screen text stating that a dumbbell row's (team OR developer) Δ and A→B readings are WITHHELD
+       below the ranking floor (#613), so the verdict is not a sighted-only
+       affordance. Clipped, NOT display:none — display:none would drop it from the
+       accessibility tree, which is the only place it is meant to exist. An
+       aria-label would not do: a .cmp-db-value is a bare <div>, i.e.
+       role="generic", and the accessible-name computation refuses to name a generic
+       element, so the label would be computed and discarded (measured on the #603
+       team rows). position:absolute also takes it out of the value cell's flex
+       column so it cannot open a fourth line and reflow the row. Same recipe as
+       .ybar-sr, .dq-sr and .cmp-total-sr; kept separate because they are read by
+       different components and none should silently restyle the others. */
+    .cmp-db-sr {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip-path: inset(50%); white-space: nowrap;
     }
     .cmp-empty { font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 0; }
     /* A small note under the dumbbells clarifying the Δ direction convention and

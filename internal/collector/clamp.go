@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+
+	"github.com/tiermetric/tier/internal/logsafe"
 )
 
 // ClampNegativeTokens zeroes any negative counts in-place and reports whether
@@ -81,9 +83,14 @@ var clampWarnSeen sync.Map
 // warnUnknownModel's explicit anti-flood design; the unbounded per-event volume
 // signal lives in the RecordClamp counter instead, keeping the fail-loud posture
 // (loud once, countable always) without the log spam.
+// The model name goes through logsafe.Str (#321 review, 2026-08-04). slog
+// escapes CR/LF in both its Text and JSON handlers, so this was never a forgery
+// — it is the LENGTH that was unbounded. Measured: slog caps nothing, and a 4 KB
+// field produced a 4170-byte record. source is one of this package's own
+// Source* constants and is printed bare, per logsafe's provably-bounded carve-out.
 func WarnClamp(source, model string) {
 	if _, loaded := clampWarnSeen.LoadOrStore(source+"\x00"+model, struct{}{}); loaded {
 		return
 	}
-	slog.Warn("negative usage tokens clamped", "source", source, "model", model)
+	slog.Warn("negative usage tokens clamped", "source", source, "model", logsafe.Str(model))
 }

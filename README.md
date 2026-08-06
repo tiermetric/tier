@@ -126,15 +126,23 @@ session files under `~/.claude/projects/` and prints where the AI money went for
 a given repository:
 
 ```sh
-./bin/tierd score --repo .       # attribute the last 90 days for this repo
+# Point --repo at a repo you have actually been working in with Claude Code.
+# `--repo .` here would attribute the TIER checkout you just cloned, where you
+# have no session history yet -- it prints "No Claude Code sessions found" and
+# exits 0, which reads as success.
+./bin/tierd score --repo ~/code/your-project    # the last 90 days for that repo
 ```
+
+> **`--repo` is a local path** for `score`, `ship` and `doctor` — `backfill` alone
+> takes a GitHub `owner/name` slug. On a fork, `score` also needs `--repo-slug` to
+> match outcomes to the upstream repository.
 
 Output shape (values will differ):
 
 ```
-price table: embedded default (version 8, 2026-07-22, 76 models)
+price table: embedded default (version 9, 2026-07-26, 77 models)
 
-TIER Cost Attribution — since 2026-06-25
+TIER Cost Attribution — since 2026-05-07
 Source: Claude Code JSONL (real-time, per-request)
 ───────────────────────────────────────────────────────────────────────────────
 Developer              Input tok  Output tok    Cache rd   Cache w5m   Cache w1h    Cost ($)
@@ -183,7 +191,7 @@ reconstructed from history, so you don't have to wait for new activity:
 #
 #    ⚠️ GOTCHA 2 — run backfill BEFORE serve. The store is single-writer SQLite,
 #    so the two processes must not both hold the DB file open.
-export TIER_GITHUB_TOKEN=@~/.tier/github-token
+export TIER_GITHUB_TOKEN=@$HOME/.tier/github-token
 ./bin/tierd backfill --repo your-org/your-repo        # GitHub "owner/name" slug, not a path
 
 # 2. Start the server (see GOTCHA 3 immediately below this block).
@@ -192,7 +200,12 @@ export TIER_GITHUB_TOKEN=@~/.tier/github-token
 
 # 3. In a SECOND terminal, ship your last 90 days of cost to it.
 ./bin/tierd ship --server http://127.0.0.1:8080 --repo /path/to/local/checkout
+# Per-repo summary:
+#   /path/to/local/checkout: sessions_with_events=12 events_shipped=3481
 # Shipped N events ... Re-running is safe: the server dedups on idempotency keys.
+#
+# A run that recovers NOTHING exits 1 rather than reporting success (#549) —
+# almost always a wrong --repo path. Pass --allow-empty if zero is expected.
 ```
 
 > ⚠️ **GOTCHA 3 — evaluating solo or on a small team? You must pass
@@ -339,6 +352,13 @@ export ANTHROPIC_BASE_URL=http://tier-host:8080/anthropic
 #   X-Tier-Developer: <id>   X-Tier-Issue: <issue-id>
 ```
 
+A Gemini client points at `http://tier-host:8080/gemini` the same way. Gemini
+authenticates upstream via an `x-goog-api-key` header or a `?key=` query
+parameter rather than a bearer token — prefer the header: it never appears in
+tierd's own request logs (path-only), while a `?key=` value can land in
+front-of-tierd infrastructure's access logs (nginx, a load balancer,
+Cloudflare) that log the full request line.
+
 The proxy extracts only token-usage fields from responses (see
 [Privacy](#privacy)), never prompt or completion content.
 
@@ -365,7 +385,7 @@ applies:
 | `size/m` or `m` | 3 |
 | `size/l` or `l` | 5 |
 | `size/xl` or `xl` | 8 |
-| _(none)_ | `min(8, max(0.5, ceil(log2(lines + files×10 + 1))))` |
+| _(none)_ | bucketed on `effort = lines + files×10`: `<=15` → 0.5, `<=60` → 1.0, `<=200` → 3.0, `<=1000` → 5.0, else 8.0 |
 
 **Issue references** attribute a branch / PR to an issue:
 
@@ -451,6 +471,7 @@ token, all routes are reachable.
 | `GET /api/v1/org_actual_spend` | read back recorded org actual-paid spend | admin |
 | `GET /api/v1/scores` | all developer scores | read |
 | `GET /api/v1/scores/{developer}` | one developer's score | read |
+| `GET /api/v1/scores/compare` | two-window comparison, k-anonymized in team/division mode (#277) | read |
 | `GET /api/v1/events` | paginated bulk export of raw token events (#191) | read |
 | `GET /api/v1/outcomes` | paginated bulk export of raw outcomes (#191) | read |
 | `POST /api/v1/developer_alias` | map an alias to a canonical developer | admin |
@@ -465,13 +486,20 @@ token, all routes are reachable.
 | `GET /api/v1/health` | liveness/status | open |
 | `GET /api/v1/healthz` | readiness (watcher subsystem state) | open |
 | `GET /api/v1/livez` | liveness (version + uptime) | open |
+| `GET /api/v1/quality_events` | raw quality signals behind the outcome weights | read |
+| `GET /api/v1/quality_history` | quality signal history over time | read |
+| `GET /api/v1/fidelity` | capture fidelity: recorded vs estimated spend | read |
 | `GET /metrics` | Prometheus exposition (mounted when metrics are wired) | read |
 | `POST /webhook/github` | GitHub webhook (mounted only when a secret is set) | HMAC signature |
 | `GET /` | dashboard (static HTML + vanilla JS) | open |
 
-The proxy routes (`/anthropic/`, `/openai/`) authenticate with the
+The proxy routes (`/anthropic/`, `/openai/`, `/gemini/`) authenticate with the
 `X-Tier-Token` header instead of Bearer, and are mounted only when their target
-URL is configured (non-empty).
+URL is configured (non-empty). `/gemini/` defaults to
+`https://generativelanguage.googleapis.com` (`--gemini-target` /
+`proxy.gemini_target`) — mounted and structurally complete (#459 task 4), but
+**not yet verified against live Gemini traffic**: see
+[docs/how-it-works.md](docs/how-it-works.md)'s ‡ note before relying on it.
 
 ---
 

@@ -134,7 +134,7 @@ The two PK-table rebuilds have a working precedent: the `dropActualSpendNonNegat
 
 ```mermaid
 sequenceDiagram
-    participant Tx as BEGIN IMMEDIATE (Serializable)
+    participant Tx as beginImmediate (write lock up front)
     participant New as __new_&lt;table&gt;
     participant Old as &lt;table&gt;
     Tx->>New: CREATE TABLE with new (tenant_id, …) PK
@@ -146,7 +146,7 @@ sequenceDiagram
 
 Key properties inherited from the precedent (`dropActualSpendNonNegativeCheck()` in `store.go`):
 
-- **`BEGIN IMMEDIATE`** (`sql.LevelSerializable`) takes the `RESERVED` lock up front so `busy_timeout=5000` can retry instead of racing to `SQLITE_BUSY`.
+- **Take the write lock up front** via `store.beginImmediate` (`internal/store/store.go`), so `busy_timeout=5000` can retry instead of racing to `SQLITE_BUSY`. ⚠️ Do **NOT** use `sql.TxOptions{Isolation: sql.LevelSerializable}` for this: `modernc.org/sqlite` never reads `opts.Isolation` (`tx.go`, `newTx` — the mode comes solely from the `_txlock` DSN param, which this DSN does not set), so it yields a plain **DEFERRED** `BEGIN` and the deferred-to-write upgrade fails with an unretried `SQLITE_BUSY_SNAPSHOT` (517) mid-rename. The precedent function still carries the old shape — see #598.
 - **Idempotent guard:** the precedent inspects `sqlite_master` and no-ops if the constraint is already gone. A retrofit must likewise no-op once `tenant_id` is present, so re-running `Open()` is safe.
 - **All-or-nothing:** the whole dance is one transaction; a failure mid-rename rolls back to the pre-migration table.
 

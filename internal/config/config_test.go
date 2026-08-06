@@ -42,6 +42,7 @@ outcomes:
 proxy:
   anthropic_target: "https://anthropic.local"
   openai_target: "https://openai.local"
+  gemini_target: "https://gemini.local"
 watch:
   repos:
     - /repos/a
@@ -85,6 +86,9 @@ watch:
 	if cfg.Proxy.OpenAITarget == nil || *cfg.Proxy.OpenAITarget != "https://openai.local" {
 		t.Errorf("openai_target = %v", cfg.Proxy.OpenAITarget)
 	}
+	if cfg.Proxy.GeminiTarget == nil || *cfg.Proxy.GeminiTarget != "https://gemini.local" {
+		t.Errorf("gemini_target = %v", cfg.Proxy.GeminiTarget)
+	}
 	want := []string{"/repos/a", "/repos/b"}
 	if len(cfg.Watch.Repos) != 2 || cfg.Watch.Repos[0] != want[0] || cfg.Watch.Repos[1] != want[1] {
 		t.Errorf("watch.repos = %v, want %v", cfg.Watch.Repos, want)
@@ -127,6 +131,9 @@ func TestLoad_PartialKeysLeaveOthersNil(t *testing.T) {
 	if cfg.Proxy.AnthropicTarget != nil {
 		t.Errorf("anthropic_target should be nil for absent key, got %v", cfg.Proxy.AnthropicTarget)
 	}
+	if cfg.Proxy.GeminiTarget != nil {
+		t.Errorf("gemini_target should be nil for absent key, got %v", cfg.Proxy.GeminiTarget)
+	}
 }
 
 // TestLoad_ExplicitEmptyOverridesDefault: a key present with value "" is
@@ -137,6 +144,7 @@ func TestLoad_ExplicitEmptyOverridesDefault(t *testing.T) {
 	path := writeYAML(t, `
 proxy:
   anthropic_target: ""
+  gemini_target: ""
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -147,6 +155,12 @@ proxy:
 	}
 	if *cfg.Proxy.AnthropicTarget != "" {
 		t.Errorf("anthropic_target = %q, want empty string", *cfg.Proxy.AnthropicTarget)
+	}
+	if cfg.Proxy.GeminiTarget == nil {
+		t.Fatal("gemini_target should be non-nil when explicitly empty")
+	}
+	if *cfg.Proxy.GeminiTarget != "" {
+		t.Errorf("gemini_target = %q, want empty string", *cfg.Proxy.GeminiTarget)
 	}
 }
 

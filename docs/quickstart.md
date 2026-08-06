@@ -120,8 +120,10 @@ Two things to know:
   nothing.
 - **`tierd score` does not capture Codex** — it reads Claude Code sessions
   only. Codex is captured by `serve` and by `ship` (below), from Codex's own
-  local rollout logs. The reverse proxy cannot capture it at all, because Codex
-  speaks the OpenAI Responses API rather than Chat Completions.
+  local rollout logs. The reverse proxy can parse the OpenAI Responses API that
+  Codex speaks (#459), but only for traffic you deliberately point at it with
+  API-key auth, and that path has not been verified against live traffic — the
+  rollout logs are the supported way to capture Codex.
 
 **If the server runs centrally and Codex runs on a laptop,** the same flag goes
 on the shipper — it is off by default there too:
@@ -139,11 +141,27 @@ developers moving onto the cheaper path (#492).
 
 ⚠️ **Pass `--repo` explicitly on `ship`.** It defaults to `.`, and a cron or
 launchd job usually runs from `$HOME`. If `$HOME` is not a git checkout the run
-fails loudly — exit 1, *"does not appear to be a git repository"*. But if `$HOME`
-**is** a checkout, such as a dotfiles repo, every Codex session belonging to
-another repository falls outside the scope, nothing ships, and the run **exits
-0**. Unlike `serve`, which refuses to start when `--codex-rollout` has no
-repository to attribute to, that case is silent.
+fails loudly — exit 1, *"does not appear to be a git repository"*. And if `$HOME`
+**is** a checkout, such as a dotfiles repo, every session belonging to another
+repository falls outside the scope and nothing ships — which as of #549 is also
+**exit 1**, with a per-repo summary naming the zero rows:
+
+```
+Per-repo summary:
+  /Users/you: sessions_with_events=0 events_shipped=0
+ship: every --repo target kept 0 sessions since 2026-05-05 — this is almost
+always a wrong --repo path, not a legitimately idle repo. Pass --allow-empty if
+zero is genuinely expected.
+```
+
+That case used to exit 0 silently, so "ship reported success" and "ship recovered
+nothing" were indistinguishable without diffing the store by hand. If a repo is
+*legitimately* idle for the whole window, pass `--allow-empty` (env
+`TIER_SHIP_ALLOW_EMPTY`) to get exit 0 back.
+
+The guard measures the **whole run**, not just Claude Code: a machine that only
+produces Codex spend exits 0 normally, because the Codex events count even
+though they are scanned once across all repos rather than per repo.
 
 ## 7. Viewing the dashboard from another machine
 

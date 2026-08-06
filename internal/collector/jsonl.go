@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/issueref"
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -200,6 +201,25 @@ type sessionSummary struct {
 	// call's keys. Watcher copies this into the cached sessionMetadata;
 	// CLI consumers can ignore it.
 	NextParseSeq int
+	// LastRealBranch is the most recent HUMAN-named branch seen in this file —
+	// the branch a worktree-agent message inherits (see
+	// parseSessionFileFromOffset). It must survive across incremental parses,
+	// because a tail parse can begin AFTER the line that named the branch and
+	// would otherwise have nothing to inherit; the watcher carries it in
+	// sessionMetadata for exactly that reason.
+	//
+	// ⚠️ SCOPE IS THE FILE, NOT THE SESSION. A JSONL file that violates the
+	// upstream one-sessionId-per-file invariant is warned about once and then
+	// parsed straight through under the FIRST session id (see the mixedSessionWarned
+	// branch below) — so the latch can carry a branch across the boundary and a
+	// worktree-agent message can inherit a branch named by a different session.
+	// That is pre-existing, documented behaviour, but #490 made this field a new
+	// consumer of it: before, a mixed file merely mis-attributed the counts it
+	// already had; now it can also hand out a branch. Both stay wrong in the same
+	// direction and for the same reason, so the fix belongs at the parse boundary
+	// (split on sessionId) rather than here — do not paper over it with a
+	// latch-local reset, which would leave the counts mis-keyed anyway.
+	LastRealBranch string
 }
 
 // gitCommit is a parsed row from git log.
@@ -327,7 +347,7 @@ func parseAllSessions(projectsDir string, since time.Time) ([]sessionSummary, er
 	err := filepath.WalkDir(projectsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Log but don't abort on per-entry errors (permission denied, etc.)
-			slog.Warn("walk error", "path", path, "err", err)
+			slog.Warn("walk error", "path", logsafe.Str(path), "err", err)
 			return nil
 		}
 		if d.IsDir() {
@@ -338,7 +358,7 @@ func parseAllSessions(projectsDir string, since time.Time) ([]sessionSummary, er
 		}
 		s, err := parseSessionFile(path)
 		if err != nil {
-			slog.Warn("failed to parse session file", "path", path, "err", err)
+			slog.Warn("failed to parse session file", "path", logsafe.Str(path), "err", err)
 			return nil
 		}
 		if s == nil || s.EndTime.Before(since) {
@@ -352,7 +372,9 @@ func parseAllSessions(projectsDir string, since time.Time) ([]sessionSummary, er
 
 // filterSessionsByRepo keeps only sessions whose CWD resolves to repoPath.
 // Sessions with empty CWD are dropped because we cannot safely attribute them.
-// A summary count is logged once per scan.
+// A summary count is logged once per scan — at WARN when NOTHING matched
+// (#549 arm 1: a zero-kept target is nearly always a wrong path), at INFO
+// when some but not all sessions were filtered.
 //
 // The scope decision itself — the four-way symlink match, the git-worktree
 // fallback, and the per-scan memoization — lives in RepoScope (reposcope.go),
@@ -382,7 +404,28 @@ func filterSessionsByRepo(sessions []sessionSummary, repoPath string) []sessionS
 			foreign++
 		}
 	}
-	if foreign > 0 || empty > 0 || worktree > 0 {
+	switch {
+	// worktree is deliberately absent from this guard and its log fields
+	// (#549): every RepoScopeWorktree match is appended to kept in the loop
+	// above, so len(kept)==0 already implies worktree==0 — the disjunct was
+	// dead and the field below always logged a constant worktree=0.
+	case len(kept) == 0 && (foreign > 0 || empty > 0):
+		// WARN, not INFO (#549 arm 1). A --repo target that matched NOTHING at
+		// all is nearly always an operator error — a stale checkout, a typo, a
+		// path copied from another machine — not a repo that's genuinely idle.
+		// During the 2026-07-30 dogfood backfill this exact case (kept=0,
+		// foreign=4836) logged at INFO and `ship` exited 0 anyway; nothing
+		// about the run signaled a problem short of an operator diffing
+		// `select count(*) from token_events` by hand. INFO is what a healthy
+		// scan emits too (some sessions filtered, most kept), so raising ONLY
+		// the all-filtered case to WARN keeps the two severities meaningfully
+		// different rather than training operators to ignore WARN.
+		slog.Warn("no sessions matched this --repo target; nearly always a wrong --repo path, not an idle repo",
+			"repo", scope.Target(),
+			"foreign", foreign,
+			"empty_cwd", empty,
+		)
+	case foreign > 0 || empty > 0 || worktree > 0:
 		slog.Info("filtered sessions outside target repo",
 			"repo", scope.Target(),
 			"kept", len(kept),
@@ -444,12 +487,18 @@ const maxJSONLChunk = 64 << 20
 // parseOrder=0 and collide on the store's partial unique index, silently
 // dropping the second. Persist + thread through.
 type sessionMetadata struct {
-	SessionID    string
-	GitBranch    string
-	CWD          string
-	StartTime    time.Time
-	Model        string
-	NextParseSeq int
+	SessionID string
+	GitBranch string
+	CWD       string
+	StartTime time.Time
+	Model     string
+	// LastRealBranch carries the worktree-agent inheritance latch across
+	// debounces — see sessionSummary.LastRealBranch. Without it a tail parse
+	// whose window opens on a worktree-agent line has no branch to inherit and
+	// the spend falls back to unattributed, which is the #490 defect returning
+	// through the incremental path only.
+	LastRealBranch string
+	NextParseSeq   int
 }
 
 // parseSessionFile is a back-compat wrapper for callers (the CLI's
@@ -535,7 +584,7 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 		// the same oversize chunk every debounce. The slog.Warn fires
 		// once per debounce; an operator should investigate.
 		slog.Warn("JSONL chunk exceeds size cap, skipping this debounce",
-			"path", path,
+			"path", logsafe.Str(path),
 			"chunk_bytes", chunkLen,
 			"cap_bytes", maxJSONLChunk,
 		)
@@ -595,6 +644,10 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 		s.CWD = knownMeta.CWD
 		s.StartTime = knownMeta.StartTime
 		s.Model = knownMeta.Model
+		// Seed the #490 inheritance latch too. This window may open partway
+		// through a worktree-agent run, after the line that named the branch has
+		// already been consumed by an earlier debounce.
+		s.LastRealBranch = knownMeta.LastRealBranch
 	}
 
 	// Dedup buffer: keep the largest-total usage per message.id seen in this file.
@@ -642,9 +695,9 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 			// so the operator notices, but keep parsing under the first
 			// session id (downstream IdempotencyKey will key to it).
 			slog.Warn("JSONL file contains multiple sessionIds; counts will be attributed to the first",
-				"path", path,
-				"first_session", s.SessionID,
-				"other_session", entry.SessionID,
+				"path", logsafe.Str(path),
+				"first_session", logsafe.Str(s.SessionID),
+				"other_session", logsafe.Str(entry.SessionID),
 			)
 			mixedSessionWarned = true
 		}
@@ -665,10 +718,33 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 		if !entry.Timestamp.IsZero() {
 			s.EndTime = entry.Timestamp
 		}
-		// Prefer the first non-HEAD, non-empty branch we see.
-		if (s.GitBranch == "" || s.GitBranch == "HEAD") &&
-			entry.GitBranch != "" && entry.GitBranch != "HEAD" {
-			s.GitBranch = entry.GitBranch
+		// 🔴 #490: a harness-invented worktree-agent branch carries NO attribution
+		// signal, so it neither latches as the session branch nor overwrites the
+		// inheritance latch — it only READS the latch, below.
+		//
+		// MEASURED on this repo's own session files (all 23 files carrying such a
+		// branch, 2026-08-04): for all 190 spend-bearing worktree-agent messages,
+		// "most recent preceding human-named branch in file order" gives the same
+		// answer as walking the JSONL parentUuid chain to its first
+		// non-worktree-agent ancestor — 190/190, no disagreements. The positional
+		// latch is used instead of the causal chain because it is equivalent here,
+		// needs no per-file uuid map, and survives incremental tail parses.
+		//
+		// ⚠️ Deliberately NOT the session-latched branch (s.GitBranch). That was
+		// measured too and is WRONG: these sessions open on main and check out the
+		// feature branch later, so s.GitBranch was "main" for all 68 of the 190
+		// messages whose chain ancestor was a real issue branch. Falling back to it
+		// would have resolved every message to something while recovering nothing.
+		harnessBranch := IsHarnessWorktreeBranch(entry.GitBranch)
+		if !harnessBranch {
+			// Prefer the first non-HEAD, non-empty branch we see.
+			if (s.GitBranch == "" || s.GitBranch == "HEAD") &&
+				entry.GitBranch != "" && entry.GitBranch != "HEAD" {
+				s.GitBranch = entry.GitBranch
+			}
+			if entry.GitBranch != "" && entry.GitBranch != "HEAD" {
+				s.LastRealBranch = entry.GitBranch
+			}
 		}
 
 		if entry.Type != "assistant" || entry.Message == nil || entry.Message.Usage == nil {
@@ -706,10 +782,18 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 			WarnClamp(SourceJSONL, entry.Message.Model)
 			RecordClamp(SourceJSONL)
 		}
+		// Inherit the spawning session's branch for harness-invented worktree
+		// names. If nothing has been latched yet (a tail parse whose window opens
+		// on such a line, with no cached metadata) the name is left as-is and the
+		// message buckets as before — degraded, never wrong.
+		msgBranch := entry.GitBranch
+		if harnessBranch && s.LastRealBranch != "" {
+			msgBranch = s.LastRealBranch
+		}
 		cur := messageUsage{
 			messageID:    entry.Message.ID,
 			timestamp:    entry.Timestamp,
-			gitBranch:    entry.GitBranch,
+			gitBranch:    msgBranch,
 			model:        entry.Message.Model,
 			input:        u.InputTokens,
 			output:       u.OutputTokens,
@@ -753,13 +837,13 @@ func parseSessionFileFromOffset(path string, startOffset int64, knownMeta sessio
 		// Return what we managed to parse so far rather than discarding the
 		// whole file — partial data beats none, and the warning surfaces the
 		// underlying cause so the operator can investigate.
-		slog.Warn("JSONL scan terminated early", "path", path, "err", err)
+		slog.Warn("JSONL scan terminated early", "path", logsafe.Str(path), "err", err)
 	}
 	if skipped > 0 {
 		// One aggregated event per file — easier to act on than N per-line
 		// debug logs. Logged at warn because parsed-fewer-than-expected is
 		// almost always a signal the operator wants to investigate.
-		slog.Warn("skipped malformed JSONL lines", "path", path, "count", skipped)
+		slog.Warn("skipped malformed JSONL lines", "path", logsafe.Str(path), "count", skipped)
 	}
 
 	// Carry the post-scan parseSeq forward so the watcher can persist it

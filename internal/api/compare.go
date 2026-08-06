@@ -56,8 +56,25 @@ type compareResponse struct {
 	// k-anonymized aggregate present in BOTH windows by construction.
 	Teams []teamDeltaJSON `json:"teams,omitempty"`
 	// Total is the name-free grand-rollup delta across every developer in each
-	// window, present in both modes. nil when both windows are empty.
+	// window.
+	//
+	// ⚠️ ABSENT in two distinct cases, and a consumer must be able to tell them apart:
+	// both windows empty, OR a sub-k residual was suppressed (#593) — in which case
+	// this delta would reconstruct the hidden cohort by subtraction from the named
+	// group deltas. KAnonSuppressed below is what distinguishes them. The pre-#593
+	// wording ("present in both modes; nil when both windows are empty") stated the
+	// absence contract as complete and is no longer true.
 	Total *teamDeltaJSON `json:"total,omitempty"`
+	// KAnonSuppressed declares a k-anonymity suppression on this comparison (#593).
+	//
+	// It sits at the top level rather than inside a window's data_quality because the
+	// suppression is a property of the COMPARISON: CompareTeamsKAnon folds on the
+	// union of both windows, so a cohort is withheld from both sides together or from
+	// neither. Attaching it to one window would imply the other was unaffected.
+	//
+	// Without it this endpoint went silently quiet — review caught that, and it is the
+	// same defect the top-level /scores declaration exists to prevent.
+	KAnonSuppressed *kanonSuppressedJSON `json:"kanon_suppressed,omitempty"`
 }
 
 // compareWindowMeta is one window's echoed bounds and its OWN data_quality (#277
@@ -128,12 +145,45 @@ type teamDeltaJSON struct {
 	DeltaWeightedPoints float64       `json:"delta_weighted_points"`
 	DeltaTotalCostUSD   float64       `json:"delta_total_cost_usd"`
 	Significant         bool          `json:"significant"`
+	// Ranked is the DERIVED ranking verdict of the comparison itself (#605), and
+	// the rule it encodes is one sentence: anything derived from an unranked input
+	// is itself unranked. It is `A.Ranked && B.Ranked` — a boolean AND over the two
+	// sides' own #133/#136 verdicts, never a third floor.
+	//
+	// It is computed ONCE, here, rather than per render site. That is the whole
+	// point: #502 added `ranked` to the rollup and it reached exactly one of the
+	// org headline's three consumers, because the other two RE-DERIVED the quotient
+	// from raw sums instead of reading the struct. A derived field with a single
+	// producer can be read; a rule re-implemented at each consumer drifts at each
+	// consumer.
+	//
+	// Why AND and not OR: with a ranked baseline and an unranked selected window,
+	// publishing Δ hands the reader `selected = baseline + Δ` — a perfect
+	// reconstruction of the number the floor just refused to rank. The
+	// one-ranked-one-unranked case is precisely where withholding matters, so it is
+	// the case the AND catches.
+	//
+	// Always present (no omitempty): a `false` here is the LOAD-BEARING value, so
+	// omitting it would drop the verdict rather than encode it. (Not an invitation to
+	// feature-detect on field presence — docs/api-compatibility.md forbids that and
+	// points consumers at livez's `version`.)
+	Ranked bool `json:"ranked"`
 }
 
 func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request) {
 	// Window A = before, window B = after. Each window's since_/until_ params share
 	// the exact grammar and validation as /scores' since/until (#276): half-open,
 	// UTC-anchored, until > since, retention-checked.
+	// Strict parameter allowlist (#590), same posture as /scores. This endpoint does
+	// NOT implement ?repo=, and that is exactly why the allowlist matters here: it
+	// returns the same class of cost figure from the same shared loadWindow, so
+	// silently ignoring a repo= would reproduce #590's defect one endpoint over.
+	// Rejecting it says "not supported here" instead of handing back a fleet
+	// aggregate that looks scoped. Scoped comparison is a real feature and can be
+	// added deliberately; being quietly unscoped is not a feature.
+	if !rejectUnknownQueryParams(w, r, "since_a", "until_a", "since_b", "until_b") {
+		return
+	}
 	sinceA, untilA, ok := h.parseCompareWindow(w, r, "since_a", "until_a")
 	if !ok {
 		return
@@ -143,13 +193,13 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	winA, err := h.loadWindow(r.Context(), sinceA, untilA)
+	winA, err := h.loadWindow(r.Context(), sinceA, untilA, store.FleetWide)
 	if err != nil {
 		h.logger.Error("compare load window a", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	winB, err := h.loadWindow(r.Context(), sinceB, untilB)
+	winB, err := h.loadWindow(r.Context(), sinceB, untilB, store.FleetWide)
 	if err != nil {
 		h.logger.Error("compare load window b", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -166,12 +216,12 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 	// One lookup shared across both windows: the horizon is a property of the
 	// installation, not of a window. A failure logs and omits on both, matching
 	// /scores rather than 500-ing a whole comparison over a missing annotation.
-	horizon, hasHorizon, herr := h.store.CostCoverageStart(r.Context())
+	horizon, hasHorizon, herr := h.store.CostCoverageStart(r.Context(), store.FleetWide)
 	var perSource map[string]time.Time
 	if herr != nil {
 		h.logger.Error("compare query cost coverage start", "err", herr)
 		hasHorizon = false
-	} else if perSource, err = h.store.SourceCoverageStart(r.Context()); err != nil {
+	} else if perSource, err = h.store.SourceCoverageStart(r.Context(), store.FleetWide); err != nil {
 		h.logger.Error("compare query per-source coverage start", "err", err)
 		perSource = nil
 	}
@@ -202,8 +252,10 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 	}
 	resp.Mode = h.aggregation.String()
 
+	var kanonSuppressed scoring.KAnonSuppression
 	if h.aggregation.Anonymized() {
-		if err := h.compareTeams(r.Context(), &resp, winA, winB); err != nil {
+		var err error
+		if kanonSuppressed, err = h.compareTeams(r.Context(), &resp, winA, winB); err != nil {
 			h.logger.Error("compare teams", "mode", h.aggregation.String(), "err", err)
 			writeError(w, http.StatusInternalServerError, "db error")
 			return
@@ -212,9 +264,29 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 		resp.Developers = compareDevelopers(winA, winB)
 	}
 
-	// Grand-total delta: a name-free rollup over every developer in each window,
-	// present in BOTH modes (it never names or singles out anyone).
-	resp.Total = compareTotal(winA.devScores, winB.devScores)
+	// Grand-total delta: a name-free rollup over every developer in each window.
+	//
+	// 🔴 #593: "name-free" is NOT the same as "safe". It used to be emitted in both
+	// modes unconditionally on the reasoning that it never singles anyone out — true in
+	// isolation, false in the presence of the named rows beside it, because the
+	// difference between them IS the suppressed cohort. Withheld whenever the residual
+	// was suppressed. Developer mode is unaffected: it names everyone anyway, so there
+	// is nothing to reconstruct.
+	if kanonSuppressed.Any() {
+		// Declare it, or the missing total is indistinguishable from two empty windows.
+		resp.KAnonSuppressed = &kanonSuppressedJSON{
+			Developers:    kanonSuppressed.Developers,
+			KAnonymity:    kanonSuppressed.K,
+			WithheldTotal: true,
+			// Compare ships no cost-composition sidecar, so claiming one was withheld
+			// would be false. Same for the #466 segment reconciliation: it is a
+			// /scores-only surface, and compare never builds one.
+			WithheldCostComposition:       false,
+			WithheldSegmentReconciliation: false,
+		}
+	} else {
+		resp.Total = compareTotal(winA.devScores, winB.devScores)
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -227,25 +299,23 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 // returns; group membership is not windowed, so one canonicalized map — built from
 // winA.canon (aliases are not windowed, so winB.canon is identical) — serves both
 // windows.
-func (h *Handler) compareTeams(ctx context.Context, resp *compareResponse, winA, winB windowScores) error {
+//
+// Returns whether a sub-k residual was WITHHELD (#593), so the caller can drop the
+// grand-total delta with it. Compare needs this as much as /scores does: its `total`
+// is a rollup over every developer in each window, so subtracting the named group
+// deltas reconstructs the suppressed cohort's delta — and a delta is arguably a
+// sharper disclosure than a level, since it says how one small group's efficiency
+// MOVED between two periods.
+func (h *Handler) compareTeams(ctx context.Context, resp *compareResponse, winA, winB windowScores) (scoring.KAnonSuppression, error) {
 	labelOf, err := h.resolveGroupLabels(ctx, winA.canon)
 	if err != nil {
-		return err
+		return scoring.KAnonSuppression{}, err
 	}
-	for _, tc := range scoring.CompareTeamsKAnon(winA.devScores, winB.devScores, labelOf, h.kAnonymity) {
-		resp.Teams = append(resp.Teams, teamDeltaJSON{
-			Team:                tc.Team,
-			A:                   teamSideJSON(tc.A),
-			B:                   teamSideJSON(tc.B),
-			DeltaTIER:           tc.B.TIER - tc.A.TIER,
-			DeltaWeightedPoints: tc.B.WeightedPoints - tc.A.WeightedPoints,
-			DeltaTotalCostUSD:   tc.B.TotalCostUSD - tc.A.TotalCostUSD,
-			// Group aggregates carry no bootstrap CI (#133), so significance is never
-			// asserted in an anonymized mode — see teamDeltaJSON.Significant.
-			Significant: false,
-		})
+	rows, sup := scoring.CompareTeamsKAnon(winA.devScores, winB.devScores, labelOf, h.kAnonymity)
+	for _, tc := range rows {
+		resp.Teams = append(resp.Teams, newTeamDeltaJSON(tc.Team, tc.A, tc.B))
 	}
-	return nil
+	return sup, nil
 }
 
 // compareDevelopers builds the per-developer deltas (developer mode). It emits the
@@ -335,13 +405,29 @@ func compareTotal(aScores, bScores []scoring.DeveloperScore) *teamDeltaJSON {
 	}
 	a := scoring.RollupTeam("", aScores)
 	b := scoring.RollupTeam("", bScores)
-	return &teamDeltaJSON{
+	row := newTeamDeltaJSON("", a, b)
+	return &row
+}
+
+// newTeamDeltaJSON is the ONE place a before/after aggregate row is built — the
+// k-anonymized `teams[]` rows and the name-free grand `total` alike. Having a
+// single producer is the point rather than a tidiness: see teamDeltaJSON.Ranked for
+// why the derived verdict must be computed once here instead of at each consumer.
+//
+// Significance is ALWAYS false for an aggregate: group rollups carry no bootstrap
+// CI (an interval is a per-developer signal, #133), so the endpoint never asserts
+// a move it cannot back — see teamDeltaJSON.Significant.
+func newTeamDeltaJSON(team string, a, b scoring.TeamScore) teamDeltaJSON {
+	return teamDeltaJSON{
+		Team:                team,
 		A:                   teamSideJSON(a),
 		B:                   teamSideJSON(b),
 		DeltaTIER:           b.TIER - a.TIER,
 		DeltaWeightedPoints: b.WeightedPoints - a.WeightedPoints,
 		DeltaTotalCostUSD:   b.TotalCostUSD - a.TotalCostUSD,
 		Significant:         false,
+		// Anything derived from an unranked input is itself unranked (#605).
+		Ranked: a.Ranked && b.Ranked,
 	}
 }
 

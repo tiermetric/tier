@@ -108,7 +108,9 @@ its own history, not to another team's number.
 **2. Small groups are anonymized, by design.** In the `team` setting, a
 group with fewer contributing developers than the anonymity floor (default
 five, minimum three) collapses into one anonymous row. Their spend and
-outcomes stay in the totals — nothing is dropped — but no individual is named. If you are evaluating TIER solo, you must explicitly ask
+outcomes stay in the totals — nothing is dropped — but no individual is named. If even
+that anonymous row would be too small to hide behind, it is withheld along with the
+totals that would give it away, and the response tells you so rather than looking empty. If you are evaluating TIER solo, you must explicitly ask
 for `developer` mode or you will not see your own row.
 
 **3. The two halves must cover the same window.** Spend is booked up front;

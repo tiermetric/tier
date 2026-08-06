@@ -2305,7 +2305,7 @@ func TestOutcomeTokenTotals_WindowedSum(t *testing.T) {
 	// One outcome: alice merged issue-1 at end.
 	totals, err := db.OutcomeTokenTotals(ctx, []Outcome{
 		{Developer: "alice", IssueID: "issue-1", Timestamp: end},
-	})
+	}, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals: %v", err)
 	}
@@ -2369,7 +2369,7 @@ func TestOutcomeTokenTotals_MatchesBruteForceWindowedSum(t *testing.T) {
 		}
 	}
 
-	got, err := db.OutcomeTokenTotals(ctx, outcomes)
+	got, err := db.OutcomeTokenTotals(ctx, outcomes, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals: %v", err)
 	}
@@ -2405,7 +2405,7 @@ func TestOutcomeTokenTotals_MatchesBruteForceWindowedSum(t *testing.T) {
 func TestOutcomeTokenTotals_EmptyOutcomes(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
-	totals, err := db.OutcomeTokenTotals(context.Background(), nil)
+	totals, err := db.OutcomeTokenTotals(context.Background(), nil, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals(nil): %v", err)
 	}
@@ -2435,7 +2435,7 @@ func TestOutcomeTokenTotals_WindowLowerBoundInclusive(t *testing.T) {
 	}
 	totals, err := db.OutcomeTokenTotals(ctx, []Outcome{
 		{Developer: "alice", IssueID: "issue-1", Timestamp: end},
-	})
+	}, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals: %v", err)
 	}
@@ -2465,7 +2465,7 @@ func TestOutcomeTokenTotals_ReusedIssueUsesFreshestWindow(t *testing.T) {
 	totals, err := db.OutcomeTokenTotals(ctx, []Outcome{
 		{Developer: "alice", IssueID: "issue-x", Timestamp: old},
 		{Developer: "alice", IssueID: "issue-x", Timestamp: now},
-	})
+	}, FleetWide)
 	if err != nil {
 		t.Fatalf("OutcomeTokenTotals: %v", err)
 	}

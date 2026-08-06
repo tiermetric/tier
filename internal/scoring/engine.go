@@ -162,8 +162,33 @@ type TeamScore struct {
 	// WeightedPoints on the summed team totals, the same inverse-unit as the
 	// per-developer field (#239). Guarded on WeightedPoints > 0.
 	CostPerPoint float64
-	Developers   []DeveloperScore
+	// Ranked reports whether this aggregate is sound enough to rank, on exactly
+	// the developer rule (#133/#136) applied to the SUMMED inputs: total outcomes
+	// >= MinRankedOutcomes AND TotalCostUSD >= MinRankedCostUSD AND zero flagged
+	// outcomes across the members (#502). The #133 evidence floor was never
+	// carried into the rollup, so a team that merged 28 points against $0.0001 of
+	// measured spend published TIER 2.8e8 with full ranking authority.
+	//
+	// The gate reuses the developer constants deliberately — a second, team-only
+	// floor would drift against the first, and the quantity being gated is the
+	// same one: how much evidence stands behind THIS number.
+	//
+	// It is summed, not an AND over member Ranked flags: three developers with one
+	// outcome and $2 each are individually below the floor, but the team number is
+	// computed from their sums (3 outcomes, $6), and that is what the floor must
+	// judge. TIER itself is untouched either way — the number is never altered,
+	// only its ranking authority revoked (#136).
+	Ranked     bool
+	Developers []DeveloperScore
 }
+
+// NOTE ON WHAT IS DELIBERATELY *NOT* A FIELD HERE: the summed outcome count and
+// flagged count that feed Ranked stay function-local. They are not withheld out
+// of tidiness — publishing a team-level sample_n would hand the anonymized modes
+// a second equation. `data_quality.attributed_outcome_share` is a ratio of
+// outcome COUNTS that is safe to publish precisely because its denominator is
+// published nowhere (see the k-anon strip block in internal/api/handler.go); a
+// team sample_n would supply it. Keep the counts local.
 
 // ComputeDeveloper calculates the TIER score for a single developer.
 //
@@ -221,16 +246,33 @@ func ComputeDeveloper(developer string, outcomes []Outcome, totalCostUSD, realti
 
 // RollupTeam aggregates developer scores into a single team score.
 // The team TIER uses summed points and summed costs — not an average of individual TIERs.
+//
+// It also decides Ranked (#502) from those same sums against the developer
+// floors. The arithmetic is untouched: TIER stays points/(cost/1000) exactly, and
+// a below-floor aggregate still carries its true quotient — presentation
+// withholds the headline, the engine does not fabricate a number (#136).
 func RollupTeam(team string, devScores []DeveloperScore) TeamScore {
 	ts := TeamScore{
 		Team:       team,
 		Developers: devScores,
 	}
+	// sampleN and flagged are the summed ranking evidence. They stay local on
+	// purpose (see the note on TeamScore): a team-level sample_n on the wire would
+	// make attributed_outcome_share invertible in the anonymized modes.
+	var sampleN, flagged int
 	for _, d := range devScores {
 		ts.WeightedPoints += d.WeightedPoints
 		ts.TotalCostUSD += d.TotalCostUSD
 		ts.ActualPaidUSD += d.ActualPaidUSD
+		sampleN += d.SampleN
+		flagged += d.FlaggedOutcomes
 	}
+	// Ranking gate on the SUMMED inputs (#502), the same three conditions and the
+	// same two constants ComputeDeveloper applies — no team-only floor, because a
+	// second floor drifts against the first. An empty team sums to zero and is
+	// correctly unranked.
+	ts.Ranked = flagged == 0 &&
+		sampleN >= MinRankedOutcomes && ts.TotalCostUSD >= MinRankedCostUSD
 	if ts.TotalCostUSD > 0 {
 		ts.TIER = ts.WeightedPoints / (ts.TotalCostUSD / tierCostScaleUSD)
 		// Coverage is cost-weighted average across team members.
@@ -362,11 +404,12 @@ func (d DeveloperScore) contributes() bool {
 // own named TeamScore; every team below k is folded into a single OtherCohort
 // aggregate so no cohort smaller than k is individually identifiable.
 //
-// Totals are preserved exactly: every developer lands in exactly one output row
-// (a named team or "other"), so summing the returned TeamScores' points/cost/
-// paid reproduces the same grand total as a straight RollupTeam over all
-// devScores — identity is suppressed, data is never lost. Below-k contributions
-// roll into "other" rather than vanishing.
+// Totals are preserved exactly ONLY WHEN NOTHING WAS SUPPRESSED (#593). When the
+// residual clears the floor, every developer lands in exactly one output row and
+// summing the returned TeamScores reproduces a straight RollupTeam over all devScores.
+// When the residual is sub-k it is WITHHELD, the rows no longer sum to the window, and
+// the second return value says so — see KAnonSuppression, which explains why that
+// reconciliation property and k-anonymity cannot both hold.
 //
 // The returned slice is sorted by team name for a stable response, with the
 // OtherCohort bucket (when present) always last so it reads as the residual. A
@@ -375,7 +418,7 @@ func (d DeveloperScore) contributes() bool {
 // caller. Each returned TeamScore has its Developers slice cleared to nil — the
 // names must never cross the anonymity boundary, even into a caller that might
 // later serialize them.
-func AggregateTeamsKAnon(devScores []DeveloperScore, teamOf map[string]string, k int) []TeamScore {
+func AggregateTeamsKAnon(devScores []DeveloperScore, teamOf map[string]string, k int) ([]TeamScore, KAnonSuppression) {
 	if k < MinKAnonymity {
 		k = MinKAnonymity
 	}
@@ -413,10 +456,27 @@ func AggregateTeamsKAnon(devScores []DeveloperScore, teamOf map[string]string, k
 		otherDevs = append(otherDevs, devs...)
 	}
 	sort.Slice(named, func(i, j int) bool { return named[i].Team < named[j].Team })
+
+	// Residual floor (#593). The residual is emitted only when it is either harmless
+	// or itself k-safe:
+	//
+	//   contributors == 0  -> emit. An all-idle residual (#39 zero-cost seats) rolls
+	//                         up to zeros and identifies nobody, so withholding it
+	//                         would suppress the grand total for no gain.
+	//   1 <= contributors < k -> SUPPRESS, and tell the caller. This is the live
+	//                         disclosure: a cohort too small to hide behind, published
+	//                         under a label that reads as anonymized.
+	//   contributors >= k  -> emit. It cleared the floor on its own.
+	var sup KAnonSuppression
 	if len(otherDevs) > 0 {
-		named = append(named, rollup(OtherCohort, otherDevs))
+		n := contributingCount(otherDevs)
+		if n > 0 && n < k {
+			sup = KAnonSuppression{Residual: true, Developers: n, K: k}
+		} else {
+			named = append(named, rollup(OtherCohort, otherDevs))
+		}
 	}
-	return named
+	return named, sup
 }
 
 // teamClearsFloor reports whether a group's developer slice has at least k
@@ -428,14 +488,75 @@ func AggregateTeamsKAnon(devScores []DeveloperScore, teamOf map[string]string, k
 // itself — the OtherCohort/"" residual guard stays at each call site, since the
 // reserved-label rule is a naming concern, not a floor-clearing one.
 func teamClearsFloor(devs []DeveloperScore, k int) bool {
-	contributing := 0
+	return contributingCount(devs) >= k
+}
+
+// contributingCount is teamClearsFloor's numerator, split out because the residual
+// suppression rule (#593) needs the COUNT, not just the verdict: a residual with zero
+// contributors carries no figures and is harmless, while one with 1..k-1 is a live
+// disclosure.
+func contributingCount(devs []DeveloperScore) int {
+	n := 0
 	for _, d := range devs {
 		if d.contributes() {
-			contributing++
+			n++
 		}
 	}
-	return contributing >= k
+	return n
 }
+
+// KAnonSuppression reports what a k-anonymized aggregation WITHHELD beyond folding
+// sub-k groups into the residual (#593). The zero value means nothing was withheld.
+//
+// 🔴 IT EXISTS BECAUSE SUPPRESSING A ROW IS NOT ENOUGH. Before #593 the residual
+// "other" bucket was emitted whenever it was non-empty, with NO floor applied — so an
+// org with one small team, or any window narrow enough to leave one active developer,
+// published that cohort's exact figures under a label that reads as anonymized.
+//
+// Removing the row alone does NOT close it, and that is the whole reason this type
+// exists rather than a quiet `continue`. Measured on a 6+2 developer fixture at k=5:
+//
+//	total          cost=66  points=16
+//	named team A   cost=60  points=12
+//	difference     cost= 6  points= 4   <- the suppressed 2-person cohort, exactly
+//
+// The grand total is an unfloored rollup of everyone, so subtracting the named rows
+// reconstructs whatever was hidden. Any caller that suppresses the residual MUST also
+// withhold every unfloored aggregate over the same population — the grand total and
+// the cost-composition sidecar — or it has moved the disclosure rather than closed it.
+// the maintainer ruled this shape (option A) on 2026-08-03, over complementary suppression and
+// over merging the residual into a named group (which would publish a team figure that
+// includes people not on that team — a confidently wrong number, which this project
+// does not ship even to satisfy k).
+//
+// ⚠️ This retires the "totals are preserved exactly" property the aggregation used to
+// document. That is deliberate: that property is precisely what leaks. A response
+// whose rows no longer sum to its total is the honest shape here, and the API declares
+// the suppression rather than leaving a consumer to discover the arithmetic does not
+// close.
+type KAnonSuppression struct {
+	// Residual is true when a sub-k residual cohort was withheld entirely. When it is
+	// true the caller must not emit any unfloored aggregate over the same population.
+	Residual bool
+	// Developers is how many CONTRIBUTING developers were withheld. Reported so an
+	// operator can tell "one person is invisible" from "a quarter of the org is",
+	// which are different problems with different fixes (widen the window vs. fix the
+	// org hierarchy). It is a count, never an identity.
+	Developers int
+	// K is the floor ACTUALLY IN FORCE, after the MinKAnonymity clamp — not the value
+	// the caller requested.
+	//
+	// ⚠️ The distinction is not pedantic and it bit this change during development.
+	// AggregateTeamsKAnon clamps any k below MinKAnonymity up to it, so a server
+	// configured with k=2 enforces 3. Reporting the caller's 2 would tell an operator
+	// their cohort of 2 should have been fine and leave them unable to explain the
+	// suppression. Publish the number that decided the outcome, never the one that was
+	// asked for.
+	K int
+}
+
+// Any reports whether anything was withheld beyond the normal sub-k fold.
+func (s KAnonSuppression) Any() bool { return s.Residual }
 
 // TeamComparison is one group's paired before/after aggregate (#277): the same
 // label rolled up independently over window A and window B. It is only ever
@@ -472,12 +593,14 @@ type TeamComparison struct {
 // labels never earn a named row (they are the residual), matching
 // AggregateTeamsKAnon's fold.
 //
-// Totals are preserved exactly per window: every developer in a window lands in
-// exactly one row (a named group or "other") on that window's side, so summing a
-// side reproduces that window's grand total. Each returned TeamScore has its
+// Totals are preserved per window ONLY WHEN NOTHING WAS SUPPRESSED (#593): when the
+// residual is emitted, every developer in a window lands in exactly one row on that
+// window's side and summing a side reproduces that window's grand total. When the
+// residual is withheld — because EITHER side is sub-k — the sides deliberately no
+// longer reconcile, and the second return value reports it. Each returned TeamScore has its
 // Developers slice cleared (names never cross the anonymity boundary). The result
 // is sorted by label with the OtherCohort residual (when present) always last.
-func CompareTeamsKAnon(aScores, bScores []DeveloperScore, teamOf map[string]string, k int) []TeamComparison {
+func CompareTeamsKAnon(aScores, bScores []DeveloperScore, teamOf map[string]string, k int) ([]TeamComparison, KAnonSuppression) {
 	if k < MinKAnonymity {
 		k = MinKAnonymity
 	}
@@ -528,14 +651,48 @@ func CompareTeamsKAnon(aScores, bScores []DeveloperScore, teamOf map[string]stri
 		otherB = append(otherB, bDevs...)
 	}
 	sort.Slice(named, func(i, j int) bool { return named[i].Team < named[j].Team })
+
+	// Residual floor (#593), and it must mirror the NAMED rule five lines above, which
+	// is an AND across both windows (teamClearsFloor(aDevs) && teamClearsFloor(bDevs)).
+	//
+	// 🔴 THE OBVIOUS COLLAPSE IS WRONG, AND IT SHIPPED IN THE FIRST DRAFT. Reducing the
+	// two windows to a single count and testing that — max(nA, nB) < k — makes
+	// suppression fire only when BOTH sides are sub-k. Measured with k=5, nA=2, nB=6:
+	// no suppression, and the emitted row's A side was a rollup over TWO contributing
+	// developers, published under an anonymized label. That is #593 itself, on this
+	// endpoint, and window-A-narrow / window-B-recent is the DEFAULT compare shape, not
+	// an exotic one. (min is wrong too: nA=0, nB=2 collapses to 0 and emits B's
+	// 2-person row.)
+	//
+	// The predicate has to be applied PER SIDE. A side is unsafe when it carries
+	// between 1 and k-1 contributors; a side with 0 is an empty aggregate that
+	// identifies nobody. If either side is unsafe the residual is withheld from BOTH,
+	// because a group whose presence differs across windows is itself the #277 leak.
+	//
+	// Developers reports the larger of the two counts — the bigger of the two cohorts
+	// that went unpublished. It is NOT a union: a developer contributing only in A does
+	// not count toward B's total, so max is a lower bound on |A ∪ B|. The first draft's
+	// comment claimed otherwise; the count is a magnitude hint for an operator, not a
+	// set size.
+	var sup KAnonSuppression
 	if len(otherA) > 0 || len(otherB) > 0 {
-		named = append(named, TeamComparison{
-			Team: OtherCohort,
-			A:    rollup(OtherCohort, otherA),
-			B:    rollup(OtherCohort, otherB),
-		})
+		nA, nB := contributingCount(otherA), contributingCount(otherB)
+		unsafe := func(n int) bool { return n > 0 && n < k }
+		if unsafe(nA) || unsafe(nB) {
+			n := nA
+			if nB > n {
+				n = nB
+			}
+			sup = KAnonSuppression{Residual: true, Developers: n, K: k}
+		} else {
+			named = append(named, TeamComparison{
+				Team: OtherCohort,
+				A:    rollup(OtherCohort, otherA),
+				B:    rollup(OtherCohort, otherB),
+			})
+		}
 	}
-	return named
+	return named, sup
 }
 
 // FormatReport renders a plain-text TIER report suitable for terminal output. In
@@ -583,20 +740,40 @@ func FormatReport(scores []DeveloperScore, since string, mode AggregationMode) s
 	}
 
 	// The below-floor separator is built from the constants so its wording can
-	// never drift from the gate that produces it (#133).
-	floorSeparator := fmt.Sprintf(
-		"--- below ranking floor (n < %d outcomes or < $%.0f cost) ---",
+	// never drift from the gate that produces it (#133). floorReason is factored out
+	// because the TEAM TOTAL row names the same floor (#606) and one report must not
+	// describe one gate two ways.
+	floorReason := fmt.Sprintf("n < %d outcomes or < $%.0f cost",
 		MinRankedOutcomes, MinRankedCostUSD)
+	floorSeparator := "--- below ranking floor (" + floorReason + ") ---"
 
-	var totalPoints, totalCost, totalRealtime float64
+	// The aggregate row comes from RollupTeam, the SAME rollup /scores' `total`
+	// block and the compare endpoint's `total` use — it is not re-summed here
+	// (#606). The old inline `totalPoints / (totalCost / tierCostScaleUSD)`
+	// structurally could not see `Ranked`, so this row published a below-floor
+	// quotient while the per-developer rows three lines up correctly printed the
+	// floor separator: one output contradicting itself. Reading the rollup is what
+	// makes the verdict reach here at all — #502 proved that a field added to a
+	// struct reaches only the consumers that READ the struct.
+	//
+	// Rolled up over `sorted`, which is `scores` reordered, so the aggregate is
+	// identical in BOTH modes: an anonymized mode suppresses identity, never the
+	// underlying data. (`sorted` rather than `scores` keeps this row bit-identical
+	// to the report's previous inline arithmetic, which also summed in sorted order.
+	// /scores rolls up its own unsorted slice, and float addition is not associative,
+	// so the two can differ in the last ulp — never at %.1f/%.4f, but do not read
+	// "the same rollup" as "the same summation order".)
+	team := RollupTeam("", sorted)
+	// #185/#270: RollupTeam binds the developer slice it was handed (ts.Developers =
+	// devScores), and in an anonymized mode this function's entire contract is that
+	// it never names an individual. Nothing reads the field today — but the engine's
+	// own k-anon boundary nils it for exactly this reason (see CompareTeamsKAnon's
+	// rollup closure), and a future `range team.Developers` here would be a leak in
+	// the one function least able to afford one.
+	team.Developers = nil
+
 	printedSeparator := false
 	for _, s := range sorted {
-		// Totals accumulate in BOTH modes so the aggregate row is identical
-		// whether or not the per-developer rows are printed — team mode suppresses
-		// identity, never the underlying data.
-		totalPoints += s.WeightedPoints
-		totalCost += s.TotalCostUSD
-		totalRealtime += s.TotalCostUSD * (s.CoveragePercent / 100.0)
 		if mode.Anonymized() {
 			continue // no per-developer rows in an anonymized mode (#185, #270)
 		}
@@ -609,14 +786,40 @@ func FormatReport(scores []DeveloperScore, since string, mode AggregationMode) s
 	}
 
 	fmt.Fprint(&b, strings.Repeat("─", 72)+"\n")
-	teamTIER := 0.0
-	teamCoverage := 0.0
-	if totalCost > 0 {
-		teamTIER = totalPoints / (totalCost / tierCostScaleUSD)
-		teamCoverage = (totalRealtime / totalCost) * 100.0
+	// Below the floor the QUOTIENT is withheld and the measured inputs stay — the
+	// same treatment the dashboard's org KPI tile applies, for the same reason: the
+	// ratio is a true quotient over a denominator too small to mean anything (the
+	// canonical case is 28 points over $0.0001 = 2.8e8), and a printed number is a
+	// published number whatever surrounds it. Cost, points and fidelity still print,
+	// so a reader can see exactly how thin the evidence is.
+	//
+	// This matters most in an anonymized mode, where the loop above prints no
+	// developer rows at all and this line IS the whole report.
+	//
+	// "—", never a muted or bracketed figure: the per-developer rows can print a
+	// below-floor number because the separator above them and the ordering around
+	// them carry the verdict. The TEAM TOTAL row has no list around it — it is the
+	// report's headline, read alone and quoted onward — so it is withheld, exactly as
+	// the KPI tile withholds the same quantity (#502).
+	// Defaults to WITHHELD and opts in to publishing, not the other way round. A
+	// future edit that breaks this condition then withholds a number it should have
+	// shown — a visible, reportable bug — rather than publishing one it should have
+	// withheld, which is silent and is the whole subject of #502/#606.
+	teamTIER := "—"
+	if team.Ranked {
+		teamTIER = fmt.Sprintf("%.1f", team.TIER)
 	}
-	fmt.Fprintf(&b, "%-24s  %8.1f  %10.4f  %8.1f  %7.0f%%\n",
-		"TEAM TOTAL", teamTIER, totalCost, totalPoints, teamCoverage)
+	// %8s, not %8.1f: fmt measures string width in RUNES, so the em dash still lands
+	// in the TIER column.
+	fmt.Fprintf(&b, "%-24s  %8s  %10.4f  %8.1f  %7.0f%%\n",
+		"TEAM TOTAL", teamTIER, team.TotalCostUSD, team.WeightedPoints, team.CoveragePercent)
+	if !team.Ranked {
+		// The reason, in the same words and from the same constants as the
+		// per-developer separator. A bare "—" with no stated cause trains a reader to
+		// read a withheld number as a broken one.
+		fmt.Fprintf(&b, "TEAM TOTAL is below the ranking floor (%s); TIER is withheld — "+
+			"the measured cost, points and fidelity above stand.\n", floorReason)
+	}
 	fmt.Fprint(&b, strings.Repeat("─", 72)+"\n")
 	fmt.Fprint(&b, "\nFormula: TIER = weighted_points / (total_cost_USD / $1,000)\n")
 	fmt.Fprint(&b, "Fidelity: % of CAPTURED spend from per-request sources (proxy/JSONL); "+

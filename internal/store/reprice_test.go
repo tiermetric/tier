@@ -800,6 +800,69 @@ func TestReprice_CommitBlocksGuessedWithoutAllowGuessed(t *testing.T) {
 	}
 }
 
+// TestReprice_GuessGateErrorIsNotForgeable pins the #321 barrier on the GUESS
+// gate's error text, which is a RAW SINK a level up: cmd/tierd/reprice.go
+// Fprintf's it straight to stderr, and an operator routinely pipes that into a
+// maintenance log.
+//
+// The model names in this error are, by construction, the models ABSENT from the
+// price table — the exact strings nothing in this repo has ever validated. They
+// arrive from POST /api/v1/events, which length-caps `model` and applies no
+// charset check anywhere, so a CR/LF in one plants a standalone record.
+//
+// GUARD COVERAGE: revert the logsafe.Join in store.go's GUESS gate to
+// strings.Join and this test fails. The sibling report writer is guarded by
+// TestPrintRepriceResult_NotForgeable in cmd/tierd.
+func TestReprice_GuessGateErrorIsNotForgeable(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	base := time.Date(2026, 8, 4, 6, 0, 0, 0, time.UTC)
+
+	// The payload a reviewer landed through the real handler: a benign-looking
+	// model name, a CRLF, then a second record in slog's own Text shape.
+	const forgedRecord = `time=2026-08-04T00:00:00Z level=ERROR msg="reprice COMMITTED" rows=40000 repriced_by=root`
+	const model = "ghost-model-xyz\r\n" + forgedRecord
+
+	if err := db.InsertTokenEvent(ctx, TokenEvent{
+		Developer: "ken", IssueID: "issue-guess", Model: model,
+		InputTok: 1000, CostMicro: 999_000, Source: "jsonl", Fidelity: "realtime",
+		PriceVersion: 3, Timestamp: base,
+	}); err != nil {
+		t.Fatalf("insert guessed: %v", err)
+	}
+
+	_, err := db.Reprice(ctx, RepriceOptions{FromVersion: 1, Commit: true})
+	if err == nil {
+		t.Fatal("Reprice --commit with a guessed row and no AllowGuessed = nil error, want the gate to fire")
+	}
+	msg := err.Error()
+
+	// The injection: no line of the error may BE the forged record. Split on
+	// "\n" only — a lone CR is also a line break to a terminal, so an
+	// implementation that stripped LF but passed CR would slip a "\r"-only split.
+	for _, line := range strings.Split(msg, "\n") {
+		if strings.HasPrefix(strings.TrimRight(line, "\r"), "time=") {
+			t.Errorf("the GUESS-gate error let a model name forge a standalone record.\n"+
+				"  forged line: %q\n  full error: %q\n"+
+				"Model names here are the ones NOT in the price table — nothing has "+
+				"validated them. Route them through internal/logsafe.", line, msg)
+		}
+	}
+	if strings.ContainsAny(msg, "\r\n") {
+		t.Errorf("GUESS-gate error leaked a raw CR/LF: %q", msg)
+	}
+	// The control half: the barrier must still NAME the model, because naming it
+	// is the entire reason the error lists models at all — the operator has to
+	// know what to add to prices.yaml.
+	if !strings.Contains(msg, "ghost-model-xyz") {
+		t.Errorf("the barrier destroyed the diagnostic: error = %q, want it to still name the model", msg)
+	}
+	if !strings.Contains(msg, "allow-guessed") {
+		t.Errorf("error = %q, want it to still mention --allow-guessed", msg)
+	}
+}
+
 // TestReprice_CommitProceedsWithAllowGuessed proves AllowGuessed lets the same
 // guessed commit through: the row is repriced, both ledgers are written, and
 // GuessedRowCount still surfaces (the warning stands).

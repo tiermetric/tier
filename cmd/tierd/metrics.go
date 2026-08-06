@@ -133,11 +133,11 @@ func newServeMetrics(version string) *serveMetrics {
 	// response is stored under the "unattributed" sentinel. So a systematically
 	// misconfigured client (never sending X-Tier-Developer) is visible in /metrics
 	// instead of silently polluting per-developer aggregates. header is
-	// developer|issue — static and low-cardinality; no per-developer value ever
-	// becomes a label.
+	// developer|developer-forged|issue|issue-forged|repo — static and
+	// low-cardinality; no per-developer value ever becomes a label.
 	proxyUnattributed := reg.NewCounter(
 		"tier_proxy_unattributed_total",
-		`Intercepted 2xx proxied responses missing an X-Tier-* attribution header, counted once per response per missing header (developer|issue); a captured event is then stored under "unattributed".`,
+		`Intercepted 2xx proxied responses missing an X-Tier-* attribution header, counted once per response per missing header (developer|developer-forged|issue|issue-forged|repo); a captured event is then stored under "unattributed". The -forged variants are a client that SUPPLIED the server-assigned sentinel rather than omitting the header — same stored row, different operator signal. Alert on developer-forged (#619): a forged developer moves the sender's spend out of its own denominator and RAISES its score, unlike issue-forged (#466), which only shifts a dollar between buckets inside it.`,
 		"header")
 	// unknownModels counts API calls priced at the unknown-model fallback rate
 	// ($0.50/M) because the model isn't in the price table (#68) — a mispriced-

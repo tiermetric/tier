@@ -122,19 +122,27 @@ func TestGetScores_DivisionMode_SubKDivisionFoldsToOther(t *testing.T) {
 	if teamPresent(resp.Teams, "research") {
 		t.Errorf("sub-k division 'research' must NOT be named; got %v", teamJSONNames(resp.Teams))
 	}
-	if !teamPresent(resp.Teams, "engineering") || !teamPresent(resp.Teams, "other") {
-		t.Fatalf("expected 'engineering' + 'other'; got %v", teamJSONNames(resp.Teams))
+	if !teamPresent(resp.Teams, "engineering") {
+		t.Fatalf("k-clearing division 'engineering' must be named; got %v", teamJSONNames(resp.Teams))
 	}
-	other := teamByName(resp.Teams, "other")
-	if other.WeightedPoints != 10 || other.TotalCostUSD != 14 {
-		t.Errorf("'other' = points %v cost %v, want points 10 cost 14 (research r1+r2 preserved)",
-			other.WeightedPoints, other.TotalCostUSD)
+	// #593: 'research' has 2 contributors, below the floor, so the residual is WITHHELD
+	// at the division level exactly as at the team level — and the grand total goes
+	// with it, because division-mode total minus 'engineering' would otherwise
+	// reconstruct 'research'. The developer-mode comparison this test used to make is
+	// therefore gone: totals deliberately no longer reconcile under suppression.
+	if teamPresent(resp.Teams, "other") {
+		t.Errorf("a sub-k division residual must be withheld; got %v", teamJSONNames(resp.Teams))
 	}
-	// Totals preserved vs developer-mode ground truth.
-	if resp.Total == nil ||
-		resp.Total.TotalCostUSD != devResp.Total.TotalCostUSD ||
-		resp.Total.WeightedPoints != devResp.Total.WeightedPoints {
-		t.Errorf("division-mode total != developer-mode total: suppression must not change totals")
+	if resp.Total != nil {
+		t.Errorf("grand total must be withheld alongside a suppressed residual; got %+v", resp.Total)
+	}
+	if resp.DataQuality == nil || resp.DataQuality.KAnonSuppressed == nil {
+		t.Fatal("division-mode suppression must be declared in data_quality")
+	}
+	// devResp is retained as the control arm: developer mode still shows everything,
+	// so the assertions above cannot pass against a build that merely lost the data.
+	if devResp.Total == nil {
+		t.Fatal("developer-mode control arm lost its total")
 	}
 }
 
@@ -282,9 +290,15 @@ func TestGetScores_DivisionMode_EmptyDivisionFoldsToOther(t *testing.T) {
 			t.Errorf("empty division must not produce a blank-named row; got %v", teamJSONNames(resp.Teams))
 		}
 	}
-	other := teamByName(resp.Teams, "other")
-	if other == nil || other.WeightedPoints != 2 || other.TotalCostUSD != 5 {
-		t.Errorf("empty-division developer must fold into 'other' (points 2, cost 5); got %+v", other)
+	// #593: the unnamed-division group here has too few contributors to hide behind,
+	// so it is withheld rather than published as 'other'. The contract this test pins —
+	// an empty division never produces a blank-NAMED row — is asserted above and is
+	// unchanged.
+	if teamByName(resp.Teams, "other") != nil {
+		t.Errorf("a sub-k unnamed-division residual must be withheld; got %v", teamJSONNames(resp.Teams))
+	}
+	if resp.DataQuality == nil || resp.DataQuality.KAnonSuppressed == nil {
+		t.Error("suppression of the unnamed-division group must be declared")
 	}
 }
 

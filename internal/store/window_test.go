@@ -51,7 +51,7 @@ func TestWindowedReads_HalfOpen(t *testing.T) {
 	}
 
 	// Bounded [X, Y): exactly X and Y-1s → 20_000_000 micro.
-	bounded, err := db.DeveloperCostsWindow(ctx, x, y)
+	bounded, err := db.DeveloperCostsWindow(ctx, x, y, FleetWide)
 	if err != nil {
 		t.Fatalf("DeveloperCostsWindow: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestWindowedReads_HalfOpen(t *testing.T) {
 	}
 
 	// Zero until is unbounded above: X, Y-1s and Y → 30_000_000.
-	open, err := db.DeveloperCostsWindow(ctx, x, time.Time{})
+	open, err := db.DeveloperCostsWindow(ctx, x, time.Time{}, FleetWide)
 	if err != nil {
 		t.Fatalf("DeveloperCostsWindow open: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestWindowedReads_HalfOpen(t *testing.T) {
 	}
 
 	// Outcomes read honors the same bound.
-	outs, err := db.AllOutcomesWindow(ctx, x, y)
+	outs, err := db.AllOutcomesWindow(ctx, x, y, FleetWide)
 	if err != nil {
 		t.Fatalf("AllOutcomesWindow: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestWindowedReads_HalfOpen(t *testing.T) {
 	}
 
 	// Issue-grain cost read honors the same bound.
-	ic, err := db.DeveloperIssueCostsWindow(ctx, x, y)
+	ic, err := db.DeveloperIssueCostsWindow(ctx, x, y, FleetWide)
 	if err != nil {
 		t.Fatalf("DeveloperIssueCostsWindow: %v", err)
 	}

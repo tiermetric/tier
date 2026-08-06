@@ -1,0 +1,21 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_synthetic_sse_0002","object":"response","created_at":1770000100,"status":"in_progress","model":"gpt-5.3-codex","output":[],"usage":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_synthetic_sse_0002","object":"response","status":"in_progress","model":"gpt-5.3-codex","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_synthetic_sse_0002","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_synthetic_sse_0002","output_index":0,"content_index":0,"delta":"SYNTHETIC FIXTURE - "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_synthetic_sse_0002","output_index":0,"content_index":0,"delta":"schema-derived, not recorded from live traffic."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"msg_synthetic_sse_0002","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"SYNTHETIC FIXTURE - schema-derived, not recorded from live traffic.","annotations":[]}]}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_synthetic_sse_0002","object":"response","created_at":1770000100,"status":"completed","model":"gpt-5.3-codex","output":[{"id":"msg_synthetic_sse_0002","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"SYNTHETIC FIXTURE - schema-derived, not recorded from live traffic.","annotations":[]}]}],"usage":{"input_tokens":12000,"input_tokens_details":{"cached_tokens":10000},"output_tokens":1000,"output_tokens_details":{"reasoning_tokens":640},"total_tokens":13000}}}
+

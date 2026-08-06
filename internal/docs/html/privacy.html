@@ -141,10 +141,12 @@ operational checkpoint row per watched
 JSONL file (<code>watcher_checkpoint</code>) so a restart resumes tailing from the last
 parsed byte instead of re-reading each file from the start. Each row&#39;s
 <code>metadata</code> column holds a small JSON blob describing the session being tailed:
-the <strong>absolute working-directory path</strong> (<code>cwd</code>), the <strong>git branch</strong>, and the
-<strong>session id</strong> (a UUID), plus the session start time, the first-observed model
-name, and an internal parse-sequence counter. Nothing here is captured unless
-you run the watcher; a one-shot <code>tierd score</code> writes no checkpoint.</li>
+the <strong>absolute working-directory path</strong> (<code>cwd</code>), the <strong>git branch</strong> (and, when
+an isolated-agent session inherits one, the most recent human-named git branch
+seen so far in that file), and the <strong>session id</strong> (a UUID), plus the session
+start time, the first-observed model name, and an internal parse-sequence
+counter. Nothing here is captured unless you run the watcher; a one-shot
+<code>tierd score</code> writes no checkpoint.</li>
 <li><strong>Raw GitHub webhook payloads</strong> (<strong>only when the GitHub webhook path is
 enabled</strong> — i.e. you set <code>webhook_secret</code> / <code>TIER_WEBHOOK_SECRET</code> and point
 GitHub deliveries at <code>POST /webhook/github</code>; that endpoint is fail-closed and
@@ -230,13 +232,66 @@ tables:</p>
 <td>per-developer quality-transition log</td>
 </tr>
 <tr>
+<td><code>repo_repair_audit</code></td>
+<td>which repositories a <code>tierd repair-repo</code> run moved this developer&#39;s stored spend into</td>
+</tr>
+<tr>
 <td><code>developer_alias</code></td>
 <td>the developer&#39;s alias→canonical mappings</td>
 </tr>
 </tbody>
 </table>
-<p>It returns per-table deleted-row counts and is <strong>idempotent</strong> (a second call, or
-a call for an unknown developer, deletes nothing and returns <code>404</code>).</p>
+<p>The companion <code>repo_repair_row_audit</code> ledger is <strong>not</strong> listed because it holds
+no personal data: only a repair id, a row id, and the before/after repository
+slug. It deliberately does not copy the resolving <code>session_id</code>, precisely so
+that an audit record designed to outlive the row it describes cannot become
+personal data that survives an erasure.</p>
+<p><strong>All five audit ledgers</strong> — <code>reprice_audit</code>, <code>reprice_row_audit</code>,
+<code>repo_repair_audit</code>, <code>repo_repair_row_audit</code>, <code>cost_correction_audit</code> — are
+<strong>append-only by construction: no code path mutates them; the tables
+themselves are not protected against direct database access.</strong> One of them
+carries more than that, and it is narrow: <code>cost_correction_audit</code> (the
+money-rewrite ledger) refuses <code>UPDATE</code> at the schema level, so no code path
+can <strong>silently</strong> rewrite a recorded correction — a mutation would have to
+drop the trigger first. <code>DELETE</code> is deliberately <strong>not</strong> refused on any of them — erasure
+(below) and future retention/GC are lawful deletes, and no database
+constraint can tell a lawful delete from tampering. None of this is
+tamper-proofing against someone holding the database file.</p>
+<p>The <code>cost_correction_audit</code> ledger (#346, the sanctioned <code>POST /costs</code>
+cost-correction override) follows the SAME pattern and is <strong>also not
+listed</strong>: it holds no <code>developer</code> column, and — after an earlier draft got
+this backwards — deliberately does <strong>not</strong> copy the correction&#39;s
+<code>idempotency_key</code> either, precisely because that field is often
+client-chosen and could embed personal data (an email, a ticket
+reference), and this ledger is designed to outlive the row it describes.
+It carries only a server-generated <code>token_event_id</code> (which simply stops
+resolving once the row it names is erased or pruned — correct, not a bug)
+plus <code>old_cost_micro</code>/<code>new_cost_micro</code> and the operator-supplied <code>actor</code>/
+<code>reason</code> that explain the correction. <code>actor</code>/<code>reason</code> name the OPERATOR
+who made the correction, not the data subject whose spend was corrected —
+the same third-party-identifier class as the <code>webhook_payloads</code> residual
+below — so they are not erased by this endpoint. Operators must not put a
+data subject&#39;s own name or email in <code>reason</code>; nothing technical enforces
+that today.</p>
+<p>⚠️ <strong><code>actor</code> is a self-asserted claim, not a verified identity — the audit
+trail records who the caller says they are.</strong> It is unvalidated free text
+the caller chooses (length-capped only), and nothing checks it against the
+credential that made the request. Nothing can today: <code>POST /api/v1/costs</code> is
+gated — when a token is configured at all — by a single global write token
+with no subject, so there is no
+principal for the server to record instead. Treat every <code>actor</code> value as a
+claim to be corroborated, not as an attribution. Binding it to a verified
+principal requires the identity layer tracked as #65.</p>
+<p>The same holds for the corrected row&#39;s <code>developer</code>: nothing binds the
+authenticating principal to it either, which is the half that matters for
+data accuracy (Art. 5(1)(d)). What <em>is</em> bounded is <strong>reach</strong> —
+<code>POST /api/v1/costs</code> forces <code>source=&#34;api&#34;</code> and the correction path compares
+it, so an override can only ever touch a manually imported row.
+Automatically captured spend cannot be corrected through this endpoint at
+all.</p>
+<p>The erasure endpoint returns per-table deleted-row counts and is
+<strong>idempotent</strong> (a second call, or a call for an unknown developer, deletes
+nothing and returns <code>404</code>).</p>
 </li>
 <li>
 <p><strong>Access (DSAR)</strong> — <code>GET /api/v1/developer/{id}/export</code> returns every stored

@@ -45,6 +45,133 @@ function pct(fraction) {
   return (f * 100).toFixed(3) + '%';
 }
 
+// usdText renders a USD amount that is displayed ALONGSIDE a floor it is being
+// compared against. Two rules, both load-bearing, both learned from the #502 cause
+// line:
+//
+//   - TRUNCATE to the cent, never round. Rounding lets a figure print as having
+//     reached a threshold it is below: at $4.995 the cause line rendered "$5.00 of
+//     measured AI spend — below the $5.00 evidence floor", a sentence that
+//     contradicts itself. Truncating down cannot cross the floor.
+//   - Below a cent, say "<$0.01", never "$0.00". The canonical #502 window is
+//     $0.0001; as "$0.00" the evidence the reader is meant to weigh is not on
+//     screen at all, and it is indistinguishable from a genuine zero-cost row,
+//     which is the FREE reading — unbounded yield, the opposite meaning.
+//
+// EVERY USD *amount* on this page goes through here — the SPEND tile, the
+// cost-composition total, the per-model and per-bucket costs, the unattributed
+// figure, and the below-floor cause line. That is not tidiness: these figures sit
+// beside each other and are read against each other, and two formatters for one
+// quantity is how "$5.00 of measured AI spend — below the $5.00 evidence floor"
+// happened. Two renderings are deliberately NOT routed here, both for stated
+// reasons: cost_per_point is a RATE in $/point, not an amount (#239), and the
+// compare view renders signed DELTAS whose semantics are still under review
+// (#605). TestDashboard_MoneyHasOneFormatter pins the list.
+//
+// A true zero renders "$0.00", which is the honest figure there, and that branch
+// IS exercised: the SPEND tile is in renderKPIs' common tail, so a FREE or
+// no-spend window reaches it, as does a fully-attributed window's unattributed
+// figure. num() maps NaN/Infinity/absent to 0; the domain is non-negative
+// (total_cost_usd is a sum of non-negative micro-USD values) and negatives are not
+// formatted meaningfully.
+//
+// The toFixed(6) inside the truncation is NOT decoration. `Math.floor(n * 100)`
+// alone is wrong for ordinary amounts, because n * 100 is not exact in binary:
+// 0.29 * 100 is 28.999999999999996, so a genuine $0.29 truncated to "$0.28" and
+// $8.20 to "$8.19" — losing a cent on values that have nothing to do with the
+// floor. Rounding the cent count to 6 decimal places before flooring absorbs that
+// representation error while leaving a real fraction of a cent intact.
+//
+// ⚠️ That tolerance means truncation ALONE does not guarantee the "cannot cross
+// the floor" property: any n in [4.9999999995, 5.00) still renders "$5.00". It is
+// tempting to argue this is unreachable because cost is stored in micro-USD — it
+// is NOT. total_cost_usd is a float64 SUM of micro-USD-exact values (RollupTeam),
+// and a sum is not on that grid: 2.918582 + 0.956618 + 0.420133 + 0.704667 is
+// 4.999999999999999, which is genuinely below the floor and renders "$5.00".
+// Callers that print this figure next to a floor MUST route through usdUnder,
+// which closes the gap structurally instead of by tolerance.
+function usdText(v) {
+  var n = num(v);
+  if (n > 0 && n < 0.01) { return '<$0.01'; }
+  // n is finite (num guarantees it) but n * 100 can still overflow to Infinity.
+  if (!isFinite(n * 100)) { return '$' + n.toFixed(2); }
+  return '$' + (Math.floor(Number((n * 100).toFixed(6))) / 100).toFixed(2);
+}
+
+// usdUnder renders an amount that the CALLER has already established is strictly
+// below `floor`, and guarantees the rendering does not claim otherwise. When the
+// truncated rendering lands exactly on the floor's own rendering, it says "<".
+//
+// Without this, one sentence can contradict itself: "$5.00 of measured AI spend —
+// below the $5.00 evidence floor". usdText's truncation removes that for every
+// value a human would type, but not for a float64 sum that lands a few ulps below
+// the floor (see the warning on usdText). This is a structural fix rather than a
+// wider tolerance: there is no value of v for which the output can equal the
+// floor's rendering.
+function usdUnder(v, floor) {
+  // Enforce the precondition rather than documenting it. Every caller today gates
+  // on a strict `<`, so this cannot fire -- it is here so that a caller which one
+  // day does not gate fails SAFE rather than silently lying.
+  //
+  // The fallback must not be usdText(v). Out of domain that returns "$5.00", and
+  // the caller concatenates it into '... of measured spend, below the $5.00
+  // evidence floor' -- rebuilding the exact #502 sentence this function exists to
+  // delete. '>=' cannot be read as agreeing with the floor.
+  //
+  // NaN never arrives (num maps it to 0) but 0 would read as a MEASURED zero, i.e.
+  // the FREE meaning, which is the opposite reading. It is unreachable only
+  // because every caller sits behind an earlier cost<=0 FREE gate, not because 0
+  // is a safe answer here.
+  if (num(v) >= num(floor)) { return '\u2265' + usdText(floor); }
+  var s = usdText(v);
+  return s === usdText(floor) ? '<' + s : s;
+}
+
+// spendTextFor renders the org's measured window spend. It exists so that the two
+// places that print that ONE number -- the SPEND tile and the below-floor cause
+// line, both on screen at once, sixty lines apart in renderKPIs -- cannot drift.
+//
+// They already did, twice. First the tile rounded while the caption truncated
+// ($4.997 -> tile "$5.00" beside a caption asserting the spend was below $5.00).
+// Then both truncated but only the caption used usdUnder, so at a float64 sum a
+// few ulps under the floor the tile said "$5.00" and the caption said "<$5.00" --
+// the same contradiction, narrowed to a window the code itself argues is
+// reachable. Two call sites of one function cannot disagree.
+function spendTextFor(totalCostUSD) {
+  return totalCostUSD < MIN_RANKED_COST_USD
+    ? usdUnder(totalCostUSD, MIN_RANKED_COST_USD)
+    : usdText(totalCostUSD);
+}
+
+// unrankedReasons names the #133/#136 conditions a row actually FAILS, read from
+// the fields the row itself carries.
+//
+// It never asserts a single cause, because `ranked` is a three-way conjunction
+// (flagged == 0 AND sample_n >= MIN_RANKED_OUTCOMES AND cost >= MIN_RANKED_COST_USD).
+// The old wording, "insufficient sample to rank: 20 outcomes / $500.00 cost",
+// blamed the sample on a row whose 20 outcomes and $500 clear both floors and
+// which is unranked because ONE outcome had no measured tokens — a number on
+// screen contradicting the sentence next to it.
+//
+// Developer rows carry all three inputs, so nothing is guessed. If none of the
+// three is failing, the client cannot explain the server's verdict and says so
+// rather than inventing a cause.
+function unrankedReasons(d) {
+  var why = [];
+  var flagged = num(d.flagged_outcomes);
+  if (flagged > 0) {
+    why.push(flagged + ' outcome' + (flagged !== 1 ? 's' : '') + ' with no measured tokens');
+  }
+  if (num(d.sample_n) < MIN_RANKED_OUTCOMES) {
+    why.push('fewer than ' + MIN_RANKED_OUTCOMES + ' accepted outcomes (' + num(d.sample_n) + ')');
+  }
+  if (num(d.total_cost_usd) < MIN_RANKED_COST_USD) {
+    why.push(usdUnder(d.total_cost_usd, MIN_RANKED_COST_USD) + ' of measured spend, below the ' +
+      usdText(MIN_RANKED_COST_USD) + ' evidence floor');
+  }
+  return why.length ? why.join('; ') : 'the server did not vouch for this row';
+}
+
 function showStatus(msg, isError) {
   var elm = $('status-msg');
   elm.textContent = msg;
@@ -253,6 +380,25 @@ function renderScores(data, since) {
   var teamMode = Array.isArray(data.teams);
 
   var pooled = (teamMode ? data.teams : data.developers) || [];
+
+  // #593: a k-anonymity suppression must NEVER render as "no data". The server
+  // withholds the cohort rows, the grand total and the composition sidecar when a
+  // residual cohort is too small to hide behind, and DECLARES it here. Without this
+  // branch the checks below read a suppressed window as an empty one -- the exact
+  // indistinguishability the wire field exists to prevent, moved from the JSON to the
+  // screen. "No data" tells an operator to go fix their capture; the truth is that
+  // capture is fine and the answer cannot be shown at this k.
+  var kanon = (data.data_quality && data.data_quality.kanon_suppressed) || null;
+  if (kanon) {
+    var who = kanon.developers === 1 ? '1 developer' : kanon.developers + ' developers';
+    showStatus(
+      'Withheld for anonymity: a cohort of ' + who + ' is below the k-anonymity floor of ' +
+      kanon.k_anonymity + '. Cohort rows, the org total and the cost breakdown are ' +
+      'suppressed for this window -- widen the date range, or query a level with more ' +
+      'people in it. This is not missing data.', true);
+    return;
+  }
+
   if (pooled.length === 0 && !data.total) {
     showStatus('No data for this period.');
     return;
@@ -442,7 +588,7 @@ function renderCostComposition(cc) {
     return;
   }
   var total = num(cc.total_cost_usd);
-  setText('cc-total', '$' + total.toFixed(2) + ' total');
+  setText('cc-total', usdText(total) + ' total');
 
   // Levers + attribution readouts.
   var levers = $('cc-levers');
@@ -455,7 +601,7 @@ function renderCostComposition(cc) {
     'Premium-model share', (num(cc.premium_model_share) * 100).toFixed(1) + '%',
     'of spend on top-price-tier models'));
   levers.appendChild(buildLever(
-    'Unattributed spend', '$' + unattrUSD.toFixed(2),
+    'Unattributed spend', usdText(unattrUSD),
     (num(cc.unattributed_share) * 100).toFixed(1) + '% with no issue attached'));
 
   // By-model bars, scaled to the largest model's share so the leader fills the
@@ -499,11 +645,31 @@ function buildModelBar(m, scale) {
   track.appendChild(fill);
   row.appendChild(track);
 
-  row.appendChild(el('div', 'cc-value num', '$' + num(m.cost_usd).toFixed(2)));
+  row.appendChild(el('div', 'cc-value num', usdText(m.cost_usd)));
   return row;
 }
 
 // --- KPI tiles --------------------------------------------------------------
+// The #133 ranking floor, mirrored from scoring.MinRankedCostUSD and
+// scoring.MinRankedOutcomes so the tile can say WHICH floor a below-floor org
+// missed -- the server sends the verdict (`ranked`), not the thresholds behind
+// it. That mirroring is a drift risk by construction, so it is pinned against the
+// Go constants by TestDashboard_KPIFloorsMatchEngine: move the constant and that
+// test fails rather than the caption quietly citing a floor that no longer
+// exists. Declared ABOVE its reader, not hoisted -- an undefined threshold here
+// would silently make every comparison false.
+var MIN_RANKED_COST_USD = 5.00;
+var MIN_RANKED_OUTCOMES = 3;
+
+// BELOW_FLOOR_TAG is the single phrase this dashboard uses for "the server did not
+// rank this". Declared once so the compare view's row tags and its withheld org
+// cells name the verdict identically instead of each minting its own wording
+// (#605 criterion 6); the yield-bar titles and the KPI cause line open with the
+// same words and then add the reason their surface can actually verify. Declared
+// ABOVE its readers, not hoisted, for the same reason as the floors above: an
+// undefined tag would silently render "undefined" as the verdict.
+var BELOW_FLOOR_TAG = 'below ranking floor';
+
 // The org total is an aggregate over ALL work -- a legitimate whole-org number,
 // not a cross-type comparison. Values come straight from scoring.RollupTeam (no
 // client re-summing).
@@ -521,6 +687,10 @@ function renderKPIs(data, pooled, teamMode) {
   var noScore = num(total.weighted_points) <= 0;
 
   var orgFree = !noScore && num(total.total_cost_usd) <= 0;
+  // #502: the org rollup carries the #133/#136 evidence floor on its summed
+  // inputs. `!total.ranked` fails CLOSED -- a response without the field is not
+  // treated as ranked, so no headline is ever published on an unstated verdict.
+  var orgUnranked = !noScore && !orgFree && !total.ranked;
 
   if (noScore) {
     // The window held spend but no accepted outcome anywhere, so the org TIER
@@ -546,6 +716,64 @@ function renderKPIs(data, pooled, teamMode) {
     tierValueEl.classList.add('kpi-noscore');
     tierValueEl.classList.remove('provisional');
     setText('kpi-tier-ci', 'accepted work at $0 recorded AI cost — yield unbounded');
+    provisionalEl.textContent = '';
+    provisionalEl.style.display = 'none';
+  } else if (orgUnranked) {
+    // Below the evidence floor (#502): the ratio is a TRUE quotient of real
+    // measurements, and it is still on the wire untouched -- but 28 points over
+    // $0.0001 of measured spend is 280,000,000, a number produced by a denominator
+    // too small to mean anything. So the RATIO IS WITHHELD, not printed faintly.
+    //
+    // This is the one place the per-row treatment must NOT be copied. A below-floor
+    // BAR prints its number muted with "insufficient sample to rank", which works
+    // in a ranked list where the muting and the floor line carry the meaning. A KPI
+    // tile has no list around it: it is the org headline, read alone and quoted
+    // onward, and a muted 280,000,000.0 is still a published 280,000,000.0. Muting
+    // a bar is not withholding a headline.
+    //
+    // The measured INPUTS stay on screen -- points and spend in the caption here,
+    // spend again in its own tile, every row still listed below. Suppressing those
+    // would be its own dishonesty: the reader must be able to see exactly how thin
+    // the evidence is. That is why the spend is formatted below rather than passed
+    // straight to toFixed(2): rounded to the cent, the canonical #502 window
+    // ($0.0001) prints "$0.00" and the evidence criterion 4 exists to expose is not
+    // on screen at all.
+    //
+    // Same kpi-noscore treatment as the two cases above, deliberately: one badge
+    // taxonomy for "no headline number", never a second. The CAUSE LINE is what
+    // differs, because the reader's next action does -- "no accepted outcomes"
+    // means nothing shipped, this means the meter is not reading.
+    //
+    // Ranked is a conjunction of three conditions and the wire carries only the
+    // verdict, so the cause line claims a specific cause ONLY for the one this
+    // client can verify itself (spend below the floor, from the spend it was
+    // handed). Otherwise it names the remaining possibilities without picking one:
+    // asserting "not enough spend" over a $120 window would be a fabricated cause.
+    //
+    // "Check token capture." is on the SPEND arm only. On the other arm the org has
+    // cleared $5.00 of measured, captured spend and is unranked because fewer than
+    // MIN_RANKED_OUTCOMES outcomes merged -- sending that reader to debug capture
+    // points them at the one part of the system demonstrably working. That arm
+    // names its own two causes and stops.
+    var belowSpendFloor = totalCost < MIN_RANKED_COST_USD;
+    // usdUnder on the below-floor arm, not usdText and never toFixed(2). This
+    // figure is read AGAINST the floor named in the same sentence, so it must
+    // neither vanish into "$0.00" on the canonical $0.0001 window nor print as
+    // having reached the floor it is below. Truncation alone does not give the
+    // second property for a float64 SUM landing a few ulps under $5.00 — usdUnder
+    // closes that structurally. The other arm names no floor, so it needs neither.
+    var spendText = spendTextFor(totalCost);
+    setText('kpi-tier', belowSpendFloor ? 'NOT ENOUGH SPEND TO SCORE' : 'NOT ENOUGH EVIDENCE TO SCORE');
+    tierValueEl.classList.add('kpi-noscore');
+    tierValueEl.classList.remove('provisional');
+    setText('kpi-tier-ci',
+      num(total.weighted_points).toFixed(1) + ' points from ' + spendText +
+      ' of measured AI spend — ' +
+      (belowSpendFloor
+        ? 'below the ' + usdText(MIN_RANKED_COST_USD) + ' evidence floor. A yield computed on this ' +
+          'little spend would be noise. Check token capture.'
+        : 'clear of the spend floor but short of the rest: fewer than ' + MIN_RANKED_OUTCOMES +
+          ' accepted outcomes, or an outcome with no measured tokens.'));
     provisionalEl.textContent = '';
     provisionalEl.style.display = 'none';
   } else {
@@ -592,7 +820,15 @@ function renderKPIs(data, pooled, teamMode) {
   }
 
   // AI spend (neutral -- it's a cost, not a yield, so no green).
-  setText('kpi-spend', '$' + totalCost.toFixed(2));
+  //
+  // usdText, for the same reason the cause line uses it, and it must STAY in step
+  // with it: this tile and the below-floor cause line render THE SAME totalCost,
+  // in the same function, both on screen at once. With toFixed(2) here they
+  // disagreed -- at $4.997 the tile read "$5.00" beside a sentence asserting the
+  // spend was below the $5.00 floor, and on the canonical $0.0001 window the tile
+  // read "$0.00" in the larger typeface while the caption read "<$0.01". Two
+  // renderings of one quantity is the contradiction, wherever it is split.
+  setText('kpi-spend', spendTextFor(totalCost));
   setText('kpi-spend-sub', 'metered token cost');
 
   // Spend leverage -- the CFO metric. Green when positive; a net credit balance
@@ -607,7 +843,7 @@ function renderKPIs(data, pooled, teamMode) {
   } else if (totalPaid < 0) {
     levEl.textContent = '(credit)';
     levEl.className = 'kpi-value num';
-    levSub.textContent = 'net credit balance $' + Math.abs(totalPaid).toFixed(2);
+    levSub.textContent = 'net credit balance ' + usdText(Math.abs(totalPaid));
     levSub.className = 'kpi-sub num credit';
   } else {
     levEl.textContent = '\u2014';
@@ -700,21 +936,51 @@ function buildPanel(seg, teamMode, since) {
     return panel;
   }
 
-  // Panel scale: the largest of every row's TIER and CI upper bound, so both
-  // bars and whiskers fit within the track. Guard against an all-zero panel.
+  // Panel scale: the largest RANKED row's TIER and CI upper bound, so both bars
+  // and whiskers fit within the track.
+  //
+  // Unranked rows are EXCLUDED from the scale (#502). A below-floor row's TIER is
+  // a true quotient over a denominator too small to mean anything -- the canonical
+  // case is 2.8e8 -- and a scale computed over it hands that row the entire track
+  // while flattening every honest reading on the panel to a zero-width bar.
+  // Measured on the #502 numbers: a genuine ranked 4.2 rendered at 0% beside a
+  // below-floor row at 100%. The KPI tile withholds that number precisely so it is
+  // not published; the panel must not re-publish it as bar LENGTH. Unranked rows
+  // still draw -- pct() clamps to 100% -- muted, and their number is read from the
+  // value cell rather than inferred from the track.
+  //
+  // Pre-existing: the scale never consulted `ranked`, so this was already wrong
+  // for below-floor DEVELOPER rows before team rows could be unranked at all.
+  //
+  // There is deliberately NO all-rows fallback. One was tried and re-imported the
+  // same distortion one scope down: an all-below-floor panel (which per-work_type
+  // splitting makes the COMMON case in team mode) scaled to its own 2.8e8 outlier
+  // and flattened two perfectly readable rows to zero width. Since an unranked row
+  // draws no proportional bar at all (see buildYieldBar), there is nothing left for
+  // a fallback to scale — the guard below only protects the division.
   var scale = 0;
   rows.forEach(function(d) {
-    scale = Math.max(scale, num(d.tier), num(d.ci_high));
+    if (d.ranked) { scale = Math.max(scale, num(d.tier), num(d.ci_high)); }
   });
   if (scale <= 0) { scale = 1; }
 
-  // In developer mode a ranking floor (#133) separates ranked rows (green,
-  // above) from below-floor rows (muted). orderedRows already sorts ranked
-  // first, so we insert the divider at the first unranked row. Team rows have no
-  // per-row ranking, so team mode shows no floor line.
+  // Ranked treatment is read from the row, in BOTH modes (#603). It used to be
+  // hardcoded true for team rows -- `teamMode ? true : !!d.ranked` -- on the
+  // premise that team rows carried no ranking. They now do (#502), but the
+  // hardcode was already a live defect before that field existed: EVERY team row
+  // rendered as ranked-green evidence at any cost level, so a 2-outcome, $0.30
+  // team headlined as a measured yield. Fail closed on a missing field: `!!`
+  // treats absent as unranked, so a server that does not say never gets the
+  // green.
+  //
+  // The floor DIVIDER stays developer-only. It marks the boundary in a
+  // ranked-first ordering, which is a property of orderedRows' developer sort;
+  // team rows arrive server-ordered, so a divider inserted at the first unranked
+  // team would draw a line through an arbitrary point in the list and claim
+  // everything below it is below-floor. Per-row muting is honest without it.
   var floorInserted = false;
   rows.forEach(function(d) {
-    var isRanked = teamMode ? true : !!d.ranked;
+    var isRanked = !!d.ranked;
     if (!teamMode && !isRanked && !floorInserted) {
       panel.appendChild(buildFloorLine());
       floorInserted = true;
@@ -753,6 +1019,10 @@ function buildFloorLine() {
 // posture; the only styles set are numeric widths/offsets.
 function buildYieldBar(d, teamMode, isRanked, scale, since) {
   var row = el('div', 'ybar-row');
+  // Text a screen reader must hear that the sighted reader gets from colour alone.
+  // Collected here and appended after the value cell (bottom of this function) so
+  // it lands last in reading order.
+  var srNote = '';
 
   // Label cell.
   var label = el('div', 'ybar-label' + (isRanked ? '' : ' below'));
@@ -774,7 +1044,12 @@ function buildYieldBar(d, teamMode, isRanked, scale, since) {
   var track = el('div', 'ybar-track');
   var tierVal = num(d.tier);
   var fill = el('div', 'ybar-fill' + (isRanked ? '' : ' below'));
-  fill.style.width = pct(tierVal / scale);
+  // An unranked row draws NO proportional bar (#502). Excluding it from the panel
+  // scale is only half the fix: its own fill is still tierVal/scale, and pct()
+  // clamps UP, so the withheld 2.8e8 came back as a full-width bar — the longest on
+  // the board, next to the one honest reading. A length is a comparison, and this
+  // number is not comparable; the value cell states it, the track does not imply it.
+  fill.style.width = pct(isRanked ? tierVal / scale : 0);
   track.appendChild(fill);
 
   // 95%-CI whisker: only ranked developer rows carry a CI (team rows and
@@ -805,6 +1080,28 @@ function buildYieldBar(d, teamMode, isRanked, scale, since) {
   } else if (num(d.total_cost_usd) <= 0) {
     // Same, for a FREE row: voice the label the sighted reader sees.
     row.setAttribute('aria-label', 'free: accepted work at zero recorded AI cost, yield unbounded');
+  } else if (!isRanked) {
+    // WCAG 2.1 SC 1.4.1 (Use of Color). A below-floor row is distinguished from a
+    // ranked one by MUTED COLOUR and nothing else unless something says so in
+    // text. Developer rows at least sit under the floor divider; TEAM rows have
+    // neither that divider (it is developer-only, see buildPanel) nor -- before
+    // #603 -- the hover title, so colour was the only channel. #603 made
+    // below-floor team rows reachable for the first time, so the row states its
+    // own verdict, opening with the compare view's exact tag ('below ranking
+    // floor', dashboard.js's buildTeamDumbbell) so the two views name the concept
+    // identically before this one adds its reason.
+    //
+    // NOT an aria-label, unlike the three arms above, and the difference is
+    // deliberate. A .ybar-row is a plain <div> -- role="generic" -- and the
+    // accessible-name computation refuses to name a generic element, so an
+    // aria-label here would be computed and then discarded. Giving the row a role
+    // that accepts a name would fix that, but it would also switch ON the three
+    // labels above, which were written for a row whose contents were assumed
+    // unreadable and which now duplicate the number and the $/pt already in the
+    // value cell. Real text, positioned off-screen, needs no role and duplicates
+    // nothing. (Those three labels being inert is a separate, pre-existing finding:
+    // they need rewriting before any role is added to this row.)
+    srNote = 'below ranking floor: insufficient evidence to rank';
   }
   row.appendChild(track);
 
@@ -817,6 +1114,11 @@ function buildYieldBar(d, teamMode, isRanked, scale, since) {
   value.appendChild(buildTierReading(d, teamMode, isRanked));
   value.appendChild(buildCostPerPoint(d, teamMode, isRanked));
   row.appendChild(value);
+
+  // Appended LAST so it reads after the row's own label and number rather than
+  // interrupting them. .ybar-sr is clipped, not display:none -- display:none would
+  // remove it from the accessibility tree, which is the whole point of it.
+  if (srNote) { row.appendChild(el('span', 'ybar-sr', srNote)); }
 
   return row;
 }
@@ -862,8 +1164,28 @@ function buildTierReading(d, teamMode, isRanked) {
     tier.title = isRanked
       ? '95% CI [' + num(d.ci_low).toFixed(0) + ', ' + num(d.ci_high).toFixed(0) + '] over ' +
         num(d.sample_n) + ' outcomes (bootstrap)'
-      : 'insufficient sample to rank: ' + num(d.sample_n) + ' outcomes / $' +
-        num(d.total_cost_usd).toFixed(2) + ' cost';
+      // Names the conditions this row actually fails, never one asserted cause:
+      // "insufficient sample to rank" was false for a 20-outcome, $500 row held
+      // back by a single zero-token outcome, with both cleared numbers printed
+      // beside it. See unrankedReasons.
+      : 'below ranking floor: ' + unrankedReasons(d);
+  } else if (!isRanked) {
+    // WCAG 2.1 SC 1.4.1, team half. The whole title used to be gated on !teamMode
+    // because team rows were hardcoded ranked and could never take the else arm;
+    // #603 made them reachable, and left muted colour as the row's only signal.
+    //
+    // unrankedReasons cannot be reused here: a team row carries NO sample_n and no
+    // flagged count by construction (that count is the k-anonymity denominator,
+    // withheld on purpose -- see teamScoreJSON). Spend is the ONE condition this
+    // row can check for itself, so it claims that cause only where it holds and
+    // otherwise names the remaining possibilities -- the same discipline the KPI
+    // cause line follows, for the same reason: over a $120 window "not enough
+    // spend" would be a fabricated cause.
+    tier.title = num(d.total_cost_usd) < MIN_RANKED_COST_USD
+      ? 'below ranking floor: ' + usdUnder(d.total_cost_usd, MIN_RANKED_COST_USD) +
+        ' of measured spend, below the ' + usdText(MIN_RANKED_COST_USD) + ' evidence floor'
+      : 'below ranking floor: clear of the spend floor but short of the rest — fewer than ' +
+        MIN_RANKED_OUTCOMES + ' accepted outcomes, or an outcome with no measured tokens';
   }
   return tier;
 }
@@ -1171,7 +1493,7 @@ function buildBucketBar(b, scale) {
   row.appendChild(track);
 
   row.appendChild(el('div', 'ub-value num',
-    '$' + num(b.cost_usd).toFixed(2) + ' (' + (num(b.share) * 100).toFixed(1) + '%)'));
+    usdText(b.cost_usd) + ' (' + (num(b.share) * 100).toFixed(1) + '%)'));
   return row;
 }
 
@@ -1398,10 +1720,10 @@ function buildLeversCSV(data, since) {
   if (finite(cc.unattributed_cost_usd)) {
     var uDetail = finite(cc.unattributed_share)
       ? (cc.unattributed_share * 100).toFixed(1) + '% with no issue attached' : '';
-    push('Unattributed spend', '$' + cc.unattributed_cost_usd.toFixed(2), uDetail);
+    push('Unattributed spend', usdText(cc.unattributed_cost_usd), uDetail);
   }
   if (finite(cc.total_cost_usd)) {
-    push('Total spend', '$' + cc.total_cost_usd.toFixed(2), 'metered token cost for the window');
+    push('Total spend', usdText(cc.total_cost_usd), 'metered token cost for the window');
   }
   if (finite(dq.exploratory_cost_share)) {
     push('Exploratory cost share', (dq.exploratory_cost_share * 100).toFixed(1) + '%',
@@ -1570,6 +1892,39 @@ function appendWindowCaveat(host, which, dq) {
 }
 
 // --- Org-level delta card ----------------------------------------------------
+// renderCompareTotal applies #605's one-sentence rule: ANYTHING DERIVED FROM AN
+// UNRANKED INPUT IS ITSELF UNRANKED.
+//
+// This card is the SECOND of the org TIER headline's three consumers and, until
+// #605, the only unguarded one on a live surface. It re-derived the reading from
+// the sides instead of reading the verdict, so #502's floor was asserted on the
+// main view and violated one tab over.
+//
+// Three cells are gated and one is not, and the split is the point:
+//   - each Org TIER headline under ITS OWN side's `ranked`, exactly as the KPI
+//     tile does. A ranked side keeps its honestly-earned headline.
+//   - Δ Org TIER and its % change under `total.ranked`, the server-derived
+//     A.Ranked && B.Ranked (see teamDeltaJSON.Ranked). EITHER side being unranked
+//     withholds both, because with a ranked baseline beside an unranked selected
+//     window `selected = baseline + Δ` reconstructs the withheld number exactly —
+//     and `% change = Δ/baseline` is a pure function of the withheld ratio, so it
+//     leaks directly rather than additively.
+//   - Δ AI spend always renders. It is a MEASURED INPUT, not a derived ratio, and
+//     the same criterion that withholds the quotient requires the evidence behind
+//     the verdict to stay on screen — the reader must see how thin it is.
+//
+// The withheld verdict is READ, never recomputed here. A client-side
+// reimplementation of the AND is exactly what the ruling rejected: it forfeits the
+// propagation that made one field able to fix three consumers. `!!` fails CLOSED,
+// so a server that does not say never gets a published delta.
+//
+// SHAPE, not taste: every TIER-bearing cell goes through cmpRankedCell, which
+// takes its gate as an ARGUMENT and discards the value when the gate is false, and
+// the only ungated cmpTotalCell call on this card is the measured spend. That is
+// what lets TestDashboard_CompareTotalSuppressesUnrankedRatio decide the question
+// by reading four call sites instead of trying to prove dominance over an
+// arbitrary expression — and it is why a value can never be routed onto the card
+// past a gate.
 function renderCompareTotal(total) {
   var card = $('cmp-total');
   var grid = $('cmp-total-grid');
@@ -1577,18 +1932,64 @@ function renderCompareTotal(total) {
   if (!total) { card.style.display = 'none'; return; }
   card.style.display = 'block';
 
+  var aRanked = !!(total.a && total.a.ranked);
+  var bRanked = !!(total.b && total.b.ranked);
+  var deltaRanked = !!total.ranked;
+
   var aT = num(total.a && total.a.tier), bT = num(total.b && total.b.tier);
   var dT = num(total.delta_tier);
-  grid.appendChild(cmpTotalCell('Org TIER — baseline', aT.toFixed(1), null, null));
-  grid.appendChild(cmpTotalCell('Org TIER — selected', bT.toFixed(1), null, null));
-
   var dir = deltaDir(dT);
   var pctChange = (aT !== 0) ? (dT / aT) * 100 : null;
   var sub = (pctChange === null) ? 'no baseline yield' : (signStr(pctChange) + Math.abs(pctChange).toFixed(1) + '%');
-  grid.appendChild(cmpTotalCell('Δ Org TIER', signStr(dT) + Math.abs(dT).toFixed(1), sub, dir));
 
+  grid.appendChild(cmpRankedCell('Org TIER — baseline', aRanked, aT.toFixed(1), null, null));
+  grid.appendChild(cmpRankedCell('Org TIER — selected', bRanked, bT.toFixed(1), null, null));
+  grid.appendChild(cmpRankedCell('Δ Org TIER', deltaRanked, signStr(dT) + Math.abs(dT).toFixed(1), sub, dir));
+
+  // Ungated, and the only such cell: Δ AI spend is a MEASURED INPUT, not a derived
+  // ratio. #502's criterion 4 requires the evidence behind a withheld verdict to
+  // stay on screen — suppressing it too would be its own dishonesty, because the
+  // reader could no longer see how thin the evidence is.
   var dCost = num(total.delta_total_cost_usd);
   grid.appendChild(cmpTotalCell('Δ AI spend', signStr(dCost) + '$' + Math.abs(dCost).toFixed(2), null, null));
+}
+
+// cmpRankedCell is the gate. It renders `value`/`sub`/`dir` only when `ranked` is
+// true and otherwise DISCARDS all three, returning the withheld cell — so the
+// decision cannot be separated from the rendering, and no call site can carry a
+// number past its own gate. Four cells go onto the card either way, in the same
+// order, so the grid tracks never move between the two states (the card's shape is
+// what got option D rejected).
+function cmpRankedCell(label, ranked, value, sub, dir) {
+  if (!ranked) { return cmpWithheldCell(label); }
+  return cmpTotalCell(label, value, sub, dir);
+}
+
+// cmpWithheldCell renders a withheld cell of the org delta card. It takes a LABEL
+// and nothing else: the withheld state has no value to pass, so no caller can
+// smuggle one through, and every withheld cell on the card is identical by
+// construction.
+//
+// Four rules, all from the ruling:
+//   - An explicit em dash plus a stated reason, NEVER a blank. A blank cell trains
+//     the reader to treat a withheld number as a rendering bug, and a floor whose
+//     output looks broken stops being credible.
+//   - BELOW_FLOOR_TAG verbatim, so compare has one vocabulary rather than a second
+//     phrase for the same verdict.
+//   - dir is null, so the cell takes no `cmp-delta up/down` class. A withheld delta
+//     that renders in confident green or red is a directional claim about a number
+//     we just declined to publish.
+//   - The state reaches assistive tech as TEXT, not as colour and not as an
+//     aria-label. A .cmp-total-cell is a plain <div> — role="generic" — and the
+//     accessible-name computation refuses to name a generic element, so an
+//     aria-label here would be computed and discarded (measured on the #603 team
+//     rows). Real off-screen text needs no role. Appended LAST so it reads after
+//     the cell's own label and dash.
+function cmpWithheldCell(label) {
+  var cell = cmpTotalCell(label, '—', BELOW_FLOOR_TAG, null);
+  cell.appendChild(el('span', 'cmp-total-sr',
+    'withheld: ' + BELOW_FLOOR_TAG + ' — insufficient evidence to rank this window'));
+  return cell;
 }
 
 function cmpTotalCell(label, value, sub, dir) {
@@ -1606,17 +2007,43 @@ function cmpTotalCell(label, value, sub, dir) {
 function deltaDir(v) { return v > 1e-9 ? 'up' : (v < -1e-9 ? 'down' : 'flat'); }
 function signStr(v) { return v > 1e-9 ? '+' : (v < -1e-9 ? '−' : '±'); }
 
-// compareScale is the shared denominator for dot positions: the largest TIER seen
-// on any row-side or the org total, floored at 1 so a zero-yield comparison does
-// not divide by zero.
+// compareScale is the shared denominator for dot positions: the largest RANKED
+// TIER seen on any row-side or the org total, floored at 1 so a zero-yield
+// comparison does not divide by zero.
+//
+// Gating on `ranked` (#605) is required for the chart to RENDER, not merely for it
+// to be honest. Feeding a below-floor total into this denominator was measured
+// collapsing every row's dot — ranked and unranked alike — to zero width: the
+// canonical #502 window is 28 points over $0.0001, i.e. 2.8e8, so every real
+// reading on the chart divides to ~0 and the dumbbells vanish. Same defect, same
+// value, same page as buildPanel's scale.
+//
+// Each SIDE is tested on its own `ranked`, not the row's conjunction: a row with a
+// ranked baseline and a below-floor selected window still contributes the reading
+// that IS ranked. `&&` fails closed on a missing field.
 function compareScale(rows, total) {
   var mx = 0;
   for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    mx = Math.max(mx, num(r.a && r.a.tier), num(r.b && r.b.tier));
+    mx = Math.max(mx, rankedTier(rows[i].a), rankedTier(rows[i].b));
   }
-  if (total) { mx = Math.max(mx, num(total.a && total.a.tier), num(total.b && total.b.tier)); }
+  if (total) { mx = Math.max(mx, rankedTier(total.a), rankedTier(total.b)); }
   return mx > 0 ? mx : 1;
+}
+
+// rankedTier returns a side's TIER for SCALING purposes: its number when the
+// server ranked it, and 0 otherwise.
+//
+// ⚠️ It is the gate for the shared DENOMINATOR only. This comment used to claim it
+// was "one function for the scale and the dot positions, so the two can never
+// disagree" — that is not what the code does. Dot positions go through plotA/plotB,
+// which apply a STRICTLY STRONGER gate (`has && ranked`, where `has` additionally
+// requires sample_n > 0 on a developer row). The denominator gate being weaker is
+// safe only because the server guarantees ranked ⟹ sample_n >= MinRankedOutcomes,
+// which is pinned in internal/api/compare_ranked_test.go rather than assumed here.
+// Were that to stop holding, a side could enter the denominator while being neither
+// plotted nor printed, and every published dot inverts the denominator.
+function rankedTier(side) {
+  return (side && side.ranked) ? num(side.tier) : 0;
 }
 
 // sideData reports whether a side of a developer row has real data to plot: it is
@@ -1652,8 +2079,69 @@ function buildDumbbellTrack(hasA, fracA, hasB, fracB, bClass, connectClass) {
   return track;
 }
 
-function abReadout(hasA, aTier, hasB, bTier) {
-  return (hasA ? num(aTier).toFixed(1) : 'n/a') + ' → ' + (hasB ? num(bTier).toFixed(1) : 'n/a');
+// cmpRankedSide is the PER-SIDE publication gate (#613 ruling of 2026-08-05).
+//
+// The rule it applies, and the whole rule:
+//
+//     A TIER DIGIT IS PRINTED IFF ITS OWN SIDE IS RANKED.
+//
+// No row count, no grain, no builder name, no mode — which is why one function
+// serves both dumbbell builders. It is #605's own card rule (cmpRankedCell gates
+// each Org TIER cell on that side's flag and only the Δ on the conjunction) pushed
+// down two grains, so PUBLICATION granularity is now identical to PLOTTING
+// granularity (plotA/plotB). The two channels can no longer disagree, and that
+// disagreement is exactly what produced this defect: the row-level conjunction
+// withheld a side the system had ranked, while the dot for that same side stayed on
+// the track — so the withheld digits were recoverable from the position beside them
+// to three decimals (17.5000 against an actual 17.5).
+//
+// SHAPE, not taste, for the same reason as cmpRankedCell: the gate is an ARGUMENT
+// and the unranked path DISCARDS `tier`, so no call site can carry a below-floor
+// number past its own gate and a guard decides the question by reading one call
+// site instead of proving dominance over an expression.
+//
+// THREE outcomes, and the distinction between the last two is load-bearing:
+//   'n/a'  — no data on this side (absent, or present with zero outcomes)
+//   '—'    — data exists and is WITHHELD because the side is below the floor
+//   digits — the side is ranked, so its magnitude is publishable
+// 'n/a' is the pre-existing vocabulary and keeps its meaning; the em dash is the
+// same one every withheld cell on this page already uses. A blank is never
+// returned: it trains the reader to read a withheld number as a rendering bug.
+function cmpRankedSide(has, ranked, tier) {
+  if (!has) { return 'n/a'; }
+  if (!ranked) { return '—'; }
+  return num(tier).toFixed(1);
+}
+
+// abReadout composes the A→B readout from two independently gated sides. It holds
+// no gate of its own: both halves go through cmpRankedSide, so there is no path
+// through this function that prints a digit its side did not earn.
+function abReadout(hasA, aRanked, aTier, hasB, bRanked, bTier) {
+  return cmpRankedSide(hasA, aRanked, aTier) + ' → ' + cmpRankedSide(hasB, bRanked, bTier);
+}
+
+// withheldSidesNote states the withholding as TEXT for assistive tech, and NAMES
+// WHICH SIDE. Per-side withholding is asymmetric, so the row-level sentence this
+// replaced ("…to rank this window") was singular on a row that has two, and wrong in
+// the exact case the ruling is about.
+//
+// It takes, per side, whether that side's number is WITHHELD — the side has data and
+// is below the floor. A side with NO data is NOT withheld, it is absent, and the tag
+// cell already says which window is missing (missingSideTag). Calling it withheld
+// would claim we are holding back a number that does not exist, which is the
+// 'n/a' vs '—' distinction cmpRankedSide draws, restated for a reader who cannot
+// see the glyphs.
+//
+// Empty string when nothing is withheld, so the caller appends NO span rather than an
+// empty one: a span in the DOM saying nothing is indistinguishable to a screen reader
+// from no span at all — the empty-string reveal defect this file guards elsewhere.
+//
+// The window words are the page's existing vocabulary ('baseline' / 'selected', as on
+// the Org TIER cards and in missingSideTag), not a second phrasing minted here.
+function withheldSidesNote(withheldA, withheldB) {
+  if (!withheldA && !withheldB) { return ''; }
+  var which = !withheldA ? 'the selected period' : (!withheldB ? 'the baseline period' : 'both periods');
+  return 'withheld: ' + BELOW_FLOOR_TAG + ' — insufficient evidence to rank ' + which;
 }
 
 // missingSideTag labels a one-sided developer row precisely: "no outcomes in
@@ -1670,11 +2158,35 @@ function buildDevDumbbell(row, scale) {
   var hasA = sideData(row.present_a, row.a);
   var hasB = sideData(row.present_b, row.b);
   var both = hasA && hasB;
-  var bothRanked = both && !!(row.a.ranked && row.b.ranked);
+  // HOISTED to the same two identifiers buildTeamDumbbell uses (#613, 2026-08-05).
+  // They were previously read inline inside plotA/plotB only, which is precisely how
+  // the two channels drifted: the digits gated on the conjunction while the dots
+  // gated per side. Naming them once means the publication gate and the plot flag are
+  // THE SAME FLAG, which is the cross-channel identity a named guard now enforces.
+  // `!!(row.x && …)` fails closed: a server that does not say never gets published.
+  var aRanked = !!(row.a && row.a.ranked);
+  var bRanked = !!(row.b && row.b.ranked);
+  var bothRanked = both && aRanked && bRanked;
   var sig = both && !!row.significant; // server-authoritative significance (#277)
   var d = num(row.delta_tier);
-  var fracA = hasA ? num(row.a.tier) / scale : 0;
-  var fracB = hasB ? num(row.b.tier) / scale : 0;
+  // Only a RANKED side is PLOTTED (#605), which is the second half of the scale
+  // fix: excluding an unranked reading from the denominator leaves its own dot at
+  // tier/scale, and pct() clamps UP — so the 2.8e8 the scale just refused came back
+  // pinned to the far right of the track, reading as the best yield in the view.
+  // Exactly the defect buildYieldBar's zero-width fill closes one panel over.
+  //
+  // hasA/hasB are NOT redefined: they mean "this side has data", and they still
+  // drive the missing-side tag and the 'n/a' arm of the readout.
+  //
+  // ⚠️ The comment that stood here said a below-floor side "is present and its number
+  // is stated in the readout; what it does not get is a POSITION". That is no longer
+  // true and was the defect: since 2026-08-05 a below-floor side gets NEITHER. The
+  // digit and the dot are gated on the same flag, so the position can never encode
+  // what the text declined to state.
+  var plotA = hasA && aRanked;
+  var plotB = hasB && bRanked;
+  var fracA = plotA ? num(row.a.tier) / scale : 0;
+  var fracB = plotB ? num(row.b.tier) / scale : 0;
 
   var rowEl = el('div', 'cmp-db-row');
   var label = el('div', 'cmp-db-label' + (bothRanked ? '' : ' below'));
@@ -1689,58 +2201,219 @@ function buildDevDumbbell(row, scale) {
     // shipped-nothing is not mislabeled as absent. Server leaves the delta 0 here.
     bClass = 'below'; connectClass = '';
     tag = missingSideTag(hasA, !!row.present_a, hasB, !!row.present_b);
+    // …and if the ONE side that has data is itself below the floor, this row's track
+    // is now completely empty (#605 stopped plotting unranked sides), while the tag
+    // talks only about the window that is missing. An empty track with no stated
+    // cause is the blank cell cmpWithheldCell exists to avoid, one component over:
+    // the reader sees nothing and cannot tell a withheld reading from a broken
+    // render. Name the floor first, then the missing window.
+    if ((hasA && !plotA) || (hasB && !plotB)) {
+      tag = BELOW_FLOOR_TAG + ', ' + tag;
+    }
     deltaCls = 'flat'; deltaText = '—';
   } else if (sig) {
     var dir = deltaDir(d);
-    bClass = dir; connectClass = '';
-    tag = 'significant';
+    connectClass = '';
+    // ALL THREE CHANNELS GATED (#613). `sig` is server-authoritative and the server
+    // pins that a below-floor row is never significant (compare.go computes
+    // Significant = a.Ranked && b.Ranked && ciDisjoint), so this arm should be
+    // unreachable without both sides ranked — but "should be unreachable" is not an
+    // enforcement, and a server contradiction here would assert a tested,
+    // beyond-noise move about numbers this row just withheld.
+    //
+    // 🔴 The dot's COLOUR is the third channel, and the first draft of this hardening
+    // gated only the other two. `.cmp-db-dot.b.up`/`.down` paint yield-green and
+    // danger-red, so an ungated bClass publishes SIGN(Δ) for a Δ printed as '—' —
+    // the same cross-channel leak this ruling exists to close, in the arm written to
+    // close it. When you harden against a class, the next question is which SITES
+    // got the hardening.
+    bClass = bothRanked ? dir : 'below';
+    tag = bothRanked ? 'significant' : BELOW_FLOOR_TAG;
     deltaCls = dir; deltaText = signStr(d) + Math.abs(d).toFixed(1);
   } else {
     // Both present but not significant: within the CI (noise) or below the
     // ranking floor. Dashed connector + muted delta so it never reads as a
     // confident move; the tag says which.
+    //
+    // ⚠️ THIS is the arm every two-sided below-floor developer row actually reaches —
+    // the `sig` arm above cannot fire for one. Its tag is gated for that reason: left
+    // ungated it would label a withheld row 'not significant', i.e. "we tested and
+    // found nothing", when the truth is "we cannot rank this at all".
     bClass = ''; connectClass = 'insignificant';
-    tag = bothRanked ? 'not significant' : 'below ranking floor';
+    tag = bothRanked ? 'not significant' : BELOW_FLOOR_TAG;
     deltaCls = 'flat'; deltaText = signStr(d) + Math.abs(d).toFixed(1);
   }
-  rowEl.appendChild(buildDumbbellTrack(hasA, fracA, hasB, fracB, bClass, connectClass));
+  rowEl.appendChild(buildDumbbellTrack(plotA, fracA, plotB, fracB, bClass, connectClass));
 
-  var val = el('div', 'cmp-db-value');
-  val.appendChild(el('div', 'cmp-db-delta num ' + deltaCls, deltaText));
-  val.appendChild(el('div', 'cmp-db-tag', tag));
-  val.appendChild(el('div', 'cmp-db-ab num', abReadout(hasA, row.a && row.a.tier, hasB, row.b && row.b.tier)));
-  rowEl.appendChild(val);
+  // RULED 2026-08-05 (#613 half b): developer rows go through the SAME gate as team
+  // rows, at side grain. This was the open question the previous comment here
+  // recorded — deliberately deferred rather than closed by inference, because #613's
+  // first criteria named buildTeamDumbbell and its exclusions named the main panel's
+  // bars and the KPI tile (#502 territory), leaving a compare-view DEVELOPER row
+  // named by neither: an unruled gap inside a ruled scope.
+  //
+  // What decided it: on a SOLO-DEVELOPER install — the common self-hosted OSS case —
+  // this one row IS the org total, so the card above withholding that headline as '—'
+  // while this line printed it in full is the same nullification #613 was ruled to
+  // close, one grain down. The harm ordering was inverted: the single-cohort
+  // k-anonymity fold is the corner case, the solo install is the common one.
+  //
+  // ⚠️ It also overturns a TESTED commitment. #605 asserted, and pinned in
+  // TestDashboard_CompareScaleIgnoresUnrankedSides, that a below-floor developer side
+  // "states its number, but is not placed" on the scale. That is now false in both
+  // halves, and compareNote's developer clause changed in this same commit — a legend
+  // describing behaviour the code does not have is the defect #613 exists to close.
+  //
+  // 🔴 `bothRanked` is NOT the per-side gate here and must never become one: it folds
+  // `both` (PRESENCE) in, so it is false for every ONE-SIDED row. Passing it per side
+  // would withhold a legitimately RANKED one-sided reading — over-withholding, which
+  // teaches the reader that '—' sometimes means "we have this and won't say it" and
+  // dilutes the signal #605 spent a whole card on. It stays the Δ gate, which is what
+  // it correctly describes: a derived figure needs both sides.
+  rowEl.appendChild(cmpRankedRowValue(tag, deltaCls, bothRanked, deltaText,
+    abReadout(hasA, aRanked, row.a && row.a.tier, hasB, bRanked, row.b && row.b.tier),
+    withheldSidesNote(hasA && !aRanked, hasB && !bRanked)));
   return rowEl;
 }
 
 function buildTeamDumbbell(row, scale) {
   // A k-anonymized team is present in BOTH windows by construction (the compare
-  // endpoint intersects the k-floor across windows), so both sides plot. Direction
-  // is shown by the Δ sign, but the dot stays NEUTRAL and the connector dashed:
-  // an aggregate has no CI, so we never assert the move is beyond noise (#277).
+  // endpoint intersects the k-floor across windows), so both sides have data.
+  // Direction is shown by the Δ sign, but the dot stays NEUTRAL and the connector
+  // dashed: an aggregate has no CI, so we never assert the move is beyond noise
+  // (#277).
   var hasA = !!row.a, hasB = !!row.b;
   var d = num(row.delta_tier);
-  var fracA = hasA ? num(row.a.tier) / scale : 0;
-  var fracB = hasB ? num(row.b.tier) / scale : 0;
+  // #603's own defect, in a second location. buildDevDumbbell has computed
+  // bothRanked and muted on it since #278; team rows read `ranked` on neither side,
+  // so a 3-developer, $0.30 team rendered as full-authority evidence — the same
+  // hardcoded-ranked lie the yield bars carried until #603, one view over. `!!`
+  // fails closed: a server that does not say never gets the unmuted treatment.
+  var aRanked = !!(row.a && row.a.ranked);
+  var bRanked = !!(row.b && row.b.ranked);
+  var bothRanked = aRanked && bRanked;
+  // Ranked sides only are PLOTTED, for the reason spelled out in buildDevDumbbell:
+  // pct() clamps up, so an unranked side excluded from compareScale would otherwise
+  // pin its dot to the end of the track.
+  //
+  // ⚠️ The comment here used to end "these flags stay the plotting question, not the
+  // publication one, so the two rules cannot drift onto one flag." That was exactly
+  // backwards, and the drift it permitted was the defect: publication gated on the
+  // conjunction, plotting per side, and the gap between them WAS the leak. Since
+  // 2026-08-05 these ARE the publication flags too — one flag per side, both
+  // channels — which is the identity dumbbellPlotViolations now derives and enforces.
+  var plotA = hasA && aRanked;
+  var plotB = hasB && bRanked;
+  var fracA = plotA ? num(row.a.tier) / scale : 0;
+  var fracB = plotB ? num(row.b.tier) / scale : 0;
 
   var rowEl = el('div', 'cmp-db-row');
-  rowEl.appendChild(el('div', 'cmp-db-label', row.team || 'other'));
-  rowEl.appendChild(buildDumbbellTrack(hasA, fracA, hasB, fracB, '', 'insignificant'));
+  rowEl.appendChild(el('div', 'cmp-db-label' + (bothRanked ? '' : ' below'), row.team || 'other'));
+  rowEl.appendChild(buildDumbbellTrack(plotA, fracA, plotB, fracB, '', 'insignificant'));
 
-  var val = el('div', 'cmp-db-value');
-  val.appendChild(el('div', 'cmp-db-delta num flat', signStr(d) + Math.abs(d).toFixed(1)));
-  val.appendChild(el('div', 'cmp-db-tag', 'aggregate — not tested'));
-  val.appendChild(el('div', 'cmp-db-ab num', abReadout(hasA, row.a && row.a.tier, hasB, row.b && row.b.tier)));
-  rowEl.appendChild(val);
+  // "aggregate — not tested" says significance was not TESTED, which is true of
+  // every team row and is a statement about method. It is not true that a
+  // below-floor row merely went untested: it lacks the evidence to rank at all, so
+  // it names the verdict the rest of the dashboard names.
+  var tag = bothRanked ? 'aggregate — not tested' : BELOW_FLOOR_TAG;
+  // Every digit goes through a gate, and NOTHING new is threaded in: `aRanked`,
+  // `bRanked` and `bothRanked` are all computed above, and aRanked/bRanked are the
+  // SAME flags plotA/plotB read. That identity is the point — it is what makes the
+  // published set and the plotted set equal, and #613's ruling made it a named guard
+  // so drift in either direction is caught without anyone remembering the case.
+  //
+  // The delta class is the literal 'flat' for a team row: an aggregate has no CI, so
+  // its magnitude is shown but never asserted as beyond noise (#277).
+  rowEl.appendChild(cmpRankedRowValue(tag, 'flat', bothRanked,
+    signStr(d) + Math.abs(d).toFixed(1),
+    abReadout(hasA, aRanked, row.a && row.a.tier, hasB, bRanked, row.b && row.b.tier),
+    withheldSidesNote(hasA && !aRanked, hasB && !bRanked)));
   return rowEl;
 }
 
+// --- A dumbbell row's value column, gated (#613) ------------------------------
+// #613 AMENDS #603, and the 2026-08-05 ruling then AMENDED #613's own first answer.
+// The history matters, because each step was a correction of the step before:
+//
+//   #603  ruled a below-floor team row "muted but printed" — a row sits in a LIST,
+//         and the muting plus the tag beside it carry the verdict.
+//   #613  retired that: when the k-anonymity fold yields a SINGLE cohort, the one
+//         row IS the org total, so it republished the headline #605 had withheld one
+//         line above — including, via an unconditionally printed Δ, the withheld
+//         `Δ Org TIER`. #605 was not merely contradicted there, it was NULLIFIED.
+//         Its answer withheld the WHOLE value column on `bothRanked`.
+//   2026-08-05  that answer was too strict, and the excess strictness became a LEAK.
+//         Publication gated on the CONJUNCTION while plotting gated PER SIDE, so a
+//         row with a ranked A side and an unranked B side printed '—'/'—' and still
+//         placed its A dot. pct() writes three decimals, so the withheld number was
+//         recoverable EXACTLY (17.5000 against an actual 17.5) — and, through the
+//         shared denominator, recoverable from OTHER rows' dots as well.
+//
+// The rule now, and it has no row count, no grain and no builder name in it:
+//
+//     A TIER DIGIT IS PRINTED IFF ITS OWN SIDE IS RANKED.
+//     A DERIVED FIGURE (Δ) IS PRINTED IFF BOTH SIDES ARE RANKED.
+//
+// That is exactly what renderCompareTotal's card has always done (cmpRankedCell per
+// side; Δ on `deltaRanked`), so the rows and the card above them are now one rule at
+// three grains rather than three rules. Publication granularity EQUALS plotting
+// granularity, which is the invariant that makes the dot innocent again: every dot
+// on the track has its own number printed in text on the same row, so inverting a
+// position recovers only something already on screen.
+//
+// Suppressing only "when there is one row" was refused at every stage and stays
+// refused: a cohort count is not visible to either builder (both take `row` and
+// `scale`; only the loop in renderCompare knows `rows.length`), and a rule that
+// needs new plumbing to express is a rule that drifts away from its enforcement.
+//
+// #603's SUBSTANCE survives — a below-floor reading must not render as
+// full-authority evidence — and so does #136: the stored number is never altered
+// and is still on the wire untouched. What is revoked is its display AUTHORITY.
+//
+// SHAPE, not taste, for the same reason as cmpRankedCell. TWO gates live here and
+// both are ARGUMENTS whose withheld path DISCARDS its value: `bothRanked` for the Δ
+// (below), and cmpRankedSide's `ranked` for each digit (above). A guard therefore
+// decides the question by reading one call site rather than proving dominance over
+// an expression. The withheld Δ also drops back to the LITERAL 'flat' class, never
+// the caller's: a number we declined to publish must not render as a confident green
+// or red claim — the same rule cmpWithheldCell enforces with a null direction.
+//
+// The srNote span is appended LAST so it reads after the row's own label and tag,
+// and only when there IS something withheld — a span in the DOM saying nothing is
+// indistinguishable to a screen reader from no span at all. NOT an aria-label: a
+// .cmp-db-value is a bare <div>, i.e. role="generic", and the accessible-name
+// computation refuses to name a generic element. Measured inert on the #603 rows.
+function cmpRankedRowValue(tag, deltaCls, bothRanked, deltaText, ab, srNote) {
+  var val = el('div', 'cmp-db-value');
+  val.appendChild(el('div', 'cmp-db-delta num ' + (bothRanked ? deltaCls : 'flat'),
+    bothRanked ? deltaText : '—'));
+  val.appendChild(el('div', 'cmp-db-tag', tag));
+  val.appendChild(el('div', 'cmp-db-ab num', ab));
+  if (srNote) { val.appendChild(el('span', 'cmp-db-sr', srNote)); }
+  return val;
+}
+
+// compareNote is the on-page legend, and it has to describe what the chart
+// ACTUALLY does. Before #605 it promised that "each row plots its TIER before and
+// after on a shared scale" — true of every row until an unranked side stopped
+// being placed on that scale. A legend describing behaviour the code no longer has
+// is the same defect this branch exists to close, one element over: an output
+// contradicting itself.
 function compareNote(devMode) {
-  var base = 'Δ = selected period − baseline period. Each row plots its TIER before (hollow) and after (filled) on a shared scale.';
+  // ONE sentence now describes BOTH views, because as of 2026-08-05 there is one rule
+  // (#613): a side below the floor is neither placed nor stated, at either grain. The
+  // previous split — teams "state no number at all", developers "still state their
+  // number" — was two rules on one screen, switchable by a mode toggle, and the
+  // developer clause is the one #605 had asserted and pinned in a test.
+  var base = 'Δ = selected period − baseline period. Each row plots its TIER before (hollow) and ' +
+    'after (filled) on a shared scale of ranked readings; a side below the ranking floor is ' +
+    'neither placed on that scale nor stated as a number — its denominator is too small for ' +
+    'either to mean anything. A Δ is shown only when both periods are ranked, since a difference ' +
+    'of two readings is no more publishable than the readings themselves.';
   if (devMode) {
-    return base + ' A move is "significant" only when the developer is ranked in both periods and their 95% confidence intervals do not overlap; otherwise it is within noise (dashed) or below the ranking floor.';
+    return base + ' A move is "significant" only when the developer is ranked in both periods and their 95% confidence intervals do not overlap; otherwise it is within noise (dashed) or below the ranking floor. A below-floor side is withheld on the same terms as the headline above it, always — not only when a single developer makes this row the whole organisation.';
   }
-  return base + ' Rows are k-anonymized teams — no individual names; significance is not tested for a group aggregate, so the magnitude is shown but never asserted as beyond noise.';
+  return base + ' Rows are k-anonymized teams — no individual names; significance is not tested for a group aggregate, so the magnitude is shown but never asserted as beyond noise. The withholding does not depend on how many rows are present: when the k-anonymity fold yields a single cohort that row IS the org total, and publishing it would republish the headline withheld above it.';
 }
 
 // --- Wiring -----------------------------------------------------------------
