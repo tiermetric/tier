@@ -414,11 +414,15 @@ func mapKeys(m map[string]struct{}) []string {
 // org total stays complete once multiple feeds coexist.
 //
 // The read (OrgActualSpendNet) → compute → write (InsertOrgActualSpend) is not
-// one transaction. Safe today: the sole poll goroutine and SQLite's
-// single-writer serialization (SetMaxOpenConns(1)) mean no concurrent writer to
-// the poller's own source-scoped rows can interleave, so no double-post is
-// possible. A second writer of openai-usage rows (none exists) would warrant a
-// BeginTx wrap.
+// one transaction. Safe today because there is exactly ONE writer of this
+// source's rows: the sole poll goroutine, writing only its own source-scoped
+// rows. That is the whole argument, and it does not depend on pool size.
+//
+// ⚠️ It used to ALSO cite SQLite's single-writer serialization via
+// SetMaxOpenConns(1). That leg was removed deliberately (#668/#669): the pool
+// constant is being raised, and a safety argument with a leg that quietly stops
+// holding is worse than one with a single leg that plainly does. A second writer
+// of openai-usage rows (none exists) would still warrant a BeginTx wrap.
 //
 // UNITS: OpenAI's amount.value is in DOLLARS (not cents, unlike Anthropic), so
 // the per-period sum converts to micro-dollars directly via DollarsToMicro,

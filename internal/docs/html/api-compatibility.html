@@ -95,6 +95,47 @@ separately.</li>
 whether a server supports a given field or endpoint should read <code>livez.version</code>
 rather than probing behaviour. <code>livez</code> is unauthenticated (a liveness probe must
 not need credentials), so feature detection never requires a token.</p>
+<h3 id="identifying-a-deployment-get-apiv1version">Identifying a deployment: <code>GET /api/v1/version</code></h3>
+<p>Feature detection asks <em>&#34;what can this server do?&#34;</em> — a different question from
+<em>&#34;is this the build I published?&#34;</em> For the second, use <code>GET /api/v1/version</code>,
+also unauthenticated and also mounted in read-only mode.</p>
+<blockquote>
+<p>🔴 <strong>Not available in any release published so far.</strong> This route was added after
+the most recent release was cut, so a server running <strong>v0.4.0 or earlier answers
+<code>404</code> here</strong> — verified against the published <code>0.4.0</code> container image. The
+response shown below is what a build <em>carrying</em> the route returns; it is not
+something v0.4.0 can produce.</p>
+<p>⚠️ <strong><code>404</code> on this path does not mean the server is unhealthy or the wrong
+build</strong> — it most likely means the build predates the route. Until your target
+ships it, identify a deployment with <code>GET /api/v1/livez</code>, which has always
+carried <code>version</code>. Note that reports the <em>release</em>, not the <em>build</em>: two
+binaries from a moved tag share a version string, which is exactly why this
+route exists.</p>
+</blockquote>
+<pre><code>{
+  &#34;version&#34;: &#34;0.4.0&#34;,
+  &#34;commit&#34;: &#34;ca27d9f07c0838da15595e9fad97047b389866bd&#34;,
+  &#34;modified&#34;: false,
+  &#34;go_version&#34;: &#34;go1.26.5&#34;,
+  &#34;platform&#34;: &#34;linux/amd64&#34;,
+  &#34;price_table&#34;: { &#34;version&#34;: 9, &#34;effective_date&#34;: &#34;2026-07-26&#34; }
+}
+</code></pre>
+<p><code>commit</code> and <code>modified</code> come from the VCS stamps the Go toolchain embeds
+automatically; they are absent (<code>commit</code> omitted, <code>modified: false</code>) on a binary
+built with <code>-buildvcs=false</code>. <code>commit</code> is also carried on <code>livez</code> — additively,
+so an existing liveness probe is unaffected.</p>
+<p>🔴 <strong>Why <code>version</code> alone is not enough, and why <code>price_table.version</code> is a trap.</strong>
+A tagged release reports the same <code>version</code> string however it was built, so two
+binaries from a moved tag are indistinguishable by it; <code>commit</code> is what makes
+&#34;this deployment is the build I published&#34; an assertion rather than a hope. And
+<code>price_table.version</code> bumps only when <em>prices</em> change: measured 2026-08-06, a
+deployment reported price table <code>9</code> while the newest source was also <code>9</code> — while
+the running binary was a <strong>full release behind</strong>. It is useful next to the build
+(it answers &#34;which rates priced these numbers&#34;), never as identity.</p>
+<p>⚠️ <strong>A version check is only meaningful if it can say NO.</strong> Assert the expected
+<code>commit</code>, and make sure your check fails when pointed at a different build —
+otherwise &#34;the version matches&#34; is indistinguishable from &#34;the check never ran&#34;.</p>
 <p>Do <strong>not</strong> rely on the presence or absence of an individual response field for
 feature detection at runtime: additive fields (below) can appear at any release,
 and <code>omitempty</code> fields are absent whenever their value is empty even on a server
@@ -586,11 +627,18 @@ file, full disk) — deliberately NOT reported as retryable.</li>
 <ul>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>, the stored <code>HierarchyRow</code>:
 <code>{developer, team, division, org}</code>. Request body: <code>{team, division, org}</code>.</li>
+<li><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable</strong> — it is a lost race for SQLite&#39;s single writer, not a bad request
+and not a broken database. A <code>500</code> here still means an unexpected store failure.</li>
 </ul>
 <h4 id="post-apiv1org_hierarchy"><code>POST /api/v1/org_hierarchy</code></h4>
 <ul>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, <code>{&#34;accepted&#34;: &lt;int&gt;}</code>.</li>
 <li>All-or-nothing bulk import (array of <code>{developer, team, division, org}</code>).</li>
+<li><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable, and NOTHING was written</strong> — the batch is one transaction, so the
+whole request is safe to replay verbatim. A <code>500</code> here still means an
+unexpected store failure.</li>
 </ul>
 <h4 id="get-apiv1org_hierarchy"><code>GET /api/v1/org_hierarchy</code></h4>
 <ul>
@@ -601,6 +649,11 @@ file, full disk) — deliberately NOT reported as retryable.</li>
 <ul>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>,
 <code>{developer, org, period_end}</code> (the applied end record). Request: <code>{org, period_end}</code>.</li>
+<li><code>503</code> + <code>Retry-After: 1</code> when another writer holds the database write lock.
+<strong>Retryable.</strong> Distinguish it from the <code>400</code> this route also returns when
+<code>period_end</code> precedes the membership&#39;s start: that one is permanent and
+retrying cannot help. The <code>503</code> is classified FIRST precisely so a transient
+lock conflict is never reported as bad input.</li>
 </ul>
 <h4 id="delete-apiv1developerid-gdpr-art-17-erasure"><code>DELETE /api/v1/developer/{id}</code> (GDPR Art. 17 erasure)</h4>
 <ul>
@@ -1178,6 +1231,20 @@ after this contract doc (#241) was written, hence the catalog backfill (#322).</
 applies at the level of metric/label names.</li>
 </ul>
 <h3 id="open-endpoints-probes">Open endpoints (probes)</h3>
+<h4 id="get-apiv1version"><code>GET /api/v1/version</code></h4>
+<p>Build identity of the running process (#638). Open (no token) and mounted in
+read-only mode, because the deployment hardest to identify by other means is the
+public demo, and the demo runs read-only.</p>
+<p><code>{version: &lt;string&gt;, commit: &lt;string, omitempty&gt;, modified: &lt;bool, omitempty&gt;, go_version: &lt;string, omitempty&gt;, platform: &lt;string&gt;, price_table: {...}}</code></p>
+<ul>
+<li><code>commit</code> is the build revision: ldflags-injected where available, otherwise the
+Go toolchain&#39;s <code>vcs.revision</code> stamp. Absent when neither exists.</li>
+<li><code>modified</code> is a <strong>tri-state</strong>: absent means the binary carries no VCS stamps
+(the shipped container is built with <code>.git</code> excluded, so this is its normal
+state); <code>false</code> means stamped and clean. <strong>Absent does NOT mean clean.</strong></li>
+<li><code>price_table</code> is provenance for the figures, <strong>not</strong> identity — it bumps only
+when prices change, so it can agree across a full release gap.</li>
+</ul>
 <h4 id="get-apiv1health"><code>GET /api/v1/health</code></h4>
 <ul>
 <li><strong>Scope:</strong> open. <strong>Success:</strong> <code>200 OK</code>, <code>{&#34;status&#34;: &#34;ok&#34;}</code>.</li>
@@ -1205,7 +1272,9 @@ duplicates <code>subsystems.watcher.detail</code>; it is deprecated in favour of
 <h4 id="get-apiv1livez"><code>GET /api/v1/livez</code></h4>
 <ul>
 <li><strong>Scope:</strong> open. <strong>Liveness</strong> probe (#49); always <code>200</code>. Body <code>livezResponse</code>:
-<code>{status: &#34;alive&#34;, uptime_s: &lt;int&gt;, version: &lt;string&gt;}</code>. <code>version</code> is the
+<code>{status: &#34;alive&#34;, uptime_s: &lt;int&gt;, version: &lt;string&gt;, commit: &lt;string, omitempty&gt;}</code>.
+<code>commit</code> was added additively by #638; it is absent on a binary carrying no
+build identity. <code>version</code> is the
 documented <a href="#feature-detection" rel="nofollow">feature-detection</a> signal.</li>
 </ul>
 <h2 id="api-changelog">API changelog</h2>
@@ -1213,6 +1282,15 @@ documented <a href="#feature-detection" rel="nofollow">feature-detection</a> sig
 Backfilled entries (<code>#185</code>, <code>#187</code>, <code>#191</code>, and the additive-column history)
 predate this discipline and are recorded here so the record is complete.</p>
 <ul>
+<li>
+<p><strong>#638 -- <code>GET /api/v1/version</code> added, and <code>commit</code> added to <code>/livez</code>
+(ADDITIVE).</strong> A new open probe endpoint reporting build identity, plus one new
+<code>omitempty</code> field on an existing body. No existing field changed name, type or
+semantics, so a client parsing <code>/livez</code> today is unaffected. Rationale: the
+<code>version</code> string alone cannot identify a build -- a tagged release reports the
+same string however it was built -- so a deployment could not be asserted to be
+the build it was believed to be.</p>
+</li>
 <li>
 <p><strong>#619 -- the reserved-sentinel ingest guard now covers <code>developer</code> (BREAKING on
 <code>POST /costs</code>, <code>/events</code>, <code>/outcomes</code>, <code>/actual_spend</code>, <code>/developer_alias</code>,
@@ -1302,6 +1380,38 @@ incremented no counter at all, since the guard did not exist.
 <em>Today&#39;s readers:</em> none. This ships the DATA only; <code>internal/dashboard</code> does not
 render <code>segment_reconciliation</code>, so the segmented panel a reader actually looks at
 still shows outcome-linked cost alone. The UI pass is separate work.</p>
+</li>
+<li>
+<p><strong>#668 -- three org-hierarchy routes answer write-lock contention as <code>503</code>
+instead of <code>500</code> (BREAKING status change).</strong> <code>PUT /api/v1/org_hierarchy/{developer}</code>,
+<code>POST /api/v1/org_hierarchy</code> and <code>POST /api/v1/period_membership/{developer}/end</code>
+now take the SQLite write lock before they write, bounded at the same 250ms the
+other request-path writers have used since #346/#598/#610. Contention on any of
+the three is therefore <code>503</code> + <code>Retry-After: 1</code> instead of <code>500</code>.
+<em>Breaking, and recorded as such rather than filed under &#34;a better error&#34;:</em> a
+status code changes for an input a client can actually hit, and a client with a
+<code>500</code>-is-fatal rule now sees <code>503</code>. Retry the <code>503</code>; do not retry the <code>400</code> or
+the <code>500</code>.
+⚠️ <em>But the shape of this break differs from #610&#39;s, and the difference is worth
+stating because the obvious reading is wrong.</em> #610 also shortened a wait, so
+contention it had previously <strong>waited out and completed</strong> began failing instead.
+That does NOT apply here. Measured: the DEFERRED read-then-write these three
+used to run did not wait at all -- SQLite runs no busy handler for a
+deadlock-prone upgrade, so it returned <code>SQLITE_BUSY</code> in ~65us and the handler
+answered <code>500</code>. So these routes never completed under contention; they failed
+immediately with an unretryable error and said <code>500</code>. <strong>No client loses a
+success it used to get.</strong> The change is <code>500</code> -&gt; <code>503</code> on a request that failed
+either way, plus a <code>Retry-After</code> telling the client what to do about it.
+<em>One route deserves its own note:</em> <code>POST /api/v1/period_membership/{developer}/end</code>
+also returns <code>400</code> when <code>period_end</code> precedes the membership&#39;s start. Contention
+is classified BEFORE that check, so a transient lock conflict is never reported
+as incoherent input -- which would tell a client to fix a <code>period_end</code> that was
+perfectly valid.
+<em>Why the change was made at all:</em> it is the precondition for raising
+<code>SetMaxOpenConns</code> (#669). These sites&#39; in-process atomicity came from the single
+connection, so raising the pool without converting them would have turned a
+latency defect into a correctness one -- an unretried <code>SQLITE_BUSY_SNAPSHOT</code>
+(517) race -- with no test failing.</p>
 </li>
 <li>
 <p><strong>#610 -- <code>POST /costs</code> answers write-lock contention one way (BREAKING status

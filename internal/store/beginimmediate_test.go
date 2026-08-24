@@ -6,7 +6,9 @@ package store
 // the driver. modernc.org/sqlite ignores sql.TxOptions.Isolation, so every
 // BeginTx in this package is DEFERRED and sql.LevelSerializable is a no-op. Nine
 // call sites in store.go asserted the opposite in their comments for months and
-// nothing failed, because SetMaxOpenConns(1) hides it in-process. A test that
+// nothing failed, because the then-current SetMaxOpenConns(1) hid it in-process
+// (the pool is maxOpenConns since #669, which is exactly why those sites had to
+// take the write lock up front first — see #668). A test that
 // drives a SECOND connection is the only thing that can tell the two apart.
 //
 // Every test here is therefore two-armed: the positive arm proves beginImmediate
@@ -198,8 +200,10 @@ func TestConvertedMigrationSitesTakeTheWriteLock(t *testing.T) {
 			// Each case gets its own database and its own lock holder. That is not
 			// tidiness: every case blocks for the full busy_timeout, and only
 			// separate files let t.Parallel() overlap those waits into roughly one
-			// instead of seven (SetMaxOpenConns(1) would otherwise queue them on a
-			// shared handle and serialise the waits anyway).
+			// instead of seven. (Pre-#669 a shared handle would have queued them on
+			// the single connection and serialised the waits anyway; at
+			// maxOpenConns separate files are still the clean way to keep each
+			// case's lock holder independent.)
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "migsite.db")
 			db, err := Open(path)
@@ -443,9 +447,15 @@ func TestBeginImmediatePromotesBeforeAnyReadIsPossible(t *testing.T) {
 }
 
 // TestBeginImmediateRollsBackWhenPromotionFails guards the failure path, which is
-// where a leak would be invisible and lethal. The store runs SetMaxOpenConns(1),
-// so a transaction abandoned on the error return holds the process's ONLY
-// connection forever: the next query does not error, it BLOCKS.
+// where a leak would be invisible and lethal. It pins the pool to ONE connection
+// (pinPoolToOne) so that a transaction abandoned on the error return holds the
+// only connection: the next query does not error, it BLOCKS.
+//
+// 🔴 THE PIN IS THE INSTRUMENT AND #669 IS WHY IT IS EXPLICIT. Production runs
+// maxOpenConns (4) now. At 4 this test would pass WITH THE LEAK PRESENT — the
+// abandoned tx takes one connection and the assertion read simply uses one of
+// the other three. Do not "align it with production"; that would delete the
+// test's ability to fail while leaving it green.
 //
 // The assertion is therefore a bounded-context read after the failed call. With
 // the rollback it returns immediately; without it, it waits out the deadline —
@@ -458,6 +468,8 @@ func TestBeginImmediateRollsBackWhenPromotionFails(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+	pinPoolToOne(t, db)
 
 	release := holdWriteLock(t, path)
 	defer release()
@@ -482,17 +494,59 @@ func TestBeginImmediateRollsBackWhenPromotionFails(t *testing.T) {
 	defer cancel()
 	var n int
 	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM token_events`).Scan(&n); err != nil {
-		t.Fatalf("read after a failed beginImmediate: %v — with SetMaxOpenConns(1) this means the failed call did not roll its transaction back and is still holding the only connection", err)
+		t.Fatalf("read after a failed beginImmediate: %v — on this test's PINNED pool of 1 this means the failed call did not roll its transaction back and is still holding the only connection (see pinPoolToOne — production runs maxOpenConns, where this leak would NOT block)", err)
+	}
+}
+
+// pinPoolToOne forces a store's pool back to a SINGLE connection, DELIBERATELY,
+// for the tests whose assertion only means something at that size.
+//
+// 🔴 THIS IS NOT "MIRRORING PRODUCTION" — PRODUCTION IS maxOpenConns (4) SINCE
+// #669. It is the opposite: these tests detect a LEAKED CONNECTION, and the only
+// way to observe a leak is to make the leaked connection the last one. At a pool
+// of 4, leaking one leaves three free, every subsequent query succeeds, and the
+// test passes WITH THE BUG PRESENT. Two shapes depend on it:
+//
+//   - "the next query BLOCKS" (TestBeginImmediateRollsBackWhenPromotionFails).
+//     A leak at N=4 does not block anything.
+//   - "the busy_timeout the pool hands out" (readBusyTimeout). At N>1 the pool
+//     hands out an ARBITRARY connection, so an assertion about the timeout on
+//     "the" connection is reading one of four and calling it the process state.
+//
+// ⚠️ So do NOT "fix" these to match production. If you raise maxOpenConns again,
+// these stay at 1. The thing they guard is the release path, which is pool-size
+// independent; the pool of 1 is the INSTRUMENT, not the subject.
+//
+// 🔴 AND THE PIN HAS A COST — KNOW IT BEFORE ADDING ONE TO A NEW TEST. A store
+// method that concurrently uses TWO connections is legal since #669, and inside a
+// pinned test it will DEADLOCK rather than fail. Several pinned sites acquire on
+// context.Background(), where the symptom is the whole package timing out at 600s
+// naming nothing — the worst diagnostic in this tree. Pin only a test whose
+// assertion genuinely needs a single connection, and prefer a bounded ctx.
+func pinPoolToOne(t *testing.T, db *DB) {
+	t.Helper()
+	db.db.SetMaxOpenConns(1)
+	db.db.SetMaxIdleConns(1)
+	// Assert the INSTRUMENT took. Every caller's assertion is only meaningful at a
+	// pool of 1, so a pin that silently landed on the wrong *DB — or was added
+	// before a later Open in some future edit — would return these tests to
+	// "cannot fail" with nothing visible in the diff to say so.
+	if n := db.db.Stats().MaxOpenConnections; n != 1 {
+		t.Fatalf("pinPoolToOne did not take: MaxOpenConnections = %d, want 1 — every leak assertion in this test is inert until it does", n)
 	}
 }
 
 // readBusyTimeout reports the busy_timeout the POOL hands out — i.e. what the
 // next arbitrary caller in this process will get.
 //
+// 🔴 ONLY MEANINGFUL ON A POOL PINNED TO 1 — call pinPoolToOne first. At
+// maxOpenConns this reads whichever of N connections the pool happens to hand
+// back, which is not "what the next caller gets" and not the process's state.
+//
 // 🔴 THE DEADLINE TURNS A HANG INTO A FAILURE. Every caller runs this right after
-// a release path it is testing, and with SetMaxOpenConns(1) the failure mode of a
-// release that leaked the connection is not an error — it is a BLOCK, forever,
-// waiting for the only connection to come back. On context.Background() that
+// a release path it is testing, and on the PINNED pool of 1 these tests use the
+// failure mode of a release that leaked the connection is not an error — it is a
+// BLOCK, forever, waiting for the only connection to come back. On context.Background() that
 // surfaces as the whole package timing out at 600s with a goroutine dump, which
 // reports zero test failures and names nothing; a mutant that hangs is not a
 // mutant that fails. 10s is a LIVENESS bound, never a latency one: the healthy
@@ -503,7 +557,7 @@ func readBusyTimeout(t *testing.T, db *DB) int {
 	defer cancel()
 	var ms int
 	if err := db.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&ms); err != nil {
-		t.Fatalf("read busy_timeout: %v — on a deadline this almost certainly means the release path under test did NOT return the connection, and with SetMaxOpenConns(1) that is the process's only one", err)
+		t.Fatalf("read busy_timeout: %v — on a deadline this almost certainly means the release path under test did NOT return the connection, and on this test's pinned pool that is its only one", err)
 	}
 	return ms
 }
@@ -511,8 +565,9 @@ func readBusyTimeout(t *testing.T, db *DB) int {
 // TestBeginImmediateBoundedCapsTheContendedWait is the reason the two
 // request-path sites could be converted at all. beginImmediate's promote ignores
 // ctx, so at the DSN's busy_timeout a contended request-path promote blocks ~5s
-// while holding the process's only connection — stalling every other in-flight
-// request. beginImmediateBounded caps that.
+// while holding a pool slot — and at maxOpenConns simultaneous blockers, stalling
+// every other in-flight request (measured: 4.75s for an unrelated read at 4).
+// beginImmediateBounded caps that.
 //
 // 🔴 THE CONTROL IS PLAIN beginImmediate UNDER THE SAME CONTENTION. "It returned
 // in 300ms" proves nothing on its own: it is also what an UNCONTENDED call looks
@@ -527,6 +582,8 @@ func TestBeginImmediateBoundedCapsTheContendedWait(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+	pinPoolToOne(t, db)
 
 	release := holdWriteLockRaw(t, path)
 	defer release()
@@ -564,8 +621,10 @@ func TestBeginImmediateBoundedCapsTheContendedWait(t *testing.T) {
 		t.Errorf("error = %v, want it to wrap ErrWriteLockUnavailable — callers gate the operator-facing contention hint on exactly this", err)
 	}
 	// A failed call must return the connection AND its timeout. This is the path
-	// where a leak hides: with SetMaxOpenConns(1) the next caller would otherwise
-	// inherit the short timeout, or block forever on a connection never returned.
+	// where a leak hides: on this test's pinned pool of 1 the next caller would
+	// otherwise inherit the short timeout, or block forever on a connection never
+	// returned. (Pinned deliberately — see pinPoolToOne. At production's
+	// maxOpenConns the leak would be masked by the other connections.)
 	if got := readBusyTimeout(t, db); got != dsnBusyTimeoutMS {
 		t.Errorf("busy_timeout after a FAILED beginImmediateBounded = %d, want %d — the failure path skipped the restore, so every later caller on this pooled connection silently inherits the short request-path timeout", got, dsnBusyTimeoutMS)
 	}
@@ -632,7 +691,7 @@ func TestBeginImmediateBoundedStillTakesTheWriteLock(t *testing.T) {
 		t.Fatalf("read busy_timeout inside the bounded tx: %v", err)
 	}
 	if want := int(requestPathBusyTimeout.Milliseconds()); installed != want {
-		t.Errorf("busy_timeout INSIDE a bounded tx = %d, want %d — the cap is not on the connection the transaction is actually running on, so a contended write here waits the full DSN %dms and stalls every other in-flight request behind the single connection", installed, want, dsnBusyTimeoutMS)
+		t.Errorf("busy_timeout INSIDE a bounded tx = %d, want %d — the cap is not on the connection the transaction is actually running on, so a contended write here waits the full DSN %dms and, once maxOpenConns promotes block at once, stalls every other in-flight request too", installed, want, dsnBusyTimeoutMS)
 	}
 
 	// No statement has run on tx... except the pragma read above, which takes no
@@ -657,16 +716,15 @@ func TestBeginImmediateBoundedStillTakesTheWriteLock(t *testing.T) {
 // surfaces as ErrConnDone, an error, not a silent replacement).
 //
 // ⚠️ SO THIS IS NOT A REGRESSION TEST FOR #607. That anomaly was MEASURED to be
-// pool QUEUEING — a caller waiting for the single connection before its own
+// pool QUEUEING — a caller waiting for a free connection before its own
 // perfectly-capped promote begins — and no pragma was ever shed. This test would
 // not have caught it and cannot. Its value is keeping a REFUTED hypothesis from
 // quietly becoming true again if the pinning is ever refactored away.
 //
 // WHY THE CHURN MATTERS, given TestBeginImmediateBoundedStillTakesTheWriteLock
 // already reads the pragma back inside the live tx: without churn an unpinned
-// implementation still PASSES. With SetMaxOpenConns(1) there is only one
-// connection, so a `db.ExecContext` pragma and a `db.BeginTx` land on the same
-// one anyway. Only forcing the pool to retire it BETWEEN those two calls
+// implementation still PASSES. On a pool of 1 there is only one connection, so a
+// `db.ExecContext` pragma and a `db.BeginTx` land on the same one anyway. Only forcing the pool to retire it BETWEEN those two calls
 // separates pinned from unpinned. MEASURED: reverting the helper to the unpinned
 // shape leaves that test green and fails this one.
 //
@@ -724,6 +782,13 @@ func TestBeginImmediateBoundedKeepsItsLoweredTimeoutUnderPoolChurn(t *testing.T)
 			t.Fatalf("open: %v", err)
 		}
 		defer func() { _ = db.Close() }()
+		// 🔴 PINNED TO 1 BY #669, AND THIS ARM IS WHY IT MATTERS. The control
+		// reproduces the pre-#63 shape: Exec a pragma against the POOL, then read
+		// it back off the POOL. That round trip only means something if both land
+		// on the SAME connection, which a pool of 1 guarantees and maxOpenConns
+		// does not. Unpinned, the read-back could draw a different connection and
+		// the precondition below would fail for a reason unrelated to churn.
+		pinPoolToOne(t, db)
 		ctx := context.Background()
 
 		// The pre-#63 shape: a one-shot Exec against the POOL, no pinning.
@@ -754,11 +819,12 @@ func TestBeginImmediateBoundedKeepsItsLoweredTimeoutUnderPoolChurn(t *testing.T)
 // path, and proves the restore is load-bearing rather than decorative.
 //
 // 🔴 THE CONTROL ARM IS THE INTERESTING HALF. It MEASURES that a lowered
-// busy_timeout SURVIVES conn.Close() back into the pool — so with
-// SetMaxOpenConns(1), where the pool hands the same connection to everything that
-// follows, a missing restore would silently drop the WHOLE PROCESS to the
-// request-path timeout, including the Open()-time migrations that must be able to
-// wait out a competing process. If a future driver or pool version started
+// busy_timeout SURVIVES conn.Close() back into the pool — so a missing restore
+// poisons every later caller that draws that connection. On this test's pinned
+// pool of 1 that is the WHOLE PROCESS, including the Open()-time migrations that
+// must be able to wait out a competing process; at production's maxOpenConns it
+// is one connection in N, which is intermittent rather than total and therefore
+// harder to diagnose, not easier (see restoreAndReleaseConn). If a future driver or pool version started
 // resetting session state on release, this control fails and tells us the restore
 // has become redundant — rather than leaving an unfalsifiable guard in place.
 func TestBeginImmediateBoundedRestoresBusyTimeout(t *testing.T) {
@@ -769,6 +835,8 @@ func TestBeginImmediateBoundedRestoresBusyTimeout(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+	pinPoolToOne(t, db)
 	ctx := context.Background()
 
 	if got := readBusyTimeout(t, db); got != dsnBusyTimeoutMS {
@@ -815,7 +883,7 @@ func TestBeginImmediateBoundedRestoresBusyTimeout(t *testing.T) {
 	releaseTx()
 
 	if got := readBusyTimeout(t, db); got != dsnBusyTimeoutMS {
-		t.Errorf("busy_timeout after a COMMITTED beginImmediateBounded = %d, want %d — the request-path timeout leaked into the pool's only connection, so every later caller in this process (including Open()-time migrations) now gives up after %dms", got, dsnBusyTimeoutMS, got)
+		t.Errorf("busy_timeout after a COMMITTED beginImmediateBounded = %d, want %d — the request-path timeout leaked into a pooled connection, so every later caller that DRAWS it (including Open()-time migrations) now gives up after %dms — on this test's pinned pool of 1 that is every caller; at production's maxOpenConns it is intermittent, which is harder to diagnose, not easier", got, dsnBusyTimeoutMS, got)
 	}
 }
 
@@ -830,7 +898,7 @@ func TestBeginImmediateBoundedRestoresBusyTimeout(t *testing.T) {
 // fail — which is exactly why restoreAndReleaseConn takes the statement as a
 // parameter.
 //
-// The stakes are process-wide rather than per-request: with SetMaxOpenConns(1) the
+// The stakes are wider than one request: on this test's pinned pool of 1 the
 // pool hands the same connection to everything that follows, so ONE unrestored
 // release silently drops every later caller — including the Open()-time migrations
 // that must be able to wait out a competing process — to the 250ms request-path
@@ -843,6 +911,8 @@ func TestRestoreAndReleaseConnDiscardsAConnectionItCannotRestore(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+	pinPoolToOne(t, db)
 	ctx := context.Background()
 
 	const failingRestoreSQL = `PRAGMA busy_timeout = 'not a number at all' AND`
@@ -896,7 +966,7 @@ func TestRestoreAndReleaseConnDiscardsAConnectionItCannotRestore(t *testing.T) {
 	restoreAndReleaseConn(ctx, conn, failingRestoreSQL)
 
 	if got := readBusyTimeout(t, db); got != dsnBusyTimeoutMS {
-		t.Errorf("busy_timeout after a FAILED restore = %d, want the DSN's %d — the connection was returned to the pool with an unknown timeout instead of being poisoned, and with SetMaxOpenConns(1) that value is now what EVERY later caller in this process gets, Open()-time migrations included", got, dsnBusyTimeoutMS)
+		t.Errorf("busy_timeout after a FAILED restore = %d, want the DSN's %d — the connection was returned to the pool with an unknown timeout instead of being poisoned, and on this pinned pool of 1 that value is now what EVERY later caller gets, Open()-time migrations included (at production's maxOpenConns it poisons one connection in N — intermittent rather than total)", got, dsnBusyTimeoutMS)
 	}
 }
 
@@ -937,6 +1007,8 @@ func TestRestoreAndReleaseConnDiscardsAConnectionItDidNotActuallyRestore(t *test
 				t.Fatalf("open: %v", err)
 			}
 			defer func() { _ = db.Close() }()
+			// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+			pinPoolToOne(t, db)
 			ctx := context.Background()
 
 			// 🔴 CONTROL: the statement must SUCCEED. If it errored, the ordinary
@@ -976,7 +1048,7 @@ func TestRestoreAndReleaseConnDiscardsAConnectionItDidNotActuallyRestore(t *test
 			restoreAndReleaseConn(ctx, conn, c.restoreSQL)
 
 			if got := readBusyTimeout(t, db); got != dsnBusyTimeoutMS {
-				t.Errorf("busy_timeout after a restore that SUCCEEDED without restoring = %d, want the DSN's %d — restoreAndReleaseConn trusted the statement's exit status instead of reading the value back, so the pool's only connection is now at %dms and every later caller in this process inherits it", got, dsnBusyTimeoutMS, got)
+				t.Errorf("busy_timeout after a restore that SUCCEEDED without restoring = %d, want the DSN's %d — restoreAndReleaseConn trusted the statement's exit status instead of reading the value back, so this pinned pool's only connection is now at %dms and every later caller inherits it", got, dsnBusyTimeoutMS, got)
 			}
 		})
 	}
@@ -1151,6 +1223,8 @@ func TestPromoteFailureThatIsNotContentionIsNotRetryable(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer func() { _ = ro.Close() }()
+	// DELIBERATELY 1, not "same as production" — production is maxOpenConns (4)
+	// since #669. A pool of 1 is what makes a leaked connection observable here.
 	ro.SetMaxOpenConns(1)
 
 	ctx := context.Background()
@@ -1295,7 +1369,7 @@ func requestPathWriterSites() []requestPathWriterSite {
 //
 // InsertManualCostEvent is here because leaving it out was itself the defect
 // (#610). It is the OTHER half of the same route: same SELECT-then-upsert shape,
-// same r.Context(), same single connection — and while it ran on a DEFERRED
+// same r.Context(), same store — and while it ran on a DEFERRED
 // BeginTx, POST /api/v1/costs answered a lost race for the write lock with a
 // bounded retryable 503 when `override=true` and an unbounded 5000ms block then a
 // permanent-looking 500 when it was false. Both of its branches are listed, keyed
@@ -1322,7 +1396,7 @@ func requestPathWriterSites() []requestPathWriterSite {
 //     Reverting to plain beginImmediate still wraps the sentinel, so only the
 //     timing tells the two apart — and the bound is the entire reason these sites
 //     could be converted at all: the promote ignores ctx, and with
-//     SetMaxOpenConns(1) an uncapped 5s wait on an HTTP handler stalls every other
+//     a pool of 1 an uncapped 5s wait on an HTTP handler stalls every other
 //     in-flight request in the process.
 //
 // ⚠️ The ceiling is `4 * requestPathBusyTimeout`, NOT the flat 2s this paragraph
@@ -1337,7 +1411,9 @@ func TestRequestPathWritersTakeTheBoundedWriteLock(t *testing.T) {
 	for _, c := range requestPathWriterSites() {
 		t.Run(c.name, func(t *testing.T) {
 			// Own database per case so the contended waits overlap rather than
-			// serialise — SetMaxOpenConns(1) would queue them on a shared handle.
+			// serialise. (Each case also pins its pool to 1 below, so a shared
+			// handle would queue them; separate files keep each case's lock
+			// holder independent regardless.)
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "reqpath.db")
 			db, err := Open(path)
@@ -1345,11 +1421,13 @@ func TestRequestPathWritersTakeTheBoundedWriteLock(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			defer func() { _ = db.Close() }()
+			// DELIBERATELY 1, so a leaked connection still blocks — see pinPoolToOne.
+			pinPoolToOne(t, db)
 
 			// 🔴 A LIVENESS BOUND, NOT A LATENCY ONE — and it does not weaken the
 			// timing assertion below, because the cap under test is 250ms. It is
 			// here so a release path that LEAKS the connection fails this test
-			// instead of hanging it: with SetMaxOpenConns(1), beginImmediateBounded's
+			// instead of hanging it: on a pool of 1, beginImmediateBounded's
 			// db.Conn() would otherwise block forever waiting for the only
 			// connection, and the package would die at the 600s go test timeout
 			// reporting zero failures and naming nothing. MEASURED: dropping
@@ -1506,8 +1584,11 @@ func TestRequestPathWritersDoNotSellAPermanentFailureAsRetryable(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer func() { _ = ro.Close() }()
-	// Mirrors production (see Open): the single connection is what makes a leaked
-	// one hang rather than merely slow the next caller.
+	// 🔴 NOT "mirrors production" — it said that until #669 and the sentence is
+	// now false (production is maxOpenConns, 4). It is DELIBERATELY 1 for the
+	// same reason as pinPoolToOne: the single connection is what makes a leaked
+	// one hang rather than merely slow the next caller. Keep it at 1 even if
+	// production's pool changes again.
 	ro.SetMaxOpenConns(1)
 	db := &DB{db: ro}
 
@@ -1629,9 +1710,17 @@ func TestRepriceCommitTakesTheUnboundedWriteLock(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	// 🔴 DELIBERATELY 1 — see pinPoolToOne. ARM 3 below is a LEAK DETECTOR: it
+	// works by the dry run starving for a connection that a leak never returned.
+	// At production's maxOpenConns the mutant leaks exactly ONE connection and the
+	// dry run simply takes one of the other three, so the arm would pass WITH THE
+	// BUG and its "MEASURED: fails at 30.01s" note would be a claim about a kill
+	// the test no longer has. Missed in the first pass of #669 and caught in
+	// review.
+	pinPoolToOne(t, db)
 
 	// A liveness bound, not a latency one: 30s is far past the 5s this test
-	// legitimately waits, and it exists so a begin that LEAKS the single
+	// legitimately waits, and it exists so a begin that LEAKS the pinned single
 	// connection fails here instead of hanging the package to the 600s go test
 	// timeout with zero named failures.
 	//
@@ -1717,7 +1806,7 @@ func TestRepriceCommitTakesTheUnboundedWriteLock(t *testing.T) {
 	}
 	t.Logf("contended committing reprice: %v (DSN busy_timeout = %dms, request-path cap = %v)", elapsed, dsnBusyTimeoutMS, requestPathBusyTimeout)
 	if elapsed < 2*time.Second {
-		t.Errorf("committing reprice gave up after %v, expected it to wait out the DSN's %dms busy_timeout. This site has moved to the BOUNDED helper, which caps at %v — that cap exists to keep an HTTP handler from stalling every other in-flight request behind the single connection, and Reprice has no HTTP caller at all (cmd/tierd/reprice.go is the only one). Bounding it converts a working operator command into a spurious failure whenever a live tierd holds the lock briefly", elapsed, dsnBusyTimeoutMS, requestPathBusyTimeout)
+		t.Errorf("committing reprice gave up after %v, expected it to wait out the DSN's %dms busy_timeout. This site has moved to the BOUNDED helper, which caps at %v — that cap exists to keep an HTTP handler from blocking five seconds past its client's patience, and from stalling every other in-flight request once maxOpenConns promotes block at once, and Reprice has no HTTP caller at all (cmd/tierd/reprice.go is the only one). Bounding it converts a working operator command into a spurious failure whenever a live tierd holds the lock briefly", elapsed, dsnBusyTimeoutMS, requestPathBusyTimeout)
 	}
 
 	// ARM 3: the DRY RUN must still work under the same held lock.
@@ -1728,11 +1817,12 @@ func TestRepriceCommitTakesTheUnboundedWriteLock(t *testing.T) {
 		// tx.Rollback() from beginImmediate's promote-failure path fails this arm
 		// at 30.01s with "reprice: begin tx: context deadline exceeded" — the dry
 		// run had NOT started promoting; a leaked connection starved the pool
-		// (SetMaxOpenConns(1)) and the dry run never got a connection at all. The
+		// (pinned to 1 by this test since #669 — at maxOpenConns the leak is
+		// invisible here) and the dry run never got a connection at all. The
 		// error text is the discriminator: a genuine promotion failure surfaces as
 		// the write-lock sentinel, a leak surfaces as a ctx deadline waiting for a
 		// connection.
-		t.Errorf("dry-run reprice failed while another connection held the write lock: %v — EITHER the dry run has started promoting (it writes nothing, so it must not contend with a live `tierd serve`: a diagnostic an operator cannot run without taking the database down is a diagnostic nobody runs), OR a connection was LEAKED somewhere in this package and the dry run starved waiting for the single connection. If the error is `begin tx: context deadline exceeded` it is the leak, not the promotion — check that every beginImmediate/beginImmediateBounded failure path still rolls back and releases", err)
+		t.Errorf("dry-run reprice failed while another connection held the write lock: %v — EITHER the dry run has started promoting (it writes nothing, so it must not contend with a live `tierd serve`: a diagnostic an operator cannot run without taking the database down is a diagnostic nobody runs), OR a connection was LEAKED somewhere in this package and the dry run starved waiting for this test's pinned single connection. If the error is `begin tx: context deadline exceeded` it is the leak, not the promotion — check that every beginImmediate/beginImmediateBounded failure path still rolls back and releases", err)
 	} else if dry.RowCount == 0 {
 		t.Errorf("dry-run reprice under contention examined 0 rows — it returned successfully without reading anything, so this arm is not actually proving the read went through")
 	}
@@ -1778,6 +1868,8 @@ func TestRepriceNonContentionFailureCarriesNoQuiescedHint(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer func() { _ = ro.Close() }()
+	// DELIBERATELY 1, not "same as production" — production is maxOpenConns (4)
+	// since #669. A pool of 1 is what makes a leaked connection observable here.
 	ro.SetMaxOpenConns(1)
 
 	ctx := context.Background()

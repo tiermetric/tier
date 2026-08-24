@@ -198,15 +198,36 @@ func (d *DB) WebhookPayloadByDelivery(ctx context.Context, event, deliveryID str
 // authority is the append-only trail: quality_history and quality_events (never
 // pruned here) plus the outcomes rows they explain. A defensible score rests on
 // those, not on the presence of any particular raw payload.
+//
+// 🔴 BOTH PASSES ARE ONE TRANSACTION (#673). The row-cap pass's subquery READS
+// the table the age pass just wrote, so as two independent statements it is a
+// read-then-write straddling a window another writer can enter: a delivery
+// landing between them is visible to the subquery that chooses the survivors but
+// not to the age pass that ran before it, and the returned total then describes
+// neither state. beginImmediate — the UNBOUNDED helper — because the only caller
+// is Open() (store.go, Phase 4): a background path that should WAIT for the lock,
+// with no request behind it to fail fast for.
+//
+// ⚠️ NOT REACHABLE TODAY, FIXED ANYWAY. Open() runs before the process serves
+// anything, so nothing races it now. The method is EXPORTED, so a future caller
+// inherits the gap — silently, because under no contention the counts look
+// identical either way. That is why the pin is the caller census in
+// deferred_conversion_test.go rather than a row-count assertion.
 func (d *DB) PruneWebhookPayloads(ctx context.Context) (int64, error) {
 	var total int64
 
-	ageRes, err := d.db.ExecContext(ctx, fmt.Sprintf(`
+	tx, err := beginImmediate(ctx, d.db)
+	if err != nil {
+		return 0, fmt.Errorf("prune webhook_payloads: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op (ErrTxDone) after a successful Commit
+
+	ageRes, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM webhook_payloads
 		WHERE received_at < datetime('now', '-%d days')`, webhookPayloadRetentionDays),
 	)
 	if err != nil {
-		return total, fmt.Errorf("prune webhook_payloads by age: %w", err)
+		return 0, fmt.Errorf("prune webhook_payloads by age: %w", err)
 	}
 	if n, err := ageRes.RowsAffected(); err == nil {
 		total += n
@@ -214,7 +235,7 @@ func (d *DB) PruneWebhookPayloads(ctx context.Context) (int64, error) {
 
 	// Keep the newest webhookPayloadMaxRows by id; delete the rest. The subquery
 	// selects the survivors so the DELETE removes exactly the oldest overflow.
-	capRes, err := d.db.ExecContext(ctx, `
+	capRes, err := tx.ExecContext(ctx, `
 		DELETE FROM webhook_payloads
 		WHERE id NOT IN (
 			SELECT id FROM webhook_payloads ORDER BY id DESC LIMIT ?
@@ -222,10 +243,19 @@ func (d *DB) PruneWebhookPayloads(ctx context.Context) (int64, error) {
 		webhookPayloadMaxRows,
 	)
 	if err != nil {
-		return total, fmt.Errorf("prune webhook_payloads by row cap: %w", err)
+		return 0, fmt.Errorf("prune webhook_payloads by row cap: %w", err)
 	}
 	if n, err := capRes.RowsAffected(); err == nil {
 		total += n
+	}
+
+	// 🔴 THE COUNTS ARE RETURNED ONLY AFTER THE COMMIT SUCCEEDS, and every error
+	// path above now returns 0 rather than a partial total. Reporting deletions
+	// from a transaction that then rolled back would describe rows that are still
+	// in the table — the same both-halves-or-neither property the enclosure
+	// provides, carried through to what the caller is told.
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("prune webhook_payloads: commit: %w", err)
 	}
 	return total, nil
 }

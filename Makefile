@@ -3,9 +3,13 @@ MODULE  := github.com/tiermetric/tier
 GOFLAGS := -trimpath
 # VERSION is reported by /api/v1/livez (#49). git description, "dev" off-tree.
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -X main.version=$(VERSION)
+# COMMIT is the exact revision, which VERSION cannot supply: a tagged build
+# reports the tag however it was built, so two binaries from a moved tag are
+# indistinguishable by version alone (#638).
+COMMIT  := $(shell git rev-parse HEAD 2>/dev/null || echo "")
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: build lint test check check-full clean docker seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest dns-latch-selftest mirror-audit mirror-audit-selftest e2e-summary e2e-summary-selftest expect-head
+.PHONY: build lint test check check-full clean docker seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest dns-latch-selftest mirror-audit mirror-audit-selftest e2e-summary e2e-summary-selftest expect-head merge-gate merge-gate-selftest
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/tierd
@@ -152,12 +156,12 @@ expect-head:
 # target of the first rule in the file, so hoisting these names above `build`
 # silently turns a bare `make` into `make lint`.
 lint build test docs-html docs-test docs-html-check cve-rescan-selftest \
-dns-latch-selftest mirror-audit-selftest e2e-summary-selftest: expect-head
+dns-latch-selftest mirror-audit-selftest e2e-summary-selftest merge-gate-selftest: expect-head
 
 # expect-head is FIRST here too — belt and braces with the edges above, and it is
 # what makes the serial ordering readable at a glance. `check-full: check` below
 # means check-full inherits it. Do not move it down the list.
-check: expect-head lint build test docs-test docs-html-check cve-rescan-selftest dns-latch-selftest mirror-audit-selftest e2e-summary-selftest
+check: expect-head lint build test docs-test docs-html-check cve-rescan-selftest dns-latch-selftest mirror-audit-selftest e2e-summary-selftest merge-gate-selftest
 
 check-full: check
 	go test -race -count=1 -tags integration ./...
@@ -257,6 +261,16 @@ mirror-audit-selftest:
 		echo "mirror-audit-selftest: SKIPPED -- scripts/mirror-audit.sh absent (internal tool, not in the public export; see #635)"; \
 	fi
 
+# ⚠️ THIS TARGET IS LOSSY AND IS FOR HUMANS ONLY (#682). The script returns
+# 0 CLEAN / 1 FINDINGS / 2 COULD-NOT-RUN, but GNU make REPLACES the recipe's
+# code -- 2 for a failed recipe whatever it returned (measured: `@exit 7` -> 2),
+# or 0 where errors are ignored (-i, .IGNORE, a `-`-prefixed recipe line). It
+# never passes the recipe's own code through in either direction, so
+# `make cve-rescan` reports a FINDING as a COULD-NOT-RUN. That is
+# fine at a terminal, where you read the verdict line. It is NOT fine in CI,
+# where the exit code is the whole signal -- image-cve-rescan.yml therefore
+# calls the script directly, and the script's --selftest fails if it stops.
+# Anything scripting on the exit code must call scripts/image-cve-rescan.sh.
 cve-rescan:
 	$(CURDIR)/scripts/image-cve-rescan.sh
 
@@ -302,4 +316,52 @@ dns-latch-selftest:
 	else \
 		echo "dns-latch-selftest: SKIPPED -- scripts/dns-latch.sh absent (internal tool, not in the public export; see #580)"; \
 	fi
+# merge-gate (#657) -- assert a PR's CodeQL analysis actually RAN and succeeded
+# before believing its `alerts == 0`. Not part of `check`: it needs the network
+# and a PR number. Run it before merging:  make merge-gate PR=123
+# ⚠️ SAME LOSSY WRAPPER AS cve-rescan ABOVE (#682): merge-gate.sh distinguishes
+# 1 (NOT safe) from 2 (could not check), and make collapses both to 2. Harmless
+# for the merge DECISION -- both mean DO NOT MERGE, and the script names its
+# failing arm on STDERR (on failure stdout is empty, so never pipe stdout and
+# expect a verdict) -- but it is NOT harmless for the record: our own session
+# notes logged "make merge-gate PR=675 first returned rc=2" for an arm that
+# exits 1, and then reasoned from the wrong code. Invoke the script directly.
+#
+# ⚠️ THIS FILE SHIPS to the public export, so it must not name internal files or
+# identifiers. The line above deliberately says "our own session notes" rather
+# than naming the internal doc: that document's NAME is itself in the export
+# gate's identifier list, and #682 shipped it here for one commit before the
+# gate was run by hand. `make check` does not run publish-audit.sh, so nothing
+# local catches this -- it surfaces only at publish time.
+# The two guards below are what the bare call loses, which is why the target
+# stays: an empty-PR usage check, and an explicit not-in-the-export refusal.
+merge-gate:
+	@if [ -z "$(PR)" ]; then \
+		echo "usage: make merge-gate PR=<number>" >&2; exit 2; \
+	fi
+	@if [ ! -f "$(CURDIR)/scripts/merge-gate.sh" ]; then \
+		echo "merge-gate: unavailable -- internal tool, not in the public export (#657)" >&2; \
+		exit 2; \
+	fi
+	@$(CURDIR)/scripts/merge-gate.sh "$(PR)" $(REPO)
+
+# Existence-guarded exactly like dns-latch-selftest ABOVE (and it runs twice, under
+# two interpreters, for the same reason given in that block): merge-gate.sh is
+# private-only (rm -f'd from the export), Makefile SHIPS, and CONTRIBUTING.md
+# tells public contributors to run `make check`. A bare recipe would die with
+# "No such file or directory" on the mirror -- invisibly to publish-audit, whose
+# gate (f) runs only `go build`/`go test` and never `make`.
+merge-gate-selftest:
+	@if [ -f "$(CURDIR)/scripts/merge-gate.sh" ]; then \
+		"$(CURDIR)/scripts/merge-gate.sh" --selftest && \
+		/bin/bash "$(CURDIR)/scripts/merge-gate.sh" --selftest; \
+	elif [ -f "$(CURDIR)/scripts/publish-audit.sh" ]; then \
+		echo "merge-gate-selftest: scripts/merge-gate.sh is MISSING from a PRIVATE checkout" >&2; \
+		echo "  (scripts/publish-audit.sh is present, so this is NOT the public export)." >&2; \
+		exit 1; \
+	else \
+		echo "merge-gate-selftest: SKIPPED -- scripts/merge-gate.sh absent (internal tool, not in the public export; see #657)"; \
+	fi
+
+
 

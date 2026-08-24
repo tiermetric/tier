@@ -136,6 +136,16 @@ func (h *Handler) handlePutHierarchy(w http.ResponseWriter, r *http.Request) {
 	}
 	row.Developer = canon(row.Developer)
 	if err := h.store.UpsertHierarchy(r.Context(), row.Developer, row.Team, row.Division, row.Org); err != nil {
+		// Contention is TRANSIENT and must be answered 503 + Retry-After, never
+		// 500 (#668). UpsertHierarchy now uses beginImmediateBounded, so it is a
+		// request-path writer that can produce the sentinel; before #668 this
+		// route blocked for the DSN's full 5000ms instead. A retryable condition
+		// sold as a permanent one is the defect writeStoreContention exists for.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("upsert hierarchy: write lock unavailable", "err", logSafeErr(err))
+			writeStoreContention(w)
+			return
+		}
 		h.logger.Error("upsert hierarchy", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
@@ -215,6 +225,15 @@ func (h *Handler) handleBulkHierarchy(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, row)
 	}
 	if err := h.store.UpsertHierarchies(r.Context(), rows); err != nil {
+		// Transient contention → 503 + Retry-After, not 500 (#668). The batch is
+		// all-or-nothing, so a contended import wrote NOTHING and the whole
+		// request is safe to replay verbatim — which is exactly what
+		// Retry-After tells the client to do.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("bulk upsert hierarchy: write lock unavailable", "err", logSafeErr(err), "count", len(rows))
+			writeStoreContention(w)
+			return
+		}
 		h.logger.Error("bulk upsert hierarchy", "err", logSafeErr(err), "count", len(rows))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
@@ -287,6 +306,29 @@ func (h *Handler) handleEndMembership(w http.ResponseWriter, r *http.Request) {
 	}
 	dev := canon(developer)
 	if err := h.store.EndMembership(r.Context(), dev, req.Org, req.PeriodEnd); err != nil {
+		// 🔴 CONTENTION IS CLASSIFIED FIRST, AHEAD OF THE PERMANENT 400 BELOW,
+		// AND THE ORDER IS LOAD-BEARING (#668).
+		//
+		// An earlier draft of this handler put ErrEndBeforeStart first and
+		// argued both orders were safe "because both arms match a distinct
+		// sentinel". That argument is the one handler_contention_test.go
+		// explicitly rejects for exactly this situation: this handler is
+		// written against the Store INTERFACE, not *store.DB, so "the concrete
+		// store cannot return both today" is a property of one implementation,
+		// not of the contract enforced here. Branch order must hold for ANY
+		// error satisfying both predicates — which is why
+		// mismatchingContentionStore exists at all.
+		//
+		// The rule, stated positively: a TRANSIENT condition must be classified
+		// before any PERMANENT one. Getting it wrong here is worse than the
+		// usual 500, because 400 tells the client its INPUT was incoherent — it
+		// would stop retrying a request that a retry would have completed.
+		// Pinned by TestContentionOutranksAPermanentClassification.
+		if errors.Is(err, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("end membership: write lock unavailable", "err", logSafeErr(err))
+			writeStoreContention(w)
+			return
+		}
 		// An end period before the membership's start is incoherent client input
 		// (you cannot leave an org before you joined it) — a 400, not a 500. The
 		// message names the periods, never the developer (no PII in responses).

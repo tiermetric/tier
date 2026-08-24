@@ -71,6 +71,16 @@ func Backup(ctx context.Context, dbPath, destPath string) error {
 		return fmt.Errorf("open source db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	// 🔴 DELIBERATE, AND UNRELATED TO THE STORE'S maxOpenConns. Since #669 this is
+	// the only literal 1 left in non-test code, so it reads like a site the pool
+	// sweep missed. It is not: this is a SEPARATE handle with its own DSN, opened
+	// for exactly one VACUUM INTO, which can never have more than one statement in
+	// flight. A pool here would add connections nothing uses. Do not "align" it.
+	//
+	// ⚠️ Worth knowing at the other end: VACUUM INTO holds a whole-database READ
+	// snapshot for its duration, which makes it the archetypal WAL-checkpoint
+	// pinner. A `tierd backup` running against a busy `tierd serve` is an expected
+	// transient spike in tier_sqlite_wal_bytes, not a starved WAL (#669).
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("connect source db: %w", err)

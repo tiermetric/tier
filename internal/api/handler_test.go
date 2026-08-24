@@ -23,8 +23,11 @@ import (
 // newTestHandler returns a Handler with auth DISABLED (empty token), which
 // matches the pre-#22 behavior most existing tests assume. The auth-specific
 // tests use newTestHandlerWithToken to configure a bearer token explicitly.
-// Backing store is a fresh on-disk SQLite database (not :memory:) so the
-// same DB.SetMaxOpenConns(1) semantics apply as in production.
+// Backing store is a fresh on-disk SQLite database (not :memory:) so the same
+// pool and locking semantics apply as in production. (This said
+// "SetMaxOpenConns(1) semantics" until #669 raised the pool to maxOpenConns.
+// It opens through store.Open, so it inherits whatever production uses and the
+// claim stays true without naming a number that drifts.)
 func newTestHandler(t *testing.T) (*Handler, *store.DB) {
 	return newTestHandlerWithToken(t, "")
 }

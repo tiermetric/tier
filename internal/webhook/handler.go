@@ -76,6 +76,12 @@ type Store interface {
 	// UpdateQualityForOutcome writes the derived quality to one outcome row and
 	// appends a quality_history transition (#134). Row-targeted (WHERE id = ?),
 	// not issue-wide — the §C9 scoping fix.
+	//
+	// It is a REQUEST-PATH writer: it takes the BOUNDED write lock (#668), so it
+	// may also return store.ErrWriteLockUnavailable, which ServeHTTP answers with
+	// 503 + Retry-After ahead of the generic 500. Declared here because this
+	// handler is written against THIS interface, not *store.DB — an alternate
+	// implementation has no other way to learn the contract it must satisfy.
 	UpdateQualityForOutcome(ctx context.Context, outcomeID int64, quality float64, reason, sourceRef string) error
 	// InsertWebhookPayload persists the raw delivery body for audit (#137).
 	// Called best-effort; a returned error is logged, not propagated to GitHub.
@@ -169,12 +175,31 @@ type Handler struct {
 	// via prderive.NormalizeSizeLabels. Passed to prderive.SizeWeight per PR; a
 	// configured match keeps weight_source='label'.
 	sizeLabels map[string]float64
-	// qualityMu serialises the append→resolve→write critical section in
-	// appendAndResolve (#134). net/http serves deliveries concurrently and
-	// GitHub can deliver in parallel; without this lock two events for the SAME
-	// outcome could each resolve over a stale event set and clobber each other.
-	// The store is single-writer anyway (SetMaxOpenConns(1)), so this adds no
-	// real contention — it only makes the multi-statement RMW atomic.
+	// qualityMu serialises the classify→append→resolve→write critical section,
+	// entered by BOTH appendAndResolve and appendAndResolveCISuccess (#134,
+	// widened by #674). net/http serves deliveries concurrently and GitHub can
+	// deliver in parallel; without this lock two events for the SAME outcome
+	// could each resolve over a stale event set and clobber each other.
+	//
+	// ⚠️ THE `classify→` AND THE SECOND ENTRY POINT ARE #674 AND ARE NOT
+	// COSMETIC. This comment said "the append→resolve→write critical section in
+	// appendAndResolve" — one verb short and one entry point short — while the
+	// ci_pass/ci_fail_flaky decision was made OUTSIDE the lock. #674 exists
+	// because a comment's scope and a lock's scope disagreed, so leaving the
+	// mutex's own declaration describing the narrower extent would reproduce the
+	// bug at the exact spot a future editor reads before adding a caller.
+	//
+	// 🔴 IT IS LOAD-BEARING ON ITS OWN, and the reason matters more now than it
+	// did. This used to add "the store is single-writer anyway
+	// (SetMaxOpenConns(1)), so this adds no real contention" — a throughput
+	// claim resting on a pool-size constant that #669 raises. The correctness
+	// claim never rested on it: the critical section spans THREE separate store
+	// calls (append, read, write), so no per-transaction guarantee at any pool
+	// size covers it. This mutex is the only thing that does.
+	//
+	// ⚠️ And it excludes only other WEBHOOK goroutines. The write itself is
+	// still a bounded write-lock caller (#668) and can lose to a writer outside
+	// this handler; ServeHTTP answers that with a 503 rather than a 500.
 	qualityMu sync.Mutex
 }
 
@@ -289,7 +314,51 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if deliveryKey != "" {
 			h.deliveries.forget(deliveryKey)
 		}
-		h.logger.Error("webhook handler error", "event", event, "err", handlerErr)
+		// 🔴 CONTENTION IS NOT A FAULT, AND IT MUST NOT BE LOGGED AS ONE (#668).
+		// UpdateQualityForOutcome now takes the BOUNDED write lock, so this path
+		// can return store.ErrWriteLockUnavailable — a condition that clears by
+		// itself. Both branches below return 5xx and GitHub retries either way,
+		// so the delivery is not at risk; what differs is the OPERATOR signal.
+		// An ERROR line saying "webhook handler error" points a human at a
+		// broken database for something that resolved on its own, which is the
+		// exact defect writeStoreContention exists to prevent one package over.
+		//
+		// 503 + Retry-After rather than 500: it is the honest status for a
+		// transient lock conflict, and it tells GitHub when to come back instead
+		// of leaving the interval entirely to its backoff.
+		//
+		// ⚠️ BEHAVIOUR CHANGE WORTH NAMING, and it is the OPPOSITE of what a
+		// first draft of this comment claimed. That draft said the path used to
+		// wait out contention for the DSN's 5000ms "and usually completed".
+		// Measured: it did not wait at all. A DEFERRED read-then-write upgrade
+		// gets no busy handler — SQLite will not block a transaction that
+		// already holds a read lock — so it failed in ~65µs with an error
+		// busy_timeout would never retry, and this handler answered 500.
+		//
+		// So the conversion does not trade "completes slowly" for "fails fast".
+		// It trades an instant UNCLASSIFIABLE failure for an instant
+		// CLASSIFIABLE one, and adds the 503 that tells GitHub to redeliver.
+		// The completion guarantee was always GitHub's retry; #668 makes the
+		// signal honest rather than moving where the guarantee lives.
+		//
+		// ⚠️ `event` IS logSafeStr-WRAPPED, and that is not cosmetic: it is the
+		// raw X-GitHub-Event REQUEST HEADER, so an attacker controls it and an
+		// unwrapped value is a log-injection sink. CodeQL flagged exactly this
+		// line (go/log-injection) when it was first written bare. logSafeStr is
+		// a measured CodeQL barrier — wrapping is the fix, NOT a dismissal.
+		if errors.Is(handlerErr, store.ErrWriteLockUnavailable) {
+			h.logger.Warn("webhook handler: write lock unavailable, GitHub will redeliver",
+				"event", logSafeStr(event), "err", handlerErr)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "database is busy: retry shortly", http.StatusServiceUnavailable)
+			return
+		}
+		// Wrapped for the same reason as the branch above. This line predates
+		// #668 and its bare form is one of the adjudicated-false-positive
+		// alerts; it is corrected here rather than left, because leaving one
+		// wrapped and one bare on adjacent lines invites a future reader to
+		// "fix" the inconsistency in the wrong direction.
+		h.logger.Error("webhook handler error", "event", logSafeStr(event), "err", handlerErr)
 		// Return 500 so GitHub retries delivery on transient failures.
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -747,30 +816,47 @@ func (h *Handler) handleWorkflowRun(ctx context.Context, body []byte) error {
 	// Resolve matches ci_fail against ci_fail_flaky on.
 	sourceRef := wr.HeadSHA + ":" + strconv.Itoa(wr.RunAttempt)
 
-	var eventType string
+	// A success is classified INSIDE qualityMu (#674): the ci_pass vs
+	// ci_fail_flaky decision reads the same event set the append then mutates,
+	// so it belongs in the same critical section. A failure needs no read and
+	// takes the fixed-type path.
+	//
+	// ⚠️ STILL A `switch` WITH AN EXPLICIT `default`, NOT `if success { … } else
+	// ci_fail`. The conclusion guard 30-odd lines up already returns for
+	// anything but success/failure, so the else-branch is provably `failure`
+	// TODAY — but the guard and the classifier can drift apart with no compile
+	// or runtime signal, and an if/else would then silently record a `cancelled`
+	// or `timed_out` run as ci_fail, i.e. a real 0.7 quality penalty from a run
+	// that never failed. The old switch failed LOUD in that case (empty
+	// eventType → AppendQualityEvent rejects it); this keeps that posture and
+	// costs nothing.
 	switch wr.Conclusion {
-	case "failure":
-		eventType = quality.EventCIFail
 	case "success":
-		flaky, err := h.isFlakyRerun(ctx, origin.ID, wr.HeadSHA, eventTS)
-		if err != nil {
-			return err
-		}
-		if flaky {
-			eventType = quality.EventCIFailFlaky
-		} else {
-			eventType = quality.EventCIPass
-		}
+		return h.appendAndResolveCISuccess(ctx, origin, sourceRef, eventTS)
+	case "failure":
+		return h.appendAndResolve(ctx, origin, quality.EventCIFail, sourceRef, eventTS)
+	default:
+		return fmt.Errorf("workflow_run: unclassifiable conclusion %q reached the classifier — the guard above and this switch have drifted", wr.Conclusion)
 	}
-
-	return h.appendAndResolve(ctx, origin, eventType, sourceRef, eventTS)
 }
 
-// isFlakyRerun reports whether a CI success at successTS for headSHA follows an
-// existing ci_fail for the SAME merge commit within flakyRerunWindow — the spec
-// §3 Event 2 "30-minute re-run" rule. A read error is surfaced (the caller
-// aborts) rather than silently treated as not-flaky, so a transient store
+// isFlakyRerunLocked reports whether a CI success at successTS for headSHA
+// follows an existing ci_fail for the SAME merge commit within flakyRerunWindow
+// — the spec §3 Event 2 "30-minute re-run" rule. A read error is surfaced (the
+// caller aborts) rather than silently treated as not-flaky, so a transient store
 // failure doesn't mis-classify a genuine flake as a clean pass.
+//
+// 🔴 THE CALLER MUST HOLD qualityMu (#674). This reads the outcome's event set
+// to make a decision that the append immediately following it depends on, so the
+// read and the append have to be one critical section. It ran OUTSIDE the lock
+// until 2026-08-14, which made appendAndResolve's doc comment wider than the
+// code: the doc promised the whole append→read→resolve→write was atomic with
+// respect to other quality mutations, while the DECISION about what to append
+// was made against an unprotected read. Two concurrent same-outcome deliveries
+// could each classify against the same pre-append state.
+//
+// The `Locked` suffix is the contract: there is no unlocked caller, and adding
+// one reintroduces the bug silently — nothing in the type system enforces this.
 //
 // Order assumption: classification happens at append time and depends on the
 // failure ALREADY being persisted when the success arrives. This holds for the
@@ -779,7 +865,7 @@ func (h *Handler) handleWorkflowRun(ctx context.Context, body []byte) error {
 // recorded as ci_pass and the later failure stands at 0.7. Making this
 // order-independent (neutralise inside Resolve when any same-SHA success exists
 // within 30 min of a failure) is a Phase-2 refinement, not required here.
-func (h *Handler) isFlakyRerun(ctx context.Context, outcomeID int64, headSHA string, successTS time.Time) (bool, error) {
+func (h *Handler) isFlakyRerunLocked(ctx context.Context, outcomeID int64, headSHA string, successTS time.Time) (bool, error) {
 	events, err := h.store.QualityEventsForOutcome(ctx, outcomeID)
 	if err != nil {
 		return false, fmt.Errorf("workflow_run: read events for flaky check: %w", err)
@@ -804,6 +890,13 @@ func (h *Handler) isFlakyRerun(ctx context.Context, outcomeID int64, headSHA str
 // the latest committed event set, and two concurrent same-outcome deliveries
 // cannot clobber each other with stale resolves.
 //
+// ✅ #674: that promise is now TRUE OF THE CLASSIFICATION TOO. The ci_pass vs
+// ci_fail_flaky decision used to be made by the caller outside this lock, so
+// this comment described a critical section wider than the code implemented.
+// The fix was to widen the CODE (appendAndResolveCISuccess), not to narrow this
+// comment — a comment trimmed to match a weaker guarantee makes the next reader
+// trust less than they should without telling them why.
+//
 // Replay / crash safety: it recomputes and reconciles unconditionally, even when
 // AppendQualityEvent reports inserted=false (a unique-key replay). The event set
 // is the authority; re-deriving over it is idempotent, and if a prior delivery
@@ -815,7 +908,51 @@ func (h *Handler) isFlakyRerun(ctx context.Context, outcomeID int64, headSHA str
 func (h *Handler) appendAndResolve(ctx context.Context, origin store.Outcome, eventType, sourceRef string, eventTS time.Time) error {
 	h.qualityMu.Lock()
 	defer h.qualityMu.Unlock()
+	return h.appendAndResolveLocked(ctx, origin, eventType, sourceRef, eventTS)
+}
 
+// appendAndResolveCISuccess classifies a CI success as ci_pass or ci_fail_flaky
+// and appends it — both under ONE acquisition of qualityMu (#674).
+//
+// This exists because the classification is a read-then-decide over exactly the
+// event set the append then mutates. Doing it in the caller left a window where
+// two concurrent deliveries for the same outcome both read the pre-append state.
+// qualityMu is a sync.Mutex and is NOT reentrant, so the classify step cannot
+// simply call appendAndResolve — hence the split into ...Locked.
+//
+// ⚠️ The pre-append read here is deliberate and is NOT the one appendAndResolve
+// does after appending. The event type has to be decided BEFORE the event is
+// written, because the type IS what gets written; the post-append read then
+// resolves over the full set including it. Two reads, two different questions.
+// Only the CI-success path pays for the extra read — a failure needs no
+// classification and keeps the single-read path. Measured 2026-08-14: the
+// relocated read is 14.5 µs, index-served (idx_quality_events_uq leads on
+// outcome_id), and grows the critical section ~140 µs → ~155 µs.
+//
+// ⚠️ headSHA is DERIVED from sourceRef, never passed alongside it. They overlap
+// by construction (sourceRef == headSHA + ":" + run_attempt), and two adjacent
+// string parameters that must agree is a transposition waiting to happen — one
+// that compiles and then silently classifies every success against the wrong
+// SHA, i.e. as ci_pass.
+func (h *Handler) appendAndResolveCISuccess(ctx context.Context, origin store.Outcome, sourceRef string, eventTS time.Time) error {
+	h.qualityMu.Lock()
+	defer h.qualityMu.Unlock()
+
+	flaky, err := h.isFlakyRerunLocked(ctx, origin.ID, quality.HeadSHA(sourceRef), eventTS)
+	if err != nil {
+		return err
+	}
+	eventType := quality.EventCIPass
+	if flaky {
+		eventType = quality.EventCIFailFlaky
+	}
+	return h.appendAndResolveLocked(ctx, origin, eventType, sourceRef, eventTS)
+}
+
+// appendAndResolveLocked is appendAndResolve's body. 🔴 THE CALLER MUST HOLD
+// qualityMu. It is separate only because sync.Mutex is not reentrant and
+// appendAndResolveCISuccess needs to classify inside the same critical section.
+func (h *Handler) appendAndResolveLocked(ctx context.Context, origin store.Outcome, eventType, sourceRef string, eventTS time.Time) error {
 	inserted, err := h.store.AppendQualityEvent(ctx, store.QualityEvent{
 		OutcomeID: origin.ID,
 		Developer: origin.Developer,

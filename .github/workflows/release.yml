@@ -1,12 +1,19 @@
 # release.yml -- TIER signed-release lane (self-contained; #92=A / #385).
 #
 # Triggers ONLY on a version tag (`v*`) push or an explicit manual dispatch, so
-# it can never run on a pull request or an ordinary branch push. No tag exists
-# until the first release is cut.
+# it can never run on a pull request or an ordinary branch push.
+# ⚠️ This used to add "No tag exists until the first release is cut." That has
+# been false since v0.3.0: measured 2026-08-14, this repo carries v0.3.0 and
+# v0.4.0 and the lane has run successfully here.
 #
 # This lane is self-contained -- it does NOT call any reusable workflow from
-# another repository or org, so it runs on the free public-repo GitHub Actions
-# and works identically for forkers. TIER has zero private dependencies (go.mod
+# another repository or org, so it runs on the free public-repo GitHub Actions.
+# ⚠️ It used to add "and works identically for forkers". Since #678 it does NOT:
+# the publish/release jobs are pinned to this repository by name, so a fork that
+# pushes a `v*` tag gets a refusal from `publish-image` and skipped release jobs.
+# A forker who wants the lane must repoint those three repo terms at their own
+# repository. The BUILD and SCAN half still works anywhere.
+# TIER has zero private dependencies (go.mod
 # is 100% public and the Dockerfile is a plain `go mod download` + `go build`),
 # so the build needs no registry credentials or private-module tokens beyond the
 # GITHUB_TOKEN used to push to GHCR.
@@ -68,10 +75,49 @@ jobs:
       attestations: write # attest-sbom + attest-build-provenance
       security-events: write # upload the Trivy SARIF to the Security tab
     env:
-      # Push (and sign/attest) only on a real tag push; a manual dispatch on a
-      # non-tag ref builds and scans (validation) but does not push.
-      PUSH: ${{ startsWith(github.ref, 'refs/tags/') }}
+      # Push (and sign/attest) only on a real tag push ON THE MIRROR; a manual
+      # dispatch on a non-tag ref builds and scans (validation) but does not push.
+      #
+      # 🔴 THE REPO TERM IS THE #678 FIX AND ITS POLARITY IS THE OPPOSITE OF ITS
+      # TWO SIBLINGS. image-cve-rescan.yml and mirror-audit.yml carry
+      # `!= 'tiermetric/tier'` -- run EVERYWHERE EXCEPT the mirror. (The
+      # do-not-invert instruction lives in image-cve-rescan.yml only;
+      # mirror-audit.yml carries no such comment, so do not cite "both of them
+      # warn you".) This lane is the reverse: it must run ONLY on the mirror, so
+      # it names the mirror POSITIVELY. Copying the sibling guard here would
+      # disable releases entirely AND re-enable the exact case being fixed.
+      # It still keeps internal identifiers out of the published copy, which is
+      # the reason the siblings are phrased their way -- and note that this file
+      # SHIPS, so it names the mirror and never the private remote.
+      PUSH: ${{ startsWith(github.ref, 'refs/tags/') && github.repository == 'tiermetric/tier' }}
     steps:
+      # ⛔ FAIL LOUDLY, DO NOT SILENTLY NO-OP. Releases are cut on the MIRROR;
+      # the private working remote has 0 tags and must keep it that way. Before
+      # #678 this job had NO repo guard at all, so a `v*` tag pushed to a
+      # non-mirror repo would have built, pushed to ghcr.io/tiermetric/tierd and
+      # cut a Release there.
+      #
+      # ⚠️ The `PUSH` term above is enough to make that harmless -- but harmless
+      # and SILENT is its own defect: the run would go green having published
+      # nothing, which is indistinguishable from a release that worked. Someone
+      # who tags the wrong repo needs to be told, not quietly ignored. So the
+      # env term is the safety net and this step is the signal.
+      # ⚠️ REPO passed via `env:`, NOT inline `${{ }}` in the run body. This file
+      # already states that rule for the SBOM step below ("Pass via env (not
+      # inline `${{ }}`) to avoid shell script injection") and this was the only
+      # inline expression in any run: block in the tree. `github.repository` is
+      # charset-constrained and not exploitable -- but the next person copies the
+      # SHAPE, not the safety analysis, and the next value may not be.
+      - name: Refuse to release from a non-mirror repository
+        if: startsWith(github.ref, 'refs/tags/') && github.repository != 'tiermetric/tier'
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::error::A v* tag was pushed to ${REPO}, but releases are cut on tiermetric/tier ONLY."
+          echo "Nothing was published and no Release was created -- the push/sign/attest steps are gated on PUSH."
+          echo "Delete the tag here and push it to tiermetric/tier instead."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -151,6 +197,7 @@ jobs:
           # main.version via -ldflags, matching `tierd version` / /api/v1/livez.
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
 
       # Trivy CVE gate on the LOCAL image (before push). scanners:vuln only
       # (secret scanning is redundant with the gitleaks pre-commit standard and
@@ -174,7 +221,12 @@ jobs:
       # Table format for CVE visibility in the job log. Runs ONLY when the gate
       # above failed (SARIF output otherwise traps the CVE details in /tmp).
       - name: Trivy CVE table (log visibility on gate failure)
-        if: failure()
+        # ⚠️ `failure()` alone also fires when the #678 refusal step failed, in
+        # which case NO image was ever built: this step then tries to scan a
+        # `:scan` tag that exists in no store and fails with an image-resolution
+        # error, burying the one message the refusal step exists to send. Gate on
+        # the build having actually happened.
+        if: failure() && steps.build-local.outcome == 'success'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (same SHA as gate step)
         with:
           image-ref: ghcr.io/tiermetric/tierd:scan
@@ -190,7 +242,11 @@ jobs:
       # it is not enabled) from failing the build. The Trivy gate above
       # (exit-code:1) is the load-bearing gate; this only surfaces the findings.
       - name: Upload Trivy SARIF to GitHub Security tab
-        if: always()
+        # Same reason as the step above: on the #678 refusal path the SARIF was
+        # never written, so an unconditional `always()` uploads a missing file
+        # and fails (swallowed by continue-on-error, but noisy in a job whose
+        # only real signal is the refusal message).
+        if: always() && steps.build-local.outcome == 'success'
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
@@ -223,6 +279,7 @@ jobs:
           cache-from: type=gha
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
 
       - name: Generate CycloneDX SBOM
         if: env.PUSH == 'true'
@@ -295,7 +352,14 @@ jobs:
     name: Create the GitHub Release
     # Only when a version tag is pushed. Runs once so the binaries matrix legs
     # below never race to create the same release.
-    if: startsWith(github.ref, 'refs/tags/')
+    #
+    # 🔴 THE REPO TERM IS LOAD-BEARING AND MUST BE ON *THIS* JOB (#678). This job
+    # does NOT `needs: publish-image`, so the loud refusal step up there does not
+    # gate it: on a tag pushed to the private repo this would have run
+    # independently and cut a Release there even with the image job red. Same
+    # positive polarity as `PUSH` above -- see the note there before "fixing" it
+    # to match the two sibling workflows' `!=`.
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'tiermetric/tier'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -313,7 +377,11 @@ jobs:
 
   binaries:
     name: Cross-platform binaries + checksums
-    if: startsWith(github.ref, 'refs/tags/')
+    # Repo term repeated deliberately, not redundantly: `needs: create-release`
+    # would carry it today, but a later edit that drops or re-points that `needs`
+    # must not silently re-open the hole. Each job that can write to the repo
+    # states its own guard (#678).
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'tiermetric/tier'
     needs: create-release
     runs-on: ubuntu-latest
     permissions:
@@ -343,10 +411,27 @@ jobs:
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           # These are the binaries users download from the Release page -- they are
-          # NOT built from the Dockerfile. GO-2026-5856 (crypto/tls ECH privacy
-          # leak) is fixed in 1.26.5, so this pin is what makes the published
-          # artifact clean. check-latest:false means the pin is authoritative.
-          go-version: "1.26.5"
+          # NOT built from the Dockerfile, so bumping the Dockerfile alone leaves
+          # THIS artifact vulnerable. Nothing scans the tarballs (Trivy gates only
+          # the image), so this pin is the SOLE control protecting them.
+          #
+          # FOUR build-affecting pins must move together. assert_go_pins_in_lockstep
+          # in scripts/image-cve-rescan.sh enforces it (via `make check`) -- a
+          # comment asking people to remember is what #683 already cost us:
+          #   go.mod  ·  tools/docgen/go.mod  ·  Dockerfile  ·  this line
+          # (README.md's badge + prerequisite are user-facing copies, also checked.)
+          #
+          # 1.26.6 closes the eight fixable HIGH stdlib CVEs in FUTURE builds (#694);
+          # it does NOT fix the already-published image, which stays vulnerable until
+          # rebuilt and re-released (#683). 1.26.5 was the earlier GO-2026-5856 fix.
+          #
+          # ⛔ NEVER loosen this to "1.26". The EXACT three-part version is what makes
+          # the pin authoritative: setup-go resolves "1.26.6" by semver EQUALITY, so
+          # nothing else can match. "1.26" becomes the range >=1.26.0 <1.27.0-0, and
+          # any cached 1.26.x on the runner then satisfies it -- which is precisely
+          # how 1.26.5 comes back. check-latest:false only skips a manifest
+          # round-trip; it is NOT what holds the pin.
+          go-version: "1.26.6"
           check-latest: false
 
       - name: Build binary + checksum
@@ -364,7 +449,7 @@ jobs:
           if [ "${GOOS}" = "windows" ]; then
             ext=".exe"
           fi
-          go build -trimpath -ldflags "-X main.version=${version}" -o "${out}/tierd${ext}" ./cmd/tierd
+          go build -trimpath -ldflags "-X main.version=${version} -X main.commit=${GITHUB_SHA}" -o "${out}/tierd${ext}" ./cmd/tierd
           tar -czf "${out}.tar.gz" "${out}"
           sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
 

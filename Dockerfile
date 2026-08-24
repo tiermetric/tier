@@ -5,13 +5,54 @@
 # base — no libc, no shell, no package manager.
 
 # --- build stage ---
-# golang:1.26.5 satisfies go.mod's `go 1.26.5`. 1.26.5 is the GO-2026-5856 fix (crypto/tls ECH
-# privacy leak) — the build stage is what links crypto/tls into the static binary,
-# so a CI govulncheck pass on an older builder does NOT make the shipped artifact
-# clean. Digest-pinned (mandatory — admission control rejects
-# non-digest-pinned refs in staging/prod). Refresh the digest when bumping the
-# tag: `crane digest golang:<tag>`.
-FROM golang:1.26.5@sha256:079e59808d2d252516e27e3f3a9c003740dee7f75e55aa71528766d52bcfc16a AS build
+# golang:1.26.6 satisfies go.mod's `go 1.26.6`. This build stage is what links the
+# stdlib into the static binary, so a LOCAL govulncheck pass does NOT make the
+# shipped artifact clean.
+#
+# 🔑 THE MECHANISM, because it is the whole lesson of #683: govulncheck measures
+# the toolchain that RUNS it — never the one pinned here or in go.mod. On
+# 2026-08-14 `brew upgrade go` put 1.26.6 on the build machine, so the local gate
+# went green while go.mod and this FROM line both still said 1.26.5 and the
+# already-published image stayed vulnerable. A green tree is not a clean artifact.
+#
+# 1.26.6 closes eight fixable HIGH stdlib CVEs in any FUTURE build (#694).
+# ⚠️ 1.26.7 EXISTS and was deliberately not taken (measured 2026-08-22:
+# `golang:1.26` -> go1.26.7). Reviewers are right that pinning the OLDEST version
+# clearing today's database is what makes #694 repeatable — but the floor in
+# go.mod must stay buildable on the machine that runs the gates, and m5pro is on
+# go1.26.6 by an authorised `brew upgrade`; a 1.26.7 floor would fail `make lint`
+# there under GOTOOLCHAIN=local. Take 1.26.7 in the same change that upgrades the
+# build machine, not before.
+# ⛔ It does NOT retroactively fix ghcr.io/tiermetric/tierd:latest — that image is
+# immutable and keeps all eight until a rebuild AND a re-release on the mirror
+# (#683, operator-gated). 1.26.5 was the earlier GO-2026-5856 fix (crypto/tls ECH
+# privacy leak). Digest-pinned (mandatory — admission control rejects
+# non-digest-pinned refs in staging/prod).
+#
+# THE TWO STEPS ARE DIFFERENT JOBS, and conflating them is how a wrong digest ships:
+#   RESOLVE (once, to obtain a candidate):  crane digest golang:<tag>
+#   VERIFY  (always, before committing it): docker run --rm golang@sha256:<d> go version
+# ⚠️ Docker official-image tags are re-pushed when their base OS updates, so
+# `crane digest golang:1.26.6` may stop matching the digest below at any time.
+# (Measured 2026-08-22: `crane digest golang:1.26.5` already returns 705e964a…,
+# NOT the 079e5980… this line pinned before today; both are genuine 1.26.5,
+# verified by running them.) A match is definitive; only a MISMATCH is ambiguous,
+# and for THIS pin — the builder — it is expected and harmless, because none of
+# its base-OS layers reach the runtime image.
+#
+# 🔴 THAT REASONING IS SCOPED TO THIS LINE AND DOES NOT TRANSFER TO THE RUNTIME
+# BASE PIN BELOW. That one IS the shipped filesystem, so a moved tag there is a
+# real question, not a shrug. (Measured 2026-08-22: it has in fact drifted —
+# `cgr.dev/chainguard/static:latest` now resolves to f68e3a82…, not the 77d8b892…
+# pinned below. Scanned the PINNED digest at every severity: 0 findings, so this
+# is not an exposure — but do not file it under "the pin working".)
+#
+# ⚠️ And note the limit of the verification above: `go version` proves the
+# TOOLCHAIN, which is all this stage contributes. It cannot see base-OS content,
+# so it is not a general "this digest is fine" check.
+# Resolved and verified 2026-08-22 on darwin/arm64; the pin is the multi-platform
+# index digest, which also covers the linux/amd64 the release lane builds.
+FROM golang:1.26.6@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6 AS build
 WORKDIR /src
 
 # Module cache layer — only re-downloads when go.mod/go.sum change.
@@ -25,10 +66,15 @@ COPY . .
 # `--build-arg VERSION=$(git describe --tags --always --dirty)`. Defaults to
 # "docker" so an unstamped image is still identifiable rather than claiming "dev".
 ARG VERSION=docker
+# COMMIT is injected because this build CANNOT discover it: .dockerignore excludes
+# .git, so the Go toolchain's buildvcs stamping finds no repository and records
+# nothing. Without this the shipped image reports no build identity at all (#638).
+# Empty is honest — internal/api omits the field rather than guessing.
+ARG COMMIT=""
 
 # CGO_ENABLED=0 → static binary with no dynamic libc, runnable on a scratch /
 # minimal static base. -trimpath matches the Makefile build.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/tierd ./cmd/tierd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/tierd ./cmd/tierd
 
 # Create the data dir owned by the runtime nonroot uid (65532) so a freshly
 # created volume mounted at /data is writable by the unprivileged runtime user.

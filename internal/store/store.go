@@ -996,7 +996,18 @@ func Open(path string) (*DB, error) {
 			_ = db.Close()
 		}
 	}()
-	db.SetMaxOpenConns(1) // SQLite is single-writer; serialise all writes.
+	// Pool size and its rationale live on maxOpenConns — read that before
+	// changing either line. SQLite is still single-WRITER; what changed in #669
+	// is that serialising every reader behind the writer's connection is not how
+	// that is enforced. The write lock is.
+	//
+	// 🔴 IDLE IS SET EQUAL TO MAX ON PURPOSE. Nothing called SetMaxIdleConns
+	// before #669, so database/sql's default of 2 applied — harmless at max 1,
+	// but at max 4 it means two of every four connections are continuously
+	// closed and rebuilt, and each rebuild re-runs the DSN's pragmas and starts
+	// with a cold page cache, directly in front of a 138ms window scan.
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
 	// sql.Open never dials; probe now so a locked/unwritable DB (or a bad
 	// DSN) fails here with a clear message instead of mid-schema-apply.
 	// This also restores the early-failure behavior of the removed
@@ -1031,9 +1042,10 @@ func Open(path string) (*DB, error) {
 	//
 	// Cross-process note: WAL journal mode plus busy_timeout=5000 serialise
 	// DDL at the SQLite file-lock level, so two tier processes opening the
-	// same DB simultaneously don't corrupt the schema. SetMaxOpenConns(1)
-	// above protects only the single-process case; the cross-process safety
-	// argument rests entirely on SQLite's exclusive-write lock.
+	// same DB simultaneously don't corrupt the schema. The cross-process safety
+	// argument rests entirely on SQLite's exclusive-write lock — and since #669
+	// raised the pool off 1, so does the in-PROCESS argument: the pool serialises
+	// nothing now, so the lock is the only thing holding either half up.
 	if _, err := db.Exec(schemaTables); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
@@ -1213,8 +1225,11 @@ func Open(path string) (*DB, error) {
 	// at Phase 2.8). The remaining per-boot migration cost is cheap idempotent
 	// DDL. The concurrent-first-boot hardening the #72 review imagined (two
 	// processes racing this one-time scan under busy_timeout) is deferred by
-	// design: tier is a single-process, single-writer POC (SetMaxOpenConns(1))
-	// with no multi-writer deployment to drive it.
+	// design: tier is a single-process, single-writer POC with no multi-writer
+	// deployment to drive it. (It cited SetMaxOpenConns(1) as the reason until
+	// #669. The pool is maxOpenConns now; what still makes this deferrable is the
+	// absence of a second PROCESS, which is what the hardening was about — not
+	// the pool size, which never bore on the cross-process case at all.)
 	if err := recomputeKnownSourceCosts(db); err != nil {
 		return nil, fmt.Errorf("recompute cost_micro: %w", err)
 	}
@@ -1308,6 +1323,50 @@ func (d *DB) Close() error { return d.db.Close() }
 // stated imprecision to an untestable branch that can invert the answer.
 var ErrWriteLockUnavailable = errors.New("acquire write lock")
 
+// maxOpenConns is the size of the store's database/sql connection pool, and
+// SetMaxIdleConns is set to the SAME value (see Open).
+//
+// 🔴 WHAT RAISING THIS ABOVE 1 BOUGHT, AND WHAT IT DID NOT (#669). It buys
+// LATENCY ISOLATION and nothing else. MEASURED 2026-08-11 against a 20,000-row
+// database, each arm with a control:
+//
+//	bounded write while a 1.5s read is in flight:  maxOpen=1 -> 1.450s   maxOpen=4 -> 0.514ms
+//	4 concurrent readers x5 window scans:          maxOpen=1 -> 298ms    maxOpen=4 -> 274ms (1.09x)
+//
+// ✅ ROW 1 RE-MEASURED 2026-08-13 against THIS implementation (the figures above
+// predate it): the pool-of-1 control reproduced at 1.4505s — the same to the
+// millisecond — and the raised pool answered in 627µs. Both arms ran with a
+// fixture assertion that the control actually starved (a control returning fast
+// would mean the reader never held the connection, making the fast arm
+// meaningless) and that the reader's scan matched >0 rows.
+//
+// ⚠️ THE 1.09x IS A NEGATIVE RESULT AND IT MATTERS AS MUCH AS THE FIRST ROW.
+// modernc.org/sqlite reads are pure-Go and CPU-bound, so a bigger pool does NOT
+// buy read throughput. Do not justify this constant as a performance win, do not
+// size it as if it were one, and do not raise it because "more is faster" — the
+// measurement says it is not.
+//
+// At maxOpen=1 a 629ms GET /scores held the process's ONLY connection, so a
+// concurrent POST /costs blocked at CONNECTION ACQUISITION — not at the write
+// lock. requestPathBusyTimeout bounds the wait for the LOCK, so at a pool of 1
+// it was bounding the wrong thing: the request had not reached the lock yet.
+//
+// 🔴 WHY A SMALL EXPLICIT LITERAL RATHER THAN A DERIVED GOMAXPROCS. Reads are
+// CPU-bound, so N above the core count adds contention rather than concurrency,
+// and a derived value would make every latency measurement in this package
+// machine-dependent. It is a const so tests reference it instead of restating a
+// literal that would drift.
+//
+// 🔴 THE PRECONDITION, AND IT IS NOT OPTIONAL. Every read-then-write site in
+// this package must already hold the write lock from its first statement
+// (BEGIN IMMEDIATE). At a pool of 1 a DEFERRED read-then-write was serialised by
+// the pool itself; above 1 each one is an unretried SQLITE_BUSY_SNAPSHOT (517)
+// race that no busy_timeout retries and no existing test catches. #668 converted
+// them FIRST, deliberately, and this constant was raised only afterwards. If you
+// add a read-then-write site, it takes beginImmediate/beginImmediateBounded —
+// the pool no longer covers you.
+const maxOpenConns = 4
+
 // dsnBusyTimeoutMS is the busy_timeout (milliseconds) carried in every
 // connection's DSN — how long SQLite spins waiting for a lock before giving up.
 //
@@ -1324,15 +1383,52 @@ const dsnBusyTimeoutMS = 5000
 //
 // WHY A SEPARATE, SHORTER VALUE. beginImmediate's promote is not bounded by ctx
 // (see below), so at the DSN's 5000ms a contended request-path promote blocks the
-// full five seconds — and with SetMaxOpenConns(1) it does not stall one request,
-// it stalls EVERY in-flight request in the process behind the single connection,
-// with a client disconnect unable to shorten it.
+// full five seconds, and a client disconnect cannot shorten it. Five seconds is
+// far outside any reasonable HTTP client's patience: the caller has almost
+// certainly given up, and the request is still holding a connection and a write
+// lock on its behalf.
+//
+// 🔴 #669 MOVED THIS CAP'S SECOND JUSTIFICATION — IT DID NOT REMOVE IT, AND THE
+// FIRST DRAFT OF THIS BLOCK CLAIMED IT DID. The pool-topology argument was: at
+// SetMaxOpenConns(1) a 5s block stalled not one request but EVERY in-flight
+// request, because they all queued behind the single connection. The honest
+// correction is that its THRESHOLD moved from 1 concurrent blocker to
+// maxOpenConns — not that it went away. MEASURED 2026-08-13 at maxOpenConns=4,
+// with an external holder of the write lock, N goroutines blocked in an
+// unbounded promote, timing an UNRELATED read:
+//
+//	blockers=1 -> 371µs      blockers=3 -> 393µs      blockers=4 -> 4.75s
+//
+// A blocked promote holds its pool slot for the WHOLE wait, so at maxOpenConns
+// simultaneous blockers the process-wide stall returns verbatim. ⚠️ And it is
+// REACHABLE, not theoretical: the watcher fans out a goroutine per debounced
+// file, and the pollers and the fee reconciler all write through the UNBOUNDED
+// helper, i.e. up to 5s per held slot.
+//
+// ⇒ The topology reason is therefore still the STRONGER half once N reaches
+// maxOpenConns, and the per-REQUEST reason holds at every N: a request that
+// cannot take the write lock within 250ms should answer a retryable 503 +
+// Retry-After while the client is still listening, rather than block five
+// seconds and then answer. ⛔ A contributor who checks the old premise, decides
+// the pool raise retired it, and deletes the cap removes a live guard twice
+// over.
 //
 // 250ms is a POLICY choice, not a measurement: an order of magnitude below the
 // DSN default, comfortably inside normal HTTP client patience, and still long
 // enough to ride out a short maintenance write rather than failing on contact.
 // MEASURED at this value: a contended promote returns in ~263ms (the ~13ms over
 // is SQLite's busy-handler granularity), versus ~5.05s at the DSN default.
+//
+// 🔴 #669 MADE THE 503 REACHABLE FROM IN-PROCESS CONTENTION FOR THE FIRST TIME.
+// At a pool of 1 a bounded writer could never lose the write lock to another
+// goroutine in THIS process: any competitor was queued at the pool, not holding
+// the lock. So ErrWriteLockUnavailable -> 503 was structurally a
+// cross-PROCESS-only signal. At maxOpenConns it is not — `POST /api/v1/events`
+// can be mid-transaction over a large batch while a `/costs`, alias, erase or
+// webhook write asks for the lock. The 503's text ("another writer holds the
+// write lock, retry shortly") is cause-agnostic and stays accurate, but a
+// deployment that had never seen one may start to, and that is expected
+// behaviour rather than a regression.
 const requestPathBusyTimeout = 250 * time.Millisecond
 
 // beginImmediatePromoteSQL is the no-op write beginImmediate issues to promote a
@@ -1352,6 +1448,15 @@ const requestPathBusyTimeout = 250 * time.Millisecond
 // It must stay a statement SQLite classifies as a WRITE. `SELECT` would not
 // promote, and neither would a `PRAGMA` read — the lock comes from the statement
 // being a write, not from the rows it happens to touch.
+//
+// ⛔ AND DO NOT "SIMPLIFY" THIS AWAY WITH `_txlock=immediate` IN THE DSN. The
+// pinned driver DOES support that parameter (deferred|immediate|exclusive), so
+// the idea looks workable and will be proposed. It is CONNECTION-GLOBAL with no
+// per-transaction override, so it would promote EVERY transaction on that
+// connection to a write lock — including the `tierd reprice` and
+// `tierd repair-repo` DRY RUNS, which are deliberately deferred precisely so an
+// operator can run them against a live serve without contending. The promotion
+// has to be per-transaction, which is what this statement buys.
 //
 // Guard coverage: TestBeginImmediateTakesTheWriteLock drives this directly —
 // swap it for a SELECT and the test fails.
@@ -1418,14 +1523,18 @@ const beginImmediatePromoteSQL = `UPDATE token_events SET id = id WHERE 0`
 //     behaviour when another process holds the write lock.
 //   - The TWO request-path sites — UpsertDeveloperAlias and EraseDeveloper, both
 //     called with r.Context() from HTTP handlers — use beginImmediateBounded
-//     instead, which caps the wait at requestPathBusyTimeout. With
-//     SetMaxOpenConns(1) a 5s uninterruptible block does not stall one request, it
-//     stalls EVERY in-flight request in the process behind the single connection,
-//     and the client's disconnect cannot shorten it.
+//     instead, which caps the wait at requestPathBusyTimeout. A 5s
+//     uninterruptible block runs long past the point the client gave up, and the
+//     client's disconnect cannot shorten it. (Pre-#669 this ALSO stalled every
+//     other in-flight request behind the single connection. #669 raised that
+//     threshold from 1 concurrent blocker to maxOpenConns — measured, it is NOT
+//     gone. See requestPathBusyTimeout.)
 //
-// THREE MORE SITES HAVE SINCE BEEN CONVERTED ON THE SAME SPLIT, by #346 and #610
-// rather than #598, and they are the worked example of the rule rather than
-// exceptions to it:
+// TEN MORE SITES HAVE SINCE BEEN CONVERTED ON THE SAME SPLIT, by #346, #610 and
+// #668 rather than #598, and they are the worked example of the rule rather than
+// exceptions to it. (The first three are set out individually below; #668's seven
+// are listed under the DEFERRED note that follows, because that note is where
+// they used to be named as unconverted.)
 //
 //   - CorrectManualCostEvent (the /costs sanctioned override) -> BOUNDED. Reached
 //     from an HTTP handler with r.Context(), so it lands on the request-path side
@@ -1449,17 +1558,28 @@ const beginImmediatePromoteSQL = `UPDATE token_events SET id = id WHERE 0`
 // ⚠️ THAT RULE IS NOT A DESCRIPTION OF THE TREE. "All nine" is exhaustive only
 // over the sites that previously passed sql.TxOptions{Isolation:
 // sql.LevelSerializable} — the ones whose comments claimed a lock they did not
-// take. Plenty of transactions here still open plain DEFERRED and are reachable
-// from a handler: InsertTokenEvents (POST /api/v1/events), UpdateQuality and
-// UpdateQualityForOutcome (the webhook path, and a read-then-write — the
-// SQLITE_BUSY_SNAPSHOT shape), UpsertHierarchy /
-// UpsertHierarchies / EndMembership (the org-hierarchy and period-membership
-// routes), and both subscription.go sites. (Reprice and InsertManualCostEvent
-// were on this list and have since been converted — see above.) They are knowingly
-// unconverted, NOT audited-and-cleared: #598 deliberately scoped itself to the
-// sites carrying a FALSE claim, because those were actively misleading, and left
-// the rest to be judged on their own read-then-write risk. Do not read this rule
-// as "the tree already complies".
+// take. #598 deliberately scoped itself to the sites carrying a FALSE claim,
+// because those were actively misleading, and left the rest to be judged on
+// their own read-then-write risk.
+//
+// ✅ #668 THEN CONVERTED THE READ-THEN-WRITE REMAINDER. It was the precondition
+// for raising SetMaxOpenConns (#669): every one of these relied on the single
+// connection for in-process atomicity, so raising the pool without converting
+// them would have opened an unretried SQLITE_BUSY_SNAPSHOT (517) race at each,
+// with no test failing. BOUNDED (request path): UpsertHierarchy,
+// UpsertHierarchies, EndMembership (the org-hierarchy and period-membership
+// routes), UpdateQualityForOutcome (the webhook delivery path). UNBOUNDED
+// (background): both subscription.go sites, and UpdateQuality, which has no
+// production caller at all.
+//
+// 🔴 ONE SITE OF THIS SHAPE REMAINS DEFERRED, DELIBERATELY: InsertTokenEvents
+// (POST /api/v1/events). It is NOT a read-then-write — its first statement is a
+// write, so BEGIN and the write lock are taken together and a lost race is a
+// plain SQLITE_BUSY (5), which busy_timeout DOES retry. It is therefore not
+// exposed to 517. It remains unbounded for the reason set out on
+// InsertTokenEvent: bounding the capture path drops a captured event rather
+// than failing a retryable request (#617). Knowingly unconverted, NOT
+// audited-and-cleared. Do not read this rule as "the tree already complies".
 //
 // The returned tx is caller-owned: the caller must Commit or Rollback it. On any
 // error nothing is returned and any partially-opened tx has been rolled back, so
@@ -1472,9 +1592,12 @@ func beginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, beginImmediatePromoteSQL); err != nil {
-		// Roll back here rather than leaking the transaction (and, with
-		// SetMaxOpenConns(1), the process's only connection) to a caller that
-		// has no handle to close.
+		// Roll back here rather than leaking the transaction — and its
+		// connection — to a caller that has no handle to close. (Pre-#669 that
+		// connection was the process's ONLY one, so the leak was immediately
+		// fatal. At maxOpenConns it is a slow drain instead: leak one per failed
+		// promote and the pool is dead after maxOpenConns of them. Less
+		// dramatic, strictly harder to spot.)
 		_ = tx.Rollback()
 		if !isPromoteContention(ctx, err) {
 			return nil, fmt.Errorf("promote to write lock: %w", err)
@@ -1558,12 +1681,19 @@ const sqliteBusy = 5
 //
 // 🔴 WHY THIS EXISTS RATHER THAN JUST CALLING beginImmediate. The promote is not
 // bounded by ctx — SQLite's busy handler does not consult it, so a deadline
-// changes only the error text (see beginImmediate). With SetMaxOpenConns(1) a
-// blocked promote holds the process's ONLY connection, so an uncapped 5s wait on
-// an HTTP handler stalls every other in-flight request for those 5 seconds and
-// the client hanging up cannot shorten it. Capping busy_timeout is the only lever
-// that actually shortens the block, because it is the thing the busy handler
-// obeys.
+// changes only the error text (see beginImmediate). An uncapped 5s wait on an
+// HTTP handler therefore runs to completion no matter what the caller asked for,
+// and the client hanging up cannot shorten it. Capping busy_timeout is the only
+// lever that actually shortens the block, because it is the thing the busy
+// handler obeys.
+//
+// ⚠️ #669 MOVED THE SECOND HALF OF THAT ARGUMENT; IT DID NOT DELETE IT. The
+// half is "and it holds a pool slot for the whole wait, so other in-flight
+// requests stall too" — true of the ONLY connection at a pool of 1, and true
+// again once maxOpenConns promotes block at once (measured: 4.75s for an
+// unrelated read at 4 blockers, 393µs at 3). The per-request reason — blocking
+// 5s past the client's patience when a 250ms 503 + Retry-After is the honest
+// answer — holds at every N. See requestPathBusyTimeout.
 //
 // It is a per-CONNECTION pragma, which is why this reserves a *sql.Conn: with the
 // DSN-level value lowered instead, every read transaction in the serve path would
@@ -1571,16 +1701,12 @@ const sqliteBusy = 5
 //
 // ⚠️ THE RESTORE IS LOAD-BEARING, NOT HOUSEKEEPING. MEASURED: a lowered
 // busy_timeout SURVIVES conn.Close() back into the pool — a connection set to 111
-// and returned unrestored still reports 111 on the next two acquisitions. Since
-// SetMaxOpenConns(1) means the pool hands the SAME connection to everything that
-// follows, skipping the restore would silently drop the whole process to the
-// short timeout, including the Open()-time migrations that must wait out a
-// competing process. So release() restores unconditionally, and if the restore
-// itself fails it POISONS the connection (driver.ErrBadConn via Conn.Raw) so the
-// pool discards it and the next caller gets a fresh one built from the DSN.
-// Leaving a connection of unknown busy_timeout in a one-connection pool is the
-// one outcome this must never produce — see restoreAndReleaseConn, which owns
-// both halves and is pinned by
+// and returned unrestored still reports 111 on the next two acquisitions. So
+// release() restores unconditionally, and if the restore itself fails it POISONS
+// the connection (driver.ErrBadConn via Conn.Raw) so the pool discards it and the
+// next caller gets a fresh one built from the DSN. Leaving a connection of
+// unknown busy_timeout in the pool is the one outcome this must never produce —
+// see restoreAndReleaseConn, which owns both halves and is pinned by
 // TestRestoreAndReleaseConnDiscardsAConnectionItCannotRestore.
 //
 // The returned release func must be called exactly once, and is safe to defer
@@ -1624,6 +1750,121 @@ func beginImmediateBounded(ctx context.Context, db *sql.DB, busy time.Duration) 
 	}, nil
 }
 
+// beginRead opens a DEFERRED transaction for a caller that performs SEVERAL
+// reads which must agree with each other. In WAL mode the snapshot is taken at
+// the transaction's FIRST read and held until it ends, so every statement inside
+// sees one database state no matter what commits alongside it.
+//
+// 🔴 DEFERRED IS CORRECT HERE, AND IT IS NOT THE SHAPE #668 REMOVED. That shape
+// was read-then-WRITE: the read took a shared lock, the write then tried to
+// upgrade it, and a concurrent commit turned the upgrade into SQLITE_BUSY_SNAPSHOT
+// (517) — which busy_timeout does not retry. A beginRead caller NEVER writes, so
+// there is no upgrade, no 517, and taking the write lock up front would be
+// strictly worse: it would serialise readers against every writer for no
+// correctness gain. ⛔ Do not "convert" this to beginImmediate for consistency
+// with its neighbours. The census in deferred_conversion_test.go enumerates
+// beginRead's callers for exactly this reason — a new one must be classified,
+// not absorbed.
+//
+// ⚠️ IT MUST BE ROLLED BACK, NEVER COMMITTED, and the release func does that.
+// Committing a read transaction is not wrong but it is misleading, and the
+// bigger hazard is neither: a read transaction that is never ended holds BOTH a
+// pool connection and its snapshot. At maxOpenConns that is four leaked exports
+// from a dead pool, and — see below — a WAL that never truncates.
+//
+// 🔴 THE WAL INTERACTION, WHICH IS THE REASON THIS HAS A DOC BLOCK AT ALL (#669).
+// A read transaction pins the snapshot the passive checkpointer needs to reclaim,
+// so while one is open the WAL grows for as long as writes continue and does NOT
+// reset afterwards.
+//
+// ⚠️ THE OBVIOUS BOUND ARGUMENT IS WRONG, AND IT WAS MEASURED WRONG RATHER THAN
+// REASONED WRONG. A draft of this comment argued the caller is safe because each
+// export is SHORT. Measured, 1200 concurrent writes per arm against a 5000-row
+// subject, 2026-08-14. ⚠️ THE MULTIPLIER'S DENOMINATOR IS THE 1000-PAGE WAL
+// CEILING (4.00 MB), NOT the control row — which is why the control reads 0.99×
+// rather than 1.00×:
+//
+//	no export at all (CONTROL)          3.96 MB   0.99×
+//	ONE export                          4.07 MB   1.02×
+//	one export every 500ms              4.18 MB   1.04×
+//	one export every 50ms               4.16 MB   1.04×
+//	back-to-back, zero gap              34.57 MB  8.64×   <- and it never resets
+//
+// ⇒ SHORTNESS IS NOT WHAT SAVES IT. The back-to-back arm's exports averaged
+// ~8.6ms each and it still reproduced #669's 34.7 MB held-read-tx shape, because
+// the arm ran for the WHOLE 1200-write window with no gap in it — the WAL grows
+// for as long as SOME read transaction is open, not in proportion to any one
+// transaction's length. WHAT SAVES IT IS THE GAP BETWEEN THEM: any pause long
+// enough for the passive checkpoint to run returns the file to the ceiling, which
+// is the same result #669 measured for a 500ms poll gap.
+// ⚠️ An earlier draft said "fifteen 8.6ms transactions back to back reproduce"
+// the shape. That is unsourced arithmetic — 15 × 8.6ms is ~129ms, which plainly
+// cannot produce 34.57 MB against 1200 writes. The 15 was the export COUNT in
+// that arm, not a duration budget. Do not restore it.
+//
+// ▶ SO THE REAL BOUND ON TODAY'S CALLER IS ITS CADENCE, NOT ITS DURATION.
+// ExportDeveloper serves a human-initiated GDPR Art. 15 request; consecutive
+// exports are separated by far more than the 50ms that already measures healthy.
+// A wall-clock deadline was considered and REJECTED — it would abort a
+// legitimate large subject-access request, a compliance failure, and the
+// measurement above shows a deadline would not even address the mechanism.
+//
+// 🔴 AND THE DURATION HALF IS WORSE THAN AN EARLIER DRAFT OF THIS BLOCK CLAIMED.
+// It said the export is "subject-sized index seeks, no full scans". FOUR OF THE
+// NINE READS ARE FULL TABLE SCANS — measured plans, not inferred:
+//
+//	token_events       SEARCH   idx_token_events_scores (developer=?)
+//	outcomes           SEARCH   idx_outcomes_developer          (covering)
+//	actual_spend       SEARCH   idx_actual_spend_dev_period_nu  (covering)
+//	org_hierarchy      SEARCH   sqlite_autoindex_org_hierarchy_1
+//	period_membership  SCAN   <- only idx_period_membership_org exists
+//	quality_events     SCAN   <- NO developer-leading index at all
+//	quality_history    SCAN   <- NO developer-leading index at all
+//	repo_repair_audit  SCAN   <- NO developer-leading index at all
+//	developer_alias    SCAN   <- whole-table BY DESIGN (the alias map)
+//
+// ⇒ THE TRANSACTION'S LIFETIME IS O(TABLE SIZE) FOR THOSE FOUR, NOT O(SUBJECT).
+// Measured with a NINE-ROW subject, varying only unrelated rows in one table:
+// 200,000 OTHER developers' quality_events rows took one export from 153µs to
+// 11.68ms — 76.3×. A deployment with real history holds this transaction open
+// proportionally longer, and the WAL table above is what that interacts with.
+//
+// ⚠️ The cadence argument SURVIVES this (a human DSAR still leaves gaps, and a
+// gap is what the checkpointer needs), so the no-deadline decision stands — but
+// it now rests on cadence ALONE, with no help from duration. ⛔ Do not restore
+// the "subject-sized seeks" sentence; it was true only of the one table anyone
+// had checked. The missing indexes are filed separately — see #679.
+//
+// 🔴 THE CALLER THAT WOULD BREAK THIS IS A PLAUSIBLE ONE, SO NAME IT: a BULK
+// exporter looping ExportDeveloper over every developer with no gap is precisely
+// the adversarial arm. ⛔ Do not write one against this method without either
+// spacing the iterations or checkpointing between them. ⚠️ And note the
+// instrument does NOT cover you there: `tier_sqlite_wal_bytes` WARNs past 64 MiB,
+// and the arm above tops out at 34.57 MB — real starvation, silent to the gauge.
+//
+// ⚠️ POOL OCCUPANCY, WHICH IS THE FAILURE AN OPERATOR ACTUALLY SEES. A beginRead
+// caller holds one of maxOpenConns connections for its WHOLE read sequence, not
+// for each statement. Measured: with maxOpenConns read transactions held, the
+// next BeginTx returns `context deadline exceeded` — which is NOT
+// ErrWriteLockUnavailable, so the request-path writers map it to 500 rather than
+// the 503 + Retry-After they answer for genuine lock contention. ⇒ Saturation by
+// exports surfaces as UNRELATED WRITES 500ing, not as the export misbehaving.
+// There is no deadlock: nothing inside a read transaction acquires a second
+// connection, and WAL readers never block writers.
+//
+// CONCURRENCY: safe for concurrent use; it is a plain database/sql call.
+//
+// The returned release func must be called exactly once and is safe to defer
+// immediately. On error nothing is returned and the caller has nothing to clean
+// up.
+func beginRead(ctx context.Context, db *sql.DB) (*sql.Tx, func(), error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin read tx: %w", err)
+	}
+	return tx, func() { _ = tx.Rollback() }, nil
+}
+
 // busyTimeoutRestoreSQL puts the DSN's busy_timeout back on a connection
 // beginImmediateBounded borrowed and lowered.
 var busyTimeoutRestoreSQL = fmt.Sprintf("PRAGMA busy_timeout = %d", dsnBusyTimeoutMS)
@@ -1653,15 +1894,37 @@ func busyTimeoutPragma(busy time.Duration) string {
 // timeout is unknown.
 //
 // 🔴 THE POISON FALLBACK IS THE POINT OF THIS FUNCTION, AND IT IS NOT DEFENSIVE
-// PADDING. With SetMaxOpenConns(1) the pool hands the SAME connection to
-// everything that follows, and a lowered busy_timeout is MEASURED to survive
-// conn.Close() back into the pool (the control arm of
-// TestBeginImmediateBoundedRestoresBusyTimeout). So a connection released with a
-// failed restore does not degrade one request — it silently drops the WHOLE
-// PROCESS to the 250ms request-path timeout, including the Open()-time migrations
-// that must be able to wait out a competing process. Returning driver.ErrBadConn
-// from Conn.Raw is the documented way to mark a *sql.Conn dead; the pool then
-// closes it and builds a replacement from the DSN, which carries the right value.
+// PADDING. A lowered busy_timeout is MEASURED to survive conn.Close() back into
+// the pool (the control arm of TestBeginImmediateBoundedRestoresBusyTimeout), so
+// a connection released with a failed restore poisons every later caller that
+// draws it. Returning driver.ErrBadConn from Conn.Raw is the documented way to
+// mark a *sql.Conn dead; the pool then closes it and builds a replacement from
+// the DSN, which carries the right value.
+//
+// 🔴 #669 INVERTED THIS RATIONALE — AND THE INVERSION MAKES THE GUARD MORE
+// NECESSARY, NOT LESS. READ THIS BEFORE TOUCHING THE FALLBACK.
+//
+// The old argument was: at SetMaxOpenConns(1) the pool hands the SAME connection
+// to everything, so a failed restore drops the WHOLE PROCESS to the 250ms
+// request-path timeout — including the Open()-time migrations that must be able
+// to wait out a competing process. That sentence is now false: at maxOpenConns a
+// failed restore poisons ONE of N connections.
+//
+// ⚠️ IT IS TEMPTING TO READ THAT AS "SO THE BLAST RADIUS SHRANK". It did not —
+// the failure changed KIND. Before, every caller got the short timeout, so the
+// next one to run hit it and the bug announced itself identically every time.
+// Now, a caller gets it only if the pool happens to hand it the poisoned
+// connection. TOTAL, REPRODUCIBLE FAILURE BECAME INTERMITTENT FAILURE: the
+// symptom appears roughly 1-in-N and clears on a retry, which is the signature
+// operators diagnose last and dismiss as a flake. A guard whose absence produces
+// a heisenbug is worth MORE than one whose absence produces a hard stop.
+//
+// 🔴 AND THE VICTIM IS IN **THIS** PROCESS — a later HTTP request or background
+// ticker in the same `tierd serve`. An earlier draft named `tierd reprice`, which
+// is wrong twice over and is worth stating so nobody re-derives it: reprice is a
+// SEPARATE PROCESS with its own store.Open and therefore its own pool, and it
+// uses the UNBOUNDED helper, so no connection it owns ever carries a lowered
+// busy_timeout. A poisoned connection cannot reach it.
 //
 // restoreSQL is a parameter for ONE reason: it is the only way to reach the
 // failure path from a test. A `PRAGMA busy_timeout` on a healthy connection does
@@ -1702,7 +1965,9 @@ func restoreAndReleaseConn(ctx context.Context, conn *sql.Conn, restoreSQL strin
 	// that returned driver.ErrBadConn has ALREADY released the connection, so this
 	// Close is a no-op (ErrConnDone) on the poison path — do not read a passing
 	// poison-path test as cover for this line. Drop it and the restored connection
-	// is never returned; with SetMaxOpenConns(1) the next caller blocks forever.
+	// is never returned. Pre-#669 that meant the next caller blocked forever on
+	// the process's only connection; at maxOpenConns it permanently retires one
+	// pool slot per call, so the store degrades to a pool of 1 and then hangs.
 	_ = conn.Close()
 }
 
@@ -1759,7 +2024,8 @@ func dropActualSpendNonNegativeCheck(db *sql.DB, table string) error {
 
 	// The write lock is held from the transaction's first statement, so the
 	// read-then-rebuild below cannot lose a race to another PROCESS opening the
-	// same file (in-process, SetMaxOpenConns(1) already serialises it). Under
+	// same file — nor to another goroutine in THIS process, which since #669 is
+	// also the write lock's job rather than the pool's. Under
 	// contention this blocks for the DSN's full busy_timeout, which is correct
 	// here: this runs during Open(), before the process serves anything, so the
 	// cost of another process holding the lock is a slow boot rather than a
@@ -1860,8 +2126,10 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 //     proceeding. (⚠️ This step long claimed that property while passing
 //     sql.TxOptions{Isolation: sql.LevelSerializable}, which the driver ignores
 //     — that tx was DEFERRED, held no lock until the UPDATE at step 4, and the
-//     loser got an unretried SQLITE_BUSY_SNAPSHOT (517). SetMaxOpenConns(1) was
-//     covering it in-PROCESS only. Do not reintroduce that form.)
+//     loser got an unretried SQLITE_BUSY_SNAPSHOT (517). That note used to add
+//     "SetMaxOpenConns(1) was covering it in-PROCESS only" — untrue then and
+//     now: each Open() builds its OWN *sql.DB, so the pool never serialised two
+//     concurrent Open(path) calls at any size. Do not reintroduce that form.)
 //  3. Re-check whether the legacy `cache_write` column still exists, using
 //     the tx (so we see the same schema view as the subsequent UPDATE/DROP).
 //  4. Backfill its values into `cache_write_5m` (matches Anthropic's
@@ -1946,9 +2214,18 @@ func columnExistsTx(tx *sql.Tx, table, column string) (bool, error) {
 //     column error on fresh DBs whose schemaTables already created it).
 //  2. Open a transaction via beginImmediate — under the write lock, genuinely —
 //     then re-check under it whether the legacy cost_usd column still exists.
-//     Two racing Open() calls in the SAME process were already excluded by
-//     SetMaxOpenConns(1); the lock is what stops two racing PROCESSES from both
-//     reaching step 3. (⚠️ This step previously claimed the lock while passing
+//     The write lock is what stops two racers from both reaching step 3 —
+//     whether they are two PROCESSES or two Open() calls in this one.
+//     ⚠️ The pool never covered EITHER case, at any size: Open() calls sql.Open
+//     itself, so two concurrent Open(path) calls build two independent *sql.DB
+//     handles with two independent pools, and SetMaxOpenConns on one never
+//     constrained the other — they contend at the SQLite file lock exactly as
+//     two processes do. (Within a single Open() the whole chain runs on one
+//     goroutine, so the pool was not the serializer there either. An earlier
+//     draft of the #669 comment sweep credited the pool with the in-process
+//     half; that was false BEFORE the pool changed, which is the one kind of
+//     stale claim this sweep must not leave standing.)
+//     (⚠️ This step previously claimed the lock while passing
 //     sql.TxOptions{Isolation: sql.LevelSerializable}, which the driver ignores:
 //     the tx was DEFERRED and the loser got an unretried SQLITE_BUSY_SNAPSHOT
 //     (517). Do not reintroduce that form.)
@@ -1971,8 +2248,10 @@ func migrateCostUSDToMicro(db *sql.DB) error {
 		return err
 	}
 	// Holds the write lock from the first statement, so this is atomic against
-	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
-	// the latter). Open()-time, so context.Background() and a possible full
+	// another PROCESS as well as against this one. (Until #669 the in-process
+	// half was credited to SetMaxOpenConns(1); at maxOpenConns the pool no longer
+	// serialises anything and the write lock is the WHOLE guarantee, in both
+	// directions.) Open()-time, so context.Background() and a possible full
 	// busy_timeout wait are correct: a slow boot beats a failed migration.
 	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
@@ -2024,8 +2303,10 @@ func migrateActualSpendToMicro(db *sql.DB, table string) error {
 		return err
 	}
 	// Holds the write lock from the first statement, so this is atomic against
-	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
-	// the latter). Open()-time, so context.Background() and a possible full
+	// another PROCESS as well as against this one. (Until #669 the in-process
+	// half was credited to SetMaxOpenConns(1); at maxOpenConns the pool no longer
+	// serialises anything and the write lock is the WHOLE guarantee, in both
+	// directions.) Open()-time, so context.Background() and a possible full
 	// busy_timeout wait are correct: a slow boot beats a failed migration.
 	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
@@ -2138,8 +2419,10 @@ func backfillPriceVersion(db *sql.DB) error {
 	}
 	activeVersion := ActivePriceTableInfo().Version
 	// Holds the write lock from the first statement, so this is atomic against
-	// another PROCESS as well as against this one (SetMaxOpenConns(1) covers only
-	// the latter). Open()-time, so context.Background() and a possible full
+	// another PROCESS as well as against this one. (Until #669 the in-process
+	// half was credited to SetMaxOpenConns(1); at maxOpenConns the pool no longer
+	// serialises anything and the write lock is the WHOLE guarantee, in both
+	// directions.) Open()-time, so context.Background() and a possible full
 	// busy_timeout wait are correct: a slow boot beats a failed migration.
 	tx, err := beginImmediate(context.Background(), db)
 	if err != nil {
@@ -2180,14 +2463,20 @@ func backfillPriceVersion(db *sql.DB) error {
 // runs once and is then permanently skipped.
 //
 // Memory: we materialise all (id, cost) pairs into a slice before opening
-// the write tx. This is intentional given SetMaxOpenConns(1) — issuing a
-// write tx while a SELECT cursor is still iterating would deadlock on the
-// single connection. A streaming alternative would have to either use the
-// same tx for both query and writes (modernc.org/sqlite supports it but
-// the semantics are subtle under WAL) or paginate. 16 bytes per row × <1M
-// rows = <16MB peak; safe for any realistic local DB. If a user's DB grows
-// to multi-million rows and startup gets slow, switch to a paginated
-// streaming variant.
+// the write tx. A streaming alternative would have to either use the same tx
+// for both query and writes (modernc.org/sqlite supports it but the semantics
+// are subtle under WAL) or paginate. 16 bytes per row × <1M rows = <16MB peak;
+// safe for any realistic local DB. If a user's DB grows to multi-million rows
+// and startup gets slow, switch to a paginated streaming variant.
+//
+// ⚠️ #669 REMOVED THIS DECISION'S ORIGINAL REASON, AND IT IS WORTH KNOWING
+// WHICH. It read: "intentional given SetMaxOpenConns(1) — issuing a write tx
+// while a SELECT cursor is still iterating would deadlock on the single
+// connection." At maxOpenConns that deadlock is gone: the write tx draws a
+// second connection and the two coexist. So streaming is now MERELY unattractive
+// (subtle WAL semantics, plus a long-lived read cursor is exactly what starves a
+// WAL checkpoint — see Open) rather than impossible. Do not cite the deadlock as
+// the reason; it no longer exists.
 //
 // Idempotent: re-running with the same priceTable yields identical values,
 // so a crash mid-recompute followed by a retry converges.
@@ -2553,12 +2842,15 @@ var ErrCostCorrectionIdentityMismatch = errors.New("idempotency_key belongs to a
 // ErrCostConflict (#295). cost_micro remains immutable (#233): a 409 rejects, it
 // never overwrites. An unkeyed insert cannot collide, so it skips the pre-check.
 //
-// The pre-check and the insert run in one transaction, and under
-// SetMaxOpenConns(1) (see Open) that transaction owns the store's single
-// connection for its whole lifetime — so no other in-process writer can slip a
-// row in between the SELECT and the INSERT. That serialization is what makes the
-// divergence decision atomic in-process; the BEGIN IMMEDIATE below is what makes
-// it atomic against another PROCESS. On ErrCostConflict the deferred rollback
+// The pre-check and the insert run in ONE transaction that holds the WRITE LOCK
+// from its first statement, so no other writer — in this process or any other —
+// can slip a row in between the SELECT and the INSERT.
+//
+// ⚠️ THAT SENTENCE USED TO SPLIT THE GUARANTEE IN TWO, and the in-process half
+// was attributed to SetMaxOpenConns(1) "owning the store's single connection".
+// True at the time, but it made a correctness property depend on a pool-size
+// constant (#668/#669). The BEGIN IMMEDIATE below covers BOTH halves on its own;
+// pool size is now an efficiency setting, not part of this argument. On ErrCostConflict the deferred rollback
 // leaves the stored row — cost_micro AND token counts — untouched.
 //
 // 🔴 BOUNDED BEGIN IMMEDIATE, AND BOTH HALVES OF THAT ARE LOAD-BEARING (#610).
@@ -2573,10 +2865,9 @@ var ErrCostCorrectionIdentityMismatch = errors.New("idempotency_key belongs to a
 // against a snapshot the write no longer applies to.
 //
 // BOUNDED, because internal/api handlePostCosts is the only caller and it passes
-// r.Context(). With SetMaxOpenConns(1) an unbounded acquisition blocks for the
-// DSN's full 5000ms busy_timeout — uninterruptibly, since ctx does not bound the
-// promote — and that does not stall one request, it stalls EVERY in-flight
-// request in the process behind the single connection.
+// r.Context(). An unbounded acquisition blocks for the DSN's full 5000ms
+// busy_timeout — uninterruptibly, since ctx does not bound the promote — which is
+// far past the point the client stopped waiting. (Pre-#669 it ALSO stalled every other in-flight request behind the single connection. #669 raised that threshold from 1 concurrent blocker to maxOpenConns — measured, it is NOT gone; see requestPathBusyTimeout.)
 //
 // ⚠️ THIS SITE CARRIES THE #598 DEFECT CLASS AND IT CLOSES #610's ASYMMETRY, so
 // do not convert it back "for symmetry with InsertTokenEvent". (It was described
@@ -2725,11 +3016,15 @@ type CostCorrection struct {
 // `grep 'UPDATE token_events SET cost_micro'` before trusting this sentence --
 // it is a claim about a grep, not a law.
 //
-// EVERYTHING below runs inside ONE transaction that owns the store's single
-// connection for its whole lifetime (SetMaxOpenConns(1), see Open) — cases
-// 1/3/4 all commit through the SAME tx that ran the identity lookup, so the
-// divergence decision is atomic against any other in-process writer with no
-// window where the connection is released and reacquired. (An earlier version
+// EVERYTHING below runs inside ONE transaction holding the WRITE LOCK from its
+// first statement — cases 1/3/4 all commit through the SAME tx that ran the
+// identity lookup, so the divergence decision is atomic against any other
+// writer, with no window where the lock is released and reacquired.
+//
+// ⚠️ This used to attribute the in-process half to SetMaxOpenConns(1) owning the
+// single connection. The lock is the real guarantee and does not depend on pool
+// size (#668/#669); a *sql.Tx also owns one connection for its lifetime at any
+// pool size, so the no-reacquire property survives untouched. (An earlier version
 // of this function delegated cases 1/3 to InsertManualCostEvent after an
 // explicit Rollback, which reopened exactly that window: a concurrent writer
 // could land between the Rollback and the delegated call's own BeginTx, and
@@ -2759,10 +3054,12 @@ func (d *DB) CorrectManualCostEvent(ctx context.Context, e TokenEvent, actor, re
 	//
 	// ⚠️ BOUNDED, NOT PLAIN beginImmediate, BECAUSE THIS IS REQUEST PATH. The sole
 	// caller is POST /api/v1/costs with override=true, which passes r.Context()
-	// (internal/api/handler.go). With SetMaxOpenConns(1) an unbounded acquisition
-	// blocks for the DSN's full 5000ms busy_timeout — uninterruptibly, since ctx
-	// does not bound the promote — and that does not stall one request, it stalls
-	// EVERY in-flight request in the process behind the single connection. The
+	// (internal/api/handler.go). An unbounded acquisition blocks for the DSN's
+	// full 5000ms busy_timeout — uninterruptibly, since ctx does not bound the
+	// promote — long past the point the client gave up. (Pre-#669 it ALSO stalled
+	// every other in-flight request behind the single connection. #669 raised that
+	// threshold from 1 concurrent blocker to maxOpenConns — measured, it is NOT
+	// gone; see requestPathBusyTimeout.) The
 	// 250ms cap turns contention into a retryable 503 + Retry-After instead;
 	// handlePostCosts maps ErrWriteLockUnavailable to writeStoreContention, and that
 	// errors.Is check runs BEFORE any other classification for the reason spelled
@@ -3832,7 +4129,15 @@ func (d *DB) UpsertPushOutcome(ctx context.Context, o Outcome, day string) (inse
 // retained only for back-compat callers and the tests that pin its behavior. Do
 // NOT use it for new event-driven degradation — it double-hits sibling outcomes.
 func (d *DB) UpdateQuality(ctx context.Context, developer, issueID string, quality float64) error {
-	tx, err := d.db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE, UNBOUNDED (#668). Same read-then-write shape as
+	// UpdateQualityForOutcome, so it needs the write lock up front for the same
+	// SQLITE_BUSY_SNAPSHOT reason. It takes the UNBOUNDED variant because it has
+	// no production caller — it survives for back-compat and tests only, so
+	// there is no request whose latency a cap would protect.
+	//
+	// 🔴 IF A REQUEST-PATH CALLER IS EVER ADDED, THIS MUST MOVE TO
+	// beginImmediateBounded. The choice here is about the caller, not the shape.
+	tx, err := beginImmediate(ctx, d.db)
 	if err != nil {
 		return err
 	}
@@ -3840,8 +4145,10 @@ func (d *DB) UpdateQuality(ctx context.Context, developer, issueID string, quali
 
 	// Snapshot the affected rows' old quality BEFORE the update so the history
 	// row records the true prior value. Rows are fully drained and closed
-	// before the UPDATE runs: under SetMaxOpenConns(1) the tx owns the single
-	// connection, and an open cursor on it would block the subsequent Exec.
+	// before the UPDATE runs: a *sql.Tx owns ONE connection for its whole
+	// lifetime regardless of pool size, and an open cursor on it would block
+	// the subsequent Exec. (This reason is about the transaction's connection,
+	// not about SetMaxOpenConns — it survives #669's pool change unchanged.)
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, quality FROM outcomes WHERE developer = ? AND issue_id = ?`,
 		developer, issueID,
@@ -3912,11 +4219,23 @@ func (d *DB) UpdateQuality(ctx context.Context, developer, issueID string, quali
 // replayed or reconciling call self-healing and safe against a stale value. An
 // id that matches no row is an error.
 func (d *DB) UpdateQualityForOutcome(ctx context.Context, outcomeID int64, quality float64, reason, sourceRef string) error {
-	tx, err := d.db.BeginTx(ctx, nil)
+	// BOUNDED BEGIN IMMEDIATE (#668). This is a read-then-write whose read is the
+	// guard: SELECT the current quality, then decide whether to UPDATE. Under a
+	// DEFERRED begin the SELECT takes a read snapshot and any other CONNECTION
+	// committing before the UPDATE fails the deferred-to-write upgrade with
+	// SQLITE_BUSY_SNAPSHOT (517), which busy_timeout does NOT retry — an opaque
+	// "database is locked" returned in ~19µs, on the webhook delivery path.
+	//
+	// It is BOUNDED because the only production caller is the GitHub webhook
+	// handler, which passes the delivery request's context. release() replaces
+	// the plain deferred Rollback this site used to carry — it rolls back (a
+	// no-op after Commit) AND restores the borrowed connection's busy_timeout,
+	// so the two must not be doubled up.
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	var developer, issueID string
 	var old float64
@@ -4085,11 +4404,16 @@ func (d *DB) LatestOutcomeByIssue(ctx context.Context, repo, issueID string) (Ou
 // org_hierarchy row keyed by a raw alias would never match. Onboarding maps the
 // alias first, then enrolls the canonical id.
 func (d *DB) UpsertHierarchy(ctx context.Context, developer, team, division, org string) error {
-	tx, err := d.db.BeginTx(ctx, nil)
+	// BOUNDED BEGIN IMMEDIATE (#668) — upsertHierarchyTx opens with a SELECT on
+	// org_hierarchy whose result decides whether the previous membership is
+	// closed, so it is a read-then-write guard and a DEFERRED begin exposes it
+	// to an unretried SQLITE_BUSY_SNAPSHOT (517). Bounded because the caller is
+	// PUT /api/v1/org_hierarchy/{developer}, which passes r.Context().
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	if err := upsertHierarchyTx(ctx, tx, developer, team, division, org); err != nil {
 		return err
@@ -4108,11 +4432,28 @@ func (d *DB) UpsertHierarchy(ctx context.Context, developer, team, division, org
 // API layer resolves aliases before calling this, exactly as it does for the
 // single upsert. An empty slice is a no-op that commits cleanly.
 func (d *DB) UpsertHierarchies(ctx context.Context, rows []HierarchyRow) error {
-	tx, err := d.db.BeginTx(ctx, nil)
+	// BOUNDED BEGIN IMMEDIATE (#668) — same read-then-write guard as
+	// UpsertHierarchy, once per row, and the batch holds the lock across all of
+	// them. Bounded because its request-path caller is POST /api/v1/org_hierarchy,
+	// which passes r.Context().
+	//
+	// ⚠️ IT HAS A SECOND, NON-REQUEST CALLER, and the rule above would put that
+	// one on the unbounded helper: seedDemo (cmd/tierd/demo.go) passes
+	// context.Background(). Bounded still wins, because a method takes ONE helper
+	// and the request-path caller is the one with a client to protect. The cap is
+	// harmless there: runDemo deletes and recreates the database file before
+	// opening it, so nothing can hold the write lock against the seed. Recorded
+	// rather than left implicit — a future reader who finds the background caller
+	// should not conclude the split was applied wrongly.
+	//
+	// ⚠️ The cap governs ACQUIRING the lock, not holding it: a 50-row import
+	// still runs to completion once it has the lock. The bound is what stops an
+	// import from queueing behind another writer for the DSN's full 5000ms.
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	for i, r := range rows {
 		if err := upsertHierarchyTx(ctx, tx, r.Developer, r.Team, r.Division, r.Org); err != nil {
@@ -4191,8 +4532,10 @@ var ErrEndBeforeStart = errors.New("period_end precedes the membership's start p
 // who have left. No-op if there is no open membership for (developer, org).
 //
 // periodEnd must be canonical YYYY-MM and >= the open membership's period_start.
-// The read + guard + update run in ONE transaction so the check is race-free
-// against a concurrent write (belt-and-braces under SetMaxOpenConns(1)); the
+// The read + guard + update run in ONE transaction that holds the WRITE LOCK for
+// its whole lifetime (#668), so the check is race-free against a concurrent
+// write in this process and in any other — a guarantee that no longer depends on
+// SetMaxOpenConns, which is what this parenthetical used to cite; the
 // column CHECK remains the ultimate integrity guard, but this returns the typed
 // ErrEndBeforeStart so the caller can distinguish the incoherent-input case from
 // an infrastructure failure.
@@ -4202,11 +4545,23 @@ func (d *DB) EndMembership(ctx context.Context, developer, org, periodEnd string
 	if t, err := time.Parse("2006-01", periodEnd); err != nil || t.Format("2006-01") != periodEnd {
 		return fmt.Errorf("EndMembership: period must be canonical YYYY-MM, got %q", periodEnd)
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	// BOUNDED BEGIN IMMEDIATE (#668) — the SELECT of period_start is the guard
+	// for both the ErrEndBeforeStart check and the UPDATE, so a DEFERRED begin
+	// leaves it open to an unretried SQLITE_BUSY_SNAPSHOT (517). Bounded because
+	// the caller is POST /api/v1/period_membership/{developer}/end, which passes
+	// r.Context().
+	//
+	// 🔴 The sentinel survives this function's "EndMembership: %w" decoration —
+	// errors.Is sees through %w — and the handler MUST classify it before
+	// ErrEndBeforeStart. This method is the one place in the tree that can
+	// return either, so a transient contention misfiled as the permanent 400
+	// would tell a client its INPUT was incoherent when a retry would have
+	// succeeded. Pinned by TestContentionOutranksAPermanentClassification.
+	tx, release, err := beginImmediateBounded(ctx, d.db, requestPathBusyTimeout)
 	if err != nil {
 		return fmt.Errorf("EndMembership: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer release()
 
 	// At most one open row per (developer, org) — the partial unique index
 	// idx_period_membership_open guarantees it.
@@ -6372,10 +6727,13 @@ func (d *DB) DivisionsForDevelopers(ctx context.Context) (map[string]string, err
 // itself be a canonical. This method is the sole enforcement point for that
 // invariant, so the score-join read path can trust one lookup resolves fully.
 //
-// 🔴 THE CHECK-THEN-ACT IS ATOMIC ACROSS PROCESSES ONLY BECAUSE OF THE WRITE
-// LOCK. In-process, SetMaxOpenConns(1) is what stops two racing calls from each
-// passing the chain check and jointly forming a chain; it says nothing about a
-// second process. This site formerly passed
+// 🔴 THE CHECK-THEN-ACT IS ATOMIC BECAUSE OF THE WRITE LOCK, IN THIS PROCESS AND
+// ANY OTHER. It is what stops two racing calls from each passing the chain check
+// and jointly forming a chain.
+//
+// ⚠️ This used to credit SetMaxOpenConns(1) with the in-process half and the
+// lock with only the cross-process half. The lock covers both, and saying
+// otherwise ties a correctness claim to a pool-size constant (#668/#669). This site formerly passed
 // sql.TxOptions{Isolation: sql.LevelSerializable} and its comment claimed that
 // took the lock up front — it did not. modernc.org/sqlite ignores
 // sql.TxOptions.Isolation entirely (newTx reads only opts.ReadOnly and the
@@ -6387,8 +6745,9 @@ func (d *DB) DivisionsForDevelopers(ctx context.Context) (map[string]string, err
 // this is REQUEST PATH. ctx here is r.Context() (handlePostDeveloperAlias,
 // internal/api/handler.go), and the promote is NOT bounded by ctx: at the DSN's
 // busy_timeout a contended promote blocks ~5s (measured 5.08s even under a 300ms
-// deadline), and with SetMaxOpenConns(1) that stalls every OTHER in-flight
-// request in the process too, with a client disconnect unable to shorten it.
+// deadline), with a client disconnect unable to shorten it — five seconds of
+// holding a write lock on behalf of a caller who has already gone.
+// (Pre-#669 it ALSO stalled every other in-flight request behind the single connection. #669 raised that threshold from 1 concurrent blocker to maxOpenConns — measured, it is NOT gone; see requestPathBusyTimeout.)
 // The bounded helper caps that wait at requestPathBusyTimeout. Do not "simplify"
 // this to beginImmediate — and that is no longer a bare instruction:
 // TestRequestPathWritersTakeTheBoundedWriteLock/UpsertDeveloperAlias fails on
@@ -6544,8 +6903,20 @@ var developerPIITables = []string{
 	"repo_repair_audit",
 }
 
-// rowQuerier is the read surface shared by *sql.DB and *sql.Tx, so the
-// identifier-set resolution runs identically inside or outside a transaction.
+// rowQuerier is the read surface shared by *sql.DB and *sql.Tx.
+//
+// ⚠️ ITS JUSTIFICATION CHANGED IN #673 AND THE OLD ONE IS NO LONGER TRUE. It used
+// to read "so the identifier-set resolution runs identically inside or outside a
+// transaction" — but ExportDeveloper was the LAST non-test caller passing a
+// *sql.DB, and it now passes its read transaction. All three production call
+// sites (EraseDeveloper, ExportDeveloper, RepairRepo's aliasUnqualifiedRows) pass
+// a *sql.Tx.
+//
+// It survives for one honest reason: the TESTS pass a *sql.DB deliberately —
+// export_snapshot_test.go's mechanism arm exists precisely to show that a pooled
+// read does NOT hold a snapshot, and it needs the pool as a comparison surface.
+// ⛔ Do not read the interface as an invitation to run a multi-read production
+// path outside a transaction; #673 is what happens when one does.
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
@@ -6628,9 +6999,13 @@ func inClause(ids []string) (placeholders string, args []any) {
 // with no rows, deletes nothing, and returns all-zero counts with no error. The
 // API layer maps an all-zero result to 404.
 //
-// 🔴 The alias read and the cascade are one atomic unit against another PROCESS
-// only because beginImmediateBounded holds the write lock from the first
-// statement; in-process, SetMaxOpenConns(1) is what serialises it. This site
+// 🔴 The alias read and the cascade are one atomic unit because
+// beginImmediateBounded holds the write lock from the first statement — against
+// another process AND against another goroutine in this one.
+//
+// ⚠️ This used to attribute the in-process half to SetMaxOpenConns(1). The lock
+// is sufficient on its own, and resting the claim on pool size is what #668
+// removed across the store (#669 then raises it). This site
 // formerly passed sql.TxOptions{Isolation: sql.LevelSerializable} and claimed
 // that was "BEGIN IMMEDIATE ... takes the write lock up front". It was not:
 // modernc.org/sqlite never reads sql.TxOptions.Isolation, so the transaction was
@@ -6642,9 +7017,10 @@ func inClause(ids []string) (placeholders string, args []any) {
 // ⚠️ BOUNDED, NOT PLAIN beginImmediate, BECAUSE THIS IS REQUEST PATH. ctx is
 // r.Context() (handleEraseDeveloper, internal/api/handler.go) and the promote is
 // NOT bounded by ctx: at the DSN's busy_timeout a contended promote blocks ~5s
-// (measured 5.08s even under a 300ms deadline), and with SetMaxOpenConns(1) that
-// stalls every OTHER in-flight request in the process behind the single
-// connection. requestPathBusyTimeout caps it. Do not "simplify" to beginImmediate
+// (measured 5.08s even under a 300ms deadline) — five seconds past the point an
+// erasure caller stopped listening.
+// (Pre-#669 it ALSO stalled every other in-flight request behind the single connection. #669 raised that threshold from 1 concurrent blocker to maxOpenConns — measured, it is NOT gone; see requestPathBusyTimeout.)
+// requestPathBusyTimeout caps it. Do not "simplify" to beginImmediate
 // — TestRequestPathWritersTakeTheBoundedWriteLock/EraseDeveloper fails on BOTH the
 // reverts that were measured to survive the whole tree: back to
 // `BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})` (it stops
@@ -6848,11 +7224,55 @@ type ExportDeveloperAlias struct {
 // EraseDeveloper does (single-hop alias + reverse lookup), so a request by a raw
 // login and by its canonical return the identical record. A never-seen id
 // returns an all-empty export (RowCount()==0); the API layer maps that to 404.
+//
+// 🔴 EVERY READ RUNS IN ONE beginRead TRANSACTION, AND THAT IS A CORRECTNESS
+// REQUIREMENT, NOT TIDINESS (#673). The identifier resolution and the nine table
+// reads must all observe the SAME database state. Run on the pool they do not:
+// EraseDeveloper deletes this subject's rows across these same tables inside one
+// transaction, so an export interleaved with it returns some tables pre-erase and
+// others post-erase — a PARTIAL answer to a subject-access request, presented as
+// complete, with a 200 and a well-formed body. Nothing in the artifact says which
+// tables came from which state.
+//
+// 🔴 THE POOL SIZE NEVER GATED THIS, AND THE OPPOSITE CLAIM STOOD HERE UNTIL
+// REVIEW MEASURED IT. This comment used to say that at SetMaxOpenConns(1) the
+// reads and the erase "queued on the single connection and could not truly
+// interleave in-process, so the tear needed a second PROCESS". That is FALSE,
+// and inverted. Measured against the fully unfixed code, one process, 2000
+// export iterations per run, varying ONLY maxOpenConns:
+//
+//	maxOpenConns = 4   ->  668 / 676 / 719 torn   (~34%)
+//	maxOpenConns = 1   ->  1977 / 2000 torn       (~99%, first tear at iteration 0)
+//
+// ⭐ THE MECHANISM, which is the part worth keeping: each read is a separate
+// QueryContext that RETURNS ITS CONNECTION TO THE POOL when rows.Close() runs.
+// One connection was never a lock held across the nine reads — it was a single
+// slot handed to the writer BETWEEN every read. Pool size changes the
+// interleaving pattern and the observed rate; it never opened or closed the
+// window. ONLY AN ENCLOSING TRANSACTION DOES.
+//
+// ⛔ So do NOT read this as a #669 regression, and never "lower maxOpenConns to
+// reduce tearing" — that is the worst available action and the old comment
+// implied it. This was a live single-process GDPR defect for as long as the
+// method has existed. #669 is what prompted the audit, not what opened the hole.
+//
+// ⚠️ DEFERRED, NOT beginImmediate, and see beginRead for why: this never writes,
+// so there is no lock upgrade and none of the #668 hazard. It also carries no
+// deadline — beginRead's doc block holds the measured WAL bound and the
+// SCAN-BOUNDED duration finding, both of which a reader needs before adding a
+// caller. 🔴 A bulk exporter looping this method with no gap is the one caller
+// that breaks the WAL argument; read that block before writing one.
 func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, error) {
 	if id == "" {
 		return DeveloperExport{}, errors.New("ExportDeveloper: id must not be empty")
 	}
-	canonical, ids, err := developerIdentifierSet(ctx, d.db, id)
+	tx, release, err := beginRead(ctx, d.db)
+	if err != nil {
+		return DeveloperExport{}, fmt.Errorf("ExportDeveloper: %w", err)
+	}
+	defer release()
+
+	canonical, ids, err := developerIdentifierSet(ctx, tx, id)
 	if err != nil {
 		return DeveloperExport{}, err
 	}
@@ -6860,7 +7280,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	exp := DeveloperExport{Developer: canonical, Identifiers: ids}
 
 	// token_events
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, developer, issue_id, model, input_tok, output_tok, cache_read,
 		        cache_write_5m, cache_write_1h, cost_micro, source, fidelity,
 		        idempotency_key, ts
@@ -6881,7 +7301,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// outcomes
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, developer, issue_id, pr_number, weight, quality, merge_commit_sha,
 		        weight_source, additions, deletions, changed_files, source,
 		        COALESCE(work_type, 'feature'), COALESCE(work_type_source, 'legacy'),
@@ -6905,7 +7325,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// actual_spend
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, developer, period, actual_paid_micro, ts
 		 FROM actual_spend WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
@@ -6920,7 +7340,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// org_hierarchy
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT developer, team, division, org
 		 FROM org_hierarchy WHERE developer IN (`+placeholders+`) ORDER BY developer`, args,
 		func(rows *sql.Rows) error {
@@ -6937,7 +7357,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// period_membership
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT developer, org, period_start, period_end
 		 FROM period_membership WHERE developer IN (`+placeholders+`) ORDER BY developer, period_start`, args,
 		func(rows *sql.Rows) error {
@@ -6954,7 +7374,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// quality_events
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at
 		 FROM quality_events WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
@@ -6970,7 +7390,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// quality_history
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, outcome_id, developer, issue_id, old_quality, new_quality, reason, source_ref, ts
 		 FROM quality_history WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
@@ -6986,7 +7406,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// repo_repair_audit (#493)
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT id, repair_id, developer, from_repo, to_repo, row_count,
 		        cost_micro_sum, tool_version, ts
 		 FROM repo_repair_audit WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
@@ -7003,7 +7423,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 	}
 
 	// developer_alias: every alias row pointing at this canonical identity.
-	if err := d.queryRows(ctx,
+	if err := queryRows(ctx, tx,
 		`SELECT alias, canonical, ts FROM developer_alias WHERE canonical = ? ORDER BY alias`,
 		[]any{canonical},
 		func(rows *sql.Rows) error {
@@ -7023,8 +7443,16 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 // queryRows runs one read and applies scan to each row, closing the rows set and
 // propagating any iteration error. Keeps the per-table export blocks free of
 // repeated rows.Close()/rows.Err() boilerplate.
-func (d *DB) queryRows(ctx context.Context, query string, args []any, scan func(*sql.Rows) error) error {
-	rows, err := d.db.QueryContext(ctx, query, args...)
+//
+// 🔴 IT TAKES THE READ SURFACE (q) RATHER THAN REACHING FOR d.db, AND THAT IS
+// WHAT MAKES THE #673 FIX HOLD. Its only callers are ExportDeveloper's nine table
+// reads. If one of them were handed d.db while the others ran on the export's
+// transaction, that one table would be read from a DIFFERENT snapshot — which is
+// precisely the torn export the transaction exists to prevent, reintroduced at a
+// single call site and invisible in review. Passing the surface makes the
+// enclosure explicit at every call.
+func queryRows(ctx context.Context, q rowQuerier, query string, args []any, scan func(*sql.Rows) error) error {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}

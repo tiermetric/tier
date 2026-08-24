@@ -155,7 +155,8 @@ func runHealthcheck(args []string, stdout, stderr io.Writer) int {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxHealthcheckBody))
 	snippet := sanitizeHealthcheckSnippet(body)
 	// Mark truncation rather than printing a body cut mid-token as if it were
-	// the whole thing. /livez is ~70 bytes so this never fires on the default
+	// the whole thing. /livez is ~105 bytes since #638 added `commit` (it was ~70,
+	// and that number was left stale by the commit that changed it) so this never fires on the default
 	// path; it matters for a --path override onto a chattier endpoint.
 	if len(body) == maxHealthcheckBody {
 		snippet += "…(truncated)"

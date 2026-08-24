@@ -37,6 +37,54 @@ whether a server supports a given field or endpoint should read `livez.version`
 rather than probing behaviour. `livez` is unauthenticated (a liveness probe must
 not need credentials), so feature detection never requires a token.
 
+### Identifying a deployment: `GET /api/v1/version`
+
+Feature detection asks *"what can this server do?"* — a different question from
+*"is this the build I published?"* For the second, use `GET /api/v1/version`,
+also unauthenticated and also mounted in read-only mode.
+
+> 🔴 **Not available in any release published so far.** This route was added after
+> the most recent release was cut, so a server running **v0.4.0 or earlier answers
+> `404` here** — verified against the published `0.4.0` container image. The
+> response shown below is what a build *carrying* the route returns; it is not
+> something v0.4.0 can produce.
+>
+> ⚠️ **`404` on this path does not mean the server is unhealthy or the wrong
+> build** — it most likely means the build predates the route. Until your target
+> ships it, identify a deployment with `GET /api/v1/livez`, which has always
+> carried `version`. Note that reports the *release*, not the *build*: two
+> binaries from a moved tag share a version string, which is exactly why this
+> route exists.
+
+```json
+{
+  "version": "0.4.0",
+  "commit": "ca27d9f07c0838da15595e9fad97047b389866bd",
+  "modified": false,
+  "go_version": "go1.26.5",
+  "platform": "linux/amd64",
+  "price_table": { "version": 9, "effective_date": "2026-07-26" }
+}
+```
+
+`commit` and `modified` come from the VCS stamps the Go toolchain embeds
+automatically; they are absent (`commit` omitted, `modified: false`) on a binary
+built with `-buildvcs=false`. `commit` is also carried on `livez` — additively,
+so an existing liveness probe is unaffected.
+
+🔴 **Why `version` alone is not enough, and why `price_table.version` is a trap.**
+A tagged release reports the same `version` string however it was built, so two
+binaries from a moved tag are indistinguishable by it; `commit` is what makes
+"this deployment is the build I published" an assertion rather than a hope. And
+`price_table.version` bumps only when *prices* change: measured 2026-08-06, a
+deployment reported price table `9` while the newest source was also `9` — while
+the running binary was a **full release behind**. It is useful next to the build
+(it answers "which rates priced these numbers"), never as identity.
+
+⚠️ **A version check is only meaningful if it can say NO.** Assert the expected
+`commit`, and make sure your check fails when pointed at a different build —
+otherwise "the version matches" is indistinguishable from "the check never ran".
+
 Do **not** rely on the presence or absence of an individual response field for
 feature detection at runtime: additive fields (below) can appear at any release,
 and `omitempty` fields are absent whenever their value is empty even on a server
@@ -461,10 +509,17 @@ Error bodies are uniformly `{"error": "<message>"}` with a 4xx/5xx status.
 #### `PUT /api/v1/org_hierarchy/{developer}`
 - **Scope:** write. **Success:** `200 OK`, the stored `HierarchyRow`:
   `{developer, team, division, org}`. Request body: `{team, division, org}`.
+- `503` + `Retry-After: 1` when another writer holds the database write lock.
+  **Retryable** — it is a lost race for SQLite's single writer, not a bad request
+  and not a broken database. A `500` here still means an unexpected store failure.
 
 #### `POST /api/v1/org_hierarchy`
 - **Scope:** write. **Success:** `201 Created`, `{"accepted": <int>}`.
 - All-or-nothing bulk import (array of `{developer, team, division, org}`).
+- `503` + `Retry-After: 1` when another writer holds the database write lock.
+  **Retryable, and NOTHING was written** — the batch is one transaction, so the
+  whole request is safe to replay verbatim. A `500` here still means an
+  unexpected store failure.
 
 #### `GET /api/v1/org_hierarchy`
 - **Scope:** write (discloses the full developer->team map).
@@ -474,6 +529,11 @@ Error bodies are uniformly `{"error": "<message>"}` with a 4xx/5xx status.
 - **Scope:** write. **Success:** `200 OK`,
   `{developer, org, period_end}` (the applied end record). Request: `{org,
   period_end}`.
+- `503` + `Retry-After: 1` when another writer holds the database write lock.
+  **Retryable.** Distinguish it from the `400` this route also returns when
+  `period_end` precedes the membership's start: that one is permanent and
+  retrying cannot help. The `503` is classified FIRST precisely so a transient
+  lock conflict is never reported as bad input.
 
 #### `DELETE /api/v1/developer/{id}` (GDPR Art. 17 erasure)
 - **Scope:** write. **Success:** `200 OK`,
@@ -1019,6 +1079,23 @@ Error bodies are uniformly `{"error": "<message>"}` with a 4xx/5xx status.
 
 ### Open endpoints (probes)
 
+#### `GET /api/v1/version`
+
+Build identity of the running process (#638). Open (no token) and mounted in
+read-only mode, because the deployment hardest to identify by other means is the
+public demo, and the demo runs read-only.
+
+`{version: <string>, commit: <string, omitempty>, modified: <bool, omitempty>,
+go_version: <string, omitempty>, platform: <string>, price_table: {...}}`
+
+- `commit` is the build revision: ldflags-injected where available, otherwise the
+  Go toolchain's `vcs.revision` stamp. Absent when neither exists.
+- `modified` is a **tri-state**: absent means the binary carries no VCS stamps
+  (the shipped container is built with `.git` excluded, so this is its normal
+  state); `false` means stamped and clean. **Absent does NOT mean clean.**
+- `price_table` is provenance for the figures, **not** identity — it bumps only
+  when prices change, so it can agree across a full release gap.
+
 #### `GET /api/v1/health`
 - **Scope:** open. **Success:** `200 OK`, `{"status": "ok"}`.
 
@@ -1044,7 +1121,9 @@ Error bodies are uniformly `{"error": "<message>"}` with a 4xx/5xx status.
 
 #### `GET /api/v1/livez`
 - **Scope:** open. **Liveness** probe (#49); always `200`. Body `livezResponse`:
-  `{status: "alive", uptime_s: <int>, version: <string>}`. `version` is the
+  `{status: "alive", uptime_s: <int>, version: <string>, commit: <string, omitempty>}`.
+  `commit` was added additively by #638; it is absent on a binary carrying no
+  build identity. `version` is the
   documented [feature-detection](#feature-detection) signal.
 
 ## API changelog
@@ -1052,6 +1131,14 @@ Error bodies are uniformly `{"error": "<message>"}` with a 4xx/5xx status.
 Newest first. Every entry names the change, its classification, and the issue.
 Backfilled entries (`#185`, `#187`, `#191`, and the additive-column history)
 predate this discipline and are recorded here so the record is complete.
+
+- **#638 -- `GET /api/v1/version` added, and `commit` added to `/livez`
+  (ADDITIVE).** A new open probe endpoint reporting build identity, plus one new
+  `omitempty` field on an existing body. No existing field changed name, type or
+  semantics, so a client parsing `/livez` today is unaffected. Rationale: the
+  `version` string alone cannot identify a build -- a tagged release reports the
+  same string however it was built -- so a deployment could not be asserted to be
+  the build it was believed to be.
 
 - **#619 -- the reserved-sentinel ingest guard now covers `developer` (BREAKING on
   `POST /costs`, `/events`, `/outcomes`, `/actual_spend`, `/developer_alias`,
@@ -1141,6 +1228,37 @@ predate this discipline and are recorded here so the record is complete.
   *Today's readers:* none. This ships the DATA only; `internal/dashboard` does not
   render `segment_reconciliation`, so the segmented panel a reader actually looks at
   still shows outcome-linked cost alone. The UI pass is separate work.
+
+- **#668 -- three org-hierarchy routes answer write-lock contention as `503`
+  instead of `500` (BREAKING status change).** `PUT /api/v1/org_hierarchy/{developer}`,
+  `POST /api/v1/org_hierarchy` and `POST /api/v1/period_membership/{developer}/end`
+  now take the SQLite write lock before they write, bounded at the same 250ms the
+  other request-path writers have used since #346/#598/#610. Contention on any of
+  the three is therefore `503` + `Retry-After: 1` instead of `500`.
+  *Breaking, and recorded as such rather than filed under "a better error":* a
+  status code changes for an input a client can actually hit, and a client with a
+  `500`-is-fatal rule now sees `503`. Retry the `503`; do not retry the `400` or
+  the `500`.
+  ⚠️ *But the shape of this break differs from #610's, and the difference is worth
+  stating because the obvious reading is wrong.* #610 also shortened a wait, so
+  contention it had previously **waited out and completed** began failing instead.
+  That does NOT apply here. Measured: the DEFERRED read-then-write these three
+  used to run did not wait at all -- SQLite runs no busy handler for a
+  deadlock-prone upgrade, so it returned `SQLITE_BUSY` in ~65us and the handler
+  answered `500`. So these routes never completed under contention; they failed
+  immediately with an unretryable error and said `500`. **No client loses a
+  success it used to get.** The change is `500` -> `503` on a request that failed
+  either way, plus a `Retry-After` telling the client what to do about it.
+  *One route deserves its own note:* `POST /api/v1/period_membership/{developer}/end`
+  also returns `400` when `period_end` precedes the membership's start. Contention
+  is classified BEFORE that check, so a transient lock conflict is never reported
+  as incoherent input -- which would tell a client to fix a `period_end` that was
+  perfectly valid.
+  *Why the change was made at all:* it is the precondition for raising
+  `SetMaxOpenConns` (#669). These sites' in-process atomicity came from the single
+  connection, so raising the pool without converting them would have turned a
+  latency defect into a correctness one -- an unretried `SQLITE_BUSY_SNAPSHOT`
+  (517) race -- with no test failing.
 
 - **#610 -- `POST /costs` answers write-lock contention one way (BREAKING status
   change on the plain path).** The plain, non-override half of the endpoint now

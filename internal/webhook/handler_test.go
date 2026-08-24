@@ -2370,3 +2370,73 @@ func TestHandlePR_CustomTableShadowsBuiltinLabel_EndToEnd(t *testing.T) {
 		t.Errorf("WeightSource = %q, want %q (built-in label not in custom table must fall through)", o.WeightSource, store.WeightSourceHeuristic)
 	}
 }
+
+// contendedQualityStore is the fake with UpdateQualityForOutcome failing exactly
+// as beginImmediateBounded does when another connection holds the write lock.
+//
+// The error is built with the same `fmt.Errorf("%w: %w", ...)` wrap the real
+// store uses, so errors.Is is exercised through a wrap rather than an equality
+// that the production store would never satisfy.
+type contendedQualityStore struct {
+	Store
+}
+
+func (contendedQualityStore) UpdateQualityForOutcome(context.Context, int64, float64, string, string) error {
+	return fmt.Errorf("update quality for outcome 1: %w",
+		fmt.Errorf("%w: %w", store.ErrWriteLockUnavailable, context.DeadlineExceeded))
+}
+
+// permanentlyBrokenQualityStore is the CONTROL: a non-contention failure on the
+// same call, which must still answer 500.
+type permanentlyBrokenQualityStore struct {
+	Store
+}
+
+var errDiskOnFire = errors.New("disk is on fire")
+
+func (permanentlyBrokenQualityStore) UpdateQualityForOutcome(context.Context, int64, float64, string, string) error {
+	return fmt.Errorf("update quality for outcome 1: %w", errDiskOnFire)
+}
+
+// TestWebhookWriteLockContentionIs503 pins that a lost race for SQLite's write
+// lock reaches GitHub as a retryable 503 + Retry-After, not the generic 500.
+//
+// 🔴 WHY THIS MATTERS EVEN THOUGH GITHUB RETRIES 5xx EITHER WAY. The delivery is
+// not what is at risk — the OPERATOR SIGNAL is. Before this branch existed, a
+// transient lock conflict logged `ERROR webhook handler error` and answered 500,
+// which points a human at a broken database for a condition that cleared by
+// itself. #668 made UpdateQualityForOutcome a bounded write-lock caller, so this
+// path can now produce the sentinel; classifying it is what makes the signal
+// honest.
+//
+// Deleting the errors.Is(handlerErr, store.ErrWriteLockUnavailable) block in
+// ServeHTTP must fail this test.
+func TestWebhookWriteLockContentionIs503(t *testing.T) {
+	st := newFakeStore()
+	seedMergedOutcome(t, st)
+	h := newTestHandler(contendedQualityStore{Store: st})
+
+	code := doWorkflowRun(t, h, wfRunPayload(wfMergeSHA, "main", "failure", 1, time.Now().UTC()), "wf-contended")
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 — a lost race for the write lock is TRANSIENT; %d tells the operator to go looking for a broken database for a condition that resolved on its own", code, code)
+	}
+}
+
+// TestWebhookNonContentionFailureIsStill500 is the CONTROL ARM for the test
+// above, and without it that test proves almost nothing.
+//
+// 🔴 A HANDLER THAT ANSWERED 503 FOR EVERY ERROR WOULD PASS THE CONTENTION TEST.
+// This one fails the same call with a plain, permanent error and requires 500 —
+// so the two together show the handler DISCRIMINATES rather than having been
+// blanket-downgraded. Deleting the errors.Is guard (making every error 503)
+// fails THIS test; deleting the 503 branch fails the other.
+func TestWebhookNonContentionFailureIsStill500(t *testing.T) {
+	st := newFakeStore()
+	seedMergedOutcome(t, st)
+	h := newTestHandler(permanentlyBrokenQualityStore{Store: st})
+
+	code := doWorkflowRun(t, h, wfRunPayload(wfMergeSHA, "main", "failure", 1, time.Now().UTC()), "wf-broken")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 — a genuine store fault must NOT be reported as retryable contention; if it is, the 503 branch is matching everything and the contention test above is vacuous", code)
+	}
+}

@@ -29,8 +29,19 @@ jobs:
       # Prove the harness works BEFORE trusting its verdict. A gate that has
       # silently stopped firing reports CLEAN on every repo forever, and the
       # audit alone cannot tell that apart from a genuinely clean mirror.
+      # 🔴 CALLED DIRECTLY, NOT THROUGH `make` (#682). mirror-audit.sh carries the
+      # same three-valued contract as the CVE re-scanner -- 0 clean / 1 findings,
+      # i.e. SOMETHING IS PUBLIC THAT SHOULD NOT BE / 2 could not run -- and GNU
+      # make exits 2 on a failed recipe whatever the recipe returned. Through
+      # `make` a real mirror leak arrived as "could not run". This script exists
+      # because a 6.6 MB artifact sat public for three days, so conflating "leak
+      # found" with "clone failed" is not academic. The make targets stay for
+      # local use; image-cve-rescan.sh --selftest fails if these lines regrow a
+      # `make`. (The targets' absent-script soft-skip is not lost in practice:
+      # this job never runs anywhere the script is missing -- it is guarded off
+      # the mirror above, and the export is the only tree without the script.)
       - name: Selftest the audit (fires on a violation planted in history)
-        run: make mirror-audit-selftest
+        run: scripts/mirror-audit.sh --selftest
 
       - name: Audit the published mirror
-        run: make mirror-audit
+        run: scripts/mirror-audit.sh

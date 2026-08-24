@@ -35,11 +35,22 @@ process during normal watcher backoff.
 | Path | Purpose | Auth | Codes |
 |---|---|---|---|
 | `/api/v1/livez` | liveness — process is up | none | always 200 |
+| `/api/v1/version` | build identity — WHICH build is running (#638) | none | ⚠️ **404 on every release published to date** — see below |
 | `/api/v1/healthz` | readiness — subsystems healthy | none | 200 / 503 while watcher restarting |
 | `/metrics` | Prometheus scrape | Bearer token | 200 / 401 |
 
 There is also a legacy `/api/v1/health` that returns a static ok; prefer
 `livez`/`healthz` for new wiring.
+
+> 🔴 **`/api/v1/version` is NOT in any published release yet (#653).** It merged at
+> `495a6a3`, *after* v0.4.0 was exported from `957c067`, so it answers **404** on
+> v0.4.0 — measured on the published image. **Do not wire a probe or a deploy check
+> to it** until a release built from a commit at or after `495a6a3` ships.
+> ⚠️ A correctly deployed v0.4.0 and a deploy that never happened **both** return
+> 404 here, so a check against this path cannot tell them apart. Until then, read
+> `/api/v1/livez` → `.version` (which discriminates *releases*, not builds).
+> The container reports `0.4.0`, the release tarball `v0.4.0` — strip the leading
+> `v` before comparing.
 
 **Wire liveness to `livez` and readiness to `healthz`.** Do NOT wire liveness to
 `healthz`: `healthz` returns 503 while the watcher is in its backoff/restart

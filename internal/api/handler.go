@@ -12,6 +12,8 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -155,6 +157,16 @@ type Store interface {
 	// all-or-nothing transaction behind the bulk-import endpoint. The API layer
 	// canonicalizes developer through the alias map (#125) before every call, so
 	// hierarchy keys match the score-join's canonical keys.
+	//
+	// All three are REQUEST-PATH writers: each takes the bounded write lock
+	// (#668), so each may also return store.ErrWriteLockUnavailable, which its
+	// handler answers with 503 + Retry-After ahead of every other
+	// classification. EndMembership is the one to be careful with — it can
+	// return that sentinel OR store.ErrEndBeforeStart, and the contention check
+	// must run FIRST, because misfiling a transient lock conflict as the
+	// permanent 400 tells a client to fix input that was never wrong. Declared
+	// on the interface, not just on *store.DB, because the handlers are written
+	// against this contract and an alternate implementation cannot infer it.
 	UpsertHierarchy(ctx context.Context, developer, team, division, org string) error
 	UpsertHierarchies(ctx context.Context, rows []store.HierarchyRow) error
 	EndMembership(ctx context.Context, developer, org, periodEnd string) error
@@ -228,8 +240,21 @@ type Handler struct {
 	subsystems *health.Registry
 	version    string
 	startedAt  time.Time
-	limiter    *authLimiter      // per-IP failed-auth lockout (#36); nil/disabled = off
-	metricsReg *metrics.Registry // #67; nil = no /metrics route mounted
+	// buildCommit is the ldflags-injected commit (#638). It takes precedence over
+	// the VCS stamps because the shipped CONTAINER has none: .dockerignore excludes
+	// .git, so `buildvcs=auto` finds nothing and stamps nothing. Measured on the
+	// published v0.4.0 image: zero vcs settings in the binary, while the release
+	// TARBALL from the same workflow run carries vcs.revision=ca27d9f0…. The
+	// container is precisely the deployment #638 was filed about, so without this
+	// field the endpoint would be a no-op exactly where it matters most.
+	buildCommit string
+	// vcsOverride lets a test supply known stamps. A per-Handler field rather than
+	// a package-level var: a mutable global swapped by tests races the moment any
+	// test in this package calls t.Parallel(), which is an obviously-correct-looking
+	// addition that would detonate on an unrelated PR.
+	vcsOverride *vcsInfo
+	limiter     *authLimiter      // per-IP failed-auth lockout (#36); nil/disabled = off
+	metricsReg  *metrics.Registry // #67; nil = no /metrics route mounted
 	// identityGauge exports tier_identity_unjoined{side} (#125); nil = no-op.
 	// Set once before serving via SetIdentityGauge, then only Set() from the
 	// /scores read path.
@@ -292,7 +317,22 @@ type Handler struct {
 // disables it; cmd/tierd passes a config built from the --auth-* flags (whose
 // defaults come from DefaultRateLimitConfig: 10 / 60s / 15m). The limiter only
 // ever engages when apiToken != "" (auth is on).
-func New(s Store, logger *slog.Logger, apiToken string, watcherState *health.WatcherState, version string, rateLimit RateLimitConfig) *Handler {
+// Option configures a Handler. Variadic so the 100+ existing New callers (almost
+// all tests) are untouched, while the one production call site in cmd/tierd is
+// explicit about what it injects.
+type Option func(*Handler)
+
+// WithCommit supplies the build commit from the binary's ldflags. Prefer it over
+// relying on the Go toolchain's VCS stamps: see Handler.buildCommit for why the
+// container has none.
+func WithCommit(commit string) Option { return func(h *Handler) { h.buildCommit = commit } }
+
+// withVCSStamps is test-only: it pins the build stamps instead of reading this
+// test binary's own. Unexported so it cannot become a production configuration
+// knob by accident.
+func withVCSStamps(v vcsInfo) Option { return func(h *Handler) { h.vcsOverride = &v } }
+
+func New(s Store, logger *slog.Logger, apiToken string, watcherState *health.WatcherState, version string, rateLimit RateLimitConfig, opts ...Option) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -318,7 +358,7 @@ func New(s Store, logger *slog.Logger, apiToken string, watcherState *health.Wat
 	}
 	reg := health.NewRegistry()
 	reg.Register("watcher", ws)
-	return &Handler{
+	h := &Handler{
 		store:      s,
 		logger:     logger,
 		apiToken:   apiToken,
@@ -327,6 +367,10 @@ func New(s Store, logger *slog.Logger, apiToken string, watcherState *health.Wat
 		startedAt:  time.Now(),
 		limiter:    newAuthLimiter(rateLimit, nil),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // RegisterSubsystem adds a subsystem to the /healthz `subsystems` map under
@@ -459,6 +503,13 @@ func (h *Handler) registerReadRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/health", h.handleHealth)
 	mux.HandleFunc("GET /api/v1/healthz", h.handleHealthz)
 	mux.HandleFunc("GET /api/v1/livez", h.handleLivez)
+	// Build identity (#638). In registerReadRoutes, NOT registerWriteRoutes, so
+	// RegisterReadOnly mounts it: the public demo is the deployment whose build is
+	// hardest to identify any other way, and it is the one that runs read-only.
+	// Unauthenticated alongside /healthz and /livez -- identifying a build is a
+	// probe concern, and gating it behind a token would make it useless to the
+	// operator verifying a deploy landed.
+	mux.HandleFunc("GET /api/v1/version", h.handleVersion)
 	// Prometheus scrape endpoint (#67). Read-scoped like the score GETs (#190):
 	// /metrics exposes internal counters (and, via labels, operational signal
 	// about a single-tenant deployment's spend activity), which the dashboard and
@@ -4591,10 +4642,19 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // livezResponse is the body shape /livez returns — the minimal facts a
 // liveness probe wants: that the process is up, for how long, and which build.
+//
+// Commit was added by #638. It is ADDITIVE — every existing field keeps its name
+// and type, so a probe parsing this today is unaffected. It is here as well as on
+// /version because /livez is the endpoint operators already have wired, and the
+// version string ALONE does not identify a build: a tagged release reports
+// "0.4.0" whether it was built from the tag or rebuilt from a moved tag, so two
+// different binaries are indistinguishable by `version`. The commit is what makes
+// "this deployment is the build I think it is" an assertion rather than a hope.
 type livezResponse struct {
 	Status  string `json:"status"`
 	UptimeS int64  `json:"uptime_s"`
 	Version string `json:"version"`
+	Commit  string `json:"commit,omitempty"`
 }
 
 // handleLivez is the k8s LIVENESS probe (#49). It always returns 200: reaching
@@ -4607,7 +4667,134 @@ func (h *Handler) handleLivez(w http.ResponseWriter, _ *http.Request) {
 		Status:  "alive",
 		UptimeS: int64(time.Since(h.startedAt).Seconds()),
 		Version: h.version,
+		Commit:  h.buildIdentity().Commit,
 	})
+}
+
+// --- GET /api/v1/version ---
+
+// vcsInfo is what the Go toolchain stamped into this binary. Stamped
+// distinguishes "the toolchain recorded nothing" from "it recorded a clean
+// tree" — a distinction that MATTERS and that an earlier draft of this code got
+// wrong: it reported `modified: false` unconditionally, so a binary with no
+// stamps at all made a confident, unfounded claim that its tree was clean.
+type vcsInfo struct {
+	Stamped   bool
+	Commit    string
+	Modified  bool
+	GoVersion string
+}
+
+// vcsStamps reads the build stamps ONCE per process. They are immutable for the
+// lifetime of the binary, and debug.ReadBuildInfo is NOT a cached accessor — it
+// re-parses the embedded modinfo and allocates a fresh BuildInfo, a Module per
+// dependency and a BuildSetting per setting on every call. Measured on this
+// binary's modinfo: ~1291 ns and 2776 B per call, versus ~1.6 ns and zero
+// allocations behind OnceValue. /livez is a liveness probe that can be scraped
+// every couple of seconds, so recomputing a process constant there is the exact
+// thing sync.OnceValue exists to prevent.
+var vcsStamps = sync.OnceValue(readVCSStamps)
+
+func readVCSStamps() vcsInfo {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info == nil {
+		return vcsInfo{}
+	}
+	out := vcsInfo{GoVersion: info.GoVersion}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs":
+			// Present iff the toolchain stamped VCS data at all. This is the
+			// discriminator: vcs.modified is emitted unconditionally when
+			// stamping happens, while vcs.revision is conditional, so neither
+			// one alone reliably answers "did stamping occur?".
+			out.Stamped = s.Value != ""
+		case "vcs.revision":
+			out.Commit = s.Value
+		case "vcs.modified":
+			out.Modified = s.Value == "true"
+		}
+	}
+	return out
+}
+
+// versionResponse is the full build identity of a running tierd (#638).
+//
+// 🔴 Why `version` alone was not enough. On 2026-08-01 a stale `tierd demo` from
+// six days earlier answered every probe and its 200s were read as evidence about
+// current main (false-green ledger 26). A tagged release reports the same
+// `version` string however it was built, so two binaries from a moved tag are
+// indistinguishable by it. Commit is what cannot agree by coincidence.
+//
+// ⚠️ Do NOT reinstate price_table.version as the discriminator: it bumps only
+// when PRICES change. Measured 2026-08-06, the deployed dev demo reported price
+// table v9 while main was also v9 — and the deployed binary was 0.3.0 against a
+// published 0.4.0. The discriminator agreed while the artifact was a full release
+// behind. PriceTable is here because it answers "which rates priced these
+// numbers", NEVER as identity.
+type versionResponse struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit,omitempty"`
+	// Modified is a POINTER so that "unknown" and "clean" are different states on
+	// the wire. Absent = the toolchain stamped nothing (a container built without
+	// .git, which is how this repo's image is built). false = stamped and clean.
+	// A plain bool here published `modified: false` from binaries that had no idea
+	// — a false attestation, which is strictly worse than saying nothing.
+	Modified   *bool          `json:"modified,omitempty"`
+	GoVersion  string         `json:"go_version,omitempty"`
+	Platform   string         `json:"platform"`
+	PriceTable priceTableJSON `json:"price_table"`
+}
+
+// buildIdentity assembles the build facts for this handler.
+//
+// Commit precedence is INJECTED-then-stamped, and the order is load-bearing:
+// this repo's Dockerfile builds with .git excluded via .dockerignore, so the
+// shipped container has NO VCS stamps at all. Measured on the published v0.4.0
+// image: zero vcs settings in the binary, while the release TARBALL from the same
+// run carries vcs.revision=ca27d9f0…. The container therefore relies on the
+// ldflags-injected value, which is exactly the deployment #638 was filed about.
+func (h *Handler) buildIdentity() versionResponse {
+	v := vcsStamps()
+	if h.vcsOverride != nil {
+		v = *h.vcsOverride
+	}
+	active := store.ActivePriceTableInfo()
+	resp := versionResponse{
+		Version:   h.version,
+		Commit:    h.buildCommit,
+		GoVersion: v.GoVersion,
+		Platform:  runtime.GOOS + "/" + runtime.GOARCH,
+		PriceTable: priceTableJSON{
+			Version:       active.Version,
+			EffectiveDate: active.EffectiveDate,
+		},
+	}
+	if resp.Commit == "" {
+		resp.Commit = v.Commit
+	}
+	if v.Stamped {
+		modified := v.Modified
+		resp.Modified = &modified
+	}
+	return resp
+}
+
+// handleVersion reports build identity. UNAUTHENTICATED and mounted in read-only
+// mode deliberately: the whole point is that an operator can identify a running
+// deployment, and a public demo is exactly the deployment hardest to identify by
+// other means. It discloses no spend data.
+//
+// ⚠️ Scope of that claim, stated precisely because an earlier draft overstated it:
+// for a MIRROR-built artifact everything here is already public (the release
+// binaries and image carry the same stamps). For a binary built from the PRIVATE
+// tree and deployed, `commit` is a private-repo revision. That SHA is opaque —
+// GitHub will not serve a commit, tree or blob from a private repo to an
+// anonymous fetch-by-SHA — so it leaks no code; what it reveals, sampled over
+// time, is deploy cadence. Judged acceptable: `version` was already open on
+// /livez before this endpoint existed, so the fingerprint is not new.
+func (h *Handler) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, h.buildIdentity())
 }
 
 // --- helpers ---
@@ -4672,8 +4859,14 @@ const writeLockUnavailableRetryAfter = 1
 // count is all of token_events rather than repair-repo's repo-filtered subset,
 // and it can exceed this cap comfortably. That does not make 250ms wrong: a
 // request arriving while another process is mid-upgrade is exactly the case where
-// a retryable 503 is the honest answer and a five-second stall behind the single
-// connection is not.
+// a retryable 503 is the honest answer and a five-second stall is not.
+//
+// ⚠️ "behind the single connection" stood here until #669 raised the store's pool
+// off 1. Do not restore it, and do not read its removal as the stall being gone:
+// a blocked promote still holds its pool slot for the whole wait, so the
+// process-wide version returns once maxOpenConns promotes block at once
+// (measured: 4.75s for an unrelated read at 4 concurrent blockers, 393µs at 3).
+// The threshold moved; the failure did not.
 func writeStoreContention(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", strconv.Itoa(writeLockUnavailableRetryAfter))
 	writeError(w, http.StatusServiceUnavailable, "database is busy: another writer holds the write lock, retry shortly")

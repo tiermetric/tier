@@ -30,6 +30,8 @@ type serveMetrics struct {
 	clampedNegTok       *metrics.CounterVec
 	identityUnjoined    *metrics.GaugeVec
 	zeroOutcomeTripwire *metrics.GaugeVec
+	walBytes            *metrics.GaugeVec
+	walStatErrors       *metrics.CounterVec
 	pushUnattributed    *metrics.CounterVec
 	adminPolls          *metrics.CounterVec
 	adminEvents         *metrics.CounterVec
@@ -192,6 +194,46 @@ func newServeMetrics(version string) *serveMetrics {
 	zeroOutcomeTripwire := reg.NewGauge(
 		"tier_zero_outcome_tripwire",
 		"1 when cost accrued in the tripwire window but zero outcomes were recorded (team TIER will read ~0); 0 otherwise (#189).")
+	// walBytes is the size of the SQLite -wal sidecar, sampled periodically (#669).
+	//
+	// 🔴 WHY THIS METRIC EXISTS AT ALL, AND WHY IT ARRIVED WITH THE POOL RAISE.
+	// A WAL is checkpointed PASSIVELY at commit, and a passive checkpoint can only
+	// RESET the file when no reader holds an older snapshot. At the old pool of 1 a
+	// reader and the writer shared the single connection, so a commit never found a
+	// concurrent reader and the file pinned to SQLite's 1000-page autocheckpoint
+	// ceiling (~4.1MB). Above 1 that is no longer guaranteed. MEASURED 2026-08-13,
+	// 1200 writes per arm, same DB shape:
+	//
+	//	maxOpen=1, 2 readers                     -> 4.15MB  (1.01x the ceiling)
+	//	maxOpen=4, 0 readers          [CONTROL]  -> 4.15MB  (1.01x)
+	//	maxOpen=4, 2 readers, back-to-back reads -> 12.9MB  (3.15x, never resets)
+	//	maxOpen=4, 2 readers, 500ms poll gap     -> 4.15MB  (1.01x)
+	//
+	// ⭐ The zero-reader CONTROL is the load-bearing arm: it shows the growth needs
+	// BOTH the raised pool AND continuous read pressure, so this is not "the pool
+	// makes the WAL grow". A gap as small as 500ms restores the healthy ceiling
+	// completely, and tier's dashboard has no auto-refresh at all — so the hazard
+	// is REACHABLE but not REACHED by today's workload. That is precisely why this
+	// ships as an INSTRUMENT rather than a checkpointer: the failure would
+	// otherwise present as DISK EXHAUSTION with no prior signal.
+	//
+	// A GAUGE and deliberately UNLABELLED, matching zeroOutcomeTripwire.
+	// walStatErrors counts failures to stat the -wal sidecar (#669).
+	//
+	// 🔴 IT EXISTS BECAUSE THE GAUGE ALONE HAS A FALSE-GREEN MODE. checkWALSize
+	// deliberately leaves walBytes UNTOUCHED on a stat error rather than flapping
+	// it to 0, so a transient filesystem error cannot read as "the WAL is fine
+	// now". The cost of that choice is that a PERSISTENT failure — a vanished bind
+	// mount, ENOTDIR, EACCES on the directory — freezes the gauge at its last
+	// healthy sample forever, and a scraper cannot tell that from a healthy WAL.
+	// This counter is what distinguishes them: a rising count means the gauge is
+	// STALE, not calm. ⚠️ Alert on the counter, not only on the gauge.
+	walStatErrors := reg.NewCounter(
+		"tier_sqlite_wal_stat_errors_total",
+		"Failures to stat the SQLite -wal sidecar. Non-zero means tier_sqlite_wal_bytes is stale rather than healthy (#669).")
+	walBytes := reg.NewGauge(
+		"tier_sqlite_wal_bytes",
+		"Size in bytes of the SQLite -wal sidecar at the last sample. Sustained growth far above ~4.1MB means passive checkpoints cannot reset the WAL because a reader is always open (#669).")
 	// pushUnattributed counts direct commits to the default branch that push capture
 	// could not attribute to an issue (no resolvable issue id, or no GitHub author
 	// login) and therefore did NOT score (#196). Pairs with the per-commit INFO log
@@ -253,6 +295,8 @@ func newServeMetrics(version string) *serveMetrics {
 		clampedNegTok:       clampedNegTok,
 		identityUnjoined:    identityUnjoined,
 		zeroOutcomeTripwire: zeroOutcomeTripwire,
+		walBytes:            walBytes,
+		walStatErrors:       walStatErrors,
 		pushUnattributed:    pushUnattributed,
 		adminPolls:          adminPolls,
 		adminEvents:         adminEvents,

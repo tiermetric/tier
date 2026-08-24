@@ -12,8 +12,12 @@ import (
 
 // TestOpen_DoesNotLeakHandleOnMigrationFailure is the regression guard for #316:
 // every error return in Open AFTER sql.Open succeeds must release the underlying
-// *sql.DB, whose SetMaxOpenConns(1) pooled connection holds the db file plus the
-// WAL -wal/-shm handles open. Before the fix, only the early gates (ping, version
+// *sql.DB, whose pooled connections hold the db file plus the WAL -wal/-shm
+// handles open. (This said "SetMaxOpenConns(1) pooled connection" until #669
+// raised the pool to maxOpenConns. The guard is unaffected — the fd probe below
+// counts handles, and a leak strands at least one connection's worth per
+// iteration whatever the pool size — but the singular was about to become wrong.)
+// Before the fix, only the early gates (ping, version
 // read, refuse-if-newer) closed the handle; every migration-phase branch
 // (`apply schema:`, the addColumnIfMissing ALTERs, `migrate ... drop check:`, the
 // data migrations, the post-migration indexes, the webhook prune) returned a nil

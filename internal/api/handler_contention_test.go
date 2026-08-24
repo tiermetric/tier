@@ -59,6 +59,33 @@ func (contendedStore) InsertManualCostEvent(context.Context, store.TokenEvent) e
 	return contentionErr()
 }
 
+// #668 added three more request-path writers. Until that issue these three were
+// DEFERRED read-then-write sites: they did not produce the sentinel at all, so
+// there was nothing for a handler to map and contention arrived as a 500.
+//
+// ⚠️ AND IT ARRIVED IMMEDIATELY, NOT AFTER A BLOCK. An earlier draft of this
+// comment said "after a full 5000ms block"; measured, the DEFERRED read-then-
+// write upgrade returns in ~65µs, because SQLite runs no busy handler for a
+// deadlock-prone upgrade. The defect was never a stall — it was an instant,
+// unretryable failure that no handler could classify. Converting them to
+// beginImmediateBounded is what makes these cases reachable, and the handler
+// mapping is what makes them correct.
+func (contendedStore) UpsertHierarchy(context.Context, string, string, string, string) error {
+	return contentionErr()
+}
+
+func (contendedStore) UpsertHierarchies(context.Context, []store.HierarchyRow) error {
+	return contentionErr()
+}
+
+// EndMembership is the sharpest of the three: its handler already had a typed
+// 400 arm (ErrEndBeforeStart), so a contention error landing on the wrong side
+// of that branch would be reported to the client as incoherent INPUT rather
+// than as a transient condition worth retrying.
+func (contendedStore) EndMembership(context.Context, string, string, string) error {
+	return contentionErr()
+}
+
 // newContendedHandler builds a Handler over contendedStore. It reuses the ordinary
 // test store for every method it does not override, so routing, auth, and the
 // aggregation guards behave exactly as in production.
@@ -115,6 +142,21 @@ func TestWriteLockContentionIsRetryable503(t *testing.T) {
 			overridePayload("contention-002", 0.0206, false, "", "")},
 		{"POST /costs (plain, unkeyed)", http.MethodPost, "/api/v1/costs",
 			overridePayload("", 0.0206, false, "", "")},
+		// #668: the three org-hierarchy writers. They are admin-surface rather
+		// than hot-path, which is exactly why they were the ones left DEFERRED —
+		// and why a 500 here is worse than it looks: a bulk onboarding import
+		// that lost the write lock wrote NOTHING (the batch is one transaction),
+		// so the whole request is safe to replay verbatim. 500 tells the
+		// operator to go looking for a broken database instead.
+		// The developer rides the PATH here, not the body — hierarchyPutRequest
+		// sets DisallowUnknownFields, so a body carrying "developer" is a 400
+		// and the case would never reach the store at all.
+		{"PUT /org_hierarchy/{developer}", http.MethodPut, "/api/v1/org_hierarchy/alice",
+			hierarchyPutRequest{Team: "core", Division: "platform", Org: "acme"}},
+		{"POST /org_hierarchy (bulk)", http.MethodPost, "/api/v1/org_hierarchy",
+			[]store.HierarchyRow{{Developer: "alice", Team: "core", Division: "platform", Org: "acme"}}},
+		{"POST /period_membership/{developer}/end", http.MethodPost, "/api/v1/period_membership/alice/end",
+			endMembershipRequest{Org: "acme", PeriodEnd: "2026-08"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -362,5 +404,74 @@ func TestCostInsertContentionOutranksTheCostConflict(t *testing.T) {
 		overridePayload("order-002", 0.0206, false, "", ""))
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 — a write-lock contention error that also carries ErrCostConflict is being classified as a permanent divergent-cost collision, so a transient lock race is reported as an immutable stored cost the client can never re-post; body = %s", code, body)
+	}
+}
+
+// endBeforeStartContentionStore returns a write-lock contention error that ALSO
+// wraps store.ErrEndBeforeStart — the sentinel handleEndMembership classifies as
+// a permanent 400.
+//
+// 🔴 THIS ONE PINS THE SHARPEST OF THE THREE ORDERINGS, and unlike its two
+// siblings it guards a shape the concrete store CAN produce. EndMembership is the
+// only method in the tree that returns both sentinels: it takes the bounded write
+// lock (#668) and it returns the typed ErrEndBeforeStart, and both travel out
+// through the same `fmt.Errorf("EndMembership: %w", err)` decoration.
+//
+// The first draft of handleEndMembership classified the 400 FIRST, arguing both
+// orders were safe "because both arms match a distinct sentinel" — the exact
+// argument mismatchingContentionStore's doc rejects. A handler written against
+// the Store INTERFACE cannot rely on what one implementation happens to produce;
+// branch order must hold for ANY error satisfying both predicates.
+//
+// ⚠️ AND THE COST OF THE WRONG ORDER IS WORSE HERE THAN AT THE OTHER TWO SITES.
+// A misfiled 500 tells an operator the database is broken. A misfiled 400 tells
+// the CLIENT its input was incoherent — "period_end precedes the membership's
+// start" — for a request whose periods were perfectly valid and which a retry one
+// second later would have completed. It is the one misclassification that sends
+// the caller to fix input that was never wrong.
+type endBeforeStartContentionStore struct {
+	Store
+}
+
+func (endBeforeStartContentionStore) EndMembership(context.Context, string, string, string) error {
+	return fmt.Errorf("EndMembership: %w", fmt.Errorf("%w: %w", store.ErrEndBeforeStart, contentionErr()))
+}
+
+// TestContentionOutranksAPermanentClassification pins that handleEndMembership
+// classifies store.ErrWriteLockUnavailable BEFORE store.ErrEndBeforeStart.
+//
+// Swapping the two blocks in internal/api/hierarchy.go must fail this test.
+// MEASURED: with the pre-review ordering (400 first) this returns 400 and the
+// assertion below trips.
+func TestContentionOutranksAPermanentClassification(t *testing.T) {
+	h := newHandlerOverStore(t, func(db *store.DB) Store { return endBeforeStartContentionStore{Store: db} })
+
+	// 🔴 CONTROL: the fixture must genuinely satisfy BOTH classifications, or
+	// the ordering is not what decides the status and this test proves nothing.
+	// It also travels through the same "EndMembership: %w" decoration the real
+	// method applies, so a wrap that swallowed a sentinel would surface here.
+	err := endBeforeStartContentionStore{}.EndMembership(context.Background(), "a", "b", "2026-08")
+	if !errors.Is(err, store.ErrEndBeforeStart) {
+		t.Fatalf("fixture error %v does not wrap ErrEndBeforeStart — the 400 branch would not match it, so this test would pass whichever branch ran first", err)
+	}
+	if !errors.Is(err, store.ErrWriteLockUnavailable) {
+		t.Fatalf("fixture error %v does not wrap the contention sentinel — nothing here would be classified as contention under either ordering", err)
+	}
+
+	body, err := json.Marshal(endMembershipRequest{Org: "acme", PeriodEnd: "2026-08"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/period_membership/alice/end", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 — an error that is BOTH contention and end-before-start was classified by whichever branch ran first, and %d means the permanent one won; a client told its period_end is invalid will fix input that was never wrong instead of retrying; body = %s", rec.Code, rec.Code, rec.Body.String())
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Error("503 carries no Retry-After — the client is left guessing whether to retry at all")
 	}
 }

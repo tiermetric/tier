@@ -464,12 +464,18 @@ WHERE developer IN (%s)
 // index-served: EXPLAIN QUERY PLAN reports
 // "SEARCH token_events USING INDEX idx_token_events_scores (developer=?)".
 //
-// tx is CONCRETE rather than an interface on purpose. developerIdentifierSet
-// takes the package's rowQuerier because it is genuinely called with both a *DB
-// and a *sql.Tx; this helper has exactly one caller and MUST run inside the
-// repair's transaction, so naming *sql.Tx makes that a compile-time fact instead
-// of a comment. An interface here would only advertise a flexibility that would
-// be a bug to use.
+// tx is CONCRETE rather than an interface on purpose: this helper has exactly one
+// caller and MUST run inside the repair's transaction, so naming *sql.Tx makes
+// that a compile-time fact instead of a comment. An interface here would only
+// advertise a flexibility that would be a bug to use.
+//
+// ⚠️ This used to add "developerIdentifierSet takes the package's rowQuerier
+// because it is genuinely called with both a *DB and a *sql.Tx". #673 made that
+// false: ExportDeveloper was the last production *sql.DB caller and now passes
+// its read transaction, so all three call sites pass a *sql.Tx. The interface
+// survives for the TESTS (see rowQuerier), not for a production caller. ⭐ The
+// argument in this paragraph is unaffected — and #673 is the case study for it,
+// since an unenclosed multi-read there tore a GDPR export.
 func aliasUnqualifiedRows(ctx context.Context, tx *sql.Tx, developer string) (siblings []string, unqualified int64, err error) {
 	_, ids, err := developerIdentifierSet(ctx, tx, developer)
 	if err != nil {

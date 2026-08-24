@@ -46,6 +46,19 @@ import (
 // unstamped fallback for `go run` and bare `go build`.
 var version = "dev"
 
+// commit is the build commit, injected via -ldflags "-X main.commit=...". It is
+// EMPTY off-tree and in any build that does not set it, in which case
+// internal/api falls back to the VCS stamps the Go toolchain embeds.
+//
+// 🔴 The fallback is not sufficient on its own, which is why this exists. The
+// shipped CONTAINER has no stamps at all: .dockerignore excludes .git, so
+// `buildvcs=auto` finds no repository and records nothing. Measured on the
+// published v0.4.0 image — zero vcs settings in the binary, while the release
+// TARBALL built in the same workflow run carries vcs.revision=ca27d9f0…. The
+// container is the deployment #638 was filed about, so it is the one that most
+// needs this injected.
+var commit = ""
+
 func main() {
 	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -1059,7 +1072,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		Window:         *authFailureWindow,
 		Lockout:        *authLockout,
 		TrustedProxies: trustedProxies,
-	})
+	}, api.WithCommit(commit))
 	apiHandler.SetMetricsRegistry(srvMetrics.reg)
 	// Wire the unjoined-identity gauge (#125), same write-once-before-serve seam
 	// as the registry above; /scores Sets it per read, nil-safe elsewhere.
@@ -1534,6 +1547,15 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	go runZeroOutcomeTripwire(watcherCtx, zeroOutcomeWindow, zeroOutcomeCheckInterval,
 		db, srvMetrics.zeroOutcomeTripwire, logger)
 
+	// WAL size tripwire (#669): the store's connection pool was raised from 1 to
+	// maxOpenConns, and above 1 a continuously-open reader can stop a passive
+	// checkpoint from ever RESETTING the -wal sidecar. Measured: it then grows
+	// without bound, and the first symptom an operator sees is DISK, not latency.
+	// This publishes tier_sqlite_wal_bytes and WARNs past walSizeWarnBytes, so the
+	// condition is visible long before the disk is. Cancelled via watcherCtx.
+	go runWALSizeTripwire(watcherCtx, *dbPath, walSizeCheckInterval,
+		srvMetrics.walBytes, srvMetrics.walStatErrors, logger)
+
 	go func() {
 		logger.Info("tierd listening", "addr", *addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1791,6 +1813,101 @@ func checkEmptyTeamHierarchy(ctx context.Context, mode scoring.AggregationMode, 
 	}
 	return false
 }
+
+// walSizeCheckInterval is how often the -wal sidecar is sampled. 5 minutes: the
+// failure this watches for is DISK filling over hours, never a spike, so a cheap
+// os.Stat at this cadence costs nothing and still surfaces sustained growth
+// inside one working session.
+const walSizeCheckInterval = 5 * time.Minute
+
+// walSizeWarnBytes is the -wal size above which serve WARNs.
+//
+// 🔴 THE NUMBER IS DERIVED FROM A MEASURED CEILING, NOT PICKED. A healthy WAL
+// pins to SQLite's default 1000-page autocheckpoint threshold — 4,148,872 bytes
+// measured, ~4.1MB — in EVERY configuration that can reset it, including the
+// zero-reader control at the raised pool. 64MB is ~15x that ceiling: far enough
+// above to never fire on a healthy install that momentarily overshoots between
+// checkpoints (the worst measured overshoot under a periodic checkpointer was
+// 1.68x), and far below the point where disk is in danger. See tier_sqlite_wal_bytes.
+const walSizeWarnBytes = 64 << 20
+
+// runWALSizeTripwire samples the -wal sidecar immediately, then every interval
+// until ctx is cancelled — the same lifecycle as runZeroOutcomeTripwire, so the
+// goroutine joins cleanly on shutdown with no leak.
+// It exits on ctx cancellation; nothing joins it, and nothing needs to — unlike
+// the other background loops it touches only the filesystem, never the store, so
+// it cannot outlive db.Close() into a use-after-close.
+//
+// 🔴 IT WARNS ON TRANSITION, NOT ON EVERY SAMPLE, AND THAT IS NOT COSMETIC. A
+// starved WAL does not shrink on its own — the condition is permanent by
+// construction until an operator acts — so warning every pass would emit 288
+// identical multi-line WARNs a day, indefinitely. checkZeroOutcome can warn every
+// pass precisely because its condition SELF-CLEARS when an outcome lands; this
+// one does not, and a log line that repeats forever is one operators filter out.
+// The gauge still carries the current value on every sample, so the metric stays
+// continuous while the log stays readable. A re-crossing warns again.
+func runWALSizeTripwire(ctx context.Context, dbPath string, interval time.Duration, gauge *metrics.GaugeVec, errs *metrics.CounterVec, logger *slog.Logger) {
+	wasTripped := checkWALSize(dbPath, gauge, errs, logger)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tripped := checkWALSize(dbPath, gauge, errs, logger, wasTripped)
+			wasTripped = tripped
+		}
+	}
+}
+
+// checkWALSize stats the -wal sidecar, publishes the gauge, and WARNs when it is
+// over walSizeWarnBytes. Returns true when tripped.
+//
+// A missing -wal is NOT an error and NOT a zero-size WAL to be warned about: the
+// sidecar does not exist until the first write after open, and it is removed on a
+// clean close. Both read as 0 bytes, which is the healthy value.
+//
+// ⚠️ Like checkZeroOutcome, a stat error leaves the gauge UNTOUCHED rather than
+// flapping it to 0 — a transient filesystem error must not read as "the WAL is
+// fine now".
+// suppressWarn (variadic so the startup call reads cleanly) carries the PREVIOUS
+// sample's tripped state: when it is true the condition is already known and the
+// WARN is suppressed. The return value is always the current state regardless.
+func checkWALSize(dbPath string, gauge *metrics.GaugeVec, errs *metrics.CounterVec, logger *slog.Logger, suppressWarn ...bool) bool {
+	fi, err := os.Stat(dbPath + "-wal")
+	if errors.Is(err, os.ErrNotExist) {
+		gauge.Set(0)
+		return false
+	}
+	if err != nil {
+		// 🔴 COUNT IT, because leaving the gauge untouched has a false-green mode.
+		// Not flapping the gauge to 0 is right for a TRANSIENT error, but a
+		// PERSISTENT one (vanished mount, ENOTDIR, EACCES) would otherwise freeze
+		// tier_sqlite_wal_bytes at its last healthy sample forever and a scraper
+		// could not tell stale from calm. The counter is what distinguishes them.
+		errs.Inc()
+		logger.Warn("wal size tripwire: stat failed — tier_sqlite_wal_bytes is now STALE, not necessarily healthy; see tier_sqlite_wal_stat_errors_total", "err", err)
+		return false
+	}
+	size := fi.Size()
+	gauge.Set(float64(size))
+	if !evalWALSize(size) {
+		return false
+	}
+	if len(suppressWarn) > 0 && suppressWarn[0] {
+		return true // already reported; the gauge above still carries the value
+	}
+	logger.Warn("wal size tripwire: the SQLite -wal sidecar is far above the size a passive checkpoint resets it to, which means a reader is holding a snapshot almost continuously and the WAL can be copied but never RESET — it will keep growing until disk fills, and disk is the first symptom an operator sees (#669). MOST LIKELY CAUSE FIRST: a long-running `tierd reprice` or `tierd repair-repo` DRY RUN, which holds one DEFERRED read transaction open across a full-table scan by design (so it does not contend with a live serve) and therefore pins a WAL read mark for its whole duration. Otherwise: any other process holding a read transaction open, or a client polling a read endpoint back-to-back. A gap as short as 500ms was measured to restore the healthy ceiling completely",
+		"wal_bytes", size,
+		"warn_at_bytes", int64(walSizeWarnBytes))
+	return true
+}
+
+// evalWALSize is the pure tripwire predicate, split out so the decision is
+// unit-testable without a filesystem, ticker, gauge or clock — mirroring
+// evalZeroOutcome.
+func evalWALSize(size int64) bool { return size > walSizeWarnBytes }
 
 // runZeroOutcomeTripwire runs the startup check immediately, then re-checks every
 // interval until ctx is cancelled (shutdown) — mirroring runUnknownCostShareMonitor's

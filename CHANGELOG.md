@@ -7,6 +7,74 @@ reaches v1.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-24
+
+### Security
+
+- **The build toolchain floor is Go 1.26.6 (#694).** `go.mod`, `tools/docgen/go.mod`, the
+  `Dockerfile` builder pin and `release.yml`'s `setup-go` all move together. This closes eight
+  fixable HIGH stdlib CVEs -- `CVE-2026-33818`, `-39821`, `-46600`, `-56853`, `-56858`, `-56859`,
+  `-56860`, `-56862` -- in every future build.
+  ⚠️ **It does NOT retroactively fix an already-published artifact.** A container image is
+  immutable: `ghcr.io/tiermetric/tierd:latest` keeps all eight until it is rebuilt and re-released
+  (#683). The same eight are in the v0.4.0 Release-page tarballs, which no gate scans at all.
+  🔑 **The artifact never changed -- the vulnerability database did:** the identical digest measured
+  0 fixable HIGH on 2026-08-06..08-13, 2 on 08-14 and 8 on 08-22, across zero commits.
+- **`scripts/image-cve-rescan.sh` now asserts the four Go pins are in lockstep**, run by
+  `make check`. Previously the only detector for a half-bump was the nightly CVE re-scan -- i.e.
+  *after* publication.
+
+### Changed
+
+- 🔴 **BUILD REQUIREMENT: you now need Go 1.26.6+** (was 1.26.5+). There is deliberately no
+  `toolchain` directive, so under `GOTOOLCHAIN=local` an older toolchain is **refused**
+  (`go.mod requires go >= 1.26.6`) rather than silently building a vulnerable binary. Under the
+  default `GOTOOLCHAIN=auto`, `go install` fetches 1.26.6 automatically.
+
+### Added
+
+- **`tier_sqlite_wal_bytes` -- the size of the SQLite `-wal` sidecar, sampled
+  every 5 minutes by `tierd serve`, with a `WARN` past 64MiB (#669).** It exists
+  because raising the connection pool (below) makes WAL checkpoint starvation
+  reachable: a passive checkpoint can only RESET the write-ahead log when no
+  reader holds an older snapshot, so a client polling a read endpoint with no gap
+  can keep the WAL growing indefinitely. **The first symptom of that is DISK, not
+  latency** -- there was previously no signal at all. A missing `-wal` reads as
+  `0` and is the healthy state (the sidecar does not exist until the first write
+  and is removed on a clean close).
+
+### Changed
+
+- **#669 -- the store's connection pool is 4, not 1.** A request-path write used
+  to block at CONNECTION ACQUISITION rather than at the write lock: measured, a
+  bounded write issued while a 1.5s read was in flight took **1.450s against a
+  250ms bound**, because the reader held the process's only connection. At a pool
+  of 4 the same write takes **0.514ms**. `SetMaxIdleConns` is set equal to the
+  maximum -- nothing set it before, so `database/sql`'s default of 2 applied,
+  which at a pool of 4 continuously destroys and rebuilds two connections and
+  re-runs the DSN pragmas with a cold page cache in front of a 138ms scan.
+  ⚠️ *This buys LATENCY ISOLATION, not read throughput.* Four concurrent readers
+  running window scans went 298ms -> 274ms, i.e. **1.09x**: `modernc.org/sqlite`
+  reads are pure-Go and CPU-bound. Do not size this pool as a throughput knob.
+  *Depends on #668* -- above a pool of 1, every DEFERRED read-then-write becomes
+  an unretried `SQLITE_BUSY_SNAPSHOT` (517) race, so those sites had to take the
+  write lock up front first.
+- **#668 -- the last DEFERRED read-then-write store sites take the write lock up
+  front.** `UpsertHierarchy`, `UpsertHierarchies`, `EndMembership` and
+  `UpdateQualityForOutcome` now use the bounded `BEGIN IMMEDIATE` helper; the two
+  `subscription.go` reconcilers and `UpdateQuality` use the unbounded one. Their
+  atomicity previously came from `SetMaxOpenConns(1)` handing the transaction the
+  process's only connection -- a correctness property resting on a pool-size
+  constant. This is the precondition for raising that constant (#669).
+- **BREAKING (status code):** the three org-hierarchy write routes answer
+  write-lock contention with `503` + `Retry-After: 1` instead of `500`. No client
+  loses a success it used to get -- measured, the previous shape failed in ~65us
+  with an unretryable `SQLITE_BUSY` rather than waiting. See
+  `docs/api-compatibility.md` for the full entry.
+- The GitHub webhook endpoint answers the same condition with `503` +
+  `Retry-After` instead of `500`, so a transient lock conflict no longer logs as
+  a handler error pointing at a broken database.
+
 ## [0.4.0] - 2026-08-05
 
 **The anonymity release. If you run TIER with `--aggregation team` or `division`,
@@ -707,7 +775,8 @@ The first public release.
   documented, no absolute good/bad band.
 - Team/developer/division aggregation with a k-anonymity floor for team mode.
 
-[Unreleased]: https://github.com/tiermetric/tier/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tiermetric/tier/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/tiermetric/tier/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tiermetric/tier/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tiermetric/tier/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tiermetric/tier/compare/v0.2.0...v0.2.1

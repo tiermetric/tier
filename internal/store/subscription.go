@@ -136,18 +136,24 @@ func PeriodRange(from, to string) ([]string, error) {
 // nor offset. The allocation read sums across sources, so the org total stays
 // complete.
 //
-// The read and the write run in ONE transaction — but be precise about what
-// that buys, because it is less than it looks. modernc.org/sqlite ignores
-// sql.TxOptions.Isolation entirely, so this BeginTx is DEFERRED (#598); the
-// real in-process atomicity comes from SetMaxOpenConns(1), which gives the tx
-// the process's only connection. Against another PROCESS (a concurrent `tierd
-// reprice` / `backfill`) a DEFERRED read-then-write can hit
-// SQLITE_BUSY_SNAPSHOT, which busy_timeout does NOT retry — so the INSERT
-// errors, this call returns the error, and the caller retries on the next tick.
-// That is the honest guarantee: no double-post is possible, but a cross-process
-// race is a retried failure rather than a serialized success. Promoting to
-// store.beginImmediate is deliberately left to #598's sweep rather than done
-// unilaterally here.
+// The read and the write run in ONE transaction that takes the write lock UP
+// FRONT via beginImmediate (#668) — and the distinction matters, because this
+// site used to rely on something else. It was a plain BeginTx, which
+// modernc.org/sqlite renders DEFERRED (it ignores sql.TxOptions.Isolation
+// entirely, #598), and its atomicity came from SetMaxOpenConns(1) handing the
+// tx the process's only connection. That was true but FRAGILE: it made a
+// correctness property depend on a pool-size constant, so raising the pool
+// (#669) would have converted this into a live race with no test failing.
+//
+// With BEGIN IMMEDIATE the guarantee no longer depends on pool size at all. The
+// serialization is the write lock, in-process and cross-process alike, so a
+// concurrent `tierd reprice` / `backfill` now WAITS (busy_timeout) instead of
+// failing the deferred-to-write upgrade with SQLITE_BUSY_SNAPSHOT (517), which
+// busy_timeout does NOT retry.
+//
+// UNBOUNDED is deliberate: the caller is the hourly background ticker in
+// cmd/tierd, not a request, so there is no client latency to cap and waiting
+// out a competing writer is strictly better than failing and retrying next tick.
 //
 // period must be a valid YYYY-MM (ValidPeriod); a malformed one is rejected
 // here rather than left to the org_actual_spend CHECK constraint, so the error
@@ -164,7 +170,7 @@ func (d *DB) ReconcileSubscriptionFee(ctx context.Context, routePrefix, org, per
 	}
 	source := SubscriptionSpendSource(routePrefix)
 
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginImmediate(ctx, d.db)
 	if err != nil {
 		return 0, fmt.Errorf("begin subscription fee reconcile (%s, %s): %w", routePrefix, period, err)
 	}
@@ -215,7 +221,10 @@ func (d *DB) ReconcileSubscriptionFee(ctx context.Context, routePrefix, org, per
 // fully credited) has been decided; re-posting the fee there would overrule a
 // human correction, which is the same class of error as the restatement above.
 //
-// Same transaction and same DEFERRED-BeginTx caveat as ReconcileSubscriptionFee.
+// Same transaction shape as ReconcileSubscriptionFee, and the same unbounded
+// beginImmediate for the same reason (#668): the COUNT(*) is the guard for the
+// INSERT, so the write lock is taken up front rather than relying on pool size,
+// and the caller is a background ticker with no client latency to cap.
 func (d *DB) PostSubscriptionFeeIfUnposted(ctx context.Context, routePrefix, org, period string, feeMicro int64) (int64, error) {
 	if routePrefix == "" {
 		return 0, fmt.Errorf("subscription fee backfill: route prefix is required")
@@ -242,7 +251,7 @@ func (d *DB) PostSubscriptionFeeIfUnposted(ctx context.Context, routePrefix, org
 	}
 	source := SubscriptionSpendSource(routePrefix)
 
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginImmediate(ctx, d.db)
 	if err != nil {
 		return 0, fmt.Errorf("begin subscription fee backfill (%s, %s): %w", routePrefix, period, err)
 	}

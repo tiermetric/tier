@@ -1,7 +1,7 @@
 # TIER — Token Impact & Efficiency Ratio
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Go 1.26.5+](https://img.shields.io/badge/go-1.26.5%2B-00ADD8)
+![Go 1.26.6+](https://img.shields.io/badge/go-1.26.6%2B-00ADD8)
 ![Status: pre-v1](https://img.shields.io/badge/status-pre--v1-orange)
 
 **Measure what your AI spend produces, not what it burns.**
@@ -60,7 +60,7 @@ Run it for one team or one organization at a time.
 
 ## Prerequisites
 
-TIER builds from source. You need **Go 1.26.5+**, **make**, and **git**. Clone
+TIER builds from source. You need **Go 1.26.6+**, **make**, and **git**. Clone
 the repo and build the `tierd` binary once:
 
 ```sh
@@ -485,7 +485,8 @@ token, all routes are reachable.
 | `DELETE /api/v1/developer/{id}` | GDPR: erase one developer's data (#184) | admin |
 | `GET /api/v1/health` | liveness/status | open |
 | `GET /api/v1/healthz` | readiness (watcher subsystem state) | open |
-| `GET /api/v1/livez` | liveness (version + uptime) | open |
+| `GET /api/v1/livez` | liveness (version + uptime; **+ commit** on builds newer than the latest release) | open |
+| `GET /api/v1/version` | build identity (version, commit, platform, price table) — ⚠️ **not in any published release yet; 404 on v0.4.0** | open |
 | `GET /api/v1/quality_events` | raw quality signals behind the outcome weights | read |
 | `GET /api/v1/quality_history` | quality signal history over time | read |
 | `GET /api/v1/fidelity` | capture fidelity: recorded vs estimated spend | read |
