@@ -1,0 +1,50 @@
+{
+  "aggregation": "team",
+  "data_quality": {
+    "attributed_outcome_share": 1,
+    "attribution_coverage": "not_shown",
+    "cost_coverage_start": "2026-04-15T00:00:00Z",
+    "excludes_unattributed_spend": true,
+    "window_predates_cost_capture": false
+  },
+  "developers": [],
+  "price_table": "\u003cprice_table\u003e",
+  "rubric": {
+    "version": 1
+  },
+  "since": "2026-05-01",
+  "teams": [
+    {
+      "actual_paid_usd": 0,
+      "cost_per_point": 5.175,
+      "coverage_pct": 100,
+      "ranked": true,
+      "spend_leverage": 0,
+      "team": "big",
+      "tier": 193.23671497584542,
+      "total_cost_usd": 62.1,
+      "weighted_points": 12
+    },
+    {
+      "actual_paid_usd": 0,
+      "cost_per_point": 0.74,
+      "coverage_pct": 100,
+      "ranked": false,
+      "spend_leverage": 0,
+      "team": "other",
+      "tier": 1351.3513513513512,
+      "total_cost_usd": 3.7,
+      "weighted_points": 5
+    }
+  ],
+  "total": {
+    "actual_paid_usd": 0,
+    "cost_per_point": 3.870588235294118,
+    "coverage_pct": 100,
+    "ranked": true,
+    "spend_leverage": 0,
+    "tier": 258.3586626139817,
+    "total_cost_usd": 65.80000000000001,
+    "weighted_points": 17
+  }
+}

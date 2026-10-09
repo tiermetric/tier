@@ -1,0 +1,13 @@
+# Keep the build context small and deterministic. VERSION is passed as a
+# build-arg, so .git is not needed in-image.
+.git
+.github
+.claude
+bin/
+*.db
+# Covers every root-level markdown file, including the internal ones.
+# ⚠️ Do NOT re-add specific internal filenames below this line: `*.md` already
+# excludes them from the build context, so naming them changes nothing about the
+# image and only DISCLOSES the filenames in a file that ships publicly. Two such
+# lines existed until #561 and forced a gate-(c) exemption that bought nothing.
+*.md

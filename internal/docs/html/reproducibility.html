@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The reproducibility contract — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="the-reproducibility-contract">The reproducibility contract</h1>
+<p>TIER publishes figures that state what AI-assisted work cost. This page states
+<strong>exactly what can be re-derived from a published figure, and what cannot</strong> — no
+more.</p>
+<blockquote>
+<p><strong>The one-sentence version.</strong> Every report can be bound to a <em>manifest</em> naming
+the price table, the rows and the binary it was computed from — plus, on a
+<strong>scoped</strong> report, the repo-blind rows the scope dropped; <code>tierd verify-report</code> then either reproduces it, or <strong>names which of those inputs
+moved</strong>. It does <strong>not</strong> replay history, and there are inputs it does not
+watch. Both limits are printed on every run, including the successful ones.</p>
+</blockquote>
+<hr>
+<h2 id="1-what-a-report-is-bound-to">1. What a report is bound to</h2>
+<p><code>GET /api/v1/report_manifest</code> returns a <code>tiermanifest1</code> document. It is the
+receipt for a figure. On a developer-mode server with a token, pipe the header
+in so the token stays out of <code>ps</code> (read scope, so the viewer token also works).
+Save the output as <code>manifest.json</code> for §2:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
+  curl --fail-with-body -sS -H @- \
+    &#39;http://127.0.0.1:8080/api/v1/report_manifest?since=2026-08-01&amp;until=2026-08-20&#39; &gt; manifest.json
+</code></pre>
+<p>Illustrative output from an older version-9 table; identities and row data vary:</p>
+<pre><code>$ cat manifest.json
+{
+  &#34;manifest_schema&#34;: &#34;tiermanifest1&#34;,
+  &#34;since&#34;: &#34;2026-08-01T00:00:00Z&#34;,
+  &#34;until&#34;: &#34;2026-08-20T00:00:00Z&#34;,
+  &#34;token_since&#34;: &#34;2026-07-18T00:00:00Z&#34;,
+  &#34;aggregation&#34;: &#34;developer&#34;,
+  &#34;price_table&#34;: {
+    &#34;version&#34;: 9,
+    &#34;effective_date&#34;: &#34;2026-07-26&#34;,
+    &#34;table_hash&#34;: &#34;tierpt1:7acfb82b76f518d25b81d64a1065e29208feaa3dc821e15c636dba4a517db29c&#34;,
+    &#34;file_hash&#34;: &#34;sha256:96719948a59cd5b379baadbf6ed2fb451bb8a62349dc38cb5875d6ed94ef2094&#34;
+  },
+  &#34;rubric&#34;: { &#34;version&#34;: 1 },
+  &#34;tool_version&#34;: &#34;dev&#34;,
+  &#34;commit&#34;: &#34;b105344d6c1f6fd306f0b64c36a96c32cf99a691&#34;,
+  &#34;watermarks&#34;: {
+    &#34;window&#34;:  { &#34;max_token_event_id&#34;: 12, &#34;token_event_count&#34;: 11,
+                 &#34;max_outcome_id&#34;: 12, &#34;outcome_count&#34;: 10 },
+    &#34;ledgers&#34;: { &#34;max_quality_history_id&#34;: 0, &#34;quality_history_count&#34;: 0, &#34;...&#34;: &#34;...&#34; }
+  },
+  &#34;events_digest&#34;:   { &#34;value&#34;: &#34;tierdig1:e01f105557bb8182…&#34;, &#34;rows&#34;: 11 },
+  &#34;outcomes_digest&#34;: { &#34;value&#34;: &#34;tierdig1:ea54f57d041fe2c3…&#34;, &#34;rows&#34;: 10 }
+}
+</code></pre>
+<p>Three kinds of identity are pinned — and, on a <strong>scoped</strong> report, one further
+published figure that no identity can reach
+(<a href="#the-exclusion--the-one-published-figure-no-digest-can-cover" rel="nofollow">the exclusion</a>).
+⚠️ It is listed apart from the three deliberately: it is a <strong>pin</strong>, not an
+identity, and an enumeration that quietly absorbs it would be the same defect
+as the undercounted list §4 corrects.</p>
+<h3 id="the-price-table--two-hashes-and-they-answer-different-questions">The price table — two hashes, and they answer different questions</h3>
+<p><code>table_hash</code> (<code>tierpt1:</code>) is over the <strong>resolved in-memory table</strong>: every model,
+every rate, after provider defaults have been applied. <code>file_hash</code> (<code>sha256:</code>) is
+over the <strong>raw source bytes</strong>.</p>
+<p>They differ deliberately. Provider default multipliers are baked in from <em>code</em>,
+so the same YAML under two binaries can price differently — <code>table_hash</code> catches
+that and <code>file_hash</code> cannot. Conversely a comment-only edit changes <code>file_hash</code>
+and leaves <code>table_hash</code> equal, which is what lets source-URL comments stay
+auditable without invalidating every prior report.</p>
+<p><code>tierd prices</code> lists what the local registry knows. This is a historical example
+from an older version-9 table with 77 models; your registry entries will vary:</p>
+<pre><code>$ tierd prices list --db ~/.tier/tier.db        # --db is the path you gave serve
+price_table_registry version 9:
+  table_hash     &#34;tierpt1:7acfb82b76f518d25b81d64a1065e29208feaa3dc821e15c636dba4a517db29c&#34;
+  file_hash      &#34;sha256:96719948a59cd5b379baadbf6ed2fb451bb8a62349dc38cb5875d6ed94ef2094&#34;
+  effective_date &#34;2026-07-26&#34;
+  model_count    77
+  source         &#34;embedded&#34;
+  tool_version   &#34;tierd v0.0.0-20260829045422-b105344d6c1f+dirty go1.26.6 darwin/arm64&#34;
+  first_seen     &#34;2026-08-29T04:57:38Z&#34;
+note: a recorded identity is authoritative for rows written at or after its first_seen; rows
+already stamped with that version beforehand are not covered by it.
+</code></pre>
+<p>⚠️ Read that closing note. A registry row is authoritative <strong>from its <code>first_seen</code>
+onward</strong>; rows already stamped with that version before it was recorded are not
+covered by it. <code>tierd prices audit</code> shows the append-only ledger of retired
+identities — a retired row is <strong>stamped, never deleted</strong>.</p>
+<blockquote>
+<p><strong><code>UNKNOWN</code> stays <code>UNKNOWN</code>.</strong> A version that was served before the registry
+existed has no row and never gets one retroactively. TIER does not mint an
+identity for a table it never hashed.</p>
+</blockquote>
+<h3 id="the-rows--watermarks-and-digests-because-one-of-them-is-weaker-than-it-looks">The rows — watermarks <em>and</em> digests, because one of them is weaker than it looks</h3>
+<p><code>watermarks</code> pins <code>MAX(id)</code> and <code>COUNT(*)</code> for the window and for five
+append-only audit ledgers. <strong>A <code>MAX(id)</code>/<code>COUNT(*)</code> pair cannot see an in-place
+<code>UPDATE</code></strong> — the row count does not move and neither does the maximum id.</p>
+<p><code>events_digest</code> and <code>outcomes_digest</code> (<code>tierdig1:</code>) close that: they are content
+hashes over every row the report was computed from, covering each row&#39;s
+figure-bearing columns and their evidence but not every column (<code>session_id</code>,
+<code>idempotency_key</code> and <code>push_day</code> are among those left out; <code>tokenEventDigestRow</code>
+and <code>outcomeDigestRow</code> in <code>internal/store/eventsdigest.go</code> list them all, with
+the reason for each). §3 shows an
+edit that every watermark reports as <code>UNCHANGED</code> and the digest catches.</p>
+<p>⚠️ <strong>The two digests use different windows, and that is not a bug.</strong> Outcomes are
+digested over <code>[since, until)</code>; token events over <code>[since − 14d, until)</code>, the
+<strong>attribution band</strong>, because spend that precedes a merged outcome is attributed
+forward to it. <code>token_since</code> in the manifest is that lower bound. If it
+disagrees with the band the verifying binary derives (or cannot be parsed),
+<code>verify-report</code> prints an <code>attribution band</code> line and marks <code>token_events</code>,
+<code>events_digest</code> and <code>repo_scope_excluded</code>&#39;s token leg <code>NOT CHECKED</code> rather than
+comparing pins taken over a different row set. A band difference never makes
+those band-dependent pins read <code>CHANGED</code>; the band-independent ones, including
+<code>repo_scope_excluded</code>&#39;s outcome leg, are still compared and can. Attached
+results are re-run over <em>this</em> binary&#39;s band, so they may still differ. And because the withheld pins are the ones that could
+see a token-side change, a run where any of them was withheld and nothing moved
+exits <code>2</code> (COULD NOT CHECK), never <code>0</code>; anything that did move still exits <code>1</code>.</p>
+<p>🔑 <strong>A <code>?repo=</code>-scoped manifest gets a <em>scoped</em> digest</strong> — it covers only the rows
+that report read. Without that, another team&#39;s ingestion would move your digest
+and <code>verify-report</code> would tell you your untouched report is unreproducible; <em>a
+verifier that cries wolf on other people&#39;s writes is one people stop running.</em>
+Three consequences worth knowing:</p>
+<ul>
+<li>The <strong>predicate is hashed in</strong>, so a scoped digest and a fleet-wide digest are
+<strong>different values even over identical rows</strong>. Never compare one against the
+other — a scope change is meant to read as a change.</li>
+<li>Scoping is <strong>strict</strong>, matching a scoped <code>/scores</code>: rows whose repository could
+not be determined (the reserved <code>unqualified</code> sentinel) are <strong>excluded</strong>, and
+the under-count that causes is disclosed in <code>/scores</code>&#39; <code>data_quality</code> block as
+<code>repo_scope_excluded</code>.
+✅ <strong>That disclosure figure now has a pin of its own</strong> — see
+<a href="#the-exclusion--the-one-published-figure-no-digest-can-cover" rel="nofollow">the exclusion pin</a>
+below (#751). It used to be unattested: it is computed <em>from</em> the sentinel rows,
+which no scoped digest covers and which only a fleet-wide digest would — and a
+scoped manifest publishes no fleet-wide digest. Measured then: an in-place
+reprice of a repo-blind row moved <code>repo_scope_excluded.cost_usd</code> from <code>9</code> to
+<code>14</code> while the scoped digests <strong>and</strong> the scoped watermarks held still.</li>
+<li><code>rows</code> is still the denominator that proves the digest was earned. A scope that
+matched nothing yields a well-formed digest over an empty set; <code>rows: 0</code> is the
+only thing that tells you so.</li>
+</ul>
+<h3 id="the-exclusion--the-one-published-figure-no-digest-can-cover">The exclusion — the one published figure no digest can cover</h3>
+<p><code>repo_scope_excluded</code> on a <strong>scoped</strong> manifest: <code>token_events</code>, <code>cost_micro</code> and
+<code>outcomes</code> for the repo-blind rows the strict scope dropped (#751). The sample
+above is fleet-wide and therefore carries no such key; a scoped one adds:</p>
+<pre><code>  &#34;repo&#34;: &#34;acme/tier&#34;,
+  &#34;repo_scope_excluded&#34;: { &#34;token_events&#34;: 2, &#34;cost_micro&#34;: 13000000, &#34;outcomes&#34;: 1 }
+</code></pre>
+<p>🔴 <strong>Why a separate quantity rather than a wider digest.</strong> It is not the only
+published figure a manifest fails to cover — the <strong>cost horizon</strong> in §4 is
+another, and is still open. It is the only one that no <em>scoped digest could ever</em>
+cover, which is what the heading means and why the fix had to be a separate
+quantity. A scoped <code>/scores</code>
+<em>reads</em> the <code>unqualified</code> sentinel rows — it has to, in order to disclose the
+under-count — but a scoped digest deliberately excludes them, because a digest
+that covered them would attest rows no published score was computed from, and a
+scoped <em>predicate</em> that reached them would attribute every repo-blind row in the
+fleet to whichever repository you named. So the figure sat outside every identity
+a scoped manifest shipped. This pin closes that without touching either
+predicate.</p>
+<p>Three things about its shape are deliberate, and each is the answer to a
+tempting alternative:</p>
+<ul>
+<li><strong>It pins counts, not a digest over the sentinel rows.</strong> A digest would attest
+every digested column of every repo-blind row — a strictly larger claim than the figure
+<code>/scores</code> published — so it would report <code>CHANGED</code> for an edit that moved no
+published number. On a tamper-evidence surface a false alarm is the one failure
+mode you cannot have. The residual is stated rather than hidden: an in-place
+edit to a sentinel row&#39;s non-cost, non-timestamp columns moves nothing here,
+and it moves no published figure either. <code>cost_micro</code> is a <code>SUM</code>, so a reprice
+<em>is</em> caught; <code>ts</code> moves a row in or out of the window, so that is caught too.</li>
+<li><strong>It appears on scoped manifests only, and on every one of them</strong> — including
+when all three counts are <code>0</code>. A fleet-wide report excluded nothing (the
+sentinel rows are inside its own digests), so there is nothing to pin. But an
+<em>omit-when-clean</em> pin would be vacuous exactly when it matters most: a window
+clean at publish time into which a sentinel row later lands would read <code>NOT PINNED</code>, and an absent check that reads like a passing one is the defect the
+digests exist to close. On a manifest <strong>this server emitted</strong>, <code>repo</code> present ⟺
+this object present — an emitter rule, not a refusal: the verifier tolerates a
+hand-written file that breaks it and says <code>NOT CHECKED</code> rather than erroring.</li>
+<li><strong>Money is pinned in micro-dollars</strong> where <code>/scores</code> publishes <code>cost_usd</code>. A
+pin is compared for <em>equality</em>, and float equality over a JSON-round-tripped
+dollar figure can manufacture a divergence.</li>
+</ul>
+<p>⚠️ <strong><code>token_events</code> and <code>cost_micro</code> count the attribution band</strong>
+<code>[since − 14d, until)</code>, while <code>outcomes</code> counts <code>[since, until)</code> — the same
+asymmetry <code>token_since</code> exists for, because a scope can suppress a repo-blind row
+inside an outcome&#39;s look-back. Recompute it over the narrower window and you are
+comparing two different populations.</p>
+<p>⚠️ <strong>No <code>manifest_schema</code> bump.</strong> Adding a field is additive: an older consumer
+ignores the key and every field it does read still means what it meant, and a
+manifest written before #751 verifies rather than erroring.</p>
+<p><strong>What <code>verify-report</code> prints, in full</strong> — four outcomes and a silent fifth,
+because &#34;this manifest never pinned it&#34; and &#34;there is nothing here to pin&#34; are
+different facts:</p>
+<table>
+<thead>
+<tr>
+<th>manifest</th>
+<th>pin</th>
+<th>line</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>fleet-wide</td>
+<td>absent</td>
+<td><strong>no line at all</strong> — nothing was excluded, so there is no pin to miss</td>
+</tr>
+<tr>
+<td>scoped</td>
+<td>absent</td>
+<td><code>NOT PINNED</code> — a pre-#751 emitter, or a hand-written file</td>
+</tr>
+<tr>
+<td>fleet-wide</td>
+<td>present</td>
+<td><code>NOT CHECKED</code> — reported, never agreement; the figure corresponds to no served number</td>
+</tr>
+<tr>
+<td>scoped</td>
+<td>present, equal</td>
+<td><code>UNCHANGED</code></td>
+</tr>
+<tr>
+<td>scoped</td>
+<td>present, differs</td>
+<td><code>CHANGED</code> — and the detail names <em>which</em> of the three moved</td>
+</tr>
+<tr>
+<td>scoped</td>
+<td>present, <code>token_since</code> disagrees</td>
+<td><code>NOT CHECKED</code> — the token leg was pinned over a different band; <code>CHANGED</code> only if the outcome count moved</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-binary">The binary</h3>
+<p><code>tool_version</code> and <code>commit</code>. See §4 for why a drift here is <em>reported</em> but does
+not on its own count as a divergence.</p>
+<hr>
+<h2 id="2-verifying-a-report">2. Verifying a report</h2>
+<p>Save the manifest you fetched in §1 (<code>curl … &gt; manifest.json</code>), then:</p>
+<pre><code>$ tierd verify-report manifest.json --db ~/.tier/tier.db   # --db is the path you gave serve
+</code></pre>
+<p><strong>Exit codes — three for a live window, and the third is not a pass</strong> (a sealed
+month&#39;s manifest adds <code>3</code> and <code>4</code>, <a href="#a-sealed-months-manifest-913" rel="nofollow">below</a>):</p>
+<table>
+<thead>
+<tr>
+<th>code</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td><strong>REPRODUCED</strong> — every pinned input is unchanged</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td><strong>DIVERGED</strong> — at least one pinned input moved, and the report names which</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td><strong>COULD NOT CHECK</strong> — the verification did not happen, or a pinned input was <code>NOT CHECKED</code> because of a differing attribution band, an unsupported digest scheme, or a digest contradicting its pinned row count, and nothing else moved</td>
+</tr>
+</tbody>
+</table>
+<p>⛔ <strong>Never wrap this in a <code>make</code> target.</strong> GNU make replaces a recipe&#39;s exit code,
+so <code>1</code> and <code>2</code> collapse into the same number and the distinction the tool exists
+to draw is destroyed. Invoke the binary.</p>
+<p><code>2</code> is deliberately not folded into <code>1</code>. <em>&#34;We checked and it moved&#34;</em> and <em>&#34;we did
+not check&#34;</em> are different facts and an operator must act differently on each.</p>
+<p>It never writes to the database you name. Every read runs against a <code>VACUUM INTO</code>
+snapshot which is deleted afterwards, because opening the store directly would run
+migrations — and one of those backfills <code>token_events.price_version</code>, <strong>the exact
+provenance column an audit is about</strong>. An archived file is byte-identical after a
+verification run.</p>
+<h3 id="a-sealed-months-manifest-913">A sealed month&#39;s manifest (#913)</h3>
+<p>Once an operator has armed sealing (<code>tierd seal --arm YYYY-MM|earliest</code>, or
+<code>seal_from</code>), in an anonymised mode <code>/api/v1/report_manifest?period=YYYY-MM</code>
+serves a <code>tiersealedmanifest1</code> manifest for one sealed calendar month. <code>verify-report</code>
+takes it the same way. A sealed month is <strong>replayed from the bytes it was sealed
+with, never recomputed</strong>, so the checks are different from a live window&#39;s:</p>
+<ul>
+<li>the stored body&#39;s sha256 must equal the manifest&#39;s <code>body_digest</code>, and the row&#39;s
+own <code>body_digest</code> column;</li>
+<li>the stored row must carry the manifest&#39;s <code>period_start</code>, <code>period_end</code>,
+<code>sealed_at</code>, config (<code>aggregation</code>, <code>period_size</code>, <code>k</code>, <code>fold_rule</code>, <code>digest</code>),
+<code>tool_version</code> and <code>commit</code>;</li>
+<li>the stored fold inputs must refold to the stored body&#39;s <code>teams</code>, or to its
+<code>kanon_suppressed</code> when the residual was withheld. This is not the seal&#39;s own
+check, which compared its fold with the refold before it committed: this one
+compares the refold with the stored body&#39;s bytes, and covers <code>teams</code> and
+<code>kanon_suppressed</code> only. The body&#39;s <code>total</code> and other <code>data_quality</code> fields
+rest on the digest alone;</li>
+<li>a <code>/scores</code> body attached under <code>results.scores</code> must equal the stored body.</li>
+</ul>
+<p><code>verify-report</code> checks the database, not the <code>/scores</code> body you hold. To check
+that body, save it verbatim and compare its sha256 with <code>body_digest</code>
+(<code>shasum -a 256 scores.json</code>), or attach it under <code>results.scores</code>. Without an
+attachment the <code>results</code> line reads NOT PINNED, and the report&#39;s LIMITS block
+lists every NOT PINNED and NOT CHECKED line.</p>
+<p>It also computes the month from today&#39;s rows under the month&#39;s sealed
+aggregation level and k, not this install&#39;s current config, and prints whether
+a seal now under that config would be identical. That line is information only: a
+sealed month keeps its bytes when rows arrive late, so it never changes the
+verdict.</p>
+<p>It reads the same snapshot as a live verification and <strong>never seals</strong>. A month
+this database has not sealed is reported, not sealed on the spot.</p>
+<p>A sealed manifest has two outcomes a live one does not, so it has two more exit
+codes. <code>0</code>, <code>1</code> and <code>2</code> keep their meanings above:</p>
+<table>
+<thead>
+<tr>
+<th>code</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>3</code></td>
+<td><strong>NOT SEALED IN THIS DB</strong> — this database holds no sealed row for the month; point <code>--db</code> at the database that served the manifest</td>
+</tr>
+<tr>
+<td><code>4</code></td>
+<td><strong>UNKNOWN FOLD RULE</strong> — every compared field is unchanged, but the refold was not run: either the month was sealed by a fold rule other than this binary&#39;s, or the row&#39;s <code>aggregation</code>, <code>period_size</code> or <code>k</code> no longer match its own config digest. Only a <code>tierd</code> whose fold rule is the month&#39;s own refolds it; a later <code>tierd</code> with a higher fold rule also exits <code>4</code></td>
+</tr>
+</tbody>
+</table>
+<p>A difference in any field is <code>1</code>, and the report names the field; <code>1</code> wins over
+<code>4</code>. The report prints the version and commit of the <code>tierd</code> that ran it. The install
+markers the manifest also carries (<code>next_seal_at</code>, <code>earliest_period</code>,
+<code>latest_period</code>, <code>config_gap</code>, and <code>stalled_period</code>, <code>stall_reason</code> and
+<code>owed_since</code> while sealing is stalled) describe the install when it was served, not the
+month, and are not checked.</p>
+<h3 id="the-default-window--and-why-a-manifest-can-still-be-refused">The default window — and why a manifest can still be refused</h3>
+<p>A manifest requested with <strong>no <code>since</code> and no <code>until</code></strong> is re-runnable. That is
+worth stating because it was not always true, and the reason is instructive.</p>
+<p>The manifest publishes RFC3339 <strong>instants</strong>; <code>/api/v1/scores</code> accepts only
+whole-day bounds. Until <strong>#746</strong> the default window was <code>now − 90d</code> <em>carrying the
+request&#39;s time of day</em>, so no <code>?since=</code> value reproduced it and the verifier
+refused:</p>
+<pre><code>$ tierd verify-report default-manifest.json --db tier.db ; echo &#34;EXIT=$?&#34;   # BEFORE #746
+verify-report: &#34;since: \&#34;2026-05-31T05:00:58Z\&#34; is not midnight UTC, and /api/v1/scores
+accepts only whole-day bounds (YYYY-MM-DD, YYYY-MM, YYYY) — so this report CANNOT be
+re-run through the serving path. Truncating the bound would recompute a different window
+and compare its numbers against this manifest&#39;s. Re-request the manifest with an explicit
+?since= (and ?until=) on a date boundary&#34; (NOTHING was verified)
+EXIT=2
+</code></pre>
+<p>🔑 <strong>The fix was in the SERVER, not the verifier.</strong> The default lower bound is now
+snapped BACKWARD to the start of its UTC day, so the manifest publishes
+<code>2026-05-31T00:00:00Z</code> and <code>?since=2026-05-31</code> reproduces exactly that window.</p>
+<p>⚠️ <strong>&#34;Re-runnable&#34; is not &#34;returns 0&#34;.</strong> A default manifest has an OPEN upper
+bound, so re-running it recomputes over <code>[since, ∞)</code> <strong>as the database stands
+now</strong> — ingest anything after the manifest was taken and the honest answer is
+<code>1</code> (DIVERGED), naming what moved. That is true of any open-ended manifest and is
+the tool working, not failing. What #746 changed is that the run HAPPENS.</p>
+<p>⛔ <strong>The refusal above was not deleted, and must not be.</strong> Truncating a mid-day
+bound would recompute a <em>different</em> window and compare its numbers against this
+manifest&#39;s — a green verdict for a report nobody ran. A hand-written manifest, or
+one emitted by a pre-#746 build, still carries a non-midnight instant and still
+exits <code>2</code>. That arm is asserted directly:
+<code>TestVerifyReport_DefaultWindowIsReplayable</code> re-runs its own fixture with
+<code>since: &#34;2026-05-31T05:00:58Z&#34;</code> hand-written in and requires exit <code>2</code>, so the
+distinction cannot be quietly optimised away.</p>
+<p>⚠️ <strong>One sharp edge the snap introduces.</strong> Building a verifiable report takes two
+requests (<code>/report_manifest</code>, then <code>/scores</code>), and each resolves the default
+independently. Their bounds are now identical all day — but differ by a <strong>full
+24 hours</strong> if a UTC midnight falls between the two calls. Take both on the same
+UTC day, or pass explicit bounds.</p>
+<hr>
+<h2 id="3-what-a-divergence-looks-like">3. What a divergence looks like</h2>
+<p>A verifier that says only <em>&#34;different&#34;</em> is close to useless. Late ingestion, an
+audited reprice, a repo repair, a quality revision and a GDPR erasure are all
+<strong>legitimate</strong> — and without attribution each is indistinguishable from
+corruption.</p>
+<p>Below is output captured from a local <code>dev</code> build against a sample manifest and
+database. One row&#39;s <code>billing_mode</code> was edited in place. No row was added or removed:</p>
+<pre><code>$ bin/engine-pass/tierd verify-report bin/engine-pass/m.json --db bin/engine-pass/tier.db ; echo &#34;EXIT=$?&#34;
+verify-report: &#34;tiermanifest1&#34;  window &#34;2026-08-01T00:00:00Z&#34; .. &#34;2026-09-01T00:00:00Z&#34;  scope fleet-wide  aggregation &#34;developer&#34; k=(none)
+
+FAIL: a pinned INPUT moved. ⚠ The manifest pinned no results, so whether the
+      published numbers moved with it is UNKNOWN to this run — see LIMITS.
+
+  price_table:          UNCHANGED   tierpt1:3a27fb89…, version 12, effective &#34;2026-10-02&#34;
+  rubric:               UNCHANGED   version 1
+  token_events:         UNCHANGED   no rows above watermark 4, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
+  outcomes:             UNCHANGED   no rows above watermark 3, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
+  quality revisions:    UNCHANGED   none since quality_history id 0
+  reprice:              UNCHANGED   none touching this window since reprice_row_audit id 0
+  cost corrections:     UNCHANGED   none touching this window since cost_correction_audit id 0
+  repo repairs:         UNCHANGED   none touching this window since repo_repair_row_audit id 0
+  push reconciliations: UNCHANGED   none touching this window since push_outcome_audit id 0
+  events_digest:        CHANGED     &#34;tierdig1:d6519360…&#34; (3 rows) -&gt; tierdig1:59fb9287… (3 rows): the CONTENTS of the rows this report was computed over have changed. The row COUNT is unchanged, so this is most likely an in-place edit, or compensating changes — see the watermark lines. ⚠ Check the tool_version line first: an Open()-time migration on a newer binary rewrites rows in place and would move this digest with no edit having been made
+  outcomes_digest:      UNCHANGED   tierdig1:23124fdc… over 3 row(s) — every digested column of every row is unchanged as the digest reads it; columns outside the digest were not compared
+  tool_version:         UNCHANGED   &#34;dev&#34;
+
+LIMITS
+  - This run RECOMPUTED the report over the manifest&#39;s window against the database
+    AS IT IS NOW. It did NOT replay the historical row population — as-of bounded
+    reads (#717) are not in this build — so it ATTRIBUTES a difference to a named
+    input; it does not reconstruct the manifest&#39;s original numbers.
+  - Every read above ran against a VACUUM INTO SNAPSHOT, now deleted. The database
+    you named was never opened for writing and never migrated, so an archived file
+    is byte-identical after this run. The snapshot needs free space alongside it.
+  - COMPENSATING CHANGES are the case attribution cannot resolve. A repair that moved
+    $X out of this window and a late ingest that brought $X in are reported as two
+    separate lines; whether they cancel HERE cannot be answered without replaying
+    the window as it stood (#717).
+  - This manifest pinned NO results, so NO published number was compared. Only the
+    inputs above were checked.
+EXIT=1
+</code></pre>
+<p>⭐ <strong>Every watermark reads <code>UNCHANGED</code> and the report still diverges.</strong> That is
+the case the digests exist for.</p>
+<hr>
+<h2 id="4-what-this-does-not-establish">4. What this does <strong>not</strong> establish</h2>
+<p>The limits that apply to a given run are printed by the tool itself, in a
+<code>LIMITS</code> block, on <strong>every run including the successful ones</strong> — a limitation an
+operator sees only on failure is one they will forget on success. ⚠️ <em>That is the
+run&#39;s limits, not this whole section:</em> <code>printVerifyLimits</code> emits three fixed
+bullets, a fourth when the manifest pinned no <code>results</code>, and one line per
+<code>NOT PINNED</code> / <code>NOT CHECKED</code> dimension. The uncovered-inputs table and the
+cost-horizon note below are documented here and nowhere else.</p>
+<h3 id="it-attributes-it-does-not-replay-history">It attributes; it does not replay history</h3>
+<p><code>verify-report</code> recomputes the report <strong>against the database as it is now</strong>. When
+nothing moved, that recomputation <em>is</em> the original computation over the same
+rows, so <code>REPRODUCED</code> is a true statement. When something moved, it names the
+input — it does <strong>not</strong> reconstruct the manifest&#39;s original numbers.</p>
+<h3 id="compensating-changes-cannot-be-resolved">Compensating changes cannot be resolved</h3>
+<p>A repair that moved $200 out of a window and a late ingest that brought $200 in
+are reported as <strong>two separate lines</strong>. Whether they cancel <em>in this window</em>
+cannot be answered without replaying the window as it stood.</p>
+<p>That replay is <strong>not planned</strong>, and the reason is worth stating: it would require
+append-only transition ledgers for <code>developer_alias</code>, <code>org_hierarchy</code> and
+<code>period_membership</code> first. Those tables are mutated in place today, so an
+&#34;as-of&#34; bound reconstructs nothing about them, and a replay built on them would
+be byte-exact <em>only if they happened not to have changed</em> — a premise the system
+cannot check. A conditional replay presented as a replay would be worse than no
+replay at all.</p>
+<h3 id="five-report-inputs-are-not-watched">Five report inputs are not watched</h3>
+<table>
+<thead>
+<tr>
+<th>input</th>
+<th>why it is uncovered</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>developer_alias</code></td>
+<td>upserted/deleted in place; <strong>re-keys the entire cost-to-outcome join</strong>, and an aliased identifier&#39;s team rows are dated from the write (#914)</td>
+</tr>
+<tr>
+<td><code>hierarchy_membership</code></td>
+<td>dated and append-only (#886), so a write cannot move a window that ended before it; not watermarked, so a window still open at the write can move unseen</td>
+</tr>
+<tr>
+<td><code>period_membership</code></td>
+<td><code>UPDATE</code>d in place; selects the cohort in aggregation</td>
+</tr>
+<tr>
+<td><code>actual_spend</code></td>
+<td>feeds per-developer Spend Leverage on a fleet-wide read</td>
+</tr>
+<tr>
+<td><code>Open()</code>-time migrations</td>
+<td>rewrite <code>token_events</code> with no ledger row at all</td>
+</tr>
+</tbody>
+</table>
+<p>Two of the first four share one root cause: they are <strong>identity-and-grouping
+tables that this schema mutates in place and keeps no transition log for</strong>.
+Covering them is not two more <code>MAX(id)</code> reads — a <code>MAX</code> cannot see an in-place
+<code>UPDATE</code> at all. <code>hierarchy_membership</code> is its own transition log, and only the
+watermark is missing. <code>actual_spend</code> is not mutated in place either: its rows
+are only inserted (<code>InsertActualSpend</code>), never updated, and are removed by
+erasure.
+Migrations are detectable only through the <code>tool_version</code>/<code>commit</code> stamp.</p>
+<blockquote>
+<p>The number is <strong>five</strong>, and it is stated because an earlier draft of the
+equivalent note in the source said <em>two</em>. An enumeration that undercounts is
+the same defect as a watermark that misses a ledger, one level up.</p>
+</blockquote>
+<p>Also uncovered: <code>/api/v1/scores</code> embeds the installation&#39;s <strong>global</strong> cost
+horizon (the earliest captured event in the whole database), so an event inserted
+<em>outside</em> the window changes the response body while every window-scoped
+watermark correctly holds still.</p>
+<p>✅ <strong>The scoped-exclusion gap that stood here is CLOSED (#751), and the entry is
+kept as a pointer rather than deleted</strong> so a reader arriving from an older copy
+of this file is not left hunting for it. On a <strong>scoped</strong> report,
+<code>data_quality.repo_scope_excluded</code> is computed from the <code>unqualified</code> sentinel
+rows, which a scoped digest deliberately does not cover — measured, an in-place
+reprice of a repo-blind row moved <code>repo_scope_excluded.cost_usd</code> from <code>9</code> to <code>14</code>
+while the scoped digests and watermarks were byte-identical, and <code>verify-report</code>
+reported <code>REPRODUCED</code> over changed served bytes. The manifest now pins that
+figure in its own <code>repo_scope_excluded</code> object and <code>verify-report</code> recomputes and
+compares it; the same probe is now <code>repo_scope_excluded: CHANGED</code> and <code>EXIT=1</code>.
+See <a href="#the-exclusion--the-one-published-figure-no-digest-can-cover" rel="nofollow">The exclusion</a>.</p>
+<p>⚠️ <strong>The cost-horizon entry directly above is the same shape and is still open</strong> —
+a published figure drawn from rows outside the predicate the manifest pins. Do
+not read #751&#39;s closure as closing that one; they were named together and only
+one moved.</p>
+<h3 id="tool_version-drift-is-reported-but-does-not-diverge-price_table-drift-does"><code>tool_version</code> drift is reported but does not diverge; <code>price_table</code> drift does</h3>
+<p>The guarantee is scoped to <em>&#34;the same binary&#34;</em>, and failing every cross-version
+verification would kill the audit use case outright. The asymmetry is that <strong>the
+price stamp is inside the published body and the tool version is not</strong>.</p>
+<p>⚠️ A binary upgrade can move a digest with no edit having been made, because an
+<code>Open()</code>-time migration rewrites rows in place. The tool says so on the <code>CHANGED</code>
+line: check <code>tool_version</code> first.</p>
+<h3 id="identical-means-canonically-identical-not-byte-identical">&#34;Identical&#34; means canonically identical, not byte-identical</h3>
+<p>A reproduced report is compared in <strong>canonical form</strong> — keys sorted, whitespace
+normalised, numbers re-rendered. A re-indented or re-key-ordered manifest is the
+same report, and failing it would be a fabricated divergence.</p>
+<p>Where bit-identical output <em>is</em> claimed, it is scoped to <strong>the same binary on the
+same architecture</strong>. Go may fuse a multiply-add on arm64, which is a 1-ULP
+difference; TIER does not claim cross-architecture bit-identity.</p>
+<h3 id="neither-shape-that-could-not-be-verified-is-still-open">Neither shape that could not be verified is still open</h3>
+<p>⚠️ <strong>This section listed TWO manifest shapes that could not be verified. Both are
+now closed, by two different fixes, and the entry is kept as a pointer rather
+than deleted so a reader arriving from an older copy of this file is not left
+looking for it.</strong> <em>(A third item, the scoped <code>repo_scope_excluded</code> gap, was a
+different thing — an unattested FIGURE on a manifest that verified fine — and is
+closed above by #751.)</em></p>
+<ul>
+<li><strong>The <em>repo-scoped</em> (<code>?repo=</code>) manifest</strong> carried no digests, because the digest
+reads had no repo predicate. They do now (<strong>#747</strong>) — see
+<a href="#the-rows--watermarks-and-digests-because-one-of-them-is-weaker-than-it-looks" rel="nofollow">The rows</a>.
+A scoped manifest publishes a <strong>scoped</strong> digest and verifies on it. The
+<code>digests_omitted</code> field remains, for the anonymized-mode withhold.</li>
+<li><strong>The DEFAULT-window manifest</strong> (no <code>since</code>, no <code>until</code>) could not be re-run at
+all: it published an RFC3339 instant carrying the request&#39;s time of day, and
+<code>/api/v1/scores</code> accepts only whole-day bounds, so <code>verify-report</code> exited <code>2</code>.
+The default bound is now snapped back to the start of its UTC day (<strong>#746</strong>) —
+see <a href="#the-default-window--and-why-a-manifest-can-still-be-refused" rel="nofollow">§2, The default window</a>,
+which also keeps the <code>EXIT=2</code> transcript and explains why the refusal it came
+from is still live for hand-written and pre-#746 manifests.</li>
+</ul>
+<p>⛔ <strong>Closed is not the same as unlimited.</strong> The live limits in this section are
+the ones above it <strong>except the two ✅ pointers</strong> (#751, and the two manifest
+shapes just above) — and note in particular the <strong>cost horizon</strong>: <code>/scores</code> embeds
+the earliest captured event in the <em>whole</em> database, so an insert outside the
+window changes the served bytes while every window-scoped pin correctly holds
+still. That one is still open. <em>(This sentence named <code>repo_scope_excluded</code> until
+#751 pinned it; do not restate that limit.)</em></p>
+<hr>
+<h2 id="5-determinism--why-the-same-inputs-give-the-same-number">5. Determinism — why the same inputs give the same number</h2>
+<p>Reproducibility needs the computation to be order-independent, and float addition
+is <strong>not associative</strong>. Three prerequisites make it so:</p>
+<ul>
+<li>every scoring read is totally ordered by <code>(ts, id)</code>;</li>
+<li>every float rollup is over a <strong>sorted</strong> slice — Go randomises map iteration per
+range, so four sites that summed over maps could return different totals for
+identical data;</li>
+<li>outcome timestamps are written in <strong>UTC</strong>. <code>modernc.org/sqlite</code> stores a
+<code>time.Time</code> as TEXT <em>including the zone suffix</em>, so <code>ORDER BY ts</code> is a binary
+string sort and mixed zones invert: <code>08:00 -0400</code> sorts before <code>10:00 +0000</code>
+despite being the later instant.</li>
+</ul>
+<p>Money is unaffected either way — costs are integer micro-dollars, so those sums
+are exact regardless of order.</p>
+<hr>
+<h2 id="see-also">See also</h2>
+<ul>
+<li><a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a> — the <code>/api/v1</code> contract, including
+the manifest fields and what may change without notice.</li>
+<li><a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a> — what the denominator measures,
+and why list prices rather than your invoice.</li>
+<li><a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> — the narrative companion
+to the embedded price table.</li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

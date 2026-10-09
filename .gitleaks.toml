@@ -1,0 +1,31 @@
+# TIER gitleaks configuration.
+#
+# Extends the upstream gitleaks default ruleset (useDefault = true) and adds one
+# narrowly-scoped allowlist for a single documented false positive. No rule is
+# disabled globally; every other file and rule is scanned normally.
+#
+# False positive: the reference-price fixture in
+# internal/store/prices_load_test.go lists PUBLIC LLM model identifiers so the
+# price-table loader can be tested. One of them, the Groq model name
+# "llama-3.3-70b-versatile", is a high-entropy hyphenated slug, so the built-in
+# generic-api-key rule mistakes it for a secret. It is a published product name,
+# not a credential. The allowlist below fires only when BOTH the file path AND
+# that exact model-name string match (condition = AND), scoped to the
+# generic-api-key rule, so the suppression cannot mask a real secret elsewhere.
+
+title = "TIER gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public LLM model identifier in the reference-price test fixture (not a secret)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''internal/store/prices_load_test\.go''',
+]
+regexes = [
+  '''llama-3\.3-70b-versatile''',
+]
+regexTarget = "secret"

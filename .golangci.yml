@@ -1,0 +1,62 @@
+# golangci-lint configuration for TIER (#626).
+#
+# This file pins the linter set and records a measured trap. It deliberately
+# contains NO path exclusion — read "Why there is no .claude/ exclusion" below
+# before adding one.
+#
+# `linters.default: standard` reproduces exactly what this repo had when it ran
+# with no config file at all: errcheck, govet, ineffassign, staticcheck, unused.
+# Verified with `golangci-lint linters` before and after adding this file — the
+# enabled set is identical. Naming it means a future `default: all`/`none` has
+# to be a deliberate edit rather than a side effect of the installed version
+# changing its mind.
+#
+# No `formatters:` block. Formatters are all disabled by default in v2 and must
+# stay that way: `gofmt -l` deliberately flags internal/store/store.go,
+# cmd/tierd/doctor.go and internal/dashboard/dashboard_test.go, and rewriting
+# store.go's SQL doc comments corrupts them.
+#
+# ---------------------------------------------------------------------------
+# Why there is no .claude/ exclusion
+# ---------------------------------------------------------------------------
+# #626 was filed believing golangci-lint walks into the nested git worktrees at
+# .claude/worktrees/<name>/ and lints them as source. It does not. Go's package
+# expansion skips dot-directories, so `./...` never reaches them: with a
+# violating package present ONLY inside a nested worktree, `golangci-lint run
+# --build-tags integration ./...` in the parent tree is rc=0, 0 issues.
+#
+# What actually happened is a cache effect. golangci-lint's cache is shared
+# across every checkout on the machine and keyed by package content, not by
+# location. When a worktree and the main tree hold a byte-identical package,
+# whichever runs first stores the issues and the second replays them verbatim,
+# carrying the FIRST runner's absolute file path. That is why a main-tree run
+# printed a `.claude/worktrees/impl-615/...` path. The replay by itself is what
+# fails the gate — it fails whether or not that worktree still exists. Deleting
+# the worktree only adds the "no such file or directory" warnings, because the
+# cached path can no longer be opened to render the offending source line. Note
+# the exit code: on findings golangci-lint exits 1, and the 2 recorded in #626
+# is `make` reporting a failed recipe, not a linter exit code.
+#
+# So excluding `.claude/` here would suppress the REPORT while leaving the
+# cause in place, and it is actively dangerous. Measured, with
+# `exclusions.paths: ["(^|/)\\.claude/worktrees/"]` in this file: a genuine
+# unchecked f.Close() in the MAIN tree's own internal/ package went from rc=1
+# to rc=0, because the cache had replayed that real finding under the nested
+# worktree's path and the exclusion then filtered it out. A path exclusion here
+# is a false-green machine.
+#
+# The cause is fixed where it lives: the `lint` target in the Makefile gives
+# each checkout its own GOLANGCI_LINT_CACHE (under bin/, which is already
+# gitignored, dockerignored, cleaned and publish-allowlisted), so no tree ever
+# holds a cache entry pointing into another tree. Do not "simplify" that away
+# and add an exclusion here instead.
+#
+# One trap if you ever DO add `exclusions.paths` for some unrelated reason:
+# v2's `run.relative-path-mode` defaults to `cfg`, so paths are rendered — and
+# your patterns matched — relative to THIS FILE's directory, not the working
+# directory. `make lint` runs from the repo root where those coincide, but a
+# run from a subdirectory does not, and the mismatch is silent.
+version: "2"
+
+linters:
+  default: standard

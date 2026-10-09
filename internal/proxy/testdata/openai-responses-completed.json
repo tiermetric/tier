@@ -1,0 +1,43 @@
+{
+  "id": "resp_synthetic_json_0001",
+  "object": "response",
+  "created_at": 1770000000,
+  "status": "completed",
+  "model": "gpt-5.3-codex",
+  "output": [
+    {
+      "id": "rs_synthetic_json_0001",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_synthetic_json_0001",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "SYNTHETIC FIXTURE - schema-derived, not recorded from live traffic. See testdata/PROVENANCE.md.",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "store": false,
+  "temperature": 1.0,
+  "tool_choice": "auto",
+  "tools": [],
+  "usage": {
+    "input_tokens": 12000,
+    "input_tokens_details": {
+      "cached_tokens": 10000
+    },
+    "output_tokens": 1000,
+    "output_tokens_details": {
+      "reasoning_tokens": 640
+    },
+    "total_tokens": 13000
+  }
+}

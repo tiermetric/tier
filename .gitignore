@@ -1,0 +1,40 @@
+bin/
+*.db
+*.db-wal
+*.db-shm
+# Anchored to the repo root so this ignores only a stray binary built there
+# (e.g. `go build` with no -o); without the leading slash the bare name would
+# also match the cmd/tierd SOURCE dir, silently dropping any new file added
+# under it. Built binaries normally land in bin/ (ignored above).
+/tierd
+# Local Claude Code / agent workspace state.
+#
+# Scoped deliberately rather than a blanket `.claude/`: tool configuration that
+# a contributor would want on a fresh clone is tracked; only genuinely
+# machine-local state (per-machine settings, worktrees, vendored modules) is
+# ignored here.
+.claude/settings.local.json
+.claude/worktrees/
+.claude/**/node_modules/
+
+# The Model Report instrument is its own repo (tiermetric/model-bench).
+# Never vendor it into tier — an errant `git add -A` can do exactly that.
+model-bench/
+
+# >>> tool-managed: agent durability >>>
+.claude/agents/*.md
+.claude/agent-memory-local/
+.claude/settings.local.json
+.claude/worktrees/
+# <<< tool-managed: agent durability <<<
+
+# Re-include these files, overriding the tool-managed block above: the manifest
+# that block relies on records only metadata, so without this the contents are
+# not reproducible from the repo alone.
+!.claude/agents/*.md
+
+# Compiled docgen artifact. The Makefile only ever runs `go run .`, so this is
+# always a stray `go build` -- and it is a binary embedding local build paths,
+# which should never be committed or published.
+tools/docgen/docgen
+scripts/git-cleanup.sh

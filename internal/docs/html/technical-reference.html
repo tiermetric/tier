@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER — technical reference — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier--technical-reference">TIER — technical reference</h1>
+<h2 id="how-tier-v052-captures-cost-records-outcomes-and-computes-the-number">How TIER v0.5.2 captures cost, records outcomes and computes the number</h2>
+<p><strong>Reference version:</strong> 1.2 (2026-10-01). Describes TIER <strong>v0.5.2</strong>, the first public release of the v0.5 line (embedded price table version 12, effective 2026-10-02, 91 models; rubric version 1, which versions the size scale, work types and quality floors; Go 1.26.9). Earlier releases lack parts of what follows: v0.4.1, for example, has no Opencode collector, carries price table version 9 and has no <code>tierd prices forget-version</code>. TIER is released under the Apache License 2.0.</p>
+<p><strong>What this document is.</strong> The companion to the <a href="whitepaper.html" rel="nofollow">TIER white paper</a>, which says what the number means and which decisions it may and may not inform. This reference holds the mechanics: capture paths, pricing, outcome producers, attribution and windows, aggregation and privacy, statistics, Spend Leverage accounting, team deployment, the API, and the known ways the number misleads. Where the two overlap they say the same thing; where they seem to differ, this reference is the more detailed statement and the white paper is the defect.</p>
+<p><strong>How to read it.</strong> Every behaviour the reference describes is stated in it. Operator procedures it does not reproduce are named with the repository file that holds them each time: request and response schemas, the full configuration schema, backup and restore, the binary download and checksum commands, proxy and TLS hardening, each command&#39;s failure output and full flag list (<code>tierd &lt;command&gt; -h</code>). All file names refer to the public repository, <code>tiermetric/tier</code>. Where a behaviour is configurable, the reference names the flag or setting. &#34;Planned&#34; marks designed work that has an operator ruling behind it; &#34;specified but not enforced&#34; marks design text with no build commitment. Version 1.1 was read against the source of the time during the maintainer&#39;s review; version 1.2 checks each change made since then against the source prepared for v0.5.2. Measured figures carry their date and source.</p>
+<p><strong>Two roles.</strong> The <strong>operator</strong> is the project maintainer, who decides disputed design questions. Each ruling is recorded with its date in the maintainer&#39;s private rulings ledger and on the issue it answers; this reference states in full every ruling it relies on. Issue numbers (#826 and others) refer to the maintainer&#39;s issue tracker, which may not be public; they are provenance only. Whoever installs and runs TIER is the <strong>administrator</strong>.</p>
+<hr>
+<h2 id="1-the-problem">1. The problem</h2>
+<p>AI bills report spending, not the software changes that spending produced. Two teams can spend the same amount and merge very different amounts of work, and some spend goes to work that never merges.</p>
+<p>The common engineering frameworks do not cover this. DORA (DevOps Research and Assessment) measures delivery speed and stability. SPACE and DX Core 4 are frameworks for developer productivity and experience. As the project reads their published definitions (<code>docs/how-tier-relates.md</code> sets out that reading), none uses dollars of AI spend as a denominator. TIER adds a measure in dollars of AI spend, for use alongside them.</p>
+<p>A useful measure has to deal with four things. Tokens are not comparable across models: the same token count costs very different amounts on an expensive and a cheap model. Invoices are not comparable across organisations: discounts, credits and subscriptions make identical workloads bill differently. Merged work is not comparable by count: a one-line typo fix and a multi-week subsystem are both &#34;one pull request&#34; (PR). And a number tied to a person&#39;s incentives can be gamed. Sections 2 to 5 address the first three; Sections 6.3 and 11 address the fourth.</p>
+<hr>
+<h2 id="2-definition-the-formula-units-and-a-worked-example">2. Definition: the formula, units and a worked example</h2>
+<h3 id="21-the-formula">2.1 The formula</h3>
+<pre><code>TIER = Σ(outcome_weight × quality_multiplier) / (total_AI_cost_USD / 1000)
+</code></pre>
+<p>The numerator is the sum, over accepted outcomes inside the measurement window, of each outcome&#39;s <strong>weight</strong> (its size) multiplied by its <strong>quality multiplier</strong> (1.0 for a clean merge, reduced by a continuous integration (CI) failure or a revert). The denominator is the list-price cost of all AI usage recorded in the same window, in US dollars, divided by 1,000. Spend that could not be linked to an issue is included (Section 5.3).</p>
+<p>An <strong>accepted outcome</strong> is one of three things: a merged pull request (Section 4.1), a direct commit to the default branch when the administrator turns on push capture (Section 4.5), or an outcome posted through the outcomes API, where the caller asserts the merge (Section 4.6). Nothing else adds to the numerator.</p>
+<p><strong>Unit:</strong> weighted outcome points per $1,000 of list-price AI cost. A TIER of 100 means 100 weighted points for each $1,000 of AI usage. The scale constant 1,000 is fixed in the scoring engine.</p>
+<p>The report also carries two related figures:</p>
+<ul>
+<li><strong><code>cost_per_point</code></strong> = <code>total_cost_usd / weighted_points</code>, in US dollars per weighted point; <code>1000 / TIER</code> whenever both are non-zero. With zero points it is <code>null</code>, so &#34;no accepted outcome&#34; never reads as the most efficient score. With points at zero recorded cost, TIER is 0 and <code>cost_per_point</code> is 0; the dashboard shows that case as &#34;FREE&#34; (Section 7.1), because a <code>tier</code> of 0 alone cannot tell it from nothing accepted.</li>
+<li><strong>Spend Leverage</strong> = <code>total_cost_usd / actual_paid_usd</code>, the list-price value of the usage divided by what finance actually paid (Section 8).</li>
+</ul>
+<p><strong>Which figure a decision uses.</strong> The pooled figure divides the window&#39;s points by <strong>all</strong> of its recorded cost: accepted work, abandoned and unfinished work, and spend not linked to any issue. Each per-work-type segment (Section 4.3) divides that type&#39;s points by the cost linked to that type&#39;s outcomes <strong>only</strong>, so it leaves out abandoned work and unlinked spend, and it usually reads higher (it can read lower when its own mix of outcomes differs). The segment answers &#34;what did accepted work of this kind cost&#34;; the pooled figure answers &#34;what did we spend per accepted point&#34;. A decision about one kind of work compares its segment across two windows, and reads the pooled <code>no_outcome</code> and unattributed amounts from <code>segment_reconciliation</code> beside it (Section 5.3), because a change that moves spend into abandoned work lowers the pooled figure and leaves the segment unchanged. Segments and <code>segment_reconciliation</code> are served only in <code>developer</code> mode (Section 6.2).</p>
+<p><strong>When two figures are comparable.</strong></p>
+<ol>
+<li><strong>No absolute scale.</strong> There is no good/ok/poor band and no reference cohort. A bare figure is neither good nor bad.</li>
+<li><strong>The main comparison is with your own past.</strong> An organisation, or a team, against its own history, for one work type (per-work-type figures are served only in <code>developer</code> mode; Section 6.2). Two teams in the same organisation compare weakly: only within one work type and one window, after a review of a sample of each team&#39;s size labels against Section 4.2, and still subject to their different task mix; treat the difference as a question to ask, not a finding. Two organisations do not compare, even on the same price table (Section 6.3).</li>
+<li><strong>Same prices, rubric and release.</strong> The two responses must carry the same <code>price_table.table_hash</code> and <code>rubric.version</code>, and come from the same TIER release (<code>GET /api/v1/livez</code> reports it). The release matters because some scoring rules, such as the heuristic&#39;s thresholds and the revert keyword lists, can change without a new rubric number (Section 4.2). That block describes the table the server has loaded <strong>now</strong>; each stored cost keeps the <code>price_version</code> it was stamped with (for every path except <code>POST /api/v1/costs</code>, the table that priced it; Section 3.1), and <code>data_quality.mixed_price_versions</code> appears only when one window holds several (in <code>developer</code> mode only; team and division reports do not carry it, Section 6.2). So after a table change, two windows can show the same hash yet have been priced by different tables. Confirm with the <code>price_version</code> column of <code>GET /api/v1/events</code>, or reprice both windows under the loaded table (Section 3.3). The hash, not the version number, is the check: an override can reuse a number with other rates (Section 3.4). No stamp can see labelling habits, so a change in how generously labels are applied moves the number with no stamp moving.</li>
+</ol>
+<h3 id="22-the-rules-inside-the-formula">2.2 The rules inside the formula</h3>
+<ul>
+<li>Each stored outcome contributes its full <code>weight × quality</code> once. One accepted change can be stored twice: a PR merged into an integration branch whose merge is then merged again (Section 4.1), and a squash merge that push capture stored twice before v0.5.2 (Section 4.5). Work that is never accepted (a pull request that is closed unmerged, abandoned or still open) contributes nothing to the numerator, however much it cost; that cost stays in the pooled denominator.</li>
+<li>Team and organisation figures are summed points over summed cost, never an average of individual ratios. Example: A has 10 points on $10 (TIER 1,000) and B has 1 point on $100 (TIER 10). The average of the two ratios is 505; the pooled figure is 11 / $110 × 1,000 = 100, which reflects where the money went.</li>
+<li>When the window&#39;s cost is zero the engine reports TIER 0 rather than dividing by zero. So uncaptured usage makes TIER read high only when some cost is recorded; with none recorded, TIER is 0.</li>
+<li>The window is half-open: <code>[since, until)</code>. A row timestamped exactly at <code>since</code> is inside; one at <code>until</code> is outside.</li>
+</ul>
+<h3 id="23-worked-example-illustration-with-the-arithmetic-shown">2.3 Worked example (illustration, with the arithmetic shown)</h3>
+<p>Suppose a developer merges three pull requests in a window, and $35.00 of list-price AI spend is recorded under that developer in the same window (all of it, whether or not it was linked to an issue).</p>
+<table>
+<thead>
+<tr>
+<th>PR</th>
+<th>Size label</th>
+<th>Weight</th>
+<th>What happened after merge</th>
+<th>Quality</th>
+<th>weight × quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td><code>size/m</code></td>
+<td>3</td>
+<td>clean</td>
+<td>1.0</td>
+<td>3.0</td>
+</tr>
+<tr>
+<td>B</td>
+<td><code>size/s</code></td>
+<td>1</td>
+<td>CI failed on the merge commit within 48 h</td>
+<td>0.7</td>
+<td>0.7</td>
+</tr>
+<tr>
+<td>C</td>
+<td><code>size/l</code></td>
+<td>5</td>
+<td>reverted 20 days later by a commit whose first line is <code>Revert &#34;Add export&#34;</code> and whose body says the feature was &#34;no longer needed&#34; (strategic)</td>
+<td>0.8</td>
+<td>4.0</td>
+</tr>
+</tbody>
+</table>
+<p>Weighted points = 3.0 + 0.7 + 4.0 = <strong>7.7</strong>.</p>
+<p>TIER = 7.7 / (35.00 / 1000) = 7.7 / 0.035 = <strong>220</strong> weighted points per $1,000.</p>
+<p><code>cost_per_point</code> = 35.00 / 7.7 = <strong>$4.55 per weighted point</strong> (and 1000 / 220 = 4.55, the same figure from the other direction).</p>
+<p>This row clears the evidence floor (Section 7.1): it has 3 outcomes (the floor is 3), $35.00 of cost (the floor is $5.00), and, in this illustration, no outcome flagged as zero-token. So <code>ranked: true</code>, and it carries a confidence interval.</p>
+<p>A second illustration, on the cost side, shows how one API call becomes dollars. Take <code>claude-sonnet-5</code>, which the version-12 price table lists at $2.00 per million input tokens and $10.00 per million output tokens, with Anthropic&#39;s default cache multipliers (reads 0.10×, 5-minute cache writes 1.25×, 1-hour cache writes 2.00× of the input rate). A call with 200,000 input tokens, 1,500,000 cache-read tokens, 50,000 5-minute cache-write tokens and 5,000 output tokens prices as:</p>
+<pre><code>input      200,000 / 1e6 × $2.00              = $0.400
+cache read 1,500,000 / 1e6 × $2.00 × 0.10     = $0.300
+cache w5m  50,000 / 1e6 × $2.00 × 1.25        = $0.125
+output     5,000 / 1e6 × $10.00               = $0.050
+total                                          $0.875  (stored as 875,000 micro-dollars)
+</code></pre>
+<p>The pricing function sums the per-class amounts for the call and rounds once, to the nearest micro-dollar (1 USD = 1,000,000; an exact half rounds to the even neighbour), and stores that integer.</p>
+<hr>
+<h2 id="3-where-the-cost-comes-from-capture-paths-pricing-and-cache-price-table-versions">3. Where the cost comes from: capture paths, pricing and cache, price-table versions</h2>
+<h3 id="31-capture-paths">3.1 Capture paths</h3>
+<p>TIER&#39;s default path reads the session logs Claude Code already writes, so a Claude Code user installs nothing and sets nothing; the other paths need a flag or, for the proxy, a base-URL change. Every cost event lands in one table, <code>token_events</code>. Eight producers write to it: four log readers (Claude Code, Codex CLI, Opencode, Muse Code), the reverse proxy, <code>POST /api/v1/costs</code>, and two org-level pollers. <code>tierd ship</code> is a carrier, not a ninth producer: it runs the log readers on a laptop and sends their events to a server.</p>
+<p>Cost is recorded under a developer identifier. The log readers use the operating-system (OS) username (<code>$USER</code>, then <code>$LOGNAME</code>, then the system account name). <code>tierd score</code> and <code>tierd ship</code> accept <code>--developer &lt;id&gt;</code> to override it; <code>tierd serve</code> has no such flag. Outcomes carry the GitHub login, so the two often need joining (Section 5.2).</p>
+<p><strong>Claude Code session files (on by default).</strong> Claude Code writes one JSONL (JSON Lines) file per session under <code>~/.claude/projects/</code>. TIER&#39;s parser reads only <code>type</code>, <code>timestamp</code>, <code>gitBranch</code>, <code>cwd</code>, <code>sessionId</code> and <code>message.{id, model, role, usage.*}</code>, so prompt and completion text never become a stored value. With worktree attribution on (Section 5.1; off by default), a second decoder also reads each tool call&#39;s name and the file paths it names, never file contents or shell commands; <code>docs/privacy.md</code> lists exactly what it reads and keeps. In Claude Code&#39;s logs as TIER&#39;s parser meets them, one call appears as several entries with the same <code>message.id</code>: one per streaming chunk plus a final entry. Within one read, TIER keeps the entry with the largest token total (input, output and all cache classes summed), which is the final one. A session counts only when its <code>cwd</code> is the target repository or a directory under it, or a git worktree of that repository; other sessions are dropped. Each message becomes one event keyed on <code>(&#34;anthropic&#34;, message_id)</code>, the same key the proxy derives for the same call. <code>tierd score</code> scans once and exits; <code>tierd serve --watch-repo &lt;path&gt;</code> follows the directory with a 1-second debounce.</p>
+<p>When a second event arrives with a key already stored, from a later read or from the proxy, the store keeps the larger of each token count and keeps the <strong>first</strong> row&#39;s cost. It does not re-price. So a row first stored from a partial read keeps its partial cost, and a fuller count arriving later through the proxy does not raise the stored cost. <code>tierd reprice</code> (Section 3.3) recomputes cost from the stored counts. How often a partial first read happens in practice has not been measured.</p>
+<p><strong>An open question about those counts.</strong> A third-party measurement (gille.ai, 24 February 2026, labelled preliminary by its author) compared Claude Code&#39;s JSONL token counts with the totals Claude Code shows in its status bar. After removing duplicate entries by request id, it still found output tokens undercounted 10–17× and input tokens 100–174×. It gave two causes for the output gap: placeholder counts that are never updated, and thinking tokens the log leaves out. TIER&#39;s deduplication (issue #6) stops one call being counted twice; it does not close that gap. Whether the gap holds for current Claude Code versions, and how large it is, is being measured under issue #837 and is unsettled; treat it as open until a later version of this reference says otherwise. If it holds, Claude Code cost read from JSONL is understated, so TIER reads high and <code>cost_per_point</code> reads low. The white paper and Section 8.2 say what that means for a spending decision.</p>
+<p><strong>Codex CLI rollout logs (off by default, <code>--codex-rollout</code>).</strong> Codex writes per-session logs at <code>~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl</code>. TIER reads the line type and timestamp and, under <code>payload</code>, the session <code>id</code>, <code>cwd</code>, <code>git.branch</code>, <code>model</code> and the cumulative <code>total_token_usage</code> counters of each <code>token_count</code> event. Prompts, reasoning traces, tool output and patches in the same file are never decoded. Per-call usage is the <strong>difference between consecutive cumulative snapshots</strong>; the first snapshot counts in full, and a repeated snapshot adds nothing. Summing the per-call field instead can double-count, because Codex was seen to re-emit a <code>token_count</code> event: on one session captured for the collector&#39;s tests in July 2026, summing gave 145,165 tokens where the cumulative counters gave 124,386. Four checks are fatal for a file: <code>total == input + output</code> when <code>total_tokens</code> is non-zero, cached tokens within input, reasoning tokens within output (never added on top), and no counter going down. A file that fails emits no events on that pass, and the error names it; events stored from it on an earlier pass stay. This reference names no supported tool versions: a change in a tool&#39;s log format can stop its capture. The key is <code>(&#34;codex-rollout&#34;, &#34;openai&#34;, session_id, ordinal)</code>. Under <code>serve</code> the collector rescans every <code>scan_interval</code> (config <code>collectors.codex_rollout.scan_interval</code>; default 5 minutes, floor 30 seconds). Under <code>ship</code> it makes one pass.</p>
+<p><strong>Opencode session store (off by default, <code>--opencode</code>).</strong> Opencode keeps sessions in a SQLite database at <code>~/.local/share/opencode/opencode.db</code> (<code>ship --opencode-db</code>, or <code>collectors.opencode.db_path</code> in the <code>serve</code> config, moves it). TIER opens it read-only, reads the <code>message</code> table and, from each message&#39;s JSON, the role, model id, provider id, working directory, completion time and token counts. It skips messages that have not completed. The key is <code>(&#34;opencode&#34;, provider id, message id)</code>. The spend is recorded against the watched repository when the message&#39;s working directory is inside it, and dropped otherwise.</p>
+<p>Opencode reports <code>reasoning</code> tokens <strong>beside</strong> <code>output</code>, so TIER prices <code>output + reasoning</code> at the output rate. Z.ai&#39;s pricing page, as the project read it on 2026-08-28, does not say whether reasoning bills at that rate: the token arithmetic is checked, the rate convention is not. On the maintainer&#39;s own Opencode GLM-5.3 sessions, measured on 2026-08-28, reasoning exceeded output on 77% of 3,943 messages. Opencode&#39;s own <code>cost</code> field is not read.</p>
+<p>The collector captures one provider route: the Z.ai coding plan (provider id <code>zai-coding-plan</code>). It skips every other provider and logs how many messages it skipped. Ollama&#39;s cloud tier is named in that log, because it publishes no per-token rate to price against; a provider TIER does not know is skipped with a warning. The embedded table prices <code>glm-5.3</code> ($1.40 / $4.40 per million, cache read $0.26) and <code>glm-5.3-flash</code> ($0.15 / $0.50, cache read $0.03) at Z.ai&#39;s published per-token API rates, which the operator ruled on 2026-09-25 are the value of coding-plan tokens even though the plan itself is a flat subscription (Section 8.1).</p>
+<p>Any other GLM model on that route (for example <code>glm-5.2</code>) has no embedded row, so its events price at the $0.50 per million unknown-model guess, with a warning (Section 3.3). To give one a rate, build a <code>--prices</code> table from the embedded <code>internal/store/prices.yaml</code> with a <code>version</code> this database has never recorded, such as <code>1000</code>, because <code>--prices</code> replaces the whole table (Section 3.4). Do not add a <code>glm-5.3@zai-coding-plan</code> row: a key with <code>@&lt;route&gt;</code> is looked up before the bare model name, so that row would replace the embedded <code>glm-5.3</code> row for coding-plan traffic, and one marked <code>billing_mode: subscription</code> relabels that spend. Every command that loads an override changing a built-in per-token model&#39;s <code>billing_mode</code> logs a WARN naming both modes, and the override still loads (#921). The label never changes a stored cost or TIER: it appears in the <code>/events</code> export and the data-protection export, <code>tierd reprice</code> rewrites it, and a <code>subscriptions:</code> block (Section 8.1) accepts a route only if the price table marks that route&#39;s row <code>billing_mode: subscription</code>. <code>serve</code> warns at startup if a <code>--prices</code> table drops the embedded <code>glm-5.3</code> rows.</p>
+<p>Opencode records no git branch, so its spend lands in the <code>unattributed:detached-head</code> bucket and never joins an issue. The spend still counts in the denominator, and the outcome it produced still counts in the numerator, so the pooled figure is not biased by it; only the pairing of that cost with its issue is lost. The zero-token check (Section 7.1) looks for tokens per (developer, repository, issue), so an outcome whose AI work was done only in Opencode records no tokens against its issue, is flagged, and takes its developer (and, in team or division mode, its group and the organisation headline) below the evidence floor while keeping its points. No branch-naming convention can fix this, because the branch is never recorded. Like Codex, Opencode capture is off by default on <code>serve</code> and <code>ship</code>, and <code>serve</code> requires <code>--watch-repo</code> with it.</p>
+<p><strong>Muse Code session logs (off by default, <code>--muse</code>).</strong> Meta&#39;s Muse Code CLI writes one session log per session at <code>~/.local/share/muse/sessions/YYYY/MM/DD/&lt;session-id&gt;/session.jsonl</code> (<code>ship --muse-home</code>, or <code>home</code> in the <code>collectors.muse</code> config block, moves it). TIER reads only token counts, model names, the session id, each run&#39;s recorded branch and the workspace root, never prompt, reply or tool text. Its token mapping was measured on one real Muse Code 1.4.0 session (<code>docs/how-it-works.md</code>, section 3d). Two record kinds are model calls Meta bills, and each becomes one event: an agent model call, and an automatic model review of a pending tool call. Muse writes a run&#39;s branch after the run&#39;s last model call, so a call is recorded only once its run has settled: the run&#39;s branch record is present, or the run has ended and Muse wrote past it, or the session log has gone 6 hours without a write. The 6-hour rule is a guess: a live run that waits longer at a tool-approval prompt is recorded as <code>unattributed:detached-head</code>, and that stays. Otherwise attribution follows the same branch and ±30-minute commit rule as Claude Code (Section 5.1), and a session counts only when its recorded workspace root is in a watched repository. A subagent&#39;s calls take the repository and branch of the parent run that spawned it; subagent spend that cannot be tied to a single parent run is excluded with a warning, so a Muse Code user&#39;s recorded spend can be lower than their real spend (<code>docs/how-it-works.md</code>, section 3d, lists the cases). The key is <code>(&#34;muse&#34;, &#34;meta&#34;, record id)</code>. Calls are priced at the <code>muse-spark-*</code> per-token list rates even when the developer pays for Muse by subscription (an operator ruling on #895, 2026-09-27), and Meta&#39;s per-query web-search charge is not priced, so Muse Code cost is a floor for any session that searched. The proxy has no Meta route. Under <code>serve</code> the collector rescans every <code>scan_interval</code> (config <code>collectors.muse.scan_interval</code>; default 5 minutes, floor 30 seconds), its first pass reads every log on disk, and <code>serve</code> requires <code>--watch-repo</code> with it.</p>
+<p><strong>Reverse proxy (mounted by default).</strong> <code>tierd serve</code> mounts <code>/anthropic/</code>, <code>/openai/</code> and <code>/gemini/</code>, forwarding to <code>--anthropic-target</code>, <code>--openai-target</code> and <code>--gemini-target</code> (defaults: the three providers&#39; public API hosts). Setting a target to the empty string unmounts that route; <code>--read-only</code> unmounts all three. A client points its base URL at the proxy (for example <code>ANTHROPIC_BASE_URL=http://&lt;tier-host&gt;:8080/anthropic</code>) and sends the <strong>admin (write) token</strong> in an <code>X-Tier-Token</code> header, so every developer who uses the proxy holds the organisation-wide write token (the same exposure as <code>ship</code>, Section 9.5). It is a separate header because <code>Authorization</code> carries the client&#39;s own provider credentials, which the proxy passes through. Forwarding a call on the client&#39;s provider credentials spends money, so the read-only token gets <code>403</code>; a missing or wrong token gets <code>401</code> and counts toward the per-IP lockout. Every <code>X-Tier-*</code> header, this one included, is removed before the request goes upstream, whether or not an admin token is configured (#865). With no admin token configured, which <code>serve</code> allows only on a loopback address, the proxy takes any request. The proxy passes the response through (it may decompress a gzip response in transit), and records <code>id</code>, <code>model</code> and <code>usage</code>, including from server-sent-event streams. The <code>/openai/</code> route reads both the Chat Completions and the Responses API shapes. The Gemini route is tested against synthetic bodies and has not been exercised by live Gemini traffic.</p>
+<p>The client may name the spend with three headers: <code>X-Tier-Developer</code>, <code>X-Tier-Issue</code> and <code>X-Tier-Repo</code>. Whether a coding tool can add custom headers is a property of that tool, not of TIER. The proxy trusts the headers as sent. <code>X-Tier-Issue</code> is stored verbatim and joins an outcome only if it is written the way TIER stores issue ids (<code>issue-42</code>, <code>TIER-99</code>; Section 5.1). The one value the proxy rejects is the reserved sentinel <code>unattributed</code> (or any <code>unattributed:</code> value), which counts as forged. A missing or forged developer header stores the spend under the developer <code>unattributed</code>; a missing or forged issue header stores it under the issue <code>unattributed</code> on the named developer. A counter records each case. Any other name is accepted as sent, so a token holder can put spend on anyone&#39;s row (Section 11). Attribution never fails a provider request.</p>
+<p><strong>Double counting, in one list.</strong></p>
+<ul>
+<li>Claude Code JSONL <strong>and</strong> the proxy for the same call: one row, because both use the Anthropic message id. The row keeps the larger token counts and the first writer&#39;s cost.</li>
+<li>Re-running <code>tierd score</code>, <code>tierd ship</code> or a watcher re-read: one row per key.</li>
+<li>Codex through <code>/openai/</code> <strong>and</strong> <code>--codex-rollout</code>: <strong>counted twice.</strong> The proxy keys on the response id, the collector on session and ordinal.</li>
+<li>Opencode through the proxy <strong>and</strong> <code>--opencode</code>: <strong>counted twice</strong>, for the same reason.</li>
+<li><code>POST /api/v1/costs</code> without an <code>idempotency_key</code>: every re-post is a new row.</li>
+<li><code>POST /api/v1/costs</code> for usage a provider poller also reports: refused on a server running that provider&#39;s poller, unless the row declares <code>&#34;billed_to&#34;: &#34;other&#34;</code> (Manual REST, below; #854). A wrong declaration, and a row stored before v0.5.2, are counted twice.</li>
+</ul>
+<p><code>tierd serve</code> warns at startup in the two double-counting cases: Codex capture with <code>/openai/</code> mounted, and Opencode capture with any proxy route mounted.</p>
+<p><strong>Manual REST.</strong> <code>POST /api/v1/costs</code> stores one event, for scripts and imports. Its <code>source</code> must be <code>&#34;api&#34;</code> or omitted (omitted means <code>api</code>); any other value is a <code>400</code>. Every cost event carries a <code>fidelity</code>: <code>realtime</code> (captured per call, by the log readers and the proxy), <code>daily</code> (a daily total) or <code>estimated</code>. On <code>/costs</code> it may be <code>daily</code> or <code>estimated</code> (default <code>estimated</code>); <code>realtime</code> is refused. Unlike every other path, <code>/costs</code> stores the caller&#39;s dollar figure (<code>cost_usd</code>) as given, so an import must apply list pricing itself. With an <code>idempotency_key</code>, a repeat of the same cost is ignored and a different cost is a <code>409</code> unless the request sets <code>override</code> (an audited correction); a keyed post whose developer, issue, model, source or fidelity differs from the stored row is also a <code>409</code> and writes nothing (#871). On a server running the Anthropic Admin or OpenAI Usage poller, a row for that provider&#39;s models is refused with <code>400</code> unless it declares <code>&#34;billed_to&#34;: &#34;other&#34;</code>, for spend billed where the poller cannot see it (Claude Max seats, Bedrock or Vertex, another organisation); the declaration is stored and exported, and <code>serve</code> warns at startup with the count and dollar sum of undeclared manual rows on days a poller covered (#854). <code>model</code>, <code>developer</code> and <code>issue_id</code> are required; <code>issue_id</code> is stored as sent, so it joins only if written the way TIER stores issue ids. A negative cost is a <code>400</code>. The body has no timestamp field: the server stamps the time it arrives, so an import of past spend lands in the current window. The row is stamped with the loaded table&#39;s <code>price_version</code> although that table did not price it, and <code>tierd reprice</code> never rewrites it.</p>
+<p><strong>Org-level pollers (off by default).</strong> Two pollers read an organisation&#39;s usage and cost from the Anthropic Admin API and the OpenAI Usage API, one day at a time, once that day ended at least 24 hours ago. They write two things. First, a remainder event per model and day: for each token class, the provider&#39;s total minus what the Claude Code, Codex, Opencode and proxy paths recorded for that model and day, never below zero, priced with the table. It is stored under developer <code>unattributed</code>, issue <code>unattributed</code> and fidelity <code>daily</code>, with no repository. These reach the denominator and cannot be split per person. Each poll re-reads every day from the first of the previous month. Because a repeated key keeps the larger token counts and the first cost (above), a remainder that later shrinks, because laptop events arrived late, keeps its larger counts; one that later grows gains tokens but keeps its first cost. Days older than that window are never revisited. Second, delta rows in <code>org_actual_spend</code> under the source <code>anthropic-admin</code> or <code>openai-usage</code>, which feed Spend Leverage (Section 8). They are enabled by the <code>collectors.anthropic_admin</code> and <code>collectors.openai_usage</code> config blocks, each taking <code>api_key</code> (prefer the <code>@/path/to/file</code> form), <code>org</code> and an optional <code>poll_interval</code> (default 1h, minimum 5m). Do not also post the same provider&#39;s invoice to <code>org_actual_spend</code> by hand for that organisation.</p>
+<p><strong>The laptop shipper, <code>tierd ship</code>.</strong> When developers work on laptops and the server runs centrally, <code>tierd ship --server &lt;url&gt; --repo &lt;path&gt;</code> sends locally captured events to <code>POST /api/v1/events</code>. The server prices each event again with its own loaded table. <code>ship</code> keeps no state (the server deduplicates on keys), reads the last 90 days by default, and exits 1 when it finds nothing unless <code>--allow-empty</code> is passed. Every run resends everything in its window, in batches of 500 events, and the server keeps one row per key; a scheduled job can pass a shorter <code>--since</code> to send less. A batch that fails after three retries ends the run with exit 1; batches already sent stay stored. The project has not measured the server load of frequent full resends. <code>--codex-rollout</code>, <code>--opencode</code> and <code>--muse</code> are off by default on <code>ship</code> too. Without them, a central server records a laptop&#39;s Codex, Opencode or Muse Code outcomes and none of their cost, so that work reads as free and TIER reads high for exactly the developers who moved to those tools.</p>
+<h3 id="32-pricing-list-prices-and-why">3.2 Pricing: list prices, and why</h3>
+<p>Captured tokens are converted to dollars with a <strong>reference price table</strong> embedded in the binary (<code>internal/store/prices.yaml</code>), never with the organisation&#39;s invoice. The aim: <strong>price what the provider would charge at its published list rates, including its charging mechanics.</strong> Four exceptions are stated where they apply: an unknown model is priced by a guess (Section 3.3); Opencode reasoning tokens are priced at the output rate by assumption (Section 3.1); <code>/costs</code> stores the caller&#39;s figure (Section 3.1); and fast mode, below.</p>
+<ul>
+<li><strong>Mechanics count in the denominator:</strong> cache-read and cache-write multipliers, long-context re-pricing above a model&#39;s threshold (Section 3.3), and thinking or reasoning tokens where a provider reports them (priced at the output rate).</li>
+<li><strong>Procurement does not:</strong> enterprise discounts, batch discounts and subscription fees leave the denominator unchanged. They are recorded as paid spend and show up in Spend Leverage (Section 8).</li>
+<li><strong>One known gap:</strong> Anthropic offers a faster, dearer &#34;fast mode&#34; for some models (Opus 5 at $10 / $50 per million, Opus 5.5 at $8 / $40, as recorded in the price table&#39;s comments and <code>docs/reference-price-table.md</code>). TIER&#39;s parsers read no speed or fast-mode field, so fast-mode calls are priced at the base rate. Cost is understated and TIER reads high, with no warning.</li>
+</ul>
+<p>List pricing puts every installation&#39;s cost on the same price basis: the same tokens on the same model cost the same dollars everywhere. That does <strong>not</strong> make TIER comparable across organisations (Section 6.3). Cache reuse stays in the cost because it depends partly on how the work is run, for example how much context is reused between calls. Two teams with identical work but different cache reuse get different scores: the team with less reuse pays more for the same tokens and scores lower. Read <code>cache_read_share</code> (the share of tokens that were cache reads) beside a score before concluding that a team is less efficient.</p>
+<h3 id="33-the-cost-arithmetic">3.3 The cost arithmetic</h3>
+<p>For a model with separate input and output rates, cost is:</p>
+<pre><code>input      × input_rate
++ cache_read  × input_rate × cache_read_mult
++ cache_w5m   × input_rate × cache_write_5m_mult
++ cache_w1h   × input_rate × cache_write_1h_mult
++ output      × output_rate
+</code></pre>
+<p>with token counts divided by one million and rates in dollars per million tokens. <strong>Long-context tier:</strong> if the model carries one and the call&#39;s input plus all cache classes (cache reads and both cache-write classes; output is not counted) is strictly greater than <code>context_threshold</code>, the over-tier input and output rates replace the base rates for the whole call, and the cache multipliers scale off the over-tier input rate. In the v12 table three rows carry such a tier, each with a 200,000-token threshold: <code>claude-sonnet-4-5</code> ($3.00 / $15.00 base, $6.00 / $22.50 over), <code>gemini-2.5-pro</code> ($1.25 / $10.00 base, $2.50 / $15.00 over) and <code>gemini-3.1-pro</code> ($2.00 / $12.00 base, $4.00 / $18.00 over). No other row has one, <code>claude-opus-4-8</code> included, so a large context on those models prices at the base rate however big it is. Self-hosted reference entries are <code>combined</code>: one rate for all token classes and no cache discount.</p>
+<p><strong>Cache multipliers are per model,</strong> as fractions of the input rate. A row that sets none takes its provider&#39;s default:</p>
+<table>
+<thead>
+<tr>
+<th>Provider or rows</th>
+<th>Cache read</th>
+<th>5-minute write</th>
+<th>1-hour write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic (default)</td>
+<td>0.10×</td>
+<td>1.25×</td>
+<td>2.00×</td>
+</tr>
+<tr>
+<td><code>claude-opus-5-5</code></td>
+<td>0.05×</td>
+<td>1.25×</td>
+<td>2.00×</td>
+</tr>
+<tr>
+<td><code>claude-fable-5-1</code>, <code>claude-mythos-5-1</code></td>
+<td>0.025×</td>
+<td>1.25×</td>
+<td>2.00×</td>
+</tr>
+<tr>
+<td>OpenAI 4-era (default)</td>
+<td>0.50×</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td>OpenAI <code>gpt-5.x</code></td>
+<td>0.10×</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td>OpenAI <code>gpt-6-*</code></td>
+<td>0.10×</td>
+<td>1.25×</td>
+<td>1.25×</td>
+</tr>
+<tr>
+<td><code>gemini-2.5-pro</code>, <code>gemini-2.5-flash</code>, <code>gemini-3.1-pro</code></td>
+<td>0.25×</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>deepseek-r1</code></td>
+<td>0.0509× ($0.028 ÷ $0.55 input)</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>deepseek-v3</code></td>
+<td>0.1× ($0.028 ÷ $0.28 input)</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>glm-5.3</code></td>
+<td>$0.26 ÷ $1.40, stored at full precision</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>glm-5.3-flash</code></td>
+<td>0.2× ($0.03 ÷ $0.15)</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>muse-spark-1.1</code>, <code>-1.2</code>, <code>-1.3</code></td>
+<td>0.12× ($0.15 ÷ $1.25)</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td><code>muse-spark-1.2-contributor</code>, <code>-1.3-contributor</code></td>
+<td>0.02× ($0.002 ÷ $0.10)</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+<tr>
+<td>Every other Google, xAI, DeepSeek, Z.ai and self-hosted row</td>
+<td>1.0×</td>
+<td>1.0×</td>
+<td>1.0×</td>
+</tr>
+</tbody>
+</table>
+<p>Multipliers are used as written, unrounded: <code>0.0509 × $0.55</code> is a cache-read rate of $0.027995 per million, not exactly the published $0.028; only each call&#39;s total is rounded to the micro-dollar. Representative version-12 rows, in $ per million input / output tokens: <code>claude-opus-4-8</code> 5.00 / 25.00; <code>claude-opus-5</code> 5.00 / 25.00; <code>claude-opus-5-5</code> 4.00 / 20.00; <code>claude-sonnet-5</code> 2.00 / 10.00; <code>claude-fable-5-1</code> 10.00 / 50.00; <code>claude-haiku-4-5</code> 1.00 / 5.00; <code>gpt-6-astra</code> 10.00 / 50.00; <code>gpt-6-sol</code> 2.00 / 10.00; <code>gpt-5.6-sol</code> 5.00 / 30.00; <code>glm-5.3</code> 1.40 / 4.40; <code>glm-5.3-flash</code> 0.15 / 0.50; <code>muse-spark-1.3</code> 1.25 / 4.25; <code>self-hosted-medium</code> 0.50 for all tokens. (Fable and Mythos are Anthropic model names; Muse Spark is Meta&#39;s.)</p>
+<p><strong>Model names are normalised</strong> before lookup: lower-cased, the one recognised provider prefix (<code>zai-coding-plan/</code>) stripped, date and <code>-preview</code>/<code>-latest</code> suffixes removed (<code>claude-sonnet-4-20250514</code> becomes <code>claude-sonnet-4</code>). Minor versions have their own rows because each has its own price; normalisation does not collapse <code>opus-4-8</code> to <code>opus-4</code>. When a call carries a route or host (the proxy&#39;s upstream host, Opencode&#39;s provider id), the key <code>&lt;model&gt;@&lt;host&gt;</code> is tried first and the bare model name second.</p>
+<p>An <strong>unknown model</strong> is priced by a guess: round rates the project chose, not measured ones. The tests run in this order of plain substring tests on the lower-cased name. Large (<code>self-hosted-large</code>, $2.00 per million, one rate for all tokens): <code>70b</code>, <code>72b</code>, <code>65b</code>, <code>90b</code>, <code>nemotron-ultra</code>, <code>deepseek-r1-full</code>. Small (<code>self-hosted-small</code>, $0.10): <code>3b</code>, <code>1b</code>, <code>phi-4-mini</code>, <code>qwen2.5-3b</code>, <code>embeddings</code>, <code>reranker</code>. Medium (<code>self-hosted-medium</code>, $0.50): any other <code>&lt;digits&gt;b</code>, or no pattern at all. Because the tests are substrings, a <code>13b</code> or <code>31b</code> model is classed small. Every guess logs a one-time warning per model and increments a counter on the Prometheus metrics endpoint (<code>/metrics</code>), so a new model that arrives before the table is updated is visible.</p>
+<p><code>tierd reprice --from-version N --commit</code> recomputes the cost of every stored row whose <code>price_version</code> is numerically N or higher (so an override numbered 1000 is included in any run below 1000) from its stored token counts, under the current table, and re-stamps <code>price_version</code>. It skips <code>POST /api/v1/costs</code> rows and rows that carry a cost but no token counts. It refuses to commit if any changed row would be priced by a guess and has a nonzero cost before or after, unless <code>--allow-guessed</code> is passed. Rows costing zero both before and after, including zero-token <code>&lt;synthetic&gt;</code> rows, do not trigger this refusal; the test is on cost, not the model name. Without <code>--commit</code> it is a dry run.</p>
+<h3 id="34-price-table-versions">3.4 Price-table versions</h3>
+<p>The table carries <code>version</code> (an integer) and <code>effective_date</code> (YYYY-MM-DD) as one unit. The embedded table is <strong>version 12, effective 2026-10-02, 91 models</strong>; v12 added <code>claude-sonnet-5-5</code> at $2.00 per million input tokens and $10.00 per million output tokens, v11 added the five Meta Muse Spark rows and the <code>meta</code> provider, and v10 had added the Fable 5.1, Mythos 5.1, Opus 5.5, gpt-6 and Z.ai GLM rows and corrected <code>claude-sonnet-5</code> from $3/$15 to $2/$10. The effective date marks the table revision, not the day each row was captured. The rows are the maintainers&#39; reading of each provider&#39;s published prices; this reference does not reproduce the provider pages, and the table file&#39;s comments record what each revision changed. No update schedule is published; a new release carries a new table, and until then an unpriced model is guessed and warned about (Section 3.3).</p>
+<p>Each cost row is stamped with a <code>price_version</code>: the table that priced it, except for <code>POST /api/v1/costs</code> rows, which carry the loaded table&#39;s version although the caller supplied the dollars (Section 3.1). Only <code>tierd reprice</code> and an audited <code>/costs</code> correction (Section 3.1) rewrite a stored cost, so a window that spans a price change reports <code>data_quality.mixed_price_versions</code>. A <code>/scores</code> response carries a <code>price_table</code> block describing the table the server has loaded now: <code>version</code>, <code>effective_date</code>, <code>table_hash</code> (a digest of the resolved rates, prefixed <code>tierpt1:</code>, the name of TIER&#39;s digest scheme, defined in <code>internal/store/prices.go</code>) and <code>file_hash</code> (a SHA-256 digest of the YAML bytes, prefixed <code>sha256:</code>). The table hash answers &#34;same prices&#34;: a change to a compiled-in default multiplier moves it with the file unchanged, and a comment-only edit moves <code>file_hash</code> alone. Section 2.1 gives the comparison rule built on it.</p>
+<p>An administrator may override the table with <code>--prices &lt;file.yaml&gt;</code> (or <code>prices_file:</code> in config, or <code>TIER_PRICES</code>). The override <strong>replaces</strong> the whole table; it does not merge. It must contain the <code>self-hosted-large</code>, <code>self-hosted-medium</code> and <code>self-hosted-small</code> rows or it is refused at startup, and any model it omits is priced by the unknown-model guess. The version number is binding, and two guards enforce it:</p>
+<ol>
+<li><strong>At load, before any database opens:</strong> an override that declares this binary&#39;s embedded version (12 today) with different resolved rates is refused. No flag accepts the collision, so changed version-12 rates cannot be loaded on any database, fresh or not.</li>
+<li><strong>At database open:</strong> a version this database has already recorded under a different <code>table_hash</code> is refused. This binding alone can be retired: <code>tierd prices forget-version --db &lt;path&gt; --version &lt;N&gt; --commit</code> (a dry run without <code>--commit</code>) marks the recorded identity as forgotten, so a replacement table may reuse a non-embedded number.</li>
+</ol>
+<p>So two installations can record different tables under the same non-embedded number, which is why the comparison rule uses the hash. Editing rates and bumping <code>version</code> are one action.</p>
+<hr>
+<h2 id="4-where-the-outcomes-come-from-prs-weights-quality-floors-direct-commits-outcomes-api">4. Where the outcomes come from: PRs, weights, quality floors, direct commits, outcomes API</h2>
+<h3 id="41-what-counts-as-an-outcome">4.1 What counts as an outcome</h3>
+<p>The default outcome is a <strong>merged pull request</strong>. Merge is the acceptance event; a PR that is opened, reviewed or closed without merging records nothing. Four producers can record an outcome. The webhook, the outcomes API and backfill resolve the weight the same way: a supplied weight (from a size label, or sent through the API) is stored with <code>weight_source: &#34;label&#34;</code>, and with none the diff heuristic gives <code>&#34;git-heuristic&#34;</code>. Push capture (Section 4.5) uses a fixed 0.5 (<code>&#34;push&#34;</code>). Quality starts at 1.0, except that the outcomes API accepts a caller-supplied <code>quality</code> in [0, 1] (Section 4.6).</p>
+<ol>
+<li><strong>GitHub webhook</strong> (<code>POST /webhook/github</code>): a <code>pull_request</code> event with <code>closed</code> + <code>merged</code> inserts one outcome, <code>source = &#34;github-webhook&#34;</code>.</li>
+<li><strong>Provider-neutral API</strong> (<code>POST /api/v1/outcomes</code>): for GitLab, Bitbucket, Gitea or any CI that can call an endpoint on merge, <code>source = &#34;api-outcome&#34;</code>.</li>
+<li><strong>Backfill</strong> (<code>tierd backfill</code>): walks merged-PR history through the GitHub REST API, reconstructing one outcome per merged PR, <code>source = &#34;backfill&#34;</code>.</li>
+<li><strong>Push capture</strong> (opt-in): direct commits to the default branch, <code>source = &#34;push&#34;</code> (Section 4.5).</li>
+</ol>
+<p>A merged PR whose branch and body carry no recognisable issue reference records <strong>no outcome at all</strong>. The webhook logs &#34;PR merged but no issue ID found&#34; at debug level; backfill counts such PRs in its closing line (<code>unattributed=N</code>), which is the one place the number is reported. Section 5.3 says what this does to the figure.</p>
+<p>Each PR or API outcome is keyed on its <code>merge_commit_sha</code>, across all repositories (push outcomes have no SHA and are keyed on repository, issue and day; Section 4.5), and <strong>the first producer to record a merge commit hash (SHA) wins</strong>: a later webhook delivery, backfill run or API post for the same SHA changes nothing (backfill counts it as skipped; the API answers <code>200</code> with <code>status: &#34;duplicate&#34;</code>). There is no correction path short of erasure (Section 6.4). Labels come from the producer that recorded the outcome: the webhook reads them from the merge event, backfill reads them as they are when it runs. Editing a label after that changes nothing, and two producers could have weighed the same merge differently; the first one wins. TIER creates no labels; the team adds them in GitHub. A PR merged into any branch counts, not only the default branch, so a feature PR merged into an integration branch, and that branch merged later, records two outcomes (two merge SHAs). CI is read only on the default branch, so a PR merged into another branch never receives the CI floor (Section 4.4). A PR that closes several issues is credited to one primary issue (the branch-derived id if there is one, else the leftmost <code>closes #N</code> in the body); the others are logged, not credited.</p>
+<h3 id="42-size-weights">4.2 Size weights</h3>
+<p>The weight is the PR&#39;s size, read from a GitHub label, case-insensitive, with or without the <code>size/</code> prefix:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+<th>Canonical meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>size/xs</code>, <code>xs</code></td>
+<td>0.5</td>
+<td>trivial: a one-line fix, a typo, a config flag, a dependency bump</td>
+</tr>
+<tr>
+<td><code>size/s</code>, <code>s</code></td>
+<td>1</td>
+<td>small: a localised change to one function or file</td>
+</tr>
+<tr>
+<td><code>size/m</code>, <code>m</code></td>
+<td>3</td>
+<td>medium: a self-contained feature or fix across a few files</td>
+</tr>
+<tr>
+<td><code>size/l</code>, <code>l</code></td>
+<td>5</td>
+<td>large: a feature touching several components, or a refactor with migration</td>
+</tr>
+<tr>
+<td><code>size/xl</code>, <code>xl</code></td>
+<td>8</td>
+<td>extra-large: a subsystem or multi-day effort landed as one PR</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The fixed scale applies to label-derived and heuristic weights:</strong> neither can produce any value but 0.5, 1, 3, 5 or 8. A weight sent through <code>POST /api/v1/outcomes</code> is taken as sent, anywhere in (0, 8] (Section 4.6). When a PR carries several recognised size labels, the first in the order the webhook payload (or, for backfill, the REST response) lists them wins. Label <strong>names</strong> can be remapped with the <code>outcomes.size_labels</code> config key. A custom table replaces the built-in one entirely, need not list all five sizes, and a label missing from it falls through to the heuristic; each value must be one of 0.5, 1, 3, 5, 8, or startup fails. <code>tierd backfill --config &lt;file&gt;</code> reads the same key, so backfilled and live outcomes weigh the same.</p>
+<p>With no recognised label, TIER falls back to a bucketed <strong>diff-size heuristic</strong> on the PR&#39;s aggregate line and file counts:</p>
+<pre><code>effort = (additions + deletions) + changed_files × 10
+effort ≤ 15   → 0.5
+effort ≤ 60   → 1
+effort ≤ 200  → 3
+effort ≤ 1000 → 5
+otherwise     → 8
+</code></pre>
+<p>A 50-line PR touching 3 files has effort 50 + 30 = 80, weight 3. The provenance is recorded as <code>weight_source = &#34;label&#34;</code> or <code>&#34;git-heuristic&#34;</code>. The heuristic is a fallback, not a measure of value. The webhook payload carries aggregate counts and no per-file data, and the webhook path makes no outbound GitHub call and keeps no clone, so generated or vendored churn inflates an unlabelled PR&#39;s weight. A size label replaces the diff entirely, which is the mitigation.</p>
+<p>The rubric is versioned (<code>rubric.version: 1</code>), a number set by hand and reported on every <code>/scores</code> response and report manifest; it is not stored on outcomes. The project&#39;s tests tie it to the weight scale, the heuristic&#39;s output values, the work-type list and the quality floors, so changing any of those fails the tests until the number is bumped. The heuristic&#39;s thresholds, the work-type precedence, the default label names and the revert keyword lists are not tied to it: they can change with no new rubric number. The weights, floors and windows in this section are the project&#39;s rubric choices; it publishes no study behind them. The meaning column above is the rubric&#39;s definition of each size; <code>docs/rubric.md</code> adds worked examples and says nothing the table does not.</p>
+<h3 id="43-work-types">4.3 Work types</h3>
+<p>Each outcome carries a <code>work_type</code> from a closed taxonomy: <code>feature</code>, <code>bug</code>, <code>security</code>, <code>incident</code>, <code>tech-debt</code>, <code>research</code>, <code>compliance</code>. It is read from a PR label equal to a type name or prefixed <code>type:</code> / <code>kind:</code>; when several apply the precedence is security &gt; incident &gt; compliance &gt; bug &gt; tech-debt &gt; research &gt; feature; with no type label the default is <code>feature</code>. <code>GET /api/v1/scores</code> returns a <code>work_types[]</code> array scoring each type separately. A segment divides by the developer&#39;s cost on the issues that carry an outcome of that type (Section 2.1 says why that reads higher than the pooled figure). An issue with outcomes of two types has its whole cost counted in both segments, so the segments do not add up to the whole. Comparing a security TIER to a feature TIER is a category error the taxonomy exists to prevent. The pooled rows mix all types, so a shift in the mix of work moves them with no change in efficiency. Section 2.1 says which figure a decision uses.</p>
+<h3 id="44-quality-floors-what-is-enforced-and-what-is-specified-but-not">4.4 Quality floors: what is enforced, and what is specified but not</h3>
+<p>After an outcome is recorded, its quality is derived from events, never edited by hand. Each signal is appended to an append-only <code>quality_events</code> log and the outcome&#39;s quality is recomputed as the <strong>minimum</strong> of the applicable floors, clamped to [0.1, 1.0]. The floors the shipped code enforces:</p>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Floor</th>
+<th>Window</th>
+<th>Source event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>clean merge (<code>ci_pass</code>, or no signal)</td>
+<td>1.0</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>CI failure on the merge commit (<code>ci_fail</code>): a completed <code>failure</code> run on the default branch whose head SHA is a recorded merge commit</td>
+<td>0.7</td>
+<td>up to 48 hours after the outcome; no lower bound</td>
+<td><code>workflow_run</code> webhook</td>
+</tr>
+<tr>
+<td>strategic revert, business decision (<code>revert_strategic</code>)</td>
+<td>0.8</td>
+<td>up to 60 days after the outcome; no lower bound</td>
+<td><code>push</code> webhook</td>
+</tr>
+<tr>
+<td>quality revert, code problem (<code>revert_quality</code>)</td>
+<td>0.1</td>
+<td>up to 60 days after the outcome; no lower bound</td>
+<td><code>push</code> webhook</td>
+</tr>
+</tbody>
+</table>
+<p>A strategic revert keeps most of the credit because the rubric reads it as a decision about work that was done, not a fault in it. The outcome&#39;s timestamp for a webhook-recorded PR is when TIER received the merge (Section 5.4); a revert is timed by its commit timestamp, a CI run by its <code>updated_at</code> from GitHub. The 48-hour window is an upper cutoff only: a failure whose <code>updated_at</code> is before the outcome&#39;s timestamp still counts, but the outcome must already be recorded when the delivery arrives, or the delivery is ignored. A CI failure is cleared (recorded as <code>ci_fail_flaky</code>, quality stays 1.0) by a success that is a re-run of the failing run: same merge commit, same <code>workflow_id</code>, a strictly later <code>run_attempt</code>, finishing within 30 minutes of the failure. A green run of a different workflow on the same commit does not clear a red one. Once one flaky re-run is recorded for a (commit, workflow), <strong>every</strong> failure of that workflow on that commit is cleared, including later failures with no re-run of their own. So a genuine failure that follows a flaky one on the same commit and workflow is not penalised.</p>
+<p>A pushed commit counts as a revert only when its <strong>first line</strong> matches <code>(?i)^revert\s+[&#34;&#39;]?(.+?)[&#34;&#39;]?\s*$</code>: the word <code>Revert</code> (any case) followed by whitespace, as in git&#39;s own <code>Revert &#34;feat: add login&#34;</code> or a hand-written <code>Revert broke login</code>. <code>Revert: broke login</code>, <code>Reverted login change</code> and <code>revert(auth): …</code> do <strong>not</strong> match, receive no penalty, and, with <code>--push-capture</code> on, are not excluded as reverts, so such a commit can itself be captured as a 0.5 push outcome. A matching revert is linked to one original outcome: first by the <code>This reverts commit &lt;sha&gt;</code> footer git adds (a full 40-character lowercase hex SHA only); failing that, by the issue id found in the message, which picks the most recently recorded outcome for that issue, preferring the pushed repository. The developer is not part of that match, so when several outcomes share an issue only the latest is penalised. If neither link resolves, an info line is logged and nothing is degraded.</p>
+<p>The revert is then classified by keyword over the <strong>revert commit&#39;s message</strong> (the PR body is not consulted). Each pattern is a case-insensitive regular expression with no anchors or word boundaries, so <code>.*</code> means &#34;anything in between&#34;, <code>bug</code> matches &#34;debug&#34;, <code>OOM</code> matches &#34;room&#34; and <code>break</code> matches &#34;breaking change&#34;; such accidental hits push a message toward the quality class. The strategic patterns are exactly: <code>product decision</code>, <code>PM requested</code>, <code>feature flag.*disable</code>, <code>business requirement.*changed</code>, <code>pivot</code>, <code>deprecat</code>, <code>sunset</code>, <code>removing feature</code>, <code>no longer needed</code>, <code>replaced by</code>. The quality patterns are: <code>broke</code>, <code>break</code>, <code>broken</code>, <code>crash</code>, <code>OOM</code>, <code>out of memory</code>, <code>regression</code>, <code>degradation</code>, <code>incident</code>, <code>outage</code>, <code>bug</code>, <code>defect</code>, <code>performance.*degrad</code>, <code>memory leak</code>, <code>data loss</code>, <code>corrupt</code>, <code>timeout</code>, <code>deadlock</code>, <code>security.*vuln</code>. A revert is strategic (floor 0.8) only when it hits at least one strategic pattern and no quality pattern; every other case, including no keyword at all, is a quality revert (floor 0.1). The penalty lands on the outcome that shipped the change, never on the developer who reverted it.</p>
+<p>The project&#39;s quality-degradation specification describes a fuller eight-event model. The following are <strong>specified but not enforced by the shipped code</strong>: a follow-up-fix penalty (−0.15), partial reverts (<code>1.0 − 0.9 × fraction</code>), production-incident correlation, hotfix-branch detection (0.4), downstream-CI failures (−0.20 per service), the &#34;no CI signal&#34; 0.95 penalty, the cross-PR flaky registry, and the persisted provisional → observing → final phase state machine. The 48-hour and 60-day bounds are applied as event windows today; the lifecycle state is not materialised. On this event-derived path there is no route to a quality of 0.0, because the clamp floor is 0.1; the outcomes API (Section 4.6) is the exception, since it accepts an explicit <code>quality: 0</code> from the caller, though the next quality event on that merge commit replaces it with the event-derived value. There is no endpoint to correct or delete a single quality event; a wrongly classified revert or CI failure stays in the log. The only deletion is the erasure of a whole developer (Section 6.4).</p>
+<h3 id="45-direct-commits-opt-in-push-capture">4.5 Direct commits (opt-in push capture)</h3>
+<p>Trunk-based teams that commit straight to the default branch never produce a merged-PR event, so their spend would score near zero. With <code>--push-capture</code> (env <code>TIER_PUSH_CAPTURE</code>, config <code>outcomes.push_capture</code>; off by default), a direct commit to the default branch that carries a resolvable issue reference becomes an outcome with a fixed weight of <strong>0.5</strong>, <code>weight_source = &#34;push&#34;</code>, <code>source = &#34;push&#34;</code>. Commits are grouped to <strong>one outcome per (repository, issue, day in Coordinated Universal Time, UTC)</strong>, credited to the GitHub login of its earliest commit, ordered by GitHub&#39;s push time (<code>repository.pushed_at</code>, which GitHub sets), then commit time, then SHA (#938), so splitting work into many commits earns nothing extra. A commit with no GitHub author login is skipped.</p>
+<p>Skipped as well: reverts (the same first-line test as above); commits whose first line looks like git&#39;s merge subject (<code>Merge pull request #N</code>, <code>Merge branch …</code>, <code>Merge remote-tracking branch …</code> and no other form, so <code>Merge tag …</code> is not skipped; push payloads carry no parent list, so this is a subject match); and commits whose changed files are all generated or vendored. &#34;Generated or vendored&#34; means every file matches the <code>outcomes.generated_paths</code> list: a trailing <code>/</code> is a directory at any depth, a leading <code>*</code> is a filename suffix, anything else is an exact filename. The default list is <code>vendor/</code>, <code>node_modules/</code>, <code>*.pb.go</code>, <code>*_generated.go</code>, <code>*.gen.go</code>, <code>go.sum</code> and the lock files of npm, Yarn, pnpm, Cargo, Poetry, Bundler and Composer; <code>[]</code> turns the exclusion off.</p>
+<p>A squash merge arrives as both a PR event and a push, in no fixed order. When the PR event is processed first, the push commit is skipped because its SHA is already recorded. Each captured commit is also recorded in a per-commit ledger, and a PR outcome removes its merge commit from it in the same transaction: a push outcome that held only that commit is deleted, and one holding other commits stays, re-owned to its earliest remaining commit. So the squash merge counts once whatever the order (#849). Push outcomes stored before v0.5.2 are never deleted, so a double count already stored stays. Push outcomes carry no <code>merge_commit_sha</code>, so CI-failure floors do not reach them; revert degradation still applies through the issue id. Push-grain outcomes are not directly comparable with PR-grain outcomes. <code>/scores</code> cannot filter by producer; the raw export <code>GET /api/v1/outcomes</code> carries <code>source</code> on each row, so a split by producer has to be computed from the export.</p>
+<h3 id="46-the-outcomes-api">4.6 The outcomes API</h3>
+<p><code>POST /api/v1/outcomes</code> (write scope) records an outcome from any forge:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>developer</code></td>
+<td>yes</td>
+<td>canonical developer identifier</td>
+</tr>
+<tr>
+<td><code>issue_id</code></td>
+<td>yes</td>
+<td>stored as sent, so it joins cost only when written the way TIER stores issue ids (<code>issue-42</code>, <code>TIER-99</code>); the <code>unattributed</code> sentinel is rejected</td>
+</tr>
+<tr>
+<td><code>pr_number</code></td>
+<td>yes</td>
+<td>integer ≥ 1</td>
+</tr>
+<tr>
+<td><code>merge_commit_sha</code></td>
+<td>yes</td>
+<td>dedup key, any non-empty string up to 256 characters (not checked as hex); a replay returns 200 with <code>status: &#34;duplicate&#34;</code></td>
+</tr>
+<tr>
+<td><code>merged_at</code></td>
+<td>yes</td>
+<td>timestamp in the RFC 3339 format, year 2020–2050; becomes the outcome timestamp used for windowing</td>
+</tr>
+<tr>
+<td><code>weight</code></td>
+<td>no</td>
+<td>taken as sent if 0 &lt; weight ≤ 8, not checked against the scale: 2.7 is stored as 2.7 and stamped <code>weight_source: &#34;label&#34;</code>; 0 or above 8 is a 400</td>
+</tr>
+<tr>
+<td><code>quality</code></td>
+<td>no</td>
+<td>in [0, 1]; default 1.0. The API accepts an explicit 0; the event-derived path (Section 4.4) never goes below 0.1; the value holds only until the first quality event on that <code>merge_commit_sha</code> (a CI run, flaky re-run or revert), which recomputes quality from 1.0 over the event floors and overwrites it; a green CI run resets a posted 0.3 to 1.0</td>
+</tr>
+<tr>
+<td><code>additions</code>, <code>deletions</code>, <code>changed_files</code></td>
+<td>no</td>
+<td>used for the size heuristic when <code>weight</code> is omitted; with none of them the heuristic gives 0.5</td>
+</tr>
+<tr>
+<td><code>work_type</code></td>
+<td>no</td>
+<td>one of the seven types, default <code>feature</code>; an invalid value is 400</td>
+</tr>
+<tr>
+<td><code>repo</code></td>
+<td>no</td>
+<td>canonical <code>owner/repo</code> so the outcome joins cost from the same repository; omitted, it is stored as <code>unqualified</code> (Section 5.1)</td>
+</tr>
+</tbody>
+</table>
+<p>Outside GitHub no CI or revert signal ever arrives, because both come only from GitHub&#39;s webhooks, so an API-posted outcome keeps the quality the caller sent.</p>
+<p>A fresh insert returns <code>201</code> with <code>{&#34;status&#34;:&#34;created&#34;,&#34;weight_source&#34;:...,&#34;weight&#34;:...}</code>. The bearer token is the single authenticator; any holder can post an outcome as any developer, so it is an org-level secret, and the <code>api-outcome</code> source stamp keeps such rows distinguishable in audit.</p>
+<h3 id="47-backfill">4.7 Backfill</h3>
+<p><code>tierd backfill --repo owner/name</code> reconstructs outcomes from merged-PR history over the last 90 days by default (<code>--since</code> reaches further back). It requires a GitHub token with read access (<code>TIER_GITHUB_TOKEN</code>, preferably as <code>@/path/to/file</code>). It calls two GitHub REST endpoints (Section 9.4), derives the issue id, weight and work type with the same code as the webhook, starts each outcome at quality 1.0, and does <strong>not</strong> reconstruct degradation signals: a revert or CI failure that already happened in history is not applied. A PR already in the store is skipped, not updated. Run it before <code>serve</code>. Both write one SQLite file, and SQLite lets one writer in at a time; a writer that waits more than 5 seconds for the other fails with a &#34;database is busy&#34; error. TIER takes no lock of its own to prevent this.</p>
+<hr>
+<h2 id="5-attribution-and-windows-issue-linkage-unattributed-spend-the-cost-horizon-window-matching">5. Attribution and windows: issue linkage, unattributed spend, the cost horizon, window matching</h2>
+<h3 id="51-the-shared-key-is-the-issue-id">5.1 The shared key is the issue id</h3>
+<p>Cost and outcomes are joined by developer and by <strong>issue id</strong>, extracted by one package from the branch name or the PR body so all paths agree:</p>
+<table>
+<thead>
+<tr>
+<th>Where</th>
+<th>Format</th>
+<th>Example</th>
+<th>Resolves to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>branch</td>
+<td>first all-digit segment between <code>/</code>, <code>-</code> or <code>_</code>, any prefix or none (no leading zero)</td>
+<td><code>feature/42-auth</code>, <code>42-auth</code></td>
+<td><code>issue-42</code></td>
+</tr>
+<tr>
+<td>branch</td>
+<td>tracker key <code>[A-Z][A-Z0-9]+-&lt;N&gt;</code></td>
+<td><code>fix/TIER-99-crash</code></td>
+<td><code>TIER-99</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td><code>closes #N</code>, <code>fixes #N</code>, <code>resolves #N</code> (case-insensitive)</td>
+<td><code>closes #42</code></td>
+<td><code>issue-42</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td>tracker key</td>
+<td><code>part of PROJ-123</code></td>
+<td><code>PROJ-123</code></td>
+</tr>
+<tr>
+<td>PR body / commit</td>
+<td>whitespace-preceded <code>#N</code></td>
+<td><code>see #42</code></td>
+<td><code>issue-42</code></td>
+</tr>
+</tbody>
+</table>
+<p>Branch precedence: a tracker key beats a bare number. Body precedence: <code>closes #N</code> beats a tracker key beats a bare <code>#N</code>. A bare four-digit branch segment in 1900–2099 is read as a calendar year and skipped (<code>release/2024-fix</code> attributes nothing; <code>release/2024-42</code> attributes to <code>issue-42</code>). <code>main</code>, <code>master</code> and <code>HEAD</code> never attribute. Markdown headings and hex colours do not match.</p>
+<p>For Claude Code sessions the branch comes from the <code>gitBranch</code> field in the log. Every Claude Code path (<code>tierd score</code>, <code>tierd ship</code> and the live watcher) also reads the repository&#39;s git log. When the message was recorded on a feature branch (not <code>main</code>, <code>master</code> or a detached head), a branch-tip commit on a branch of the same name within ±30 minutes of the message supplies the issue id, and <strong>that commit&#39;s issue id wins over the one in the branch name</strong>; if several qualify, the first in <code>git log</code> order wins. Otherwise the branch name decides. The watcher reads the last 30 days of commits through a cache refreshed at most every 30 seconds. Attribution is fixed when a message is first stored: a commit that lands later does not re-attribute it, and a later <code>tierd score</code>, which re-reads everything, can differ. <code>tierd ship</code> sends events to a server that already holds the same keys, and the server keeps its first attribution.</p>
+<p><strong>Worktree attribution (#823; opt-in, off by default).</strong> Claude Code writes on every line of a session file the folder the session started in (<code>cwd</code>) and that folder&#39;s branch (<code>gitBranch</code>). A session started in the main checkout that then works in a git worktree (a second checkout of the same repository, on its own branch, made with <code>git worktree add</code>) still says <code>main</code> on every line, so its spend is booked to <code>unattributed:main</code>; subagents inherit their parent&#39;s <code>cwd</code> and branch and are booked the same way. The switch <code>--worktree-attribution</code> on <code>tierd serve</code> (its live watcher), <code>tierd ship</code> and <code>tierd score</code> (environment variable <code>TIER_WORKTREE_ATTRIBUTION</code>; on <code>serve</code> also the config key <code>watch.worktree_attribution</code>) attributes each message instead by the worktree its tool calls named, with the branch that worktree had checked out at that moment, read from git&#39;s own files; it never runs <code>git</code> for this. With it on, each Claude Code event records the rule that chose its issue, <code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code> or <code>carry</code>, exported as <code>attribution_rule</code> by <code>GET /api/v1/events</code>; rows stored with it off export as <code>legacy</code>. Spend in a worktree of a repository that is not configured goes to <code>unattributed:foreign-repo</code> (Section 5.3). It was released in v0.5.2 as a preview, off by default, because its measured accuracy fell short of the project&#39;s release gates; the measurement and its limits are in <code>docs/how-it-works.md</code>, section &#34;Measured accuracy: read this before turning it on&#34;, which also gives the rules in order. Two consequences to weigh before turning it on: the server keeps the first issue it stores for each message and no command re-attributes a stored row, so a wrong attribution is permanent and turning the switch off later moves nothing back; and a <code>tierd</code> server older than v0.5.2 rejects with <code>400</code> every batch a <code>ship</code> with the switch on sends, so upgrade the server first. <code>tierd score --repo &lt;path&gt; --worktree-attribution</code> previews the effect and stores nothing: it scans the same session files with the switch off and on and prints what would change.</p>
+<p>Because a GitHub issue number is unique within one repository, each row also stores a canonical <code>owner/repo</code> (from the webhook&#39;s <code>repository.full_name</code>, from <code>remote.origin.url</code> for local capture, or from the <code>X-Tier-Repo</code> header on the proxy). Rows whose repository cannot be determined store the sentinel <code>unqualified</code>, which joins tolerantly: an <code>unqualified</code> row matches the same issue id in any repository. So <code>issue-42</code> from two repositories can be joined to each other when one side is <code>unqualified</code>; naming the repository (<code>repo</code> on the API, <code>X-Tier-Repo</code> on the proxy) avoids that. <code>tierd repair-repo</code> moves one developer&#39;s cost rows off <code>unqualified</code> using a session-to-repository map the administrator supplies (dry run unless <code>--commit</code>). A contributor on a fork must name the upstream so their cost joins its outcomes: <code>tierd score --repo-slug owner/upstream</code>; <code>tierd ship --repo &lt;path&gt; --repo-slug &lt;path&gt;=owner/upstream</code> (repeatable, one per <code>--repo</code>); and for <code>serve --watch-repo</code>, the config map <code>watch.repo_slugs</code> (there is no <code>serve</code> flag).</p>
+<h3 id="52-two-identities-that-must-be-mapped">5.2 Two identities that must be mapped</h3>
+<p>Cost is attributed to the shipping identity (the OS username, or <code>--developer &lt;id&gt;</code>); outcomes are attributed to the PR author&#39;s GitHub login. When these differ, <code>POST /api/v1/developer_alias {&#34;alias&#34;:&#34;alice-laptop&#34;,&#34;canonical&#34;:&#34;alice&#34;}</code> joins them. There is one alias per request and no bulk endpoint, so a team&#39;s aliases are posted by a script. Aliases are applied when a score is read, so an alias covers rows stored before it was created, and deleting it splits them again. Push-captured outcomes use the commit author&#39;s GitHub login and go through the same map. Without an alias, cost and outcomes land in separate rows: the cost row has no points and the outcome row has no cost, so each reads TIER 0 unless it has other matched activity. <code>/scores</code> reports the split as <code>data_quality.unjoined_developers</code>.</p>
+<h3 id="53-unattributed-spend">5.3 Unattributed spend</h3>
+<p>Spend that resolves to no issue stays in the denominator under a labelled bucket:</p>
+<ul>
+<li><code>unattributed:main</code>: spend recorded on <code>main</code> or <code>master</code>. Its share of window cost is reported as <code>exploratory_cost_share</code>. The field has been computed this way since it was introduced; its name comes from an older description and does not mean the work was exploratory, overhead or never merged.</li>
+<li><code>unattributed:branch-without-issue</code>: a named branch with no recognisable issue reference.</li>
+<li><code>unattributed:detached-head</code>: no branch recorded, which is where Opencode spend lands, and Muse Code spend whose run recorded no branch.</li>
+<li>bare <code>unattributed</code>: producers that cannot see a branch, such as the org pollers and a proxy call without an issue header.</li>
+<li><code>unattributed:foreign-repo</code>: with worktree attribution on (Section 5.1), Claude Code spend in a worktree of a repository that is not configured; its repository is stored as <code>unqualified</code>, so the other repository is never named.</li>
+</ul>
+<p><code>data_quality.attributed_cost_share</code> is the fraction of window cost that joined an issue; it and the buckets sum to 1.0. A large unattributed share means TIER could not see which issue the money went to, usually because branch names carried no issue number. It does not mean the money was wasted.</p>
+<p><strong>When the headline reads low.</strong> Linking spend to an issue does not move the pooled figure or a developer&#39;s figure by itself, because both divide all points by all cost. Among issue-linking gaps, the figure reads <strong>low</strong> in exactly one case: accepted work that recorded no outcome because its PR named no issue in the branch or the body (Section 4.1). (A separate, identity gap splits one person&#39;s cost and outcomes across two unjoined rows; Section 5.2.) Its cost is in the denominator with no points. That case and a low attribution share often share a cause, branch names without issue numbers: a PR from such a branch records an outcome only if its body names the issue (<code>closes #N</code> and the other forms in Section 5.1). So a low share is a reason to check, not a verdict. Backfill&#39;s closing line reports how many merged PRs recorded nothing (<code>unattributed=N</code> beside <code>inserted=N</code>). Spend recorded without an issue while its PR did record an outcome (for example sessions logged on <code>main</code> while the PR, on its own branch, named the issue; or Opencode) does not bias the figure. It loses the pairing instead: the segments leave that cost out, and the outcome may be flagged zero-token, which takes its row below the evidence floor (Section 7.1).</p>
+<p>Run <code>tierd doctor --repo &lt;path&gt;</code> to check local issue attribution. Its issue-attribution check divides issue-attributed dollars by feature-branch dollars (attributed plus <code>unattributed:branch-without-issue</code>). Below the <code>--min-attribution</code> floor (default 0.5) the check fails with a non-zero exit; from 0.5 to below 0.9 it warns; 0.9 and above is healthy.</p>
+<p>Spend on <code>main</code> or <code>master</code>, detached-head spend and bare-unattributed spend are left out of that ratio. A separate, informational check named <code>spend not on a feature branch</code> reports them. So the doctor&#39;s ratio is not the dashboard&#39;s <code>attributed_cost_share</code>, which divides by all window cost.</p>
+<p>The API distinguishes three cases:</p>
+<ul>
+<li><strong>Unattributed spend</strong> — cost the collector could not tie to any issue (no branch reference, mainline work, detached head). It has no issue id.</li>
+<li><strong>No-outcome spend</strong> (<code>no_outcome_cost_usd</code> in <code>segment_reconciliation</code>) — cost that <strong>did</strong> resolve to an issue id, but for which <strong>that developer</strong> has no recorded outcome on that repository and issue inside the window: abandoned work, work still in flight, a PR that never merged, or an issue a colleague merged. When two people work one issue and one merges it, the other&#39;s spend is always no-outcome spend; TIER has no notion of pairing or shared credit. It counts as a cost with nothing to show for it yet.</li>
+<li><strong>A merged PR with no issue reference</strong> — the outcome side of the same gap: the merge happened, but it records no outcome at all (Section 4.1). Its cost, if the branch had no reference either, is in the unattributed bucket.</li>
+</ul>
+<p><code>segment_reconciliation</code> accounts for the window with the identity <code>outcome_linked + no_outcome + unattributed == window_cost</code>, exact on the integer micro-dollar fields. The per-work-type segments divide by outcome-linked cost alone, so when there is any no-outcome or unattributed cost they can read higher than the pooled figure (an individual segment can still read lower, because its outcome mix differs). Section 2.1 says which figure a decision uses.</p>
+<h3 id="54-two-clocks-and-why-recent-windows-read-low">5.4 Two clocks, and why recent windows read low</h3>
+<p>This section and Section 5.6 describe free windows, which only <code>developer</code> mode serves; team and division mode serve sealed calendar months instead (Section 6.2). The denominator is windowed on the cost event&#39;s timestamp, which lands continuously as tokens are spent. The numerator is windowed on the outcome&#39;s timestamp, which lands at merge time (the webhook stamps <code>time.Now()</code> when it processes the merge; the API and backfill use <code>merged_at</code>; push capture uses the commit timestamp). The two halves are read independently over the same <code>[since, until)</code> and then joined by identity, not by time. So:</p>
+<ul>
+<li><strong>Trailing edge (near <code>until</code>):</strong> cost has landed for work that has not merged yet. The ratio reads <strong>low</strong>. The default <code>/scores</code> window opens at the start of the UTC day 90 days ago with an open upper bound, so the newest weeks of a live deployment are always in this zone.</li>
+<li><strong>Leading edge (near <code>since</code>):</strong> an outcome merges inside the window but its cost was spent before <code>since</code>. The ratio reads <strong>high</strong>.</li>
+</ul>
+<p>In a window much longer than the time an issue usually takes from first spend to merge, both edges are a small part of the whole; this is a rule of thumb, and the project publishes no measured lead time. While a window&#39;s upper bound is still ahead of the clock (the default <code>/scores</code> window is open-ended), its number keeps moving as work merges and new cost arrives; it does not settle. Once <code>until</code> has passed, the window is closed to new PR merges: the webhook stamps a merge outcome at the time it processes the merge, so even a late delivery lands outside. A past window can still move: a <code>backfill</code> re-run or a <code>POST /api/v1/outcomes</code> (both stamp <code>merged_at</code>) and push capture (commit timestamp) can add outcomes; a revert up to 60 days after merge lowers an existing outcome&#39;s quality; and a late <code>ship</code> adds cost stamped at the original session time. The code defines no &#34;settled&#34; state and reports none. By the rules above, a window has mostly stopped moving when <code>until</code> is in the past, 60 days have passed since <code>until</code>, and no revert committed within 60 days of an outcome in the window is still waiting to be pushed (a revert is timed by its commit timestamp, so a late push can still lower a quality; Section 4.4), every laptop has run <code>ship</code> since <code>until</code>, and no backfill is pending. Administrative actions can still change it afterwards: an API post, a <code>/costs</code> correction, a reprice, an alias or hierarchy edit, or an erasure. To fix a figure for later comparison, record its manifest and check it with <code>tierd verify-report</code> (Section 9.6). Compare two such periods, never a mature quarter against the current open one.</p>
+<h3 id="55-the-cost-horizon">5.5 The cost horizon</h3>
+<p>Every installation has a <strong>cost horizon</strong>: the timestamp of the earliest cost event in its store (<code>SELECT ts FROM token_events ORDER BY ts LIMIT 1</code>, scoped to the repository when <code>?repo=</code> is set). Outcomes backfill freely from tracker history; cost exists only from that earliest event forward.</p>
+<p>The horizon is one timestamp for the whole installation, across every developer and every capture path (or one repository with <code>?repo=</code>). A developer or a tool whose capture started later is not reflected in it; <code>source_coverage_start</code> gives each capture path&#39;s own earliest event when there is more than one.</p>
+<p>Loading history moves the horizon back. <code>tierd ship</code> writes events stamped with the session&#39;s original timestamps, so after a run the horizon moves back to the oldest session still on disk, at most 90 days by default (further with <code>--since</code>). Coding tools delete old session logs on their own schedule; the project&#39;s reading is that Claude Code keeps about 30 days by default, so for a Claude Code user a first <code>ship</code> usually reaches back about 30 days, not 90. On <code>serve</code>, the Codex, Opencode and Muse Code collectors&#39; first pass loads every log on disk, and the Anthropic Admin and OpenAI Usage pollers write remainder events back to the first of the previous month. (<code>tierd score</code> only prints a report; it writes nothing and does not move the horizon.) A fresh install with nothing loaded has no horizon at all. One that has only tailed Claude Code live for a week has a horizon about a week old, or older if an older session file the watcher had not tracked before was appended to, because a file&#39;s first tracked write re-reads it whole (tracked files resume from their checkpointed offset). Extracted events outlive the logs they came from, so only an erasure (<code>DELETE /api/v1/developer/{id}</code>) that removes the earliest rows moves the horizon forward; it is a property of what was captured, not a retention setting.</p>
+<p>A window reaching back past the horizon divides outcomes by cost that was never captured, and the number reads high. On one multi-repo installation, measured on 2026-07-26, the API&#39;s default 90-day window read about twice what the same installation reported for the last 30 days, roughly the period its cost capture covered. That is a single measurement, reported here as an illustration of size, not a rule.</p>
+<p>A first trial is the common case. <code>tierd backfill</code> loads 90 days of merged PRs by default, while the session logs on disk may cover about 30. The older outcomes then have no recorded tokens against their issues, so they are flagged zero-token and take their developers below the evidence floor (Section 7.1), and a 90-day window reads high. Reading from <code>cost_coverage_safe_since</code> avoids both for the installation as a whole; it cannot show a developer or a tool whose capture started later, which <code>source_coverage_start</code> and the zero-token flags hint at.</p>
+<p><code>/scores</code> reports the horizon in <code>data_quality</code>: <code>cost_coverage_start</code> (the horizon timestamp), <code>window_predates_cost_capture</code> (an explicit <code>true</code> or <code>false</code>; absence means it could not be checked), <code>cost_coverage_safe_since</code> (the horizon&#39;s UTC date, or the next day when the horizon is not exactly midnight; the earliest <code>since</code> that clears it), and <code>source_coverage_start</code> per capture path. The dashboard shows the same as a banner, and <code>tierd doctor --repo &lt;path&gt; --server &lt;url&gt;</code> reports a named &#34;cost horizon&#34; check; that check reads the server&#39;s <code>/scores</code>, so it runs only when <code>--server</code> is given (Section 9.3 lists which checks run without one). A sealed team or division month never carries <code>cost_coverage_safe_since</code>; there the horizon sets the earliest month that can be sealed (Section 6.2).</p>
+<h3 id="56-window-matching-in-practice">5.6 Window matching in practice</h3>
+<p><code>tierd backfill</code> and <code>tierd ship</code> both default to the last 90 days so cost and outcomes cover the same period; <code>GET /api/v1/scores</code> also defaults to 90 days, while the dashboard&#39;s &#34;From&#34; date defaults to 30 days ago. Whatever window you read, check it against <code>cost_coverage_safe_since</code>: a 90-day window over an installation whose cost capture began 30 days ago divides three months of outcomes by one month of cost and reads high.</p>
+<p>The project&#39;s published snapshot, from its README: measured on the TIER repository over the trailing 30 days to 2026-07-21, 221 weighted points per $1,000 across 152 merged PRs, with 72.1% of spend not linked to an issue, so attribution coverage was about 28% (100 − 72.1 = 27.9). It is an illustration, not a benchmark, and four limits apply. The README records neither the price-table hash nor the mode, and the figure was priced under an earlier table than version 10, so by Section 2.1 it does not compare with v0.5.2 output. At 28% coverage the dashboard today labels such a headline provisional (Section 7.1). Its cost is Claude Code JSONL cost, so if the open doubt in Section 3.1 holds, the figure is too high. And whether it also read low depends on how many of its merged PRs recorded no outcome (Section 5.3), which the snapshot does not report.</p>
+<hr>
+<h2 id="6-aggregation-and-privacy-modes-k-anonymity-suppression-what-it-must-never-be-used-for">6. Aggregation and privacy: modes, k-anonymity, suppression, what it must never be used for</h2>
+<h3 id="61-three-modes-no-default">6.1 Three modes, no default</h3>
+<p><code>tierd serve --aggregation &lt;mode&gt;</code> is required. There is no default; <code>serve</code> refuses to start without it (env <code>TIER_AGGREGATION</code>, config key <code>aggregation</code>), so an existing deployment&#39;s reporting posture never changes on upgrade. <strong>The mode changes only what is served, not what is stored</strong>: every mode stores per-developer rows, and the mode is not recorded in the database. So restarting in <code>developer</code> mode shows named per-developer rows for all history, including anything collected under <code>team</code> mode. Anyone who controls the server&#39;s startup, or can read its database file, can see individual rows whatever the mode.</p>
+<ul>
+<li><strong><code>developer</code></strong>: per-developer rows keyed by the developer identifier (the GitHub login, or the OS username a cost row was shipped under; Section 5.2), with no display names. This is the coaching mode of Section 6.3, which also says who can see these rows today and what the law of the European Union and European Economic Area (EU/EEA) is read to require. Two team views exist in this mode, and neither is k-anonymised: <code>team_rollups</code>, one row per team in the hierarchy plus an <code>unassigned</code> row, summing to the total; and <code>?team=&lt;name&gt;</code>, which adds a <code>team</code> rollup for that team&#39;s members without filtering <code>developers[]</code>.</li>
+<li><strong><code>team</code></strong>: team-level aggregates from the <code>org_hierarchy</code> map, k-anonymised, never naming an individual, and served as sealed calendar months (Section 6.2).</li>
+<li><strong><code>division</code></strong>: one level higher in the same hierarchy, under the same k floor and the same suppression guards.</li>
+</ul>
+<p>Team and division modes read group labels from <code>org_hierarchy</code> (<code>PUT /api/v1/org_hierarchy/{developer}</code>, a bulk <code>POST</code>, or <code>tierd hierarchy import --server &lt;url&gt; --api-token @&lt;file&gt; &lt;file.csv&gt;</code>, which posts a CSV (comma-separated values) file with the header <code>developer,team,division,org</code> to that server in one all-or-nothing request and never removes anyone; <code>--dry-run</code> only validates). An entry can be overwritten with <code>PUT</code> but not removed (there is no delete route; only a developer&#39;s erasure removes it). Membership is dated (#886): every hierarchy write is dated by the server clock, each spend event counts toward the team its developer was in at the event&#39;s own timestamp, each merged outcome toward the team at merge time, and each invoice toward the team at the start of its month, so moving a developer affects only the future. History from before a developer&#39;s first assignment stays in <code>other</code>. Alias edits are dated the same way (#914): an alias still joins earlier spend to its person&#39;s row (Section 5.2), but that spend keeps counting toward the team its identifier was in when it was recorded. An empty hierarchy is not refused: <code>serve</code> starts, logs a warning at startup, and every developer resolves to the unnamed group, which folds the whole company into a single anonymous <code>other</code> row; and because only people on the hierarchy count toward k (Section 6.2), an empty hierarchy counts no one. Populate the hierarchy before reading team-mode output as team-level data. The local <code>tierd score</code> command reads only the invoking user&#39;s own logs, has no server, and takes no mode.</p>
+<h3 id="62-k-anonymity-suppression-and-sealed-monthly-reports">6.2 k-anonymity, suppression and sealed monthly reports</h3>
+<p><strong>k-anonymity</strong> here means a group is shown by name only when at least k people count toward it. The floor is <code>--k-anonymity</code> (env <code>TIER_K_ANONYMITY</code>, config <code>k_anonymity</code>), <strong>default 5, hard minimum 3</strong>; <code>serve</code> refuses a smaller value. An identifier with spend or merged work in the window counts as a person only if all three hold (#856): it is on the hierarchy at some point during the window, after aliases are joined, so one person&#39;s identifiers count once (Section 5.2); it is not a bot (GitHub account type <code>Bot</code>, which the webhook records, a login ending in <code>[bot]</code>, or a known bot login such as <code>Copilot</code> or <code>dependabot</code>); and it has captured activity in the window, meaning spend a collector or the proxy recorded, or a merged pull request. Spend entered through <code>POST /api/v1/costs</code> and merged work captured only from direct pushes do not count on their own, and neither does an identifier whose only figure in a group is paid spend. An identifier that does not count keeps its figures in its group but does not make the group bigger; <code>data_quality.uncounted_active_ids</code> reports how many did not count, and why (<code>manual_only</code>, <code>push_only</code>, <code>not_on_roster</code>, <code>bot</code>).</p>
+<p>Each figure also needs its own k. A group&#39;s cost is shown only if at least k counted people in it have captured spend, its points only if at least k have merged work, its paid spend (and so <code>spend_leverage</code>) only if at least k have paid spend, and each non-zero part of the <code>coverage_pct</code> split only if k counted people carry it. Captured spend is judged per published group, so a person who moved team during the window carries only what was captured while they were in each (#943). Spend under the <code>unattributed</code> pseudo-developer (an org poller&#39;s remainder, a proxy request with no developer header) is left out of every figure in these modes, and <code>data_quality.excludes_unattributed_spend</code> is always <code>true</code>. k-anonymity hides who is in a small group; it does not protect against a reader who already knows the other members. It protects what a read-token holder sees: anyone holding the write token can edit the hierarchy and the aliases that decide who counts, so treat that token as an admin credential (#908 is filed to separate the two).</p>
+<p><strong>One breakdown per report (#864).</strong> A team or division response carries only the group rows and the company <code>total</code>. It leaves out <code>work_types[]</code>, <code>segment_reconciliation</code>, <code>cost_composition</code> (with its per-model rows) and the <code>data_quality</code> fields <code>attributed_cost_share</code>, <code>unattributed_buckets</code>, <code>exploratory_cost_share</code> and <code>mixed_price_versions</code>; <code>data_quality.attribution_coverage</code> reads <code>&#34;not_shown&#34;</code> instead, and <code>?work_type=</code> is a <code>400</code>. Each of those was a second breakdown of the same data, and two breakdowns subtract to a group smaller than k even when every published row has k people: team totals minus work-type totals gave a 3-person group&#39;s spend, and a model only one developer used showed that developer&#39;s spend. #937 tracks an audit that could bring the work-type and per-model views back.</p>
+<p><strong>Suppression.</strong> A group with fewer than k counted people folds into a residual row labelled <code>other</code>, which also holds everyone with no team. When <code>other</code> has at least k counted people, or nothing at all was measured in it, it is emitted. Otherwise, even with no counted person in it, the <strong>whole response is withheld</strong>: every named team row, <code>other</code> and the <code>total</code>, because a view that folds a named team into its own <code>other</code> row (a comparison of two months does) would otherwise let a reader subtract that team&#39;s row and read the hidden group. The response says so in <code>data_quality.kanon_suppressed</code>, with <code>developers</code> (how many counted people were withheld), <code>k_anonymity</code> (the floor in force) and flags for what was withheld, among them <code>withheld_total</code> and <code>withheld_teams</code>. A consumer must key off this field to tell &#34;withheld&#34; from &#34;no data&#34;. A group can be withheld with k or more people in it when one of its figures is carried by fewer than k of them.</p>
+<p><strong>Sealed monthly reports (#913).</strong> In team and division mode, <code>GET /api/v1/scores</code>, <code>GET /api/v1/report_manifest</code> and <code>GET /api/v1/scores/compare</code> answer only from sealed calendar months, because two overlapping windows subtract to a group smaller than k. <code>/scores</code> and <code>/report_manifest</code> take <code>?period=YYYY-MM</code>, or nothing for the latest sealed month; <code>/scores/compare</code> takes <code>?period_a=</code> and <code>?period_b=</code>, the earlier month first, or neither for the two latest sealed months. <code>since</code>, <code>until</code>, <code>before</code>, <code>team</code>, <code>repo</code> and <code>work_type</code> are <code>400</code>s. <code>/scores</code> returns the stored body byte for byte, so its SHA-256 digest equals the manifest&#39;s <code>body_digest</code>, and names the month in response headers such as <code>Tier-Period</code>. A comparison names a team only if it clears k in both months, and is withheld if either month&#39;s own <code>other</code> row, or the comparison&#39;s, does not reach k; two months sealed under different configs are a <code>409</code>.</p>
+<p><strong>When a month seals.</strong> A writable <code>serve</code> runs a seal pass at startup and then every hour. Each pass seals, oldest first, every owed month whose grace lag has ended: <code>--report-grace</code> (env <code>TIER_REPORT_GRACE</code>, config <code>report_grace</code>), default 14 days, minimum 24 hours. A month also waits, with the stall reason <code>source_behind</code>, until every source <code>serve</code> polls or scans (the organisation pollers, the subscription-fee reconciler and the scheduled log collectors such as Codex and Opencode) has settled past its end without a gap. Spend a source can never read again, such as an excluded Muse Code subagent call or a deleted log that held a call, is recorded as lost and holds every month it touches until <code>tierd seal --skip</code>. The live Claude Code watcher, webhooks, <code>tierd ship</code> and <code>POST /api/v1/costs</code> are covered by the grace lag alone. A month that fails to seal holds back every later one. Once sealed, a month is stored and served unchanged: cost a laptop ships after its month is sealed, and later alias or hierarchy edits, never change that month&#39;s report. A <code>--read-only</code> <code>serve</code> never seals; it serves what a writable server sealed in the same database.</p>
+<p><strong>Arming, and the one-way upgrade.</strong> Nothing is sealed until the administrator arms sealing, once, after any history is loaded. <code>tierd seal --arm YYYY-MM</code> (or <code>--arm earliest</code>, the first full month of cost data), run with the same config, flags and environment as <code>serve</code>, seals that month first and pins it as the earliest month ever sealed; setting <code>seal_from</code> (<code>--seal-from</code>, env <code>TIER_SEAL_FROM</code>) arms sealing too. Until then those three reads are a <code>404</code> whose error begins &#34;sealing not armed&#34;. The earliest sealable month is the later of the armed month and the first full month after the cost horizon (Section 5.5), and the first seal pins it for good, so older data imported afterwards never appears in these modes. No month seals, <code>--arm</code> included, until <code>serve</code> has started once on the database and registered its sources, and a month before a source&#39;s first recorded coverage never seals automatically: arm a later month, or set the subscription&#39;s <code>active_since</code>. <code>tierd seal --skip YYYY-MM --reason TEXT</code> records a month that cannot seal as a permanent gap, so later months can seal; the reason is served to every reader and can never be erased, so it must not name a person. <code>tierd seal --status</code> (with the same config, flags and environment as <code>serve</code>), and <code>tierd doctor --server</code>, report a stalled month and why. A sealed month is never recomputed: a change of aggregation level or k applies from a later month, and <code>serve</code> warns at startup naming the first month the new config applies from. The upgrade moves the database to schema version 6, which an older <code>tierd</code> refuses to open. On the dashboard, a &#34;Sealed month&#34; picker replaces the date controls in these modes. <code>developer</code> mode is unchanged and still serves any window.</p>
+<p><strong>Other endpoints in an anonymised mode.</strong> <code>GET /api/v1/scores</code> returns <code>teams[]</code> and an empty <code>developers: []</code> with an <code>aggregation</code> discriminator; <code>GET /api/v1/scores/{developer}</code> returns a blanket <code>404</code> for every path value; the row-level exports (<code>/events</code>, <code>/outcomes</code>, <code>/quality_events</code>, <code>/quality_history</code>) and <code>/fidelity</code> return <code>403</code>. The read token also gets <code>403</code> on <code>/metrics</code> (#944), because two scrapes of its running counters a short interval apart give one person&#39;s spend and activity timeline. Scrape it with the write token or with a scrape-only metrics token (<code>--metrics-token</code>, env <code>TIER_METRICS_TOKEN</code>, config <code>http.metrics_token</code>), which opens <code>GET /metrics</code> and no other route. Its holder, and anything that can query the Prometheus store that keeps its scrapes, sees the same per-person timeline the read token is refused, so treat both as operator-only (<code>docs/security.md</code>); <code>serve</code> refuses to start when any two of the write, read and metrics tokens are equal, and an install with no token configured keeps <code>/metrics</code> open. The data-protection export and erasure endpoints (Section 6.4) remain available to the admin token in every mode, because they are compliance tooling.</p>
+<h3 id="63-what-the-numbers-are-for-and-what-they-must-never-be-used-for">6.3 What the numbers are for, and what they must never be used for</h3>
+<p>TIER is a diagnostic of how efficiently a body of work turned AI spend into accepted outcomes. It exists to help people improve how they use AI: which model they use for which work, how they reuse context and cache, and whether their spend starts from an issue. By the operator&#39;s ruling of 2026-09-26 (issue #826), a manager <strong>may</strong> look at an individual developer&#39;s numbers in <code>developer</code> mode in order to coach: to discuss model choice, cache reuse and issue-linked work with the developer. The same ruling sets the line: the numbers <strong>must never be used to evaluate the developer: not as an input to pay, compensation, promotion, individual performance reviews, performance improvement plans (PIPs), forced ranking, discipline or dismissal.</strong> Permitted use is discussing practice with the developer (model choice, cache reuse, issue-linked work); the number must not be treated as a verdict on the person. TIER cannot enforce that line; only an organisation&#39;s own policy or works agreement can.</p>
+<p>There are two reasons for the line. The first is the project&#39;s reading of the law, stated here so a reader can check it with counsel; it is not legal advice, and the project&#39;s longer notes are in <code>docs/legal-and-privacy.md</code>. In Germany, per-developer measurement is subject to works-council co-determination (§87 of the Works Constitution Act, <em>Betriebsverfassungsgesetz</em>, BetrVG). In France it requires consultation of the works council (<em>comité social et économique</em>, CSE); in the Netherlands, the works council&#39;s consent (Article 27 of the Works Councils Act, <em>Wet op de ondernemingsraden</em>, WOR). The project reads most of the EU/EEA as similar. Using the output alone to drive a human-resources (HR) decision would likely engage Article 22 of the General Data Protection Regulation (GDPR), on decisions based solely on automated processing, and the project expects a data protection impact assessment (DPIA) for any per-developer deployment. For measured employees in the EU/EEA the project recommends team-only aggregation plus advance consultation. The second reason is method: a per-developer figure moves with task mix, seniority, pairing and review load, and a number tied to a person&#39;s evaluation invites gaming (Section 11).</p>
+<p><strong>Who can see a developer&#39;s numbers today, and what is planned.</strong> Access in <code>developer</code> mode is not per viewer today. Anyone holding the deployment&#39;s read or admin token sees every developer&#39;s row (<code>/scores</code>, <code>/scores/{developer}</code> and the row-level exports are read-scoped; Section 10), and on a loopback bind with no admin token, so does anyone who can reach the server. Cost events and outcomes are never deleted by age (Section 6.4). The dashboard&#39;s per-work-type panels still draw one bar per named developer on a shared scale, which invites comparing colleagues; the rows are listed by identifier, not by TIER. The #826 design adds the following, all <strong>planned, not in v0.5.2</strong>, with no release date published: per-viewer tokens (the developer, their declared manager and an optional skip-level viewer), with the shared read token limited to name-free pages; a log of who viewed each developer&#39;s page, which that developer can read; retention in <code>developer</code> mode, 90 days by default with a 365-day ceiling (the operator&#39;s stated reason: a full annual coaching cycle, not annual reviews), with <code>serve</code> refusing to start in that mode without it; the organisation&#39;s history kept in a name-free roll-up; and a per-developer coaching page to replace the shared-scale panels. Until they ship, treat the read token as access to every developer&#39;s data.</p>
+<p><strong>Comparisons that are unsupported.</strong> Three, by construction:</p>
+<ol>
+<li><strong>Raw TIER across organisations.</strong> List prices put both organisations&#39; cost on one price basis, but the numbers still do not compare. Size labelling differs (a generous labeller scores the same work higher), task mix differs, and capture coverage differs (an uncaptured tool reads as free).</li>
+<li><strong>Any two figures that fail the comparison rule of Section 2.1</strong> (different <code>table_hash</code> or <code>rubric.version</code>, or mixed price versions).</li>
+<li><strong>One work type against another</strong> (Section 4.3).</li>
+</ol>
+<h3 id="64-what-is-stored-and-what-is-never-read">6.4 What is stored, and what is never read</h3>
+<p>TIER&#39;s log parsers decode only an allowlist of metadata and usage fields, so prompt and completion text never reach a stored row from those paths. Two paths differ. The reverse proxy forwards complete request and response bodies to and from the provider (it records only usage). The webhook stores each raw GitHub delivery body, which can contain arbitrary PR and commit text, pasted code included.</p>
+<p>Everything is stored in one local SQLite file. TIER sends no telemetry to the project or to anyone else. Beyond the <code>tierd</code> server the administrator names (which <code>ship</code>, <code>doctor</code>, <code>hierarchy import</code> and <code>healthcheck</code> contact), it makes outbound calls only when used that way: the proxy (mounted by default) forwards a client&#39;s own calls to the provider, <code>tierd backfill</code> reads the GitHub API, and the org pollers, when configured, read the providers&#39; usage APIs. The file holds developer identifiers, issue ids, repository slugs, model names, token counts, list cost in micro-dollars, price versions, an opaque session UUID, PR metadata (number, author login, weight, quality, merge SHA), quality events and finance ledgers. In team and division mode it also holds the sealed months (Section 6.2): each month&#39;s served report, the per-group totals it was built from before small groups were folded (never served; a group with one member holds that person&#39;s totals), and, for each group and figure, a keyed hash of each person counted, computed from their canonical id under a random per-install secret, which anyone holding the database file can recompute from a guessed id. Two conditional stores hold personal data an auditor should note: the watcher&#39;s checkpoints of how far it has read each session file (live <code>--watch-repo</code> mode; they hold the working-directory path, branch and session id, and with worktree attribution on, the path of a worktree) and raw GitHub webhook bodies (webhook path enabled; commit author names and emails, PR titles and commit messages).</p>
+<p><strong>Retention today.</strong> Nothing is deleted by age except the raw webhook bodies, which are cut to the last 90 days and 50,000 rows each time a process opens the database and every 24 hours while <code>serve</code> runs. Cost events, outcomes and quality events are kept until erased. (Developer-mode retention is planned; Section 6.3.)</p>
+<p><strong>Erasure and export.</strong> <code>DELETE /api/v1/developer/{id}</code> erases, in one transaction, the developer&#39;s (and their aliases&#39;) rows in cost events, outcomes, per-developer paid spend, hierarchy and dated team membership, seat membership, quality events, quality history, the repository-repair log and the push-capture commit ledger and audit, then their alias entries and canonical-id history. It erases the watcher&#39;s tail-state for the person&#39;s sessions with a tombstone the live watcher obeys, deleting the row instead when the session file is gone (#919); <code>docs/privacy.md</code> lists its limits, among them that a session that stored no events cannot be found. It does not touch raw webhook bodies, organisation-level paid spend, or the reprice and correction audit logs, and apart from that tombstone it leaves no record that blocks re-import: a later <code>ship</code> or <code>backfill</code> can store the same rows again. No endpoint removes a person&#39;s raw webhook bodies; they go with the 90-day cut, and the repository documents no other procedure. Backups taken with <code>tierd backup</code> are separate files that erasure does not reach. A sealed month keeps an erased person&#39;s contribution: erasure changes no sealed report or total, because removing it would let a reader recover the person&#39;s figures by subtraction; it replaces with random tombstones the keyed hashes it can reach from the person&#39;s current ids and their recorded alias links. A month reached only through an alias since deleted or re-pointed keeps its key until that retired id is also erased by name (<code>docs/privacy.md</code>). <code>GET /api/v1/developer/{id}/export</code> produces the access-request file. TIER is single-tenant: developer identifiers are global, there is no <code>tenant_id</code>, two organisations&#39; <code>alice</code> rows would collide, and it must not run as a shared multi-organisation service.</p>
+<hr>
+<h2 id="7-reading-the-number-the-evidence-floor-confidence-and-significant-trends-versus-comparisons">7. Reading the number: the evidence floor, confidence and <code>significant</code>, trends versus comparisons</h2>
+<h3 id="71-the-evidence-floor-ranked">7.1 The evidence floor (<code>ranked</code>)</h3>
+<p>A row clears the <strong>evidence floor</strong> when all three hold: at least <strong>3</strong> outcomes in the window; at least <strong>$5.00</strong> of list-price cost (all of the row&#39;s cost, including spend not linked to an issue); and <strong>zero</strong> flagged outcomes. The wire field for this is <code>ranked: true</code>, a name kept for compatibility; it marks the floor and nothing else. It is not a position in any list, and nothing in TIER sorts by it or by TIER. The floor never changes a number; it changes what the number may claim. Every row below the floor, developer or team, comes back from <code>/api/v1/scores</code> with its <code>tier</code>, <code>weighted_points</code> and <code>total_cost_usd</code> exactly as computed and <code>ranked: false</code>. A developer row that clears the floor gets a confidence interval (Section 7.2); one below it has <code>ci_low = ci_high = 0</code>, the wire spelling of &#34;no interval&#34;. Team and division rows never carry an interval; for them the floor decides only what the dashboard draws and whether the headline shows a number. The floor exists because one 0.5-weight PR against $0.0004 of cost yields a TIER around 1,250,000, a figure that says nothing about the work. The thresholds are fixed in the code; no flag changes them. They are the project&#39;s judgement; it publishes no study showing they are sufficient, or how often they flag work that did use captured AI. AI work done more than 14 days before an issue&#39;s latest merge does not count toward the zero-token check, so long-running work can be flagged.</p>
+<p>A team or division row applies the same three conditions to its <strong>summed</strong> inputs. Five developers with one outcome and $2 each are each below the floor; their team, with 5 outcomes and $10, clears it, and at the default k of 5 it is also named (Section 6.2).</p>
+<p><strong>Order.</strong> The API returns developer rows in identifier order and team rows in name order (the <code>other</code> row last). The dashboard keeps that order: &#34;Rows are listed alphabetically, not by TIER.&#34; A developer row below the floor shows its TIER muted, tagged &#34;below evidence floor&#34;, with no bar drawn. In the dashboard&#39;s per-work-type panels the floor is tested against that segment&#39;s own cost and outcomes.</p>
+<p><strong>The dashboard headline</strong> is the rollup over every row (the <code>total</code> block). It shows a word instead of a number in four cases and keeps the measured inputs on screen in each: &#34;NO SCORE&#34; when the window has no weighted points (nothing accepted is the absence of a score, not a score of zero); &#34;FREE&#34; when it has points at zero recorded cost; and, when the rollup is below the floor, &#34;NOT ENOUGH SPEND TO SCORE&#34; under $5.00 or &#34;NOT ENOUGH EVIDENCE TO SCORE&#34; otherwise. &#34;NO SCORE&#34; and &#34;FREE&#34; also appear on individual rows.</p>
+<p>Separately from the floor, the dashboard qualifies the headline by attribution coverage: when <code>data_quality.attributed_cost_share</code> is below 0.5, the value is dimmed and labelled &#34;provisional — N% attribution coverage&#34;, and the attribution banner turns to a warning. It says most of the cost joined no issue; Section 5.3 says what that does and does not imply. Team and division reports do not publish <code>attributed_cost_share</code> (Section 6.2), so their headline is labelled &#34;provisional — coverage not shown&#34;, without the dimming. A row can clear the floor and be provisional, or the reverse.</p>
+<p>The <strong>zero-token check</strong> is the third condition. An outcome is flagged when its developer recorded fewer than <strong>1,000</strong> tokens (input, output and every cache class summed) on its (repository, issue) in the <strong>attributable window</strong>: the 14 days up to and including the timestamp of the latest outcome on that (repository, issue) in the scored window, by any developer. That window may start before <code>since</code>; the check reads those tokens even though they are outside the scored window. Several outcomes on one issue (for example daily push-capture outcomes) share one window. The flagged outcome keeps its full points; the developer&#39;s row falls below the floor. The check sees only recorded tokens, so it cannot tell its causes apart: AI work TIER never captured (off-books usage, G-02 in Section 11), broken identity mapping, spend that cannot join an issue (Opencode, Section 3.1), session logs that are gone (Section 5.5), or a PR written without AI. The project accepts flagging the last case, because missing uncaptured AI use would be worse. In a large group, where almost any window holds one such outcome, this keeps the group row and headline below the floor; the project has no remedy for that beyond linking branches to issues and capturing every tool. The flag propagates: a team or division row is below the floor unless its members&#39; flagged count is zero, so <strong>one flagged outcome from any member takes the whole group row below the floor</strong>, and the headline with it. In team mode the per-developer list is suppressed and a name-free <code>zero_token_outcome_count</code> is emitted.</p>
+<h3 id="72-confidence-intervals">7.2 Confidence intervals</h3>
+<p>For developer rows that clear the floor, <code>/scores</code> returns <code>ci_low</code> and <code>ci_high</code>, a 95% interval from a <strong>percentile bootstrap</strong> over the developer&#39;s own outcomes. Each of 1,000 replicates (a fixed number, not configurable) draws the developer&#39;s outcomes with replacement. Each draw carries its <code>weight × quality</code> and its share of cost: the developer&#39;s own spend on that (repository, issue), split evenly across the developer&#39;s outcomes on it. The developer&#39;s cost that joins none of their outcomes (spend not linked to an issue, and spend on issues where they have no outcome) is added back as a fixed term. TIER is recomputed per replicate, and a replicate whose cost comes to zero or less is dropped. The bounds are the 2.5th and 97.5th percentiles of the replicates kept, by nearest rank. The random seed is fixed, so the same stored rows give the same interval on every read. <code>cost_per_point_ci_low</code> is 1,000 ÷ <code>ci_high</code> and <code>cost_per_point_ci_high</code> is 1,000 ÷ <code>ci_low</code> (the bounds swap); if either TIER bound is 0, both read 0. The interval is self-relative: it says how much this developer&#39;s own number could move under resampling, not where it stands against anyone. In the rare case that no replicate is kept, the interval reads 0 to 0, as for a row below the floor. The method assumes the developer&#39;s outcomes are independent draws, which work on one issue may not be; the project has not studied how often the interval covers the true value. Team, division and total rows carry no interval. Developer rows inside each work-type segment carry their own interval, computed the same way over that segment&#39;s outcomes and cost.</p>
+<h3 id="73-significant">7.3 <code>significant</code></h3>
+<p><code>GET /api/v1/scores/compare?since_a=&amp;until_a=&amp;since_b=&amp;until_b=</code> compares two half-open windows (&#34;A = before&#34;, &#34;B = after&#34;; every delta is B − A). Those four are the <strong>only</strong> query parameters it accepts; <code>work_type</code>, <code>team</code>, <code>repo</code> or anything else is a <code>400</code>, and the response carries no <code>work_types[]</code> segmentation. In team and division mode it compares two sealed months instead, named with <code>period_a</code> and <code>period_b</code>, and the four window parameters are a <code>400</code> (Section 6.2). A developer row&#39;s <code>significant</code> is <code>true</code> only when the developer is present and clears the floor (<code>ranked</code>) in both windows <strong>and</strong> the two 95% intervals do not overlap (<code>a.ci_high &lt; b.ci_low</code> or <code>b.ci_high &lt; a.ci_low</code>; touching ends count as overlap). Any overlap, an absent side, or a window below the floor gives <code>false</code>, which is not the same as showing there is no difference. The flag is a fixed rule over intervals whose coverage has not been studied (Section 7.2), not a validated statistical test. Nothing corrects for many comparisons, so across a large team a few rows can read <code>significant</code> by chance. In team or division mode <code>significant</code> is <strong>always <code>false</code></strong>, because group rows have no interval, so a team-mode delta is directional only. Team, division and <code>total</code> compare rows carry <code>ranked = a.ranked &amp;&amp; b.ranked</code>. A developer row has no combined field: read <code>a.ranked</code> and <code>b.ranked</code> with <code>present_a</code> and <code>present_b</code>.</p>
+<h3 id="74-when-to-read-it">7.4 When to read it</h3>
+<p>Check <code>window_predates_cost_capture</code> first; if it is <code>true</code>, set <code>since</code> to <code>cost_coverage_safe_since</code> and read again. Prefer long windows, and compare two windows that have stopped moving (Section 5.4). A rise in TIER (equivalently, when both windows have recorded cost, a fall in <code>cost_per_point</code>) with <code>significant: false</code> is &#34;promising, keep watching&#34;, never proof that a change worked. Compare within one <code>work_type</code> segment: <code>/scores/compare</code> cannot filter by type, so read <code>GET /api/v1/scores?work_type=&lt;type&gt;&amp;since=&amp;until=</code> once per window and compare the two segments yourself, accepting that this two-call form has no <code>significant</code> flag. It is not available in team or division mode, which publishes no per-type segment and refuses <code>?work_type=</code> (Section 6.2). Trend <code>cost_per_point</code> over time, and compare teams only as far as Section 2.1 allows.</p>
+<p><code>coverage_pct</code> measures capture fidelity, not completeness: (labelled &#34;Fidelity&#34; in the dashboard) is the share of <strong>captured</strong> spend that arrived per request rather than as a daily or estimated total. It says nothing about spend TIER never saw, and it reads near 100% under JSONL capture even when most spend is linked to no issue. Attribution is <code>attributed_cost_share</code>.</p>
+<hr>
+<h2 id="8-spend-leverage-and-what-the-number-supports-in-a-spending-decision">8. Spend Leverage, and what the number supports in a spending decision</h2>
+<h3 id="81-spend-leverage">8.1 Spend Leverage</h3>
+<p><strong>Spend Leverage = <code>total_cost_usd / actual_paid_usd</code></strong>: the list-price value of the usage TIER recorded, divided by what finance recorded as paid. It is a separate figure and <strong>never changes TIER</strong>, which always divides by list-price cost whatever was paid. It is server-only, because it needs a finance figure.</p>
+<p><strong>Which months count.</strong> Paid spend is posted per calendar month (<code>YYYY-MM</code>) and never pro-rated. A window includes every month from the month containing <code>since</code> up to, but not including, the month containing <code>until</code>. So a mid-month <code>since</code> brings in its whole month and a mid-month <code>until</code> drops its whole month. With no <code>until</code>, every month from <code>since</code> onward counts, including months not yet over. Use month-aligned windows (<code>since=2026-04</code>, <code>until=2026-07</code>) whenever leverage matters. The dashboard&#39;s default window (30 days back, no end) does not line up: it sets the full paid amount of every month from the one 30 days back through the current month (usually two months, sometimes one or three) against 30 days of list cost.</p>
+<p><strong>Reading it.</strong> <strong>Above 1</strong>: the organisation paid less than list for the recorded usage (a discount, a commitment, a subscription). <strong>Near 1</strong>: what metered billing at list gives, though discounts, capture gaps and seat allocation can each move it. <strong>Below 1</strong>: it paid more than list, for example a flat fee that was under-used that month. As an illustration, usage worth $3,280 at list on a plan that cost $200 for the month is 3,280 / 200 = 16.4×. On the wire, a row with no finance entry has <code>actual_paid_usd</code> 0 and <code>spend_leverage</code> 0. A row whose net paid is zero or negative has <code>spend_leverage</code> 0 and carries the net in <code>actual_paid_usd</code>, so a negative net is visible but a net of exactly zero looks like no entry. The dashboard renders 0 as &#34;—&#34;, and when the window&#39;s total paid is negative its leverage tile reads &#34;(credit)&#34; with the balance beneath.</p>
+<p><strong>Posting what was paid.</strong> Finance posts US-dollar amounts at one of two grains; the per-developer grain wins where both exist. Every post adds a row: there is no idempotency key, so posting the same invoice twice doubles it. TIER records whatever dollar figure is posted for a month; the accounting basis (cash, invoice or accrual) and the treatment of tax, currency and prepaid credit are finance&#39;s choice, and TIER does not check them. Credit memos and refunds are negative rows, corrections are deltas, and the net is summed when read; a multi-month window sums each month&#39;s net.</p>
+<ul>
+<li><strong>Per developer:</strong> <code>POST /api/v1/actual_spend {&#34;developer&#34;,&#34;period&#34;:&#34;YYYY-MM&#34;,&#34;actual_paid_usd&#34;}</code>, for tools billed per seat.</li>
+<li><strong>Org level:</strong> <code>POST /api/v1/org_actual_spend {&#34;org&#34;,&#34;period&#34;,&#34;actual_paid_usd&#34;}</code>, for one contract covering many seats. Each seat&#39;s share is <code>org_total / seats</code>, where the seats are the developers whose <code>period_membership</code> is open in that month. Membership is kept by month: joining mid-month counts as a full seat for that month. A developer&#39;s first hierarchy entry with an organisation opens a membership reaching back to every earlier month, so they count as a seat on all past invoices; re-enrolling a developer whose organisation was cleared, or whose membership was ended, opens the new seat in the current month instead (#867). Moving to another organisation makes them a seat in both for that month. <code>POST /api/v1/period_membership/{developer}/end</code> closes a membership so leavers stop diluting the share. <strong>With no hierarchy, or no organisation named in it, there are no seats, and an org-level invoice is allocated to no one.</strong> When both grains exist in a month, the org-level seats split what is left after the per-developer rows; that remainder is clamped at zero, and if every seat has its own row it goes to no one.</li>
+</ul>
+<p>Team leverage is <code>Σ list cost / Σ paid</code>, never an average of ratios. Under a <code>?repo=</code> scope, <code>spend_leverage</code> and <code>actual_paid_usd</code> are reported as 0 with <code>data_quality.spend_leverage_suppressed: true</code>, because an invoice carries no repository.</p>
+<p><strong>Subscription plans.</strong> Token value and subscription fees are recorded separately. The price table says what a subscription route&#39;s tokens are worth at a comparable per-token rate (a row marked <code>billing_mode: subscription</code>); the <code>subscriptions:</code> config block says what the flat fee was (<code>route_prefix</code>, <code>org</code>, <code>monthly_fee_usd</code>, optional <code>active_since</code>), and <code>serve</code> posts that fee to <code>org_actual_spend</code> under the source <code>subscription:&lt;route_prefix&gt;</code>: at startup and hourly, the full fee for each month (never pro-rated), back to <code>active_since</code> at startup, posting only the difference from what is already recorded for the current month, so restarts do not duplicate it and a fee change corrects the current month only. The fee never enters the denominator. A &#34;subscription row&#34; here means a row marked <code>billing_mode: subscription</code>; the embedded table ships none (its GLM rows are ordinary per-token rows), because for most plans a comparable rate is a judgement with no first-party source, and <code>serve</code> refuses to start when a <code>route_prefix</code> matches no subscription row in the active table. So on the embedded table, record a flat fee by posting it yourself with one of the two endpoints above. That covers a Claude subscription too. The Anthropic Admin API poller reads the organisation&#39;s API usage and cost, and by the project&#39;s reading a subscription plan&#39;s fee does not appear there, so post it by hand.</p>
+<p>The Z.ai coding plan is one of two flat-fee routes the embedded table has per-token rates for; the other is a Muse subscription, whose calls are priced at Meta&#39;s per-token list rates (Section 3.1). Z.ai publishes per-token API rates for the same GLM models, and the operator ruled on 2026-09-25 that those published rates are the value of coding-plan tokens. That is a valuation choice, not a price the plan charges, and it is why the plan&#39;s <code>glm-5.3</code> spend needs no subscription row. Ollama&#39;s cloud tier publishes no per-token rate for its models at all, so there is nothing comparable to price it with, and it is not captured (Section 3.1).</p>
+<p><strong>Leverage is not a saving.</strong> On a flat or subsidised plan leverage can run far above 1 (the 16.4× illustration). That does not mean the organisation saved that multiple. The ratio says what the plan bought at list prices; it does not say what metered billing would have cost, because usage might have been different under it. The dashboard tile is labelled &#34;metered cost / paid spend&#34; for that reason. Leverage also inherits every gap in capture: usage TIER did not record lowers the numerator, and an invoice that covers tools TIER does not capture raises the denominator.</p>
+<h3 id="82-what-the-number-supports-in-a-spending-decision">8.2 What the number supports in a spending decision</h3>
+<p>How to use TIER for the decisions the white paper says it may inform:</p>
+<p><strong>What a change over time tells you.</strong> Within one organisation, under the comparison rule (Section 2.1), for two windows that have stopped moving (Section 5.4): a falling <code>cost_per_point</code> in one work type means recorded AI cost per weighted point of that type fell. It does not say the work was the same, or why. Four ordinary causes move it with no change in efficiency: a shift in the mix of work, a change in how generously size labels are applied, a change in capture coverage (a newly used tool that is not captured makes work look cheaper), and a window edge. Rule each out before reading a change as an efficiency gain. For one developer&#39;s pooled figure, <code>significant</code> (Section 7.3) is the only test TIER offers. A team-level change, and any per-work-type change, is directional only, because <code>/scores/compare</code> cannot filter by type.</p>
+<p><strong>How complete the cost side must be.</strong> TIER cannot see spend on a tool it does not capture, and no field reports that spend. So first confirm by hand that every AI tool the team uses is captured by some path (Section 3.1). Then:</p>
+<ul>
+<li><code>window_predates_cost_capture</code> must be <code>false</code>.</li>
+<li><code>attributed_cost_share</code> should be at least 0.5 (it is published in <code>developer</code> mode only; Section 6.2), the code&#39;s only threshold: below it the dashboard labels the headline provisional. A low share weakens the segments and the evidence floor a decision would lean on, and is a reason to check for unrecorded outcomes (Section 5.3).</li>
+<li><code>coverage_pct</code> (0 to 100) is not a completeness measure: it is the share of <strong>captured</strong> cost that arrived per call. A low value means more cost came from the org pollers or from imports. The code sets no threshold for it.</li>
+<li>For the open doubt on Claude Code&#39;s logs (Section 3.1, issue #837), TIER applies no correction. For usage billed through a provider&#39;s API console, the org pollers add the gap between the provider&#39;s daily totals and what capture recorded, as unattributed spend; they cannot see a subscription plan&#39;s usage. Before relying on an absolute dollar figure, compare one month of TIER&#39;s Claude Code cost with what the provider billed for the same usage. That check is possible only for API-billed usage: a flat subscription&#39;s bill has no token counts to compare. Prefer decisions that rest on a change within one capture path, which the doubt affects less if the error is stable; nothing in TIER tests that it is.</li>
+</ul>
+<p><strong>Decisions it can inform:</strong></p>
+<ol>
+<li><strong>Model or routing choice.</strong> Change the default model or route for one kind of work, then compare <code>cost_per_point</code> for that work type across two matched windows, with <code>premium_model_share</code> (the share of dollars spent on models whose base input rate is $4.00 per million or more) and <code>cache_read_share</code> beside it (all three are served only in <code>developer</code> mode; Section 6.2).</li>
+<li><strong>A tool trial.</strong> Give a group a new AI tool for a window and compare its <code>cost_per_point</code> with its own previous window. This works only if the new tool is captured; if it is not, its spend reads as zero and the trial looks free.</li>
+<li><strong>A team&#39;s trend.</strong> Whether one team&#39;s cost per point moves after a change in practice, such as linking branches to issues or reusing context.</li>
+<li><strong>Whether a flat plan is used.</strong> Spend Leverage below 1 for several months means the fee was more than the list-price value of the usage TIER recorded. Whether metered billing would have cost less depends on usage under it, which TIER cannot know (Section 8.1).</li>
+</ol>
+<hr>
+<h2 id="9-how-to-use-it-install-demo-see-spend-full-score">9. How to use it: install, demo, see spend, full score</h2>
+<h3 id="91-install">9.1 Install</h3>
+<p>Build from source (Go 1.26.9 or newer, <code>make</code>, <code>git</code>):</p>
+<pre><code>git clone --branch v0.5.2 https://github.com/tiermetric/tier.git
+cd tier
+make build                       # produces ./bin/tierd
+</code></pre>
+<p>Or install without cloning:</p>
+<pre><code>go install github.com/tiermetric/tier/cmd/tierd@v0.5.2
+tierd version
+</code></pre>
+<p>Both commands pin the tag. <code>@latest</code> or a clone of <code>main</code> can give you a version whose flags and defaults differ from the ones documented here.</p>
+<p>Each release on the <code>tiermetric/tier</code> releases page publishes per-platform tarballs (darwin and linux on amd64 and arm64, and windows on amd64), each with a <code>.sha256</code> checksum and a SLSA (Supply-chain Levels for Software Artifacts) build-provenance attestation you can check with <code>gh attestation verify &lt;file&gt; --repo tiermetric/tier</code>. It also publishes a container image to the GitHub Container Registry (GHCR) as <code>ghcr.io/tiermetric/tierd</code>, built for linux/amd64 only (on arm64, use the arm64 binaries).</p>
+<p>The macOS binaries are not yet Developer-ID signed or notarized; by the operator&#39;s ruling of 2026-09-26 (issue #822), notarization and a Homebrew tap come in a later release. A binary downloaded with a web browser is marked as downloaded, and macOS&#39;s Gatekeeper may refuse to run it. Remove the mark once with <code>sudo xattr -d com.apple.quarantine /usr/local/bin/tierd</code> (use the path where you put it). A binary built from source or with <code>go install</code> carries no such mark. The download, checksum and extraction commands are in <code>docs/quickstart.md</code>. The Windows archive is built but untested: there is no Windows test run, and the database file-permission protection does not apply there. Treat Windows as unsupported. The default log locations are built from the home directory, so they resolve on Windows too.</p>
+<p>The commands in this section write <code>tierd</code>, meaning the binary on your <code>PATH</code>. <code>go install</code> puts it in Go&#39;s binary directory (<code>$(go env GOPATH)/bin</code> unless <code>GOBIN</code> is set); add that directory to <code>PATH</code> if <code>tierd version</code> is not found. From a source checkout, use the full path to <code>bin/tierd</code> instead, for example <code>~/tier/bin/tierd</code>; the relative <code>./bin/tierd</code> works only while your current directory is the checkout.</p>
+<h3 id="92-see-it-in-one-command-synthetic-data">9.2 See it in one command (synthetic data)</h3>
+<pre><code>tierd demo                       # then open http://127.0.0.1:8080
+</code></pre>
+<p>The demo seeds a throwaway database (<code>tier-demo.db</code> in the system temporary directory, recreated on each run and left in place on exit) with <code>demo-*</code> developers, <code>DEMO-*</code> issues and an <code>ACME (DEMO)</code> organisation and prints a synthetic-data banner. It runs <code>serve</code> in <code>--read-only</code> mode: only the read, health and open routes (the dashboard and <code>/docs/</code>) are mounted, and the write, ingest, admin, webhook and proxy routes and every collector are structurally absent rather than token-gated. Because capture is disabled in that mode, <code>--read-only</code> also lifts the <code>--watch-repo</code> requirement: <code>--codex-rollout</code> or <code>--opencode</code> beside it produces a startup warning that the spend will not be recorded, rather than a refusal to start. <code>demo</code> is the one exception to the fail-closed bind rule of Section 9.5: because it serves invented data in that mode, it may bind a non-loopback address with no token (<code>tierd demo --addr 0.0.0.0:8124</code>). The exemption is an in-code signal set by the <code>demo</code> command alone; no <code>serve</code> flag or environment variable can reach it.</p>
+<h3 id="93-check-capture-then-see-where-the-money-went-no-server-no-token">9.3 Check capture, then see where the money went (no server, no token)</h3>
+<pre><code>tierd doctor --repo ~/src/your-repo                  # local checks: git repository, git remote, claude projects dir, recent sessions, issue attribution, spend not on a feature branch
+tierd score --repo ~/src/your-repo                   # last 90 days of Claude Code spend for that repo
+tierd score --repo ~/src/your-repo --since 2026-05-01
+</code></pre>
+<p>With no <code>--server</code>, <code>doctor</code> runs the local checks named above (plus collector-credential probes when <code>--config</code> names an Admin/Usage poller). Add <code>--server &lt;url&gt;</code> (and <code>--api-token</code> if the server has one) to also round-trip against a running <code>tierd</code>: server reachable, server auth, clock offset, price table (parity between the CLI&#39;s table and the server&#39;s), identity join, outcome coverage, the <strong>cost horizon</strong> check, which reads that server&#39;s <code>/scores</code>, and <code>sealing</code>, which reports a stalled sealed month (Section 6.2):</p>
+<pre><code>tierd doctor --repo ~/src/your-repo --server http://127.0.0.1:8080
+</code></pre>
+<p><code>score</code> reads <code>~/.claude/projects/</code>, prints the price-table version and hashes, a per-developer token and cost table, and a cost-by-issue table with an <code>unattributed</code> row. It is cost attribution, not a TIER score, because it has no outcomes; it reads Claude Code sessions only. Point <code>--repo</code> at a repository you have actually worked in with Claude Code; pointing it at a fresh checkout prints &#34;No Claude Code sessions found&#34; and exits 0. Useful flags: <code>--since</code>, <code>--developer &lt;id&gt;</code> (default: OS username), <code>--prices &lt;file.yaml&gt;</code>, <code>--repo-slug owner/upstream</code> on a fork.</p>
+<h3 id="94-the-full-score">9.4 The full score</h3>
+<p>First create a GitHub token for <code>tierd backfill</code>, which calls two GitHub REST endpoints and nothing else: <code>GET /repos/{owner}/{repo}/pulls</code> and <code>GET /repos/{owner}/{repo}/pulls/{number}</code>. A fine-grained personal access token (PAT) with <strong>Pull requests: Read-only</strong> on that one repository is enough:</p>
+<ol>
+<li>Create it at GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token (<code>https://github.com/settings/personal-access-tokens/new</code>).</li>
+<li>Repository access: only that repository. Permissions: Pull requests = Read-only (Metadata is added automatically).</li>
+<li>Copy the <code>github_pat_…</code> value; GitHub shows it once.</li>
+<li>Save it to a private file: run the line below, paste the token (nothing is shown) and press Enter: <code>mkdir -m 700 -p ~/.tier &amp;&amp; chmod 700 ~/.tier &amp;&amp; read -rs T &amp;&amp; (umask 077; printf &#39;%s&#39; &#34;$T&#34; &gt; ~/.tier/github-token) &amp;&amp; chmod 600 ~/.tier/github-token; unset T</code>.</li>
+</ol>
+<p>Then:</p>
+<pre><code># 1. Reconstruct the last 90 days of merged-PR outcomes. Run this BEFORE serve:
+#    the store is single-writer SQLite.
+export TIER_GITHUB_TOKEN=@$HOME/.tier/github-token      # or pass --token @$HOME/.tier/github-token
+tierd backfill --repo your-org/your-repo             # GitHub &#34;owner/name&#34; slug, not a path
+
+# 2. Start the server. --aggregation is required; use developer for a solo trial.
+tierd serve --aggregation developer --watch-repo ~/src/your-repo
+# tierd listening addr=127.0.0.1:8080
+
+# 3. In a second terminal, ship the last 90 days of local cost to it.
+tierd ship --server http://127.0.0.1:8080 --repo ~/src/your-repo
+</code></pre>
+<p>A literal token on the command line leaks through <code>ps</code> and shell history; the <code>@file</code> form avoids that. A repository owned by an organisation may require an organisation owner to approve the token before it works. <code>gh auth token</code> from the GitHub CLI also works, but it hands <code>backfill</code> a token with far wider access than it needs. For GitHub Enterprise, add <code>--github-api-url &lt;base URL&gt;</code>.</p>
+<p>Then open <code>http://127.0.0.1:8080</code>. The dashboard (a static HTML page with client-side JavaScript, served at <code>/</code>) now computes the score from your captured cost and merged outcomes. On a server with an admin token, the page asks for a token when a read returns <code>401</code>; it keeps the token for the browser session only and sends it as <code>Authorization: Bearer</code>. The <code>tierd</code> in these blocks is the binary on your <code>PATH</code>; from a checkout, substitute its full path as in Section 9.1.</p>
+<p>Why both <code>serve --watch-repo</code> and <code>ship</code> on the same machine: <code>--watch-repo</code> captures Claude Code session files as they change after <code>serve</code> starts (a changed file the watcher has not tracked before is re-read whole, so its earlier messages come in too; files it has tracked resume from their checkpointed offset, even across restarts), while <code>ship</code> loads the <strong>back catalog</strong> (the last 90 days) that already exists on disk. They overlap on any session written during both, and that is harmless: both derive the same idempotency key from the message id, so the store keeps one row. In this laptop-only layout, add <code>--codex-rollout</code>, <code>--opencode</code> and/or <code>--muse</code> to <code>serve</code> (and send those tools&#39; traffic through their own logs, not also through the proxy, or it is counted twice; Section 3.1) (whose first pass loads every such log on disk and then rescans) and to <code>ship</code> (which loads their history); the central-server layout in Section 9.5 puts those flags on <code>ship</code>, because that server holds no session logs.</p>
+<p>New merges after this point reach the server in one of two ways. A GitHub webhook (Section 9.5) needs the server reachable from GitHub, which a loopback bind is not; the alternative for a local trial is to stop <code>serve</code>, re-run <code>tierd backfill</code>, and start <code>serve</code> again, since the store is single-writer. With no webhook, no CI or revert signal arrives, so every outcome in this layout keeps quality 1.0. A brand-new trial with fewer than 3 merged PRs or under $5 of captured spend (unattributed spend included) shows a row below the evidence floor until more data accrues. So does one whose backfilled PRs are older than the session logs on disk (Section 5.5): read from <code>cost_coverage_safe_since</code>. If your OS username differs from your GitHub login, map them:</p>
+<pre><code>curl -X POST http://127.0.0.1:8080/api/v1/developer_alias \
+  -H &#34;Content-Type: application/json&#34; \
+  -d &#39;{&#34;alias&#34;:&#34;alice-laptop&#34;,&#34;canonical&#34;:&#34;alice&#34;}&#39;
+</code></pre>
+<p>On a server with an admin token, send the header through curl&#39;s input so the token never appears in <code>ps</code>: start the command with <code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat /path/to/token)&#34; |</code> and add <code>-H @-</code> to <code>curl</code> (<code>printf</code> is built into the shell, so it starts no process that would show the token), but only when nothing else in the command reads standard input (<code>-d @-</code>, <code>--data-binary @-</code>, <code>-T -</code>, <code>-K -</code>).</p>
+<h3 id="95-run-it-for-a-team">9.5 Run it for a team</h3>
+<pre><code>export TIER_API_TOKEN=@/etc/tier/api-token
+export TIER_WEBHOOK_SECRET=@/etc/tier/webhook-secret
+tierd serve --aggregation team --addr 0.0.0.0:8080 --db /var/lib/tier/tier.db
+</code></pre>
+<p><code>tierd</code> itself serves plain HTTP. The <code>https://</code> addresses in the webhook and <code>ship</code> examples assume TLS (Transport Layer Security) is terminated in front of it by a reverse proxy, load balancer or tunnel that forwards to <code>tierd</code>&#39;s listener; TIER ships no certificate handling of its own. How to keep the per-IP lockout working behind such a proxy is in <code>docs/security.md</code>.</p>
+<p><code>--db</code> defaults to <code>~/.tier/tier.db</code> on every command that opens the store (<code>tier.db</code> in the current directory if the home directory cannot be resolved). A non-loopback <code>--addr</code> without an API token is refused at startup with the message &#34;refusing to bind ... without an API token: ... set --api-token (or TIER_API_TOKEN) or bind to 127.0.0.1&#34;; the remedy is exactly that: set the write token (preferably <code>TIER_API_TOKEN</code> or an <code>@file</code>), or bind to <code>127.0.0.1</code>. A <code>--read-token</code> on its own does <strong>not</strong> unlock a non-loopback bind, and it must differ from the write token. The one exemption is <code>tierd demo</code> (Section 9.2), which binds without a token because it serves synthetic data read-only; <code>serve</code> over captured data has no such path. Any secret flag accepts <code>@/path/to/file</code> so the value never appears in <code>ps</code> or shell history. A token is any long random string (for example the output of <code>openssl rand -hex 32</code>), stored in a file only the service account can read. Secrets are read when <code>serve</code> starts, so to rotate one, replace the file and restart. Configure the GitHub webhook at Settings → Webhooks: payload URL <code>https://&lt;tierd-host&gt;/webhook/github</code>, content type <code>application/json</code>, the secret from <code>TIER_WEBHOOK_SECRET</code>, and the individual events <strong>Pull requests</strong>, <strong>Pushes</strong> and <strong>Workflow runs</strong>. Without a secret the webhook route is not mounted at all. Populate <code>org_hierarchy</code> before relying on team mode, for example with <code>tierd hierarchy import</code> (Section 6.1). A team-mode server publishes no report until sealing is armed: once the history is loaded and <code>serve</code> has started once on the database, run <code>tierd seal --arm earliest</code> (or a <code>YYYY-MM</code> month) with the same config, flags and environment as <code>serve</code>. That command is refused until the month it would seal has closed and its grace lag (14 days by default) has ended, and the refusal names the date. To arm in advance, set <code>seal_from</code> to that month instead (<code>--seal-from YYYY-MM</code>, env <code>TIER_SEAL_FROM</code>, config <code>seal_from</code>). Arming is irreversible, and a new installation&#39;s first report appears no earlier than 14 days after the end of its first full calendar month of cost data (Section 6.2). Laptops feed the server on a schedule:</p>
+<pre><code>*/15 * * * * /absolute/path/to/tierd ship --server https://&lt;tier-host&gt; --repo ~/src/app --api-token @/path/to/token --codex-rollout --opencode --since 2026-09-01
+</code></pre>
+<p>Replace <code>/absolute/path/to/tierd</code> with the installed binary&#39;s absolute path; <code>git</code> must be on cron&#39;s <code>PATH</code> (default <code>/usr/bin:/bin</code>), or set <code>PATH=</code> in the crontab. In this layout <code>POST /api/v1/events</code> is admin-scoped, so every laptop&#39;s <code>ship</code> job holds the org-wide write token, and a leaked laptop token can post cost or outcomes under any developer name until it is rotated. There is no per-developer credential today. Keep only the collector flags for tools the developer uses. A fixed <code>--since</code> must be within the last 90 days and moved forward from time to time to bound how much each run resends (Section 3.1); a rolling date needs a wrapper script, because <code>%</code> must be escaped in a crontab line and <code>date</code> differs between Linux and macOS. The server does not know which laptops should report. In <code>developer</code> mode, <code>GET /api/v1/fidelity</code> shows each developer&#39;s captured spend over the last 7 and 30 days, the nearest check that every laptop is reporting. In <code>team</code> and <code>division</code> mode that endpoint answers <code>403</code>, and no endpoint shows per-developer activity; the team rows&#39; cost, and <code>GET /api/v1/developer/{id}/export</code> for one named developer at a time, are what remain. <code>tierd ship -h</code> describes its output on each kind of failure.</p>
+<p>In this layout the central server holds no developer&#39;s session logs, so it runs without <code>--watch-repo</code>, <code>--codex-rollout</code>, <code>--opencode</code> or <code>--muse</code>, and each laptop&#39;s <code>ship</code> carries those collector flags instead. The flags are not forbidden on a server: any <code>serve</code> that does have session logs and repositories on its own disk (for example a shared build host) may take <code>--watch-repo</code>, repeated per repository, with the collectors; <code>serve</code> refuses the collector flags only when no <code>--watch-repo</code> is given. Likewise point <code>backfill</code> at the server&#39;s database, or its outcomes land in <code>~/.tier/tier.db</code> where the central <code>serve</code> never reads them:</p>
+<pre><code>tierd backfill --repo your-org/your-repo --db /var/lib/tier/tier.db   # before serve starts
+</code></pre>
+<p>A config file (<code>tierd serve --config config.yaml</code>) mirrors the flags; precedence is CLI flag &gt; environment variable &gt; config file &gt; built-in default. This reference does not reproduce the full schema: the repository&#39;s <code>config.example.yaml</code> lists every key, including the hierarchy, pollers, repository slugs and size-label overrides. For Docker, the image (linux/amd64 only, Section 9.1) runs <code>tierd</code> as non-root uid 65532 on a static base with no shell; it must bind <code>0.0.0.0</code> with a token. The image sets <code>HOME=/data</code> and declares <code>/data</code> a volume, so the default database is <code>/data/.tier/tier.db</code>:</p>
+<pre><code>docker run -d -p 8080:8080 -v tier-data:/data -v /etc/tier:/etc/tier:ro \
+  -e TIER_API_TOKEN=@/etc/tier/api-token \
+  ghcr.io/tiermetric/tierd:0.5.2 serve --aggregation team --addr 0.0.0.0:8080
+</code></pre>
+<p>The token file must be readable by uid 65532. It ships only <code>tierd</code> (no <code>git</code>, no host logs), so feed a stock container with <code>tierd ship</code> or the proxy; watching inside a container needs the session-log directory and the repository mounted, and commit-based attribution is unavailable without <code>git</code>.</p>
+<h3 id="96-the-other-commands">9.6 The other commands</h3>
+<p><code>tierd backup --db &lt;path&gt; --out &lt;new-file&gt;</code> takes a consistent snapshot with SQLite&#39;s <code>VACUUM INTO</code>, safe while <code>serve</code> runs. The snapshot is a complete database file that <code>--db</code> can point at; the repository documents no separate restore procedure. <code>tierd reprice --from-version N [--commit]</code> recomputes historical costs under the current table (dry run by default). <code>tierd score-log --format claude|codex --log &lt;file&gt;</code> prices one session log as JSON with no store or network. <code>tierd verify-report</code> checks a report against its <strong>manifest</strong>: the record, served by <code>GET /api/v1/report_manifest</code>, of the window, repository scope, mode, k, price table and its hashes, rubric version, tool version, and counts and digests of the rows the report was computed from. It exits <code>0</code> when every pinned input matches and the recomputed report equals the manifest, <code>1</code> when an input or a number has moved (and names which), and <code>2</code> when it could not check at all; <code>2</code> is never a pass. A sealed team or division month&#39;s manifest is replayed from the bytes it was sealed with, never recomputed, and adds two exit codes: <code>3</code> when this database holds no sealed row for the month, and <code>4</code> when every compared field is unchanged but the refold was not run, for example because the month was sealed under a fold rule other than this binary&#39;s (<code>docs/reproducibility.md</code>). <code>tierd seal</code> arms sealing, records a skipped month and reports sealing status (Section 6.2). <code>tierd healthcheck</code> probes <code>/api/v1/livez</code>. <code>tierd repair-repo</code> moves one developer&#39;s cost rows off the <code>unqualified</code> repository sentinel (Section 5.1). <code>tierd prices forget-version --db &lt;path&gt; --version &lt;N&gt; --commit</code> retires a registered price-table identity in that database (dry run without <code>--commit</code>; <code>tierd prices list --db &lt;path&gt;</code> and <code>tierd prices audit --db &lt;path&gt;</code> show the registry and its ledger); it cannot free the embedded version, which the load-time guard protects regardless. Run any command with <code>-h</code> for its full flag list.</p>
+<p><strong>Upgrades.</strong> A newer binary migrates the database when it opens it, and an older binary refuses to open a database a newer one has migrated, so take a <code>tierd backup</code> before upgrading; that backup is the only way back. Running <code>serve</code> as a system service is left to the administrator&#39;s own service manager; the repository ships a container image and an example systemd unit, <code>deploy/tierd.service</code>.</p>
+<p><strong>Scale.</strong> The project publishes no tested deployment size (developers, events or database size) for the single-writer SQLite store, and no figure for what running TIER itself costs. A warning fires when SQLite&#39;s write-ahead log (WAL) grows past 64 MiB (Section 10); it only warns, and the project documents no remedy.</p>
+<hr>
+<h2 id="10-api-and-interfaces">10. API and interfaces</h2>
+<p>All routes are served by <code>tierd serve</code> under <code>/api/v1</code> (the Prometheus scrape is at <code>/metrics</code>, the webhook at <code>/webhook/github</code>, the dashboard at <code>/</code>, and the documentation, this reference and the white paper included, at <code>/docs/</code>). Routes fall into three token scopes, plus the webhook, which is checked by signature instead. <strong>admin</strong> requires the write token (<code>--api-token</code> / <code>TIER_API_TOKEN</code>, sent as <code>Authorization: Bearer</code>); <strong>read</strong> accepts either the read-only viewer token (<code>--read-token</code> / <code>TIER_READ_TOKEN</code>, which must differ from the admin token and is rejected on the write routes and on the proxies) or the admin token; <strong>open</strong> needs no token. The <code>serve --help</code> text lists fewer read-scoped routes than the router actually protects; the router&#39;s list follows: <code>/scores</code>, <code>/scores/{developer}</code>, <code>/scores/compare</code>, <code>/report_manifest</code>, <code>/events</code>, <code>/outcomes</code>, <code>/quality_events</code>, <code>/quality_history</code>, <code>/fidelity</code> and <code>/metrics</code> are all read-scoped in the router. In team and division mode <code>/metrics</code> refuses the read token and takes the admin token or the scrape-only metrics token (<code>--metrics-token</code>) instead (Section 6.2). <code>POST</code>, <code>PUT</code> and <code>PATCH</code> requests under <code>/api/v1</code> need <code>Content-Type: application/json</code> or get <code>415</code>. A cross-origin browser request gets <code>403</code> on <code>/api/</code> for every method, and on every other path, the proxies included, for any method but <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code>. A server with no token on a loopback address answers <code>403</code> to a <code>Host</code> that is not a loopback name or IP, so browse it at <code>127.0.0.1</code> or <code>localhost</code> (#893). Auth is enforced only when the admin token is configured. A <code>--read-token</code> without <code>--api-token</code> has no effect (<code>serve</code> logs a warning), and on a loopback bind with no admin token every route is reachable. A per-IP lockout returns <code>429</code> after 10 failed authentications within 60 seconds and holds for 15 minutes (<code>--auth-max-failures</code>, <code>--auth-failure-window</code>, <code>--auth-lockout</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Method and path</th>
+<th>Purpose</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /api/v1/costs</code></td>
+<td>ingest one token-cost event (<code>source</code> must be <code>api</code> or omitted; Section 3.1)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/events</code></td>
+<td>bulk ingest from <code>tierd ship</code> (sources <code>jsonl</code>, <code>codex-rollout</code>, <code>opencode</code>, <code>muse</code>); server re-prices</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/outcomes</code></td>
+<td>record a merged outcome (Section 4.6)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/actual_spend</code></td>
+<td>per-developer invoice total for a <code>YYYY-MM</code> period</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/org_actual_spend</code>, <code>GET</code></td>
+<td>org-level invoice total; read back the ledger</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/scores</code></td>
+<td>all scores for a window; <code>?since=</code>, <code>?until=</code> (or its legacy alias <code>?before=</code>), <code>?team=</code> (adds a <code>team</code> rollup), <code>?work_type=</code>, <code>?repo=</code>; in team and division mode only <code>?period=YYYY-MM</code>, a sealed month (Section 6.2)</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/scores/{developer}</code></td>
+<td>one developer with per-issue detail; blanket 404 in anonymised modes</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/scores/compare</code></td>
+<td>two-window before/after deltas with <code>significant</code>; accepts <code>since_a</code>, <code>until_a</code>, <code>since_b</code>, <code>until_b</code> and nothing else; in team and division mode <code>period_a</code> and <code>period_b</code> instead</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/report_manifest</code></td>
+<td>the reproducibility manifest a published report is verified against; <code>?period=YYYY-MM</code> in team and division mode</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/events</code>, <code>GET /api/v1/outcomes</code></td>
+<td>keyset-paginated raw exports, JSON or CSV (<code>Accept: text/csv</code>); 403 in anonymised modes</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/quality_events</code>, <code>GET /api/v1/quality_history</code></td>
+<td>the append-only quality signal and transition logs; 403 in anonymised modes</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/fidelity</code></td>
+<td>per-developer capture fidelity over 7 and 30 days; 403 in anonymised modes</td>
+<td>read</td>
+</tr>
+<tr>
+<td><code>POST</code>, <code>GET</code>, <code>DELETE /api/v1/developer_alias[/{alias}]</code></td>
+<td>identity map</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>PUT /api/v1/org_hierarchy/{developer}</code>, <code>POST</code>, <code>GET /api/v1/org_hierarchy</code></td>
+<td>developer → team/division/org map; <code>PUT</code> body <code>{&#34;team&#34;,&#34;division&#34;,&#34;org&#34;}</code> with <code>team</code> required, <code>POST</code> body an array of <code>{&#34;developer&#34;,&#34;team&#34;,&#34;division&#34;,&#34;org&#34;}</code> in one all-or-nothing transaction</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/period_membership/{developer}/end</code></td>
+<td>close a departed developer&#39;s seat</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/developer/{id}/export</code>, <code>DELETE /api/v1/developer/{id}</code></td>
+<td>GDPR access and erasure</td>
+<td>admin</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/health</code>, <code>/healthz</code>, <code>/livez</code></td>
+<td>smoke, readiness (503 while the watcher restarts), liveness (version, uptime)</td>
+<td>open</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/version</code></td>
+<td>build identity (version, commit, platform, price-table version, no digests); first released in v0.4.1, so v0.4.0 and earlier answer 404</td>
+<td>open</td>
+</tr>
+<tr>
+<td><code>GET /</code>, <code>GET /docs/</code></td>
+<td>the dashboard page, and the documentation as static HTML; both mounted in every mode, <code>--read-only</code> included</td>
+<td>open</td>
+</tr>
+<tr>
+<td><code>GET /metrics</code></td>
+<td>Prometheus exposition</td>
+<td>read (team and division mode: admin or metrics token)</td>
+</tr>
+<tr>
+<td><code>POST /webhook/github</code></td>
+<td>GitHub deliveries, HMAC-SHA256 (a keyed hash of the body) in <code>X-Hub-Signature-256</code>; mounted only with a secret</td>
+<td>signature</td>
+</tr>
+</tbody>
+</table>
+<p>Windows on the read endpoints accept <code>YYYY-MM-DD</code>, <code>YYYY-MM</code> or <code>YYYY</code>, each meaning the first instant of that day, month or year in UTC; windows are half-open, so <code>until=2026</code> ends immediately before 2026-01-01T00:00Z, and <code>until</code> must be after <code>since</code>. <code>since</code> defaults to the start of the UTC day 90 days ago (the dashboard defaults its &#34;From&#34; date to 30 days ago). Team and division mode take no window parameters on <code>/scores</code>, <code>/report_manifest</code> and <code>/scores/compare</code>, only the sealed-month parameters above. The scores endpoints reject any query parameter outside their own list with <code>400</code>: in developer mode, for <code>/scores</code> that list is <code>since</code>, <code>until</code>, <code>before</code> (a legacy alias of <code>until</code>), <code>team</code>, <code>work_type</code> and <code>repo</code>; for <code>/scores/compare</code> it is the four window parameters alone. The project&#39;s compatibility rule for responses is additive-only: a field is not renamed, removed or given a new computation in place, and CSV columns are append-only. That is a rule the project holds itself to, not something the code can guarantee for future releases. (<code>exploratory_cost_share</code> is computed as it was when introduced; only the words describing it changed; Section 5.3. One exception in this release: the premium cutoff behind <code>premium_model_share</code> moved from $5 to $4, which changes that share for models priced between the two.) Feature detection reads <code>livez.version</code>. This reference does not reproduce request and response schemas, pagination parameters or error bodies; they are in the repository&#39;s <code>docs/api-compatibility.md</code> and <code>docs/outcomes-api.md</code>. Exports paginate by an opaque <code>next_cursor</code> (also in the <code>X-Next-Cursor</code> header), default page 1,000 rows, hard cap 10,000, and <code>cost_micro</code> is integer micro-dollars.</p>
+<p>A developer row in <code>/scores</code> (<code>developers[]</code>, developer mode) carries: <code>developer</code>, <code>tier</code>, <code>weighted_points</code>, <code>total_cost_usd</code>, <code>actual_paid_usd</code>, <code>spend_leverage</code>, <code>coverage_pct</code>, <code>exploratory_cost_share</code>, <code>cost_per_point</code> (<code>null</code> on zero points), <code>sample_n</code> (the developer&#39;s outcomes in the window, flagged ones included), <code>ci_low</code>, <code>ci_high</code>, <code>cost_per_point_ci_low</code>, <code>cost_per_point_ci_high</code>, <code>ranked</code>, <code>flagged_outcomes</code> (outcomes that failed the zero-token check). A team or division row (<code>teams[]</code>) carries <code>team</code>, <code>tier</code>, <code>weighted_points</code>, <code>total_cost_usd</code>, <code>actual_paid_usd</code>, <code>spend_leverage</code>, <code>coverage_pct</code>, <code>cost_per_point</code>, <code>ranked</code>, and no interval. Rows come in identifier or name order (in team and division mode, the <code>other</code> row last), and the dashboard keeps that order (Section 7.1). In developer mode the response also carries <code>team_rollups</code> (Section 6.1).</p>
+<p>The <code>/scores</code> response carries, beside the rows: <code>price_table {version, effective_date, table_hash, file_hash}</code>; <code>rubric {version}</code>; <code>total</code> (a pooled rollup); <code>work_types[]</code>; <code>cost_composition</code> (name-free: <code>cache_read_share</code>, <code>premium_model_share</code> for models whose base input rate is at or above $4.00 per million tokens (a constant in the code, lowered from $5 to $4 in this release so that <code>claude-opus-5-5</code> at $4.00 counts as premium; while Sonnet, Haiku and the flash/mini tiers do not; the over-threshold long-context rates play no part), <code>by_model</code>, and <code>by_class</code>, which holds token counts, not dollars, for input, output, cache read and cache write); <code>segment_reconciliation</code> (<code>outcome_linked + no_outcome + unattributed == window</code>, exact on the integer fields); and <code>data_quality</code> (attribution shares, unattributed buckets, <code>exploratory_cost_share</code>, <code>unjoined_developers</code>, zero-token flags, <code>mixed_price_versions</code>, the cost-horizon fields, <code>kanon_suppressed</code>, and <code>repo_scope</code>, which echoes the repository when <code>?repo=</code> is set). A team or division report leaves out <code>work_types[]</code>, <code>cost_composition</code>, <code>segment_reconciliation</code> and the <code>data_quality</code> fields Section 6.2 lists, and carries <code>attribution_coverage</code> and <code>excludes_unattributed_spend</code>, plus <code>uncounted_active_ids</code> when an identifier did not count toward k.</p>
+<p>TIER emits two operational warnings. A <strong>zero-outcome tripwire</strong> checks hourly and warns (log plus <code>tier_zero_outcome_tripwire</code> gauge) when cost accrued but no outcome landed in the last <code>--zero-outcome-window-days</code> (default 7): a broken webhook or a trunk-based team without push capture. A <strong>WAL-size tripwire</strong> checks every 5 minutes and warns once when the SQLite write-ahead log (WAL) grows past 64 MiB (gauge <code>tier_sqlite_wal_bytes</code>).</p>
+<hr>
+<h2 id="11-limits-and-known-ways-it-can-mislead-or-be-gamed">11. Limits and known ways it can mislead or be gamed</h2>
+<p>The project publishes its own adversarial analysis (<code>docs/adversarial-analysis.md</code>), dated 26 March 2026: 28 scenarios, each with a code used below: G for individual gaming, U for unfair comparison, O for organisational gaming, M for mathematical edge cases and P for perverse incentives. It rated 7 critical, 14 high and 7 medium. It analysed an earlier formula that divided by tokens rather than dollars, on an older weight scale, and the ratings have not been redone for the current formula; read them as the project&#39;s judgement at that date. Project policy (Section 6.3) prohibits using the numbers in appraisal; the software cannot enforce that. Known ways the number misleads or can be gamed:</p>
+<p><strong>Structural, present in normal use</strong></p>
+<ul>
+<li><strong>Task mix moves the number.</strong> Greenfield features and production debugging will not score alike; a senior on a legacy module can show a lower number than a junior on greenfield. The project has not measured the relative effects of task mix and developer skill on TIER. Compare a team with its own history (Section 2.1).</li>
+<li><strong>Windowing.</strong> Recent, open-ended windows read low (the trailing edge, Section 5.4). Windows that reach back past the cost horizon read high (Section 5.5); widening a window shrinks the edge effects but makes this one worse once it crosses the horizon.</li>
+<li><strong>Attribution coverage.</strong> A merged PR with no derivable issue records no outcome at all (logged at debug level, so easy to miss), and TIER reads low. Spend recorded without an issue weakens the segments and trips the zero-token check (Section 5.3). Branch names that carry the issue number reduce both. They cannot help Opencode spend, because Opencode records no branch, and they do not stop a PR merged into a non-default branch from escaping the CI floor, which is read only on the default branch.</li>
+<li><strong>Identity mismatch</strong> between OS username and GitHub login splits into zero-scoring rows until aliased (flagged in <code>unjoined_developers</code>).</li>
+<li><strong>Outcome timestamps differ by producer.</strong> The webhook stamps an outcome with the time it processed the merge event, while backfill and the outcomes API use the PR&#39;s <code>merged_at</code>, and push capture uses the commit time. A late or redelivered webhook can therefore place an outcome in a later window than a backfill of the same PR would.</li>
+<li><strong>Cache-hit rates.</strong> Identical workflows with different cache reuse get different scores by design; read <code>cache_read_share</code> beside the number.</li>
+<li><strong>The diff heuristic has no semantics.</strong> A five-line concurrency fix and a five-line typo fix weigh the same unless labelled, and generated churn inflates unlabelled PRs.</li>
+<li><strong>Quality is partial.</strong> Follow-up fixes, partial reverts, incidents, hotfixes and downstream failures are specified and not enforced; backfilled outcomes carry no historical degradation; CI floors do not reach push-captured outcomes; and if the &#34;Workflow runs&#34; webhook event is not subscribed, CI failures are invisible.</li>
+<li><strong>Coverage of tools.</strong> TIER has no collector for Cursor, GitHub Copilot or ChatGPT Team, so their usage is not captured; the project&#39;s reading is that they report seat invoices rather than per-developer token counts. Gemini through the proxy is untested on live traffic. Opencode capture takes only the Z.ai coding plan (Section 3.1). Uncaptured usage reads as free and makes TIER read high whenever some cost is recorded (Section 2.2).</li>
+</ul>
+<p><strong>Gaming vectors</strong></p>
+<ul>
+<li><strong>Off-books usage (G-02, critical).</strong> Work done on a personal AI subscription that TIER never sees shrinks the denominator. The zero-token check takes a developer below the evidence floor when any outcome has under 1,000 tokens against its issue in the 14-day attributable window (Section 7.1); beyond that, the defence is policy.</li>
+<li><strong>Label inflation (the labelling side of O-01 manager weight manipulation, and the relabelling in G-03).</strong> Calling a medium change <code>size/l</code> raises the numerator, and <strong>no code defends against it.</strong> The fixed scale constrains only labels and the heuristic; <code>POST /api/v1/outcomes</code> takes any weight in (0, 8] (Section 4.6). Nothing detects a mislabelled PR, and the rubric version stamp cannot see a generous labelling culture. The mitigation is human: review labels against the meanings in Section 4.2.</li>
+<li><strong>PR splitting (G-03).</strong> The scale is concave at the top, so splitting large work pays. One <code>size/xl</code> PR is 8 points; the same work as two <code>size/l</code> PRs is 10, or as three <code>size/m</code> PRs is 9. The heuristic has the same shape: a 1,200-line, 10-file PR has effort 1,300 and weight 8, while the same diff as two 600-line, 5-file PRs has effort 650 each and weight 5 + 5 = 10. (The adversarial analysis states G-03 as issue splitting on an older weight scale: a 13-point epic relabelled into sub-issues totalling 21; the incentive is the same.) The one-outcome-per-merge rule does not stop this; push capture&#39;s one-outcome-per-(repository, issue, UTC day) rule closes only the commit-splitting form.</li>
+<li><strong>Cheap-work farming (P-02, P-03).</strong> Avoiding hard problems, or avoiding AI where it would help, can both raise the ratio. Work-type segmentation and the &#34;no absolute good band&#34; rule make it easier to notice; nothing prevents it.</li>
+<li><strong>Forged rows (O-03).</strong> The write scope is a single global bearer token with no subject; nothing binds it to the <code>developer</code> field, so a token holder can post cost under another name, through <code>/costs</code>, <code>/events</code> or the proxy&#39;s <code>X-Tier-Developer</code>, or shift spend out of their own row. The only value the write endpoints refuse is the reserved <code>unattributed</code> sentinel (the proxy, which never fails a call, stores a forged header as <code>unattributed</code> instead; Section 3.1): in the <code>developer</code> field of every write endpoint, and in <code>issue_id</code> on <code>/costs</code> and <code>/outcomes</code>; <code>POST /api/v1/events</code> accepts, from the <code>unattributed</code> family, only the five exact bucket names of Section 5.3 that its own collectors emit (ordinary issue ids pass as usual). Binding identity to credential needs an identity layer that is not built (#65).</li>
+<li><strong>Quality-window exploitation (G-04).</strong> Reverts after 60 days do not degrade the original outcome.</li>
+<li><strong>Double outcomes.</strong> One change can be stored twice: Sections 4.1 (integration branches) and 4.5 (push capture).</li>
+<li><strong>Goodhart (P-06, critical).</strong> The risk: if TIER becomes a target, people will work to raise the number rather than improve the work, by the routes above.</li>
+</ul>
+<p><strong>Operational</strong></p>
+<ul>
+<li>Double counting and the first-writer cost rule: Section 3.1. A <code>--prices</code> override replaces the whole table: Section 3.4.</li>
+<li>The store is single-writer SQLite; run <code>backfill</code> before <code>serve</code>, not beside it (Section 4.7).</li>
+<li>Everything is single-tenant; run one instance per organisation.</li>
+</ul>
+<hr>
+<h2 id="12-glossary">12. Glossary</h2>
+<p>Short definitions; the section named holds the rule.</p>
+<ul>
+<li><strong>TIER</strong>: weighted outcome points per $1,000 of list-price AI cost (§2.1).</li>
+<li><strong>Accepted outcome</strong>: a merged pull request, an opt-in direct commit, or an API-posted merge (§2.1, §4).</li>
+<li><strong>Weighted point</strong>: one outcome&#39;s <code>weight × quality</code> (§2.1).</li>
+<li><strong>Weight</strong>: an outcome&#39;s size; 0.5 / 1 / 3 / 5 / 8 from a label or the diff heuristic, or any value in (0, 8] sent through the API (§4.2, §4.6).</li>
+<li><strong>Quality multiplier</strong>: 1.0 for a clean merge, lowered by a CI failure or a revert (§4.4).</li>
+<li><strong>List-price cost</strong>: token counts priced by the reference price table, stored as integer micro-dollars (§3.2, §3.3).</li>
+<li><strong>Reference price table</strong>: the embedded, versioned <code>prices.yaml</code>; <code>--prices</code> replaces it (§3.4).</li>
+<li><strong>price_version / table_hash / file_hash</strong>: the table version stamped on each cost row; digests of the resolved rates and of the file (§3.4).</li>
+<li><strong>Rubric version</strong>: the stamp on the weight scale, work-type taxonomy and quality floors (§4.2).</li>
+<li><strong>cost_per_point</strong>: dollars per weighted point (§2.1).</li>
+<li><strong>Spend Leverage</strong>: list cost ÷ paid (§8.1).</li>
+<li><strong>Operator / administrator</strong>: the project maintainer who rules on design questions / whoever runs an installation (front matter).</li>
+<li><strong>Evidence floor (<code>ranked</code>)</strong>: 3 outcomes, $5.00 of cost, no zero-token outcome (§7.1).</li>
+<li><strong>Zero-token outcome</strong>: an outcome whose developer recorded under 1,000 tokens on its issue in the 14-day attributable window (§7.1).</li>
+<li><strong>Provisional</strong>: the dashboard&#39;s label on the headline when <code>attributed_cost_share</code> is below 0.5 (§7.1).</li>
+<li><strong>Unattributed / no-outcome spend</strong>: cost with no issue / cost on an issue with no outcome for that developer (§5.3).</li>
+<li><strong>attributed_cost_share / coverage_pct</strong>: share of window cost joined to an issue / share of captured cost that arrived per call (§5.3, §7.4).</li>
+<li><strong>Issue id</strong>: the join key (<code>issue-42</code>, <code>TIER-99</code>) read from a branch name, commit or PR body (§5.1).</li>
+<li><strong>Window</strong>: the half-open interval <code>[since, until)</code> (§2.2, §10).</li>
+<li><strong>Cost horizon</strong>: the timestamp of the earliest cost event in the store (§5.5).</li>
+<li><strong>Bootstrap interval</strong>: the 95% interval from 1,000 resamples of a developer&#39;s outcomes (§7.2).</li>
+<li><strong>significant</strong>: on <code>/scores/compare</code>, both windows clear the floor and their intervals do not overlap (§7.3).</li>
+<li><strong>Reporting mode</strong>: <code>developer</code>, <code>team</code> or <code>division</code>, chosen at startup; changes what is served, not what is stored (§6.1).</li>
+<li><strong>k-anonymity / other / kanon_suppressed</strong>: a group is named only when at least k people count toward it; smaller groups fold into <code>other</code>; a small <code>other</code> withholds the whole response (§6.2).</li>
+<li><strong>Sealed month</strong>: in team and division mode, a report for one calendar month, sealed once after its grace lag and never recomputed (§6.2).</li>
+<li><strong>Worktree attribution</strong>: the opt-in, off-by-default rule that attributes Claude Code spend by the git worktree a session&#39;s tool calls worked in (§5.1).</li>
+<li><strong>Work type</strong>: one of seven categories; scores compare within a type (§4.3).</li>
+<li><strong>Push capture</strong>: opt-in scoring of direct commits to the default branch (§4.5).</li>
+<li><strong>Laptop shipper</strong>: <code>tierd ship</code> (§3.1).</li>
+<li><strong>Idempotency key</strong>: the per-event key the store deduplicates on (§3.1).</li>
+<li><strong>developer_alias / org_hierarchy / period_membership</strong>: identity map; developer → team, division, organisation map; paid-spend seats by month (§5.2, §6.1, §8.1).</li>
+<li><strong>Acronyms</strong>: API (application programming interface), CI (continuous integration), CSV (comma-separated values), DPIA (data protection impact assessment), GDPR (General Data Protection Regulation), GHCR (GitHub Container Registry), HMAC (hash-based message authentication code), JSONL (JSON Lines), PAT (personal access token), PIP (performance improvement plan), PR (pull request), SLSA (Supply-chain Levels for Software Artifacts), TLS (Transport Layer Security), WAL (write-ahead log); BetrVG, CSE and WOR are expanded in §6.3.</li>
+</ul>
+<hr>
+<h2 id="appendix-a-machine-readable-summary">Appendix A: machine-readable summary</h2>
+<p>Constants and rules from the body, for tools. Where a value here and the body differ, the body is right and this appendix is a defect.</p>
+<pre><code>document:
+  title: &#34;TIER — technical reference&#34;
+  version: &#34;1.2&#34;
+  companion: &#34;whitepaper.md (version 2.2)&#34;
+  date: &#34;2026-10-01&#34;
+  describes: &#34;tiermetric/tier v0.5.2&#34;
+  licence: &#34;Apache-2.0&#34;
+formula:                                  # §2.1
+  tier: &#34;sum(weight * quality) / (total_cost_usd / 1000)&#34;
+  unit: &#34;weighted outcome points per 1000 USD of list-price AI cost&#34;
+  cost_per_point: &#34;total_cost_usd / weighted_points; null when points are 0; 0 when cost is 0 and points &gt; 0&#34;
+  accepted_outcome: [merged_pull_request, push_capture_commit_opt_in, api_posted_outcome]
+  denominator: &#34;all recorded cost in the window, linked to an issue or not&#34;
+  team_rollup: &#34;sum of points / (sum of cost_usd / 1000)&#34;
+  comparable_when: &#34;same price_table.table_hash AND same rubric.version AND no data_quality.mixed_price_versions, and rows priced by the same price_version; own history first; two teams only within one work type after a label review; never two organisations&#34;
+  decision_figure: &#34;per-work-type segment across two windows, read beside segment_reconciliation&#34;
+  segments: &#34;divide by that type&#39;s outcome-linked cost only; an issue with two types counts in both&#34;
+  never_compare: [across_organisations, across_work_types]      # §6.3
+weights:                                  # §4.2, §4.6
+  labels: {xs: 0.5, s: 1, m: 3, l: 5, xl: 8}
+  heuristic: {effort: &#34;additions + deletions + changed_files * 10&#34;, buckets: {&#34;&lt;=15&#34;: 0.5, &#34;&lt;=60&#34;: 1, &#34;&lt;=200&#34;: 3, &#34;&lt;=1000&#34;: 5, &#34;else&#34;: 8}}
+  several_size_labels: &#34;first in the webhook payload or REST response order wins&#34;
+  api_weight: &#34;taken as sent, 0 &lt; w &lt;= 8&#34;
+  push_capture: {weight: 0.5, grain: &#34;one outcome per (repository, issue, UTC day)&#34;, squash_merge: &#34;counts once in any event order since v0.5.2 (#849); double counts stored before the upgrade stay&#34;}
+  rubric_version: {value: 1, set_by_hand: true, tied_by_tests: [scale, heuristic_outputs, work_types, quality_floors], not_tied: [heuristic_thresholds, work_type_precedence, default_label_names, revert_keywords]}
+quality:                                  # §4.4
+  floors: {clean: 1.0, ci_fail: 0.7, revert_strategic: 0.8, revert_quality: 0.1}
+  windows: {ci_fail: &#34;48h upper cutoff, run updated_at, default branch only&#34;, revert: &#34;60d&#34;}
+  combination: &#34;minimum of floors, clamped to [0.1, 1.0]&#34;
+  flaky: &#34;same commit, same workflow_id, later run_attempt, success within 30 min; then every failure of that (commit, workflow) is cleared&#34;
+  keyword_match: &#34;case-insensitive unanchored regular expressions over the revert commit message&#34;
+  specified_not_enforced: [followup_fix, partial_revert, incident_correlation, hotfix_branch, downstream_ci, no_ci_signal, flaky_registry, lifecycle_state_machine]
+pricing:                                  # §3.2–§3.4
+  price_table: {version: 12, effective_date: &#34;2026-10-02&#34;, models: 91}
+  cost_storage: &#34;integer micro-dollars, one round-half-to-even per call&#34;
+  long_context_trigger: &#34;input + cache_read + cache_write_5m + cache_write_1h &gt; context_threshold&#34;
+  long_context_rows: [claude-sonnet-4-5, gemini-2.5-pro, gemini-3.1-pro]
+  unknown_model: {large: 2.00, medium: 0.50, small: 0.10, unit: &#34;USD per million, all tokens&#34;, note: &#34;substring match; 13b and 31b class as small&#34;}
+  store_conflict: &#34;same key: larger token counts kept, first row&#39;s cost kept&#34;
+  billing_mode_changes_cost: false
+capture:                                  # §3.1
+  producers: [claude_code_jsonl, codex_rollout, opencode, muse_code, proxy, post_costs, anthropic_admin_poller, openai_usage_poller]
+  defaults: {claude_code: on, codex_rollout: off, opencode: off, muse_code: off, proxy: mounted, pollers: off}
+  worktree_attribution: {default: off, flag: &#34;--worktree-attribution&#34;, env: TIER_WORKTREE_ATTRIBUTION, config: &#34;watch.worktree_attribution (serve only)&#34;, status: &#34;opt-in preview; measured accuracy in docs/how-it-works.md&#34;, stored_attribution: permanent}   # §5.1
+  opencode_routes: [zai-coding-plan]
+  counted_twice: [&#34;codex via /openai/ + --codex-rollout&#34;, &#34;opencode via proxy + --opencode&#34;, &#34;POST /costs re-posted without idempotency_key&#34;, &#34;POST /costs rows declared billed_to=other for usage a running poller also reports, and manual rows for a poller-covered provider stored before v0.5.2&#34;]
+  open_doubt: &#34;Claude Code JSONL may undercount tokens (issue #837, unsettled); if so TIER reads high&#34;
+evidence_floor:                           # §7.1
+  wire_field: ranked
+  min_outcomes: 3
+  min_cost_usd: 5.00
+  zero_token: {min_tokens: 1000, window_days: 14}
+  configurable: false
+  row_order: &#34;identifier order; nothing sorts by TIER&#34;
+intervals:                                # §7.2, §7.3
+  bootstrap: {replicates: 1000, configurable: false, seed: fixed, bounds: &#34;2.5th and 97.5th percentile, nearest rank&#34;}
+  cost_per_point_ci: &#34;low = 1000 / ci_high; high = 1000 / ci_low&#34;
+  significant: &#34;both windows clear the floor AND intervals do not overlap; always false in team/division mode&#34;
+aggregation:                              # §6
+  modes: [developer, team, division]
+  required: true
+  k_anonymity: {default: 5, minimum: 3, counts: &#34;people: on the hierarchy in the window, not bots, with captured activity&#34;, per_figure: &#34;cost, points and paid spend each need k carriers&#34;}
+  anonymised_reports: {period: &#34;sealed calendar month&#34;, select: &#34;?period=YYYY-MM&#34;, report_grace: {default: &#34;336h&#34;, minimum: &#34;24h&#34;}, armed_by: &#34;tierd seal --arm YYYY-MM|earliest, or seal_from&#34;, recomputed: never}
+  anonymised_breakdowns: &#34;group rows and total only&#34;
+  developer_mode_team_views_k_anonymised: false
+  mode_changes_storage: false
+  known_limits: [&#34;the write token can edit the hierarchy and aliases that decide who counts (#908)&#34;]
+spend_leverage:                           # §8.1
+  formula: &#34;total_cost_usd / actual_paid_usd&#34;
+  months: &#34;month(since) &lt;= period &lt; month(until); open until includes every later month&#34;
+  org_invoice_without_hierarchy: &#34;allocated to no one&#34;
+  finance_posts_idempotent: false
+use:                                      # §6.3
+  permitted: &#34;coaching conversations, including a manager viewing an individual&#39;s numbers in developer mode&#34;
+  never: [pay, compensation, promotion, performance reviews, performance improvement plans, forced ranking, discipline, dismissal]
+  source: &#34;operator ruling, issue #826, 2026-09-26&#34;
+  planned_not_built: [per_viewer_tokens, view_log, developer_mode_retention_90d_default_365d_ceiling, name_free_rollup, coaching_page]
+retention_today: &#34;nothing deleted by age except raw webhook bodies (90 days, 50,000 rows, at database open and every 24 hours while serve runs)&#34;
+windows:                                  # §5, §10
+  interval: &#34;[since, until), UTC&#34;
+  defaults_days: {api: 90, dashboard: 30, backfill: 90, ship: 90, score: 90}   # api and dashboard: developer mode
+  read_first: [window_predates_cost_capture, cost_coverage_safe_since]
+install:                                  # §9.1
+  source: &#34;git clone --branch v0.5.2 https://github.com/tiermetric/tier.git &amp;&amp; cd tier &amp;&amp; make build&#34;
+  go: &#34;go install github.com/tiermetric/tier/cmd/tierd@v0.5.2&#34;
+  image: &#34;ghcr.io/tiermetric/tierd:0.5.2 (linux/amd64)&#34;
+  go_version: &#34;1.26.9 or newer&#34;
+</code></pre>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

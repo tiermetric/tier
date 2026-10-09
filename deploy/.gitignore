@@ -1,0 +1,6 @@
+# The filled-in secrets files (copied from *.env.example) must never be
+# committed. The .example templates ARE tracked; the real files are not.
+# `*.env` covers tierd.env and cloudflared.env without matching *.env.example.
+tierd.env
+cloudflared.env
+*.env

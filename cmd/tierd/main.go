@@ -1,0 +1,3190 @@
+package main
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/tiermetric/tier/internal/api"
+	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/collector/anthropicadmin"
+	"github.com/tiermetric/tier/internal/collector/codexrollout"
+	"github.com/tiermetric/tier/internal/collector/muse"
+	"github.com/tiermetric/tier/internal/collector/openaiusage"
+	"github.com/tiermetric/tier/internal/collector/opencode"
+	"github.com/tiermetric/tier/internal/config"
+	"github.com/tiermetric/tier/internal/dashboard"
+	"github.com/tiermetric/tier/internal/docs"
+	"github.com/tiermetric/tier/internal/health"
+	"github.com/tiermetric/tier/internal/ingester"
+	"github.com/tiermetric/tier/internal/logsafe"
+	"github.com/tiermetric/tier/internal/metrics"
+	"github.com/tiermetric/tier/internal/proxy"
+	"github.com/tiermetric/tier/internal/scoring"
+	"github.com/tiermetric/tier/internal/store"
+	"github.com/tiermetric/tier/internal/webhook"
+)
+
+// version is the build version reported by /api/v1/livez. The Makefile injects
+// the git description via -ldflags "-X main.version=..."; "dev" is the
+// unstamped fallback for `go run` and bare `go build`.
+var version = "dev"
+
+// commit is the build commit, injected via -ldflags "-X main.commit=...". It is
+// EMPTY off-tree and in any build that does not set it, in which case
+// internal/api falls back to the VCS stamps the Go toolchain embeds.
+//
+// 🔴 The fallback is not sufficient on its own, which is why this exists. The
+// shipped CONTAINER has no stamps at all: .dockerignore excludes .git, so
+// `buildvcs=auto` finds no repository and records nothing. Measured on the
+// published v0.4.0 image — zero vcs settings in the binary, while the release
+// TARBALL built in the same workflow run carries vcs.revision=ca27d9f0…. The
+// container is the deployment #638 was filed about, so it is the one that most
+// needs this injected.
+var commit = ""
+
+func main() {
+	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// dispatch routes a subcommand and returns the process exit code. It is split
+// from main so the no-arg, version, and unknown-command paths are unit-testable
+// without os.Exit / global os.Args / os.Stdout (#66). score and ship manage
+// their own lifecycle and exit on their own errors, so they don't return here;
+// serve, backfill, and backup return an exit code that dispatch propagates.
+func dispatch(args []string, stdout, stderr io.Writer) int {
+	// Install the build identity BEFORE any subcommand can reach store.Open
+	// (#714): a price_table_registry row records WHICH binary first served a
+	// given price-table version into the database, and the store cannot know its
+	// own build stamp. Here, once, rather than in each subcommand — every path
+	// through dispatch that opens a store gets it, including ones added later.
+	// It is provenance only; nothing about the collision guard depends on it,
+	// which is why an unset identity records "unknown" instead of failing.
+	store.SetToolVersion(versionString())
+
+	// Diagnostic writes to the injected writers are best-effort; ignore the
+	// (n, err) so errcheck/golangci-lint stays clean for the generic io.Writer
+	// (errcheck only auto-excludes direct os.Stdout/os.Stderr writes).
+	if len(args) < 1 {
+		// No command is a usage error: usage to stderr, exit 1.
+		printUsage(stderr)
+		return 1
+	}
+
+	switch args[0] {
+	case "score":
+		runScore(args[1:])
+	// "score-log": price ONE session log file in isolation — no store, no
+	// daemon, no repo, no attribution (#465). Distinct from "score", which
+	// scans ~/.claude/projects/ and joins to a repo's git log.
+	case "score-log":
+		return runScoreLog(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:])
+	// "seal": arm sealing by performing the first seal (#913-D5 ruling C′).
+	case "seal":
+		return runSealCmd(args[1:], os.Stdin, stdout, stderr)
+	case "ship":
+		runShip(args[1:])
+	case "backfill":
+		return runBackfillCmd(args[1:], stdout, stderr)
+	case "backup":
+		return runBackup(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr)
+	case "reprice":
+		return runRepriceCmd(args[1:], stdout, stderr)
+	// "repair-repo": rewrite the 'unqualified' repo sentinel on rows a pre-#491
+	// shipper captured. #491's wire fix is forward-only — a re-ship collides on
+	// idempotency_key and the conflict clause never touches `repo` — so this is
+	// the only path that can repair that history (#493).
+	case "repair-repo":
+		return runRepairRepoCmd(args[1:], stdout, stderr)
+	// "prices": operator commands for the price-table registry (#714). Its one
+	// subcommand, `forget-version`, is the documented remedy for the fail-closed
+	// version-collision refusal in store.Open — see cmd/tierd/prices.go.
+	case "prices":
+		return runPricesCmd(args[1:], stdout, stderr)
+	// "verify-report": take a report manifest and either REPRODUCE its numbers
+	// against a database or name WHICH input moved (#718). 🔴 The only
+	// subcommand in this tree whose exit code is more than pass/fail — 0
+	// reproduced, 1 diverged, 2 could not check, and for a sealed month's
+	// manifest 3 not sealed in this database and 4 unknown fold rule
+	// (verifysealed.go) — because "I could not look" is not "it changed". Never
+	// wrap it in a make target: make replaces a recipe's exit code and would
+	// collapse the 1 and the 2 into one number.
+	case "verify-report":
+		return runVerifyReportCmd(args[1:], stdout, stderr)
+	// "hierarchy": load the developer -> team map from a CSV through POST
+	// /api/v1/org_hierarchy, never the store, so alias resolution and row
+	// validation stay the handler's (#821).
+	case "hierarchy":
+		return runHierarchyCmd(args[1:], stdout, stderr)
+	case "demo":
+		return runDemo(args[1:], stdout, stderr)
+	// "healthcheck": probe a running tierd over HTTP and exit 0/1. Backs the
+	// Dockerfile HEALTHCHECK — the runtime image has no shell and no HTTP
+	// client, so tierd is the only thing available to call (#571).
+	case "healthcheck":
+		return runHealthcheck(args[1:], stdout, stderr)
+	// "version", "--version", "-v": print the ldflags-injected build version so
+	// operators can confirm exactly which binary is deployed (#66). Mirrors the
+	// value /api/v1/livez reports, but available without starting the server.
+	case "version", "--version", "-version", "-v":
+		_, _ = fmt.Fprintln(stdout, versionString())
+	// An explicit help request is success, not an error: usage to stdout,
+	// exit 0. `tierd --help`/`-h`/`help` is the first thing a new user types
+	// and must not look broken (#378).
+	case "help", "--help", "-help", "-h":
+		printUsage(stdout)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
+		return 1
+	}
+	return 0
+}
+
+// printUsage writes the top-level command listing to w. It backs both the
+// no-arg path (to stderr, exit 1) and an explicit help request (to stdout,
+// exit 0), so the two callers stay in lockstep as subcommands are added (#378).
+func printUsage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "usage: tierd <command> [flags]")
+	_, _ = fmt.Fprintln(w, "  score    compute TIER from local Claude Code JSONL files")
+	_, _ = fmt.Fprintln(w, "  score-log price ONE session log file (claude|codex) as JSON, no store/daemon/network (#465)")
+	_, _ = fmt.Fprintln(w, "  serve    run the TIER HTTP server (proxy + webhook + dashboard)")
+	_, _ = fmt.Fprintln(w, "  seal     arm sealing: seal the first month and pin it (irreversible, #913)")
+	_, _ = fmt.Fprintln(w, "  ship     forward locally captured JSONL events to a central tierd (#126)")
+	_, _ = fmt.Fprintln(w, "  backfill reconstruct outcomes from merged-PR history via the GitHub API (#237)")
+	_, _ = fmt.Fprintln(w, "  backup   write a consistent snapshot of the database (VACUUM INTO)")
+	_, _ = fmt.Fprintln(w, "  doctor   verify this install captures correctly (local + optional --server, #236)")
+	_, _ = fmt.Fprintln(w, "  reprice  recompute historical costs under the current price table (audited, #294)")
+	_, _ = fmt.Fprintln(w, "  repair-repo  repair rows stuck on the 'unqualified' repo sentinel (audited, #493)")
+	_, _ = fmt.Fprintln(w, "  prices   price-table registry operations (forget-version, #714)")
+	_, _ = fmt.Fprintf(w, "  verify-report  reproduce a report from its manifest, or name WHICH input moved (%d/%d/%d, #718; a sealed month adds %d/%d, #913)\n",
+		rcReproduced, rcDiverged, rcCannotCheck, rcNotSealed, rcUnknownFoldRule)
+	_, _ = fmt.Fprintln(w, "  hierarchy  import the developer -> team map from a CSV via a running tierd (#821)")
+	_, _ = fmt.Fprintln(w, "  demo     serve the dashboard on SYNTHETIC sample data (no setup, #383)")
+	_, _ = fmt.Fprintln(w, "  healthcheck  probe a running tierd and exit 0/1 (backs the container HEALTHCHECK, #571)")
+	_, _ = fmt.Fprintln(w, "  version  print the build version and exit")
+	_, _ = fmt.Fprintln(w, "  help     print this help and exit")
+}
+
+// defaultListenAddr is the default bind address for `serve` and `demo`, and
+// therefore the default target for `tierd healthcheck` (#571). It lives in one
+// place because the container probe is only correct while it matches what the
+// server actually binds: three independent copies of the same literal is a
+// coupling that nothing enforces and that no test would catch drifting.
+// Loopback by default — a non-loopback bind requires --api-token (#59).
+const defaultListenAddr = "127.0.0.1:8080"
+
+// versionString formats the build version with the Go toolchain and target
+// platform, e.g. "tierd v0.3.1-2-gcfaf273 go1.26.4 darwin/arm64". version is
+// "dev" for an unstamped `go build`/`go run`.
+func versionString() string {
+	return fmt.Sprintf("tierd %s %s %s/%s", resolveVersion(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
+// codexWatchCheck decides what to do when Codex capture is requested (#479).
+// --codex-rollout attributes to the SAME repos as --watch-repo, so enabling it
+// with no watched repo is a silent no-op — a knob that does nothing. Returns a
+// non-empty `fatal` message (abort startup) when codex is enabled with no repo
+// and serve is NOT read-only; a non-empty `warn` when it is read-only (which
+// deliberately disables all capture, so the mismatch is expected); both empty
+// otherwise. watchRepoCount already merges the CLI flag and config watch.repos.
+func codexWatchCheck(codexEnabled bool, watchRepoCount int, readOnly bool) (warn, fatal string) {
+	if !codexEnabled || watchRepoCount > 0 {
+		return "", ""
+	}
+	if readOnly {
+		return "--codex-rollout is set but --read-only disables all capture; Codex spend will not be recorded", ""
+	}
+	return "", "--codex-rollout needs a repository to attribute Codex spend to, but no --watch-repo (or watch.repos config) is set. Add --watch-repo <path>, or drop --codex-rollout. (#464)"
+}
+
+// codexProxyDoubleCountWarn returns the startup warning for the one
+// configuration in which Codex spend is captured TWICE (#459 task 2), or "" when
+// it cannot arise.
+//
+// Since the proxy learned OpenAI's Responses shape, Codex traffic routed through
+// /openai/ IS captured there — and Codex writes its rollout logs regardless, so
+// the collector captures the same call again. The two rows cannot dedup: the
+// proxy keys on the response id (IdempotencyKey("msg","openai","resp_...")),
+// the collector keys on (session id, ordinal) because a rollout log carries no
+// response id at all. Different hashes by construction, and the store dedups on
+// the key alone — so this DOUBLES the spend rather than colliding, and doubling
+// is the failure mode this codebase treats as worse than under-reporting.
+//
+// Deliberately a WARN and not a refusal: the overwhelmingly common case is an
+// operator proxying ordinary OpenAI traffic that Codex never touches, which is
+// unaffected — we cannot tell from configuration alone whether Codex will be
+// pointed at the proxy. But #459 task 3 (live-verifying the Responses parser) is
+// exactly the setup that trips it, so it is said out loud at boot rather than
+// discovered in a doubled dashboard.
+//
+// A pure function for the same reason codexWatchCheck is one: the decision is
+// table-testable without booting a server (TestCodexProxyDoubleCountWarn).
+func codexProxyDoubleCountWarn(codexEnabled, openAIProxyMounted bool) string {
+	if !codexEnabled || !openAIProxyMounted {
+		return ""
+	}
+	return "both the OpenAI proxy and the Codex rollout collector are enabled: if you route Codex CLI traffic through /openai/, its spend is captured TWICE — the proxy keys on the response id, the collector keys on (session, ordinal), and the two cannot dedup. Ordinary OpenAI traffic is unaffected. To live-verify the proxy's Responses parser (#459 task 3), disable --codex-rollout first"
+}
+
+// opencodeWatchCheck is the Opencode twin of codexWatchCheck (#719). The
+// Opencode collector attributes to the SAME repos as --watch-repo, so enabling it
+// with no watched repo is a knob that does nothing.
+func opencodeWatchCheck(opencodeEnabled bool, watchRepoCount int, readOnly bool) (warn, fatal string) {
+	if !opencodeEnabled || watchRepoCount > 0 {
+		return "", ""
+	}
+	if readOnly {
+		return "--opencode is set but --read-only disables all capture; Opencode spend will not be recorded", ""
+	}
+	return "", "--opencode needs a repository to attribute Opencode spend to, but no --watch-repo (or watch.repos config) is set. Add --watch-repo <path>, or drop --opencode. (#719)"
+}
+
+// museWatchCheck is the Muse twin of codexWatchCheck (#895): the Muse collector
+// attributes to the SAME repos as --watch-repo, so enabling it with no watched
+// repo aborts a normal serve and only warns under --read-only.
+func museWatchCheck(museEnabled bool, watchRepoCount int, readOnly bool) (warn, fatal string) {
+	if !museEnabled || watchRepoCount > 0 {
+		return "", ""
+	}
+	if readOnly {
+		return "--muse is set but --read-only disables all capture; Muse spend will not be recorded", ""
+	}
+	return "", "--muse needs a repository to attribute Muse spend to, but no --watch-repo (or watch.repos config) is set. Add --watch-repo <path>, or drop --muse. (#895)"
+}
+
+// opencodeProxyDoubleCountWarn returns the startup warning for the configuration
+// in which Opencode spend is captured TWICE (#719), or "" when it cannot arise.
+//
+// 🔴 THE TWO KEYS ARE UNRELATABLE BY CONSTRUCTION, which is why this cannot be
+// fixed with a better key. The Opencode collector keys on
+// IdempotencyKey("opencode", providerID, Opencode's message.id) — a row id in a
+// local SQLite database. A proxy in front of the same traffic keys on
+// MessageIdempotencyKey(provider, upstream response id) — an identifier the
+// PROVIDER minted. Neither party can compute the other's value, so the two rows
+// hash differently and the store's partial unique index stores both: the spend
+// DOUBLES rather than colliding, and doubling is the failure this codebase treats
+// as worse than under-reporting.
+//
+// Deliberately a WARN and not a refusal, for the same reason as the Codex one:
+// configuration alone cannot say whether Opencode is actually pointed at the
+// proxy, and the common case (proxying unrelated traffic) is unaffected.
+//
+// A pure function so the decision is table-testable without booting a server.
+func opencodeProxyDoubleCountWarn(opencodeEnabled, anyProxyMounted bool) string {
+	if !opencodeEnabled || !anyProxyMounted {
+		return ""
+	}
+	return "both a reverse proxy and the Opencode collector are enabled: if you also point Opencode at tier's proxy, its spend is captured TWICE — this collector keys on Opencode's local message.id, the proxy keys on the upstream response id, and the two are unrelatable, so the rows do not dedup, they ADD. Pick one path for Opencode traffic"
+}
+
+// opencodeUnauditedStartupModels returns the Opencode models tier supports
+// (R-2026-09-28-12: GLM-5.3 only) that the ACTIVE price table cannot price at
+// an audited rate on the zai-coding-plan route, in probe order. serve --opencode
+// WARNs once per model returned; nil means the table covers every one.
+func opencodeUnauditedStartupModels() []string {
+	var missing []string
+	for _, m := range []string{"glm-5.3", "glm-5.3-flash"} {
+		if !store.IsAuditedRate("zai-coding-plan", m) {
+			missing = append(missing, m)
+		}
+	}
+	return missing
+}
+
+// resolveVersion returns the ldflag-injected version when the Makefile stamped
+// one, and otherwise falls back to the module version from the build info.
+// `go install github.com/tiermetric/tier/cmd/tierd@v0.1.0` does not run the
+// Makefile, so `version` stays "dev" — but the module version IS embedded by
+// the toolchain, so a released install can still report "v0.1.0" instead of a
+// bare "dev" (#477). A local `go run`/`go build` has neither and stays "dev".
+func resolveVersion() string {
+	if version != "" && version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
+}
+
+// runBackup writes a consistent snapshot of the database via store.Backup
+// (VACUUM INTO, #141) and returns the process exit code. Split to return an int
+// (like the version path) so it is unit-testable without os.Exit — the injected
+// writers carry its output. --db defaults to defaultDBPath(); --out is required
+// and must not already exist (store.Backup enforces both refusals). On success it
+// prints one line ("backup written: <dest> (<n> bytes)") to stdout and returns 0;
+// any error prints to stderr and returns 1.
+func runBackup(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path to back up")
+	out := fs.String("out", "", "destination path for the snapshot (required; must not already exist)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if *out == "" {
+		_, _ = fmt.Fprintln(stderr, "backup: --out is required (destination path for the snapshot)")
+		return 1
+	}
+	if err := store.Backup(context.Background(), *dbPath, *out); err != nil {
+		_, _ = fmt.Fprintf(stderr, "backup: %v\n", err)
+		return 1
+	}
+	// Report the snapshot size so an operator can eyeball that it is non-trivial.
+	// A Stat failure omits the size note; the successful backup is still reported.
+	var sizeNote string
+	if fi, err := os.Stat(*out); err == nil {
+		sizeNote = fmt.Sprintf(" (%d bytes)", fi.Size())
+	}
+	_, _ = fmt.Fprintf(stdout, "backup written: %s%s\n", *out, sizeNote)
+	return 0
+}
+
+// loadPricesOverride applies a --prices YAML override when path is non-empty,
+// failing the process loudly on a bad file (#68 — never a silent fallback to the
+// embedded default). Returns the loaded table's metadata and true when an
+// override was applied, or the zero value and false when path is empty (the
+// embedded default, loaded at package init, stays active).
+func loadPricesOverride(path string) (store.PriceTableInfo, bool) {
+	if path == "" {
+		return store.PriceTableInfo{}, false
+	}
+	info, err := store.LoadPriceTable(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--prices: %v\n", err)
+		os.Exit(1)
+	}
+	return info, true
+}
+
+func runScore(args []string) {
+	// NOTE(#185): the --aggregation team|developer gate does NOT apply to `tierd
+	// score`, and that is a CONSCIOUS carve-out. `score` is a LOCAL, single-operator
+	// CLI that reads the invoking user's own Claude Code JSONL and prints to their
+	// own terminal — it is not a served, multi-viewer surface, so it needs no
+	// k-anonymity floor or required-mode gate. Team-only aggregation is enforced on
+	// `tierd serve` (GET /scores, the dashboard, GET /scores/{developer}), which are
+	// the surfaces an organization actually consumes.
+	fs := flag.NewFlagSet("score", flag.ExitOnError)
+	repo := fs.String("repo", ".", "path to the git repository")
+	repoSlug := fs.String("repo-slug", "", `canonical "owner/repo" identity for --repo (#231). Omit to read remote.origin.url. REQUIRED ON A FORK: origin names the fork, while the upstream webhook records outcomes against the upstream, so without this your cost never joins your outcomes`)
+	sinceStr := fs.String("since", "", "start date, e.g. 2026-01-01 (default: 90 days ago)")
+	developer := fs.String("developer", "", "developer ID override (default: OS username)")
+	claudeDir := fs.String("claude-dir", "", "override ~/.claude directory (for testing)")
+	pricesPath := fs.String("prices", os.Getenv("TIER_PRICES"), "path to a price-table YAML override (#68); empty uses the embedded default. A bad file fails the command")
+	configPath := fs.String("config", "", "path to a tierd config YAML (#154); `score` reads ONLY prices_file from it, so the CLI prices identically to the serve it reports against. --prices wins over the file's prices_file")
+	worktreeAttr := fs.Bool(worktreeAttrFlag, false, "report with #823 worktree attribution on, as `tierd ship --"+worktreeAttrFlag+"` would ship it, then print a dry-run audit of what it changes against the flag off: counts per rule and per repo, and a bounded sample of changed messages (session id, time, old and new issue; never content or paths). Stores nothing. The counts compare against a local flag-off scan: the server keeps the first issue, repo and rule it stored for a message, so turning the flag on changes only messages not yet stored. Reads only this flag or env "+worktreeAttrEnv+", never --config")
+	_ = fs.Parse(args)
+	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
+		os.Exit(1)
+	}
+
+	// Resolve the effective price table BEFORE Collect, which prices events.
+	//
+	// #154: `score` is the zero-setup CLI, and it used to have no way to reach the
+	// SAME table its server prices with — an operator whose serve runs a --prices
+	// override (the only place a `billing_mode: subscription` route ever lives,
+	// since none ships in the embedded default) would silently get different
+	// numbers from the two surfaces. --config closes that by reading prices_file.
+	//
+	// Precedence mirrors runServe: an explicit --prices (or TIER_PRICES) wins over
+	// the config file, which wins over the embedded default.
+	resolvedPrices := *pricesPath
+	var subscriptionsCfg []config.Subscription
+	if *configPath != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config: %v\n", err)
+			os.Exit(1)
+		}
+		if resolvedPrices == "" && cfg.PricesFile != nil {
+			resolvedPrices = *cfg.PricesFile
+		}
+		subscriptionsCfg = cfg.Subscriptions
+	}
+
+	// A bad --prices file fails the command (never a silent fallback). No override
+	// → the embedded default stays active. Note which table priced the report to
+	// stderr (audit: "which prices produced these numbers"), mirroring the
+	// structured log `tierd serve` emits.
+	info, overridden := loadPricesOverride(resolvedPrices)
+	if overridden {
+		fmt.Fprintf(os.Stderr, "price table: override %s (version %d, %s, %d models)\n",
+			resolvedPrices, info.Version, info.EffectiveDate, info.ModelCount)
+	} else {
+		info = store.ActivePriceTableInfo()
+		fmt.Fprintf(os.Stderr, store.EmbeddedPriceStampFormat+"\n",
+			info.Version, info.EffectiveDate, info.ModelCount)
+	}
+	// Content identity of whichever table the line above named (#713), on its
+	// OWN line — EmbeddedPriceStampFormat is pinned verbatim by the README guard
+	// and must not grow fields that change on every price edit.
+	fmt.Fprintf(os.Stderr, store.PriceIdentityStampFormat+"\n", info.TableHash, info.FileHash)
+	// Name the subscription-billed routes in the active table alongside the
+	// provenance line (#154). Their cost_micro is a comparable-list-rate
+	// VALUATION of flat-fee tokens, not a metered price, and this report shows
+	// dollars with no billing_mode column — so the one honest place to say so is
+	// here, next to the table that produced them.
+	if routes := store.SubscriptionRouteSummary(); len(routes) > 0 {
+		fmt.Fprintln(os.Stderr, "subscription-billed routes in this table:")
+		for _, r := range routes {
+			fmt.Fprintf(os.Stderr, "  %s\n", r)
+		}
+	}
+	// `score` never POSTS a fee — it has no database and reports no Spend
+	// Leverage — but it must not be SILENT about a `subscriptions:` block that
+	// `serve` would refuse to start on. Left silent, the same typo is fatal on one
+	// surface and invisible on the other, and an operator who reaches for the CLI
+	// to debug their config gets a clean run that tells them nothing.
+	//
+	// A WARN rather than an exit, because `score` is a read-only report against a
+	// config it only borrowed: refusing to print costs over a fee-bookkeeping
+	// misconfiguration would be the wrong severity for this surface.
+	for _, s := range subscriptionsCfg {
+		if len(store.SubscriptionRoutesWithPrefix(s.RoutePrefix)) > 0 {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: config subscriptions route_prefix %q matches no billing_mode: subscription entry in this price table — `tierd serve` would REFUSE to start on this config. (score posts no fee either way, so this report is unaffected.)\n", s.RoutePrefix)
+	}
+
+	since, err := parseSince(*sinceStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --since value: %v\n", err)
+		os.Exit(1)
+	}
+
+	repoPath, err := resolveRepo(*repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot resolve repo: %v\n", err)
+		os.Exit(1)
+	}
+
+	c := &collector.JSONLCollector{
+		RepoPath:    repoPath,
+		ClaudeDir:   *claudeDir,
+		DeveloperID: *developer,
+		RepoSlug:    *repoSlug,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	events, err := c.Collect(ctx, since)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "collect error: %v\n", err)
+		os.Exit(1)
+	}
+	var offEvents []collector.TokenEvent
+	if wtSetting.on {
+		fmt.Fprintf(os.Stderr, "score: %s\n", wtSetting)
+		offEvents = events
+		c.SetWorktreeAttribution(wtSetting.attribution([]string{repoPath}))
+		if events, err = c.Collect(ctx, since); err != nil {
+			fmt.Fprintf(os.Stderr, "collect error (worktree attribution): %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if len(events) == 0 {
+		fmt.Println("No billable messages inside the --since window for the given repo.")
+		fmt.Printf("Searched: ~/.claude/projects/ for sessions since %s\n", since.Format("2006-01-02"))
+		fmt.Println("Make sure TIER is running in the correct git repository directory.")
+		fmt.Println("Note: `tierd score` reads Claude Code sessions only — it captures neither Codex CLI nor Opencode spend. For Codex, run `tierd serve --aggregation <mode> --watch-repo <path> --codex-rollout` (or `tierd ship --server <url> --repo <path> --codex-rollout`); replace <path> with your git repository path, <mode> with team or division (anonymized aggregates) or developer (named per-developer rows), and <url> with your central tierd base URL with TIER_API_TOKEN set; for Opencode, the same with --opencode; the embedded price table covers glm-5.3 and glm-5.3-flash, and any other GLM model needs a --prices table carrying its rate (#492, #719, #786).")
+		return
+	}
+
+	// Without a live server we have no outcome data, so `tierd score` shows cost
+	// attribution only — the "day-one value" mode: see where AI money is going
+	// before the 14-day rework windows that full TIER scoring needs have elapsed.
+	// Both reports re-aggregate straight from events; full per-developer TIER is
+	// computed server-side (tierd serve), where outcomes and the actual_spend
+	// ledger exist.
+
+	// Print cost-only summary (outcomes not yet available in zero-setup mode).
+	printCostReport(os.Stdout, events, since)
+
+	// Show issue-level cost breakdown.
+	printIssueCosts(os.Stdout, events)
+	if wtSetting.on {
+		printWorktreeAudit(os.Stdout, offEvents, events)
+	}
+
+	fmt.Print(scoreClosingTip())
+}
+
+// scoreClosingTip is the last line of the zero-setup `tierd score` summary. It
+// names the quickstart as a full URL on defaultListenAddr: the docs handler
+// serves only "<name>.html", so an extensionless /docs/quickstart is a 404 (#799).
+// It never tells the user to run a bare `tierd serve` or `tierd backfill` — both
+// refuse without flags the quickstart supplies — and points at `tierd demo`,
+// which serves /docs/ on defaultListenAddr with no setup.
+func scoreClosingTip() string {
+	return "\nTip: to record PR outcomes and compute full TIER scores, follow the quickstart (it gives the flags `tierd backfill` and `tierd serve` need). Read it now with `tierd demo`, then open http://" +
+		defaultListenAddr + "/docs/quickstart.html (the default address).\n"
+}
+
+// printCostReport prints the per-developer cost summary, one row per developer
+// in identifier order: never ranked, and stable from run to run.
+func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time) {
+	type row struct {
+		inputTok     int
+		outputTok    int
+		cacheRead    int
+		cacheWrite5m int
+		cacheWrite1h int
+		costMicro    int64
+	}
+	byDev := map[string]*row{}
+	for _, e := range events {
+		if byDev[e.Developer] == nil {
+			byDev[e.Developer] = &row{}
+		}
+		r := byDev[e.Developer]
+		r.inputTok += e.InputTok
+		r.outputTok += e.OutputTok
+		r.cacheRead += e.CacheRead
+		r.cacheWrite5m += e.CacheWrite5m
+		r.cacheWrite1h += e.CacheWrite1h
+		r.costMicro += e.CostMicro
+	}
+
+	_, _ = fmt.Fprintf(w, "\nTIER Cost Attribution — since %s\n", since.Format("2006-01-02"))
+	_, _ = fmt.Fprintf(w, "Source: Claude Code JSONL (real-time, per-request)\n")
+	_, _ = fmt.Fprintln(w, "───────────────────────────────────────────────────────────────────────────────────────────")
+	// Cache columns split (#55): Read, 5m Write, and 1h Write each carry a
+	// different cost multiplier (Anthropic: 0.1× / 1.25× / 2.0× of input
+	// rate), so summing them into a single "Cache" cell would be misleading.
+	_, _ = fmt.Fprintf(w, "%-20s  %10s  %10s  %10s  %10s  %10s  %10s\n",
+		"Developer", "Input tok", "Output tok", "Cache rd", "Cache w5m", "Cache w1h", "Cost ($)")
+	_, _ = fmt.Fprintln(w, "───────────────────────────────────────────────────────────────────────────────────────────")
+	devs := make([]string, 0, len(byDev))
+	for dev := range byDev {
+		devs = append(devs, dev)
+	}
+	sort.Strings(devs)
+	var totalCostMicro int64
+	for _, dev := range devs {
+		r := byDev[dev]
+		_, _ = fmt.Fprintf(w, "%-20s  %10d  %10d  %10d  %10d  %10d  %10.4f\n",
+			dev, r.inputTok, r.outputTok, r.cacheRead, r.cacheWrite5m, r.cacheWrite1h, store.MicroToDollars(r.costMicro))
+		totalCostMicro += r.costMicro
+	}
+	_, _ = fmt.Fprintln(w, "───────────────────────────────────────────────────────────────────────────────────────────")
+	_, _ = fmt.Fprintf(w, "%-20s  %78.4f\n", "TOTAL", store.MicroToDollars(totalCostMicro))
+}
+
+// printIssueCosts prints the per-issue cost breakdown.
+//
+// Takes an io.Writer rather than printing to os.Stdout directly, matching the
+// convention the reprice/repair/doctor reports already follow. That is not
+// tidiness: this report interpolates a producer-controlled model name into a raw
+// fmt.Fprintf, and without an injectable writer the logsafe barrier below cannot
+// be tested — a mutant that removed it survived the whole suite (#321 review,
+// 2026-08-04).
+func printIssueCosts(w io.Writer, events []collector.TokenEvent) {
+	type row struct {
+		costMicro int64
+		model     string
+	}
+	byIssue := map[string]*row{}
+	for _, e := range events {
+		if byIssue[e.IssueID] == nil {
+			byIssue[e.IssueID] = &row{}
+		}
+		r := byIssue[e.IssueID]
+		r.costMicro += e.CostMicro
+		if r.model == "" {
+			r.model = store.NormalizeModel(e.Model)
+		}
+	}
+
+	// Deterministic order: by descending cost, ties broken by issue id. Replaces
+	// the old map-iteration order and, with the labeled unattributed buckets
+	// (#refocus, Option B), keeps the main/detached-head/branch-without-issue
+	// lines adjacent and stable instead of a single opaque "unattributed" row.
+	issues := make([]string, 0, len(byIssue))
+	for issue := range byIssue {
+		issues = append(issues, issue)
+	}
+	sort.Slice(issues, func(i, j int) bool {
+		a, b := byIssue[issues[i]], byIssue[issues[j]]
+		if a.costMicro != b.costMicro {
+			return a.costMicro > b.costMicro
+		}
+		return issues[i] < issues[j]
+	})
+
+	_, _ = fmt.Fprintln(w, "\nCost by Issue")
+	_, _ = fmt.Fprintln(w, "──────────────────────────────────────────────────────────────────")
+	_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10s\n", "Issue", "Model", "Cost ($)")
+	_, _ = fmt.Fprintln(w, "──────────────────────────────────────────────────────────────────")
+	for _, issue := range issues {
+		r := byIssue[issue]
+		// r.model is session content — it comes off the JSONL entry's
+		// Message.Model, which nothing validates for charset — and this is a raw
+		// fmt.Printf sink, so a model string carrying CR/LF forges a whole row of
+		// this table. logsafe.Str, not %q, for the reason the logsafe package doc
+		// gives: the strip is the barrier, the quoting is the backstop.
+		//
+		// issueLabel's output is NOT wrapped, and that is a measured distinction,
+		// not an oversight: a real issue id passes through unchanged, but issue
+		// ids are derived from git refnames, which cannot contain control bytes
+		// (git rejects them), and every other branch of issueLabel returns one of
+		// this repo's own constants. The developer column in printCostReport is
+		// exempt for a different measured reason — see collector.Collect's
+		// developer parameter, which is a single per-run operator-supplied value,
+		// never session content.
+		_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10.4f\n", issueLabel(issue), logsafe.Str(r.model), store.MicroToDollars(r.costMicro))
+	}
+}
+
+// issueLabel renders an issue id for the cost-by-issue report, expanding the
+// labeled unattributed buckets (#refocus, Option B) into a human-readable form so
+// the report reads "unattributed: main/master" instead of a bare
+// "unattributed:main" sentinel. Real issue ids pass through unchanged.
+func issueLabel(issue string) string {
+	switch issue {
+	case collector.UnattributedIssueID:
+		return "unattributed (unlabeled)"
+	case collector.UnattributedMain:
+		return "unattributed: main/master"
+	case collector.UnattributedDetachedHEAD:
+		return "unattributed: detached HEAD"
+	case collector.UnattributedNoIssue:
+		return "unattributed: branch, no issue #"
+	default:
+		return issue
+	}
+}
+
+func parseSince(s string) (time.Time, error) {
+	if s == "" {
+		// Return the default 90-day lower bound in UTC. time.Now() carries the
+		// host's local zone; a non-UTC bound mis-windows any ts >= ? comparison
+		// against UTC-stored rows because modernc.org/sqlite compares DATETIME
+		// as offset-bearing strings (#180). This CLI's since currently feeds
+		// only instant-safe paths (collector time.Before, gitLog's own
+		// .UTC().Format), but normalizing here keeps the bound correct-from-start
+		// for any future store-backed caller.
+		//
+		// ⚠️ DELIBERATELY NOT SNAPPED to the start of the UTC day, unlike the
+		// api.parseSince/defaultSince this is a copy of (#746). That snap exists
+		// because the SERVED window is published two ways — echoed as a calendar
+		// day by /scores and as an RFC3339 instant by /report_manifest — so a
+		// bound carrying a time of day made the two disagree and made the default
+		// report unverifiable. Nothing here publishes a manifest, so nothing here
+		// has two surfaces to reconcile.
+		//
+		// ⛔ THE REASON IS "NOT THE SAME PROBLEM", NOT "IT WOULD NOT MATTER" — an
+		// earlier draft of this comment claimed a wider bound here is merely
+		// redundant work, and that is FALSE for two of the three commands:
+		//   - `score`   — `since` filters individual messages in collector.Collect;
+		//                 sessions ending before since are still skipped. A bound
+		//                 24h wider collects more messages and PRINTS DIFFERENT TOTALS.
+		//   - `backfill`— `since` bounds which merged PRs become outcomes, so a
+		//                 wider bound INSERTS ADDITIONAL ROWS into the store.
+		//   - `ship`    — genuinely redundant: the server dedups on idempotency
+		//                 keys, so over-shipping costs nothing.
+		// So snapping here is a real, user-visible behaviour change to two CLI
+		// commands, which is precisely why it is not being made as a side effect
+		// of a server-side fix.
+		//
+		// 📌 Worth its own issue rather than a silent harmonization: `tierd score`
+		// and `tierd backfill` BOTH print `since.Format("2006-01-02")` for a bound
+		// that carries a time of day — the same lossy echo #746 removed from
+		// /scores. If that is fixed, snap in THIS function rather than at the
+		// three call sites, for the same one-definition reason the served copy
+		// gives.
+		return time.Now().AddDate(0, 0, -90).UTC(), nil
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01", "2006"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("expected YYYY-MM-DD, got %q", s)
+}
+
+func resolveRepo(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("path does not exist: %s", abs)
+	}
+	return abs, nil
+}
+
+// repeatableStringSlice satisfies flag.Value so a string flag can be passed
+// multiple times on the command line, e.g. --watch-repo A --watch-repo B.
+type repeatableStringSlice []string
+
+func (s *repeatableStringSlice) String() string { return strings.Join(*s, ",") }
+
+// Set appends one occurrence, and REJECTS an empty value.
+//
+// 🔴 It used to `return nil` without appending, which made an empty-string
+// occurrence (shell: --map followed by a quoted empty argument) the one
+// malformed form that vanished in silence: every other shape (`--map foo`,
+// `--map =x`, `--map x=`) is a hard error naming the bad entry, but an empty
+// value produced no entry, no message, and no non-zero exit. A shell that ate a
+// quote or an unset `--map "$SESSION=$SLUG"` variable therefore silently shrank
+// the mapping, and repair-repo would go on to report a smaller repair as a clean
+// one. Every flag using this type wants the same answer — an empty occurrence is
+// never a meaningful instruction, and flag.Parse turns the error into a usage
+// message naming the flag, which is exactly the diagnosis the operator needs.
+func (s *repeatableStringSlice) Set(v string) error {
+	if v == "" {
+		return errors.New("empty value: pass a value, or omit the flag entirely (an empty occurrence is silently lost otherwise)")
+	}
+	*s = append(*s, v)
+	return nil
+}
+
+// applyRepeatableConfigList feeds a config-file list into a repeatable flag,
+// failing on the first bad entry with a message naming the config KEY and the
+// entry.
+//
+// It exists as a seam for the same reason buildWebhookOptions does: the two call
+// sites in runServeWithOptions end in os.Exit(1), which no in-process test can
+// survive, so without this the config->flag wiring is unreachable from a test and
+// only the flag type itself is covered. That is exactly the gap that let the #240
+// regression (a config key parsed but never plumbed) go unnoticed.
+//
+// It matters more now that repeatableStringSlice.Set REJECTS an empty value: an
+// explicit `- ""` in watch.repos or http.trusted_proxy_cidrs used to be skipped
+// in silence and now refuses to start the server. (A bare `-` does NOT reach
+// here — measured against the pinned go.yaml.in/yaml/v3: a null sequence element
+// is dropped by the decoder before it becomes a []string entry. The realistic
+// producer of an explicit "" is a rendered template whose variable was empty,
+// which is the config-file analogue of an unset shell variable in --map.)
+//
+// dst is appended to, never replaced, so a caller's existing entries survive.
+func applyRepeatableConfigList(dst *repeatableStringSlice, values []string, configKey string) error {
+	for _, v := range values {
+		if err := dst.Set(v); err != nil {
+			return fmt.Errorf("config: invalid %s entry %q: %w", configKey, v, err)
+		}
+	}
+	return nil
+}
+
+// buildWebhookOptions assembles the webhook.Handler construction options from
+// the resolved server config. It is the single source of truth for the
+// config→handler plumbing so both runServe and its test exercise the same wiring
+// — the #240 regression (outcomes.generated_paths parsed but never plumbed) went
+// unnoticed precisely because there was no seam to test.
+//
+//   - pushCapture (outcomes.push_capture, #196) toggles WithPushCapture, and with
+//     it WithPushMergeLeakCounter (#849) and WithPushMissingPushedAtCounter (#938)
+//     — all three counters only move under capture.
+//   - generatedPaths (outcomes.generated_paths, #240) is nil when the config key
+//     is absent → the option is omitted so the handler keeps its built-in
+//     defaultGeneratedPaths. A non-nil slice — including an explicit empty `[]`,
+//     which disables all exclusion — is plumbed into WithGeneratedPaths. go-yaml
+//     yields a non-nil empty slice for `[]` and nil for an absent key, so != nil
+//     selects the override exactly when the operator supplied one.
+//   - sizeLabels (outcomes.size_labels, #244) is nil when the config key is absent
+//     → the option is omitted so the handler keeps its built-in defaultSizeLabels.
+//     A non-nil map is plumbed into WithSizeLabels, which itself no-ops on an empty
+//     map so an explicit `{}` preserves the defaults too — matching the documented
+//     `{}`/absent = defaults, custom = replace semantics.
+func buildWebhookOptions(pushCapture bool, unattributed, mergeLeak, missingPushedAt webhook.PushUnattributedCounter, generatedPaths []string, sizeLabels map[string]float64) []webhook.Option {
+	var opts []webhook.Option
+	if pushCapture {
+		opts = append(opts, webhook.WithPushCapture(unattributed), webhook.WithPushMergeLeakCounter(mergeLeak),
+			webhook.WithPushMissingPushedAtCounter(missingPushedAt))
+	}
+	if generatedPaths != nil {
+		opts = append(opts, webhook.WithGeneratedPaths(generatedPaths))
+	}
+	if sizeLabels != nil {
+		opts = append(opts, webhook.WithSizeLabels(sizeLabels))
+	}
+	return opts
+}
+
+// runServe runs the HTTP server subcommand and returns the process exit code
+// (0 clean, 1 fatal), so main's os.Exit is the single exit point and the
+// deferred db.Close always runs (#146). The early flag/config/validation
+// failures below still call os.Exit(1) directly: they fire BEFORE any resource
+// (the DB, the watcher) is open, so no defer is skipped that matters. Every
+// os.Exit AFTER store.Open has been converted to `return 1` so db.Close and the
+// watcher-drain shutdown sequence run on the fatal path too.
+func runServe(args []string) int {
+	// The `serve` CLI entry ALWAYS uses a zero serveOptions — no serve flag or env
+	// var can set syntheticDemo. That unreachability is the #476 security property:
+	// only runDemo passes syntheticDemo:true. See serveOptions and validateBind.
+	return runServeWithOptions(args, serveOptions{})
+}
+
+// serveOptions carries process-internal serve settings that are DELIBERATELY not
+// CLI flags or env vars. It exists so `tierd demo` can hand the serve path a
+// signal that must be impossible to set from a `serve` invocation on real data.
+type serveOptions struct {
+	// syntheticDemo marks a serve driven by `tierd demo` (#476): the dataset is
+	// invented and every write/ingest/admin route is structurally absent
+	// (--read-only), so exposing it beyond loopback leaks nothing real. It relaxes
+	// validateBind for that case ONLY. It is set exclusively by runDemo and is
+	// unreachable from any serve flag/env, so a serve over real data on a
+	// non-loopback bind without a token is still refused.
+	syntheticDemo bool
+}
+
+func runServeWithOptions(args []string, opts serveOptions) int {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	// The settings sealing reads are registered once, for serve and `tierd seal` (#913).
+	sf := addSealServeFlags(fs)
+	configPath, dbPath, pricesPath, readOnly := sf.config, sf.db, sf.prices, sf.readOnly
+	aggregation, kAnonymity := sf.aggregation, sf.k
+	addr := fs.String("addr", defaultListenAddr, "listen address (loopback by default; a non-loopback bind requires --api-token)")
+	webhookSecret := fs.String("webhook-secret", "", "GitHub webhook secret. When the flag is not given, TIER_WEBHOOK_SECRET is used; when that is empty too, the config file's http.webhook_secret. Prefer TIER_WEBHOOK_SECRET env var or @/path/to/file (read from disk); a literal value here leaks via ps/shell history (#37)")
+	apiToken := fs.String("api-token", "", "API token: Bearer on POST writes and score GETs, X-Tier-Token on the proxies; empty disables auth and restricts the bind to loopback (#59). When the flag is not given, TIER_API_TOKEN is used; when that is empty too, the config file's http.api_token. Prefer TIER_API_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
+	readToken := fs.String("read-token", "", "Read-only viewer token (#190): Bearer accepted on every read-scoped GET route (the /scores family, the report manifest, the bulk data exports, fidelity, and, in developer mode only, /metrics; exact list: registerReadRoutes in internal/api/handler.go) but rejected on all writes and the proxies. Must differ from --api-token; alone it does NOT permit a non-loopback bind. When the flag is not given, TIER_READ_TOKEN is used; when that is empty too, the config file's http.read_token. Prefer TIER_READ_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
+	metricsToken := fs.String("metrics-token", "", "Metrics scrape token (#944): Bearer accepted on GET /metrics and NO other route. In team/division mode the read token cannot scrape /metrics, so scrape with this token (or --api-token). Operator-only, never a viewer credential: docs/security.md, 'The metrics token'. Must differ from --api-token and --read-token; alone it does NOT permit a non-loopback bind. When the flag is not given, TIER_METRICS_TOKEN is used; when that is empty too, the config file's http.metrics_token. Prefer TIER_METRICS_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
+	anthropicTarget := fs.String("anthropic-target", "https://api.anthropic.com", "upstream Anthropic API URL")
+	openaiTarget := fs.String("openai-target", "https://api.openai.com", "upstream OpenAI-compatible API URL")
+	geminiTarget := fs.String("gemini-target", "https://generativelanguage.googleapis.com", "upstream Gemini API URL (#459 task 4); the /gemini/ proxy route. Set to \"\" to disable")
+	rlDefault := api.DefaultRateLimitConfig()
+	authMaxFailures := fs.Int("auth-max-failures", rlDefault.MaxFailures, "per-IP failed-auth attempts within --auth-failure-window before a 429 lockout (#36); 0 disables the limiter")
+	authFailureWindow := fs.Duration("auth-failure-window", rlDefault.Window, "sliding window over which --auth-max-failures is counted (#36)")
+	authLockout := fs.Duration("auth-lockout", rlDefault.Lockout, "how long an IP stays locked out (429) after tripping --auth-max-failures (#36)")
+	zeroOutcomeWindowDays := fs.Int("zero-outcome-window-days", 7, "zero-outcome tripwire look-back window in days (#189): serve fails loud (WARN log + tier_zero_outcome_tripwire metric) when cost accrued in this window but zero outcomes were recorded. Config key: zero_outcome_window_days. Must be >= 1")
+	pushCapture := fs.Bool("push-capture", envBool("TIER_PUSH_CAPTURE"), "capture a qualifying direct commit to the default branch as a degraded (0.5, per-issue-per-UTC-day) outcome so trunk-based teams aren't scored ~0 (#196). OFF by default. Env TIER_PUSH_CAPTURE, config key outcomes.push_capture. Precedence: CLI > env > config > default")
+	var trustedProxyCIDRs repeatableStringSlice
+	fs.Var(&trustedProxyCIDRs, "trusted-proxy-cidr", "CIDR of a trusted reverse proxy/TLS terminator (repeatable). When the direct peer is inside a trusted CIDR, the failed-auth lockout keys on the client IP from X-Forwarded-For (rightmost untrusted hop) instead of the peer address. Default: unset — X-Forwarded-For is never trusted (#131)")
+	var watchRepos repeatableStringSlice
+	fs.Var(&watchRepos, "watch-repo", "git repo path to tail Claude Code JSONL for (repeatable; omit to disable live ingestion)")
+	codexRollout := fs.Bool("codex-rollout", envBool("TIER_CODEX_ROLLOUT"), "capture Codex CLI spend from the local rollout logs at ~/.codex/sessions/**/rollout-*.jsonl (#464). This is the path that captures Codex as you actually run it: the reverse proxy can parse the Responses API Codex speaks (#459), but only for traffic you deliberately point at it with API-key auth, and that path is not yet live-verified. Do NOT do both at once — Codex routed through /openai/ while this flag is on is counted TWICE (the proxy keys on the response id, this collector keys on session+ordinal, and the two cannot dedup). Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_CODEX_ROLLOUT, config block collectors.codex_rollout (which also sets sessions_dir / scan_interval)")
+	opencodeFlag := fs.Bool("opencode", envBool("TIER_OPENCODE"), "capture Opencode spend from its local SQLite session store at ~/.local/share/opencode/opencode.db (#719). Opened READ-ONLY; Opencode may keep running. Captures only providers with an AUDITED per-token rate — today the Z.ai coding plan — and NAMES every exclusion at startup with a per-scan row count; Ollama's cloud tier is excluded because it publishes no per-token rate and would price at the guessed self-hosted-medium reference rate. GLM-5.3 needs no price-table override: the embedded table's glm-5.3 row prices it per token at Z.ai list price (#786). Any GLM model with no embedded row prices at that same guessed fallback, and serve logs a WARN naming it the first time it prices one. Do NOT also route Opencode through tier's proxy: the two keys are unrelatable and the spend DOUBLES. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_OPENCODE, config block collectors.opencode (which also sets db_path / scan_interval)")
+	museFlag := fs.Bool("muse", envBool("TIER_MUSE"), "capture Meta Muse Code spend from its local session logs at ~/.local/share/muse/sessions/**/session.jsonl (#895). Reads only token counts, model names, the session id (stored), each run's recorded branch and the workspace root — never prompt, reply or tool text. One event per billed model call, agent turns and automatic tool-approval reviews alike, emitted once its run settles: its branch is recorded, or it has ended and Muse wrote past it, or its session log has been quiet for 6h. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_MUSE, config block collectors.muse (which also sets home / scan_interval)")
+	worktreeAttr := fs.Bool(worktreeAttrFlag, false, worktreeAttrServeHelp)
+	logFormat := fs.String("log-format", cmp.Or(os.Getenv("TIER_LOG_FORMAT"), "auto"), "log format: auto|json|text (#67; auto = JSON unless stderr is a terminal)")
+	logLevel := fs.String("log-level", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "info"), "log level: debug|info|warn|error (#67)")
+	_ = fs.Parse(args)
+	secretEnvFallback(fs, webhookSecret, "webhook-secret", "TIER_WEBHOOK_SECRET")
+	secretEnvFallback(fs, apiToken, "api-token", "TIER_API_TOKEN")
+	secretEnvFallback(fs, readToken, "read-token", "TIER_READ_TOKEN")
+	secretEnvFallback(fs, metricsToken, "metrics-token", "TIER_METRICS_TOKEN")
+
+	// Build the configured logger first thing after flag parse and make it the
+	// process default, so EVERY line below — including the config-resolution
+	// warning and any slog.Default() in library code — honors --log-format /
+	// --log-level (#67). log-format/log-level come only from flags+env, not the
+	// config file, so they're fully resolved here.
+	logger, err := newLogger(os.Stderr, *logFormat, *logLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	slog.SetDefault(logger)
+
+	// Apply config-file values to flags the operator did NOT pass on the
+	// command line AND that didn't already pick up a non-empty env-var
+	// default (#29). Precedence: CLI flag > env var > config file >
+	// builtin default. fs.Visit distinguishes CLI-set from defaulted;
+	// envVarSet below tracks the env-var dimension (the flag layer
+	// otherwise loses that information: env vars are either
+	// flag-construction-time defaults or, for the secret flags, applied
+	// by secretEnvFallback after Parse).
+	// anthropicAdminCfg is populated only from the config file (collectors block
+	// has no CLI flag / env var). nil = block absent = poller disabled.
+	// watchRepoSlugs carries the config-only watch.repo_slugs override map (#231)
+	// out of the config block so the Watcher construction below can consume it.
+	// There is deliberately no CLI flag: a per-path map is a poor fit for a
+	// repeatable string flag, and the override is a set-once deployment fact.
+	var watchRepoSlugs map[string]string
+	var worktreeAttrCfg *bool
+	var anthropicAdminCfg *config.AnthropicAdminConfig
+	var openaiUsageCfg *config.OpenAIUsageConfig
+	// codexRolloutCfg carries the collectors.codex_rollout block (#464). Unlike
+	// the two pollers this collector DOES have a CLI flag (--codex-rollout),
+	// because it needs no credential — the flag alone is enough to enable it
+	// with defaults, and the block only exists to override sessions_dir /
+	// scan_interval.
+	var codexRolloutCfg *config.CodexRolloutConfig
+	// opencodeCfg carries the collectors.opencode block (#719). Same shape as
+	// codex_rollout: a CLI flag alone enables it (no credential is needed), and
+	// the block exists only to override db_path / scan_interval.
+	var opencodeCfg *config.OpencodeConfig
+	// museCfg carries the collectors.muse block (#895); same shape as opencode.
+	var museCfg *config.MuseConfig
+	// generatedPathsCfg carries the config-only outcomes.generated_paths override
+	// (#240) out of the config block to the webhook wiring below. There is no CLI
+	// flag / env var, so nil means "config key absent" → keep the handler's built-in
+	// defaultGeneratedPaths; a non-nil slice (including an explicit empty `[]`, which
+	// disables exclusion) is plumbed into webhook.WithGeneratedPaths.
+	var generatedPathsCfg []string
+	// sizeLabelsCfg carries the config-only outcomes.size_labels override (#244) out
+	// of the config block to the webhook wiring below. There is no CLI flag / env
+	// var, so nil means "config key absent" → keep the handler's built-in
+	// defaultSizeLabels; a non-nil map (config.Load has already validated every
+	// weight is on the fixed scale and no two names collide) is plumbed into
+	// webhook.WithSizeLabels, which treats an empty map as a no-op so `{}` preserves
+	// the defaults.
+	var sizeLabelsCfg map[string]float64
+	// subscriptionsCfg carries the config-only `subscriptions:` block (#113) out
+	// to the coverage gate (after the price table settles) and the fee reconciler
+	// (after the DB opens). There is deliberately no CLI flag or env var: a
+	// per-route monthly fee is a deployment fact, not a switch, and there is no
+	// sensible single-value form for a list of them.
+	var subscriptionsCfg []config.Subscription
+	if *configPath != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config: %v\n", err)
+			os.Exit(1)
+		}
+		anthropicAdminCfg = cfg.Collectors.AnthropicAdmin
+		openaiUsageCfg = cfg.Collectors.OpenAIUsage
+		codexRolloutCfg = cfg.Collectors.CodexRollout
+		opencodeCfg = cfg.Collectors.Opencode
+		museCfg = cfg.Collectors.Muse
+		watchRepoSlugs = cfg.Watch.RepoSlugs
+		worktreeAttrCfg = cfg.Watch.WorktreeAttribution
+		generatedPathsCfg = cfg.Outcomes.GeneratedPaths
+		sizeLabelsCfg = cfg.Outcomes.SizeLabels
+		subscriptionsCfg = cfg.Subscriptions
+		setFlags := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+		envVarSet := map[string]bool{
+			"webhook-secret": os.Getenv("TIER_WEBHOOK_SECRET") != "",
+			"api-token":      os.Getenv("TIER_API_TOKEN") != "",
+			"read-token":     os.Getenv("TIER_READ_TOKEN") != "",
+			"metrics-token":  os.Getenv("TIER_METRICS_TOKEN") != "",
+			"push-capture":   os.Getenv("TIER_PUSH_CAPTURE") != "",
+		}
+		maps.Copy(envVarSet, sf.envSet())
+		applyStringFromConfig(fs, setFlags, envVarSet, "addr", cfg.HTTP.Addr)
+		sf.applyConfig(fs, setFlags, envVarSet, cfg)
+		applyStringFromConfig(fs, setFlags, envVarSet, "webhook-secret", cfg.HTTP.WebhookSecret)
+		applyStringFromConfig(fs, setFlags, envVarSet, "api-token", cfg.HTTP.APIToken)
+		applyStringFromConfig(fs, setFlags, envVarSet, "read-token", cfg.HTTP.ReadToken)
+		applyStringFromConfig(fs, setFlags, envVarSet, "metrics-token", cfg.HTTP.MetricsToken)
+		applyStringFromConfig(fs, setFlags, envVarSet, "anthropic-target", cfg.Proxy.AnthropicTarget)
+		applyStringFromConfig(fs, setFlags, envVarSet, "openai-target", cfg.Proxy.OpenAITarget)
+		applyStringFromConfig(fs, setFlags, envVarSet, "gemini-target", cfg.Proxy.GeminiTarget)
+		applyIntFromConfig(fs, setFlags, envVarSet, "zero-outcome-window-days", cfg.ZeroOutcomeWindowDays)
+		applyBoolFromConfig(fs, setFlags, envVarSet, "push-capture", cfg.Outcomes.PushCapture)
+		// Auth-lockout knobs (#85). No env-var layer exists for these, so their
+		// envVarSet keys are simply absent (false). The resolved flag values flow
+		// into the existing >0 validation below, so a config-sourced combo is
+		// validated identically to a flag-sourced one.
+		applyIntFromConfig(fs, setFlags, envVarSet, "auth-max-failures", cfg.HTTP.Auth.MaxFailures)
+		applyDurationFromConfig(fs, setFlags, envVarSet, "auth-failure-window", cfg.HTTP.Auth.FailureWindow)
+		applyDurationFromConfig(fs, setFlags, envVarSet, "auth-lockout", cfg.HTTP.Auth.Lockout)
+		// watch-repo is repeatable. CLI wins entirely when any --watch-repo
+		// is passed — partial override via config makes no sense for a
+		// list-valued flag. Log a warning so the operator notices the
+		// config's list was discarded.
+		if setFlags["watch-repo"] {
+			if len(cfg.Watch.Repos) > 0 {
+				logger.Warn("--watch-repo on CLI overrides config watch.repos entirely",
+					"cli_repos", []string(watchRepos),
+					"config_repos_ignored", cfg.Watch.Repos)
+			}
+		} else if err := applyRepeatableConfigList(&watchRepos, cfg.Watch.Repos, "watch.repos"); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		// trusted-proxy-cidr is repeatable, same list-valued CLI-wins-entirely
+		// precedence as watch-repo (#131): any --trusted-proxy-cidr on the CLI
+		// discards the config list entirely rather than partially merging.
+		if setFlags["trusted-proxy-cidr"] {
+			if len(cfg.HTTP.TrustedProxyCIDRs) > 0 {
+				logger.Warn("--trusted-proxy-cidr on CLI overrides config http.trusted_proxy_cidrs entirely",
+					"cli_cidrs", []string(trustedProxyCIDRs),
+					"config_cidrs_ignored", cfg.HTTP.TrustedProxyCIDRs)
+			}
+		} else if err := applyRepeatableConfigList(&trustedProxyCIDRs, cfg.HTTP.TrustedProxyCIDRs, "http.trusted_proxy_cidrs"); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, worktreeAttrCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
+		os.Exit(1)
+	}
+	logger.Info(wtSetting.String())
+
+	// Validate the zero-outcome tripwire window (#189) after CLI+config resolution.
+	// A sub-day window is a misconfiguration (correct-from-start: fail loud rather
+	// than silently coerce), so refuse it at startup.
+	if *zeroOutcomeWindowDays < 1 {
+		fmt.Fprintf(os.Stderr, "--zero-outcome-window-days must be >= 1, got %d\n", *zeroOutcomeWindowDays)
+		os.Exit(1)
+	}
+	zeroOutcomeWindow := time.Duration(*zeroOutcomeWindowDays) * 24 * time.Hour
+
+	// Resolve the REQUIRED aggregation mode (#185) after CLI+env+config resolution.
+	// There is deliberately NO silent default: defaulting would flip an existing
+	// deployment between naming individuals and not on upgrade — an EU works-council
+	// / GDPR Art. 22 co-determination concern — so an unset value is a hard startup
+	// error that tells the operator how to choose.
+	// k-anonymity floor (#185): reject anything below the hard minimum (3), which
+	// would gut the anonymity set. k, grace and seal_from are validated
+	// unconditionally so a misconfigured value fails loud even in developer mode
+	// (where they are unused) rather than lurking until someone switches to team
+	// mode.
+	sealCfg, err := sf.resolve(fs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	aggMode := sealCfg.mode
+
+	// Resolve `@file` secret indirection (#37) before anything reads the token
+	// or secret. Runs after config resolution so a value sourced from CLI, env,
+	// or config alike can use the `@/path` form; keeps the secret off the
+	// command line (and out of ps/shell history).
+	resolveOrExit := func(flagName string, p *string) {
+		v, err := resolveSecretFlag("--"+flagName, *p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "--%s: %v\n", flagName, err)
+			os.Exit(1)
+		}
+		*p = v
+	}
+	resolveOrExit("api-token", apiToken)
+	resolveOrExit("read-token", readToken)
+	resolveOrExit("metrics-token", metricsToken)
+	resolveOrExit("webhook-secret", webhookSecret)
+
+	// Token guardrails (#190, #944), checked after @file/env/config resolution so
+	// they see the effective values regardless of source. Two equal tokens would
+	// classify as the broader scope and silently grant it — refuse to start.
+	if err := checkDistinctTokens(*apiToken, *readToken, *metricsToken); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	// A read token with no api token has no effect: auth is disabled entirely in
+	// that mode, and validateBind still refuses a non-loopback bind on a read
+	// token alone. Warn rather than fail so loopback dev use is unhurt.
+	if *readToken != "" && *apiToken == "" {
+		logger.Warn("--read-token is set but --api-token is empty: auth is disabled and the read-only token has no effect; a non-loopback bind still requires --api-token (#190)")
+	}
+	if *metricsToken != "" && *apiToken == "" {
+		logger.Warn("--metrics-token is set but --api-token is empty: auth is disabled and the metrics token has no effect; a non-loopback bind still requires --api-token (#944)")
+	}
+
+	// Resolve + validate the Anthropic Admin poller config (#138) BEFORE store.Open
+	// so a misconfiguration fails fast at startup rather than after the DB is open.
+	// Absent block → nil settings → poller stays disabled (logged where it would
+	// otherwise start). The admin key uses the same @file indirection as the other
+	// secrets, so it never appears on the command line.
+	adminSettings, err := resolveAnthropicAdminConfig(anthropicAdminCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	// Same for the OpenAI Usage/Costs poller (#139): resolve+validate before
+	// store.Open so a misconfiguration fails fast. Absent block → nil → disabled.
+	openaiSettings, err := resolveOpenAIUsageConfig(openaiUsageCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	// Same for the Codex rollout-log collector (#464): resolve+validate before
+	// store.Open. Enabled by EITHER --codex-rollout or the config block.
+	codexSettings, err := resolveCodexRolloutConfig(codexRolloutCfg, *codexRollout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	// Fail fast when Codex capture is requested but has no repo to attribute to
+	// (#479). --codex-rollout attributes to the SAME repos as --watch-repo, so
+	// enabling it with no watched repo is a silent no-op — the exact "knob that
+	// does nothing" that erodes trust in a capture path. watchRepos here already
+	// merges the CLI flag and the config watch.repos block, so a config-only repo
+	// counts. The one exception is --read-only, which deliberately nulls every
+	// ingest config just below (including codex); there the mismatch is expected,
+	// so it warns rather than aborts.
+	// Same for the Opencode collector (#719).
+	opencodeSettings, err := resolveOpencodeConfig(opencodeCfg, *opencodeFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	museSettings, err := resolveMuseConfig(museCfg, *museFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	if warn, fatal := codexWatchCheck(codexSettings != nil, len(watchRepos), *readOnly); fatal != "" {
+		fmt.Fprintln(os.Stderr, fatal)
+		os.Exit(1)
+	} else if warn != "" {
+		logger.Warn(warn)
+	}
+	if warn, fatal := opencodeWatchCheck(opencodeSettings != nil, len(watchRepos), *readOnly); fatal != "" {
+		fmt.Fprintln(os.Stderr, fatal)
+		os.Exit(1)
+	} else if warn != "" {
+		logger.Warn(warn)
+	}
+	if warn, fatal := museWatchCheck(museSettings != nil, len(watchRepos), *readOnly); fatal != "" {
+		fmt.Fprintln(os.Stderr, fatal)
+		os.Exit(1)
+	} else if warn != "" {
+		logger.Warn(warn)
+	}
+
+	// Read-only public-demo mode (#429): neutralize EVERY ingest / relay / write
+	// CONFIG in ONE place, so the ordinary guards below (len(watchRepos)>0,
+	// *webhookSecret!="", parseProxyTarget!=nil, adminSettings!=nil, ...) skip these
+	// subsystems naturally — and, critically, a FUTURE ingest subsystem keyed off
+	// its own config var is auto-disabled here rather than silently exposed. The API
+	// write ROUTES are omitted structurally via RegisterReadOnly (below); this single
+	// choke point handles the background collectors, the webhook, and the relays.
+	// See the SECURITY invariant on api.Handler.RegisterReadOnly.
+	if *readOnly {
+		watchRepos = nil
+		*webhookSecret = ""
+		*anthropicTarget, *openaiTarget, *geminiTarget = "", "", ""
+		adminSettings, openaiSettings = nil, nil
+		codexSettings = nil
+		opencodeSettings = nil
+		museSettings = nil
+		// The subscription-fee reconciler WRITES org_actual_spend rows (#113), so
+		// it belongs in this neutralization list for the same reason the pollers do:
+		// read-only mode must leave no externally triggerable background writer
+		// running. The one exception is the clock-driven webhook payload retention
+		// prune (#846), which store.Open already runs at boot in this mode and which
+		// serve keeps running daily (TestServe_StartsWebhookPayloadPruner pins that
+		// it is started unconditionally). Clearing the config here (rather than
+		// guarding the goroutine's start site) is what
+		// makes the ordinary `len(subscriptionsCfg) > 0` guard below do the work —
+		// and, because this choke point runs BEFORE the coverage gate, it also
+		// means a demo may ship a subscriptions block the gate would otherwise
+		// refuse. TestServeSmoke_ReadOnlyNeutralizesSubscriptionFees pins both.
+		subscriptionsCfg = nil
+	}
+
+	// A non-zero failure cap with a non-positive window or lockout would create
+	// a limiter that looks armed but can never trip (#36) — refuse to start
+	// rather than expose auth that is silently un-throttled.
+	if err := validateAuthLockout(*authMaxFailures, *authFailureWindow, *authLockout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	// Parse the trusted-proxy CIDRs into prefixes, failing loud on a bad entry
+	// (#131). A bare IP is the common mistake, so the error suggests the fix.
+	// Empty list → nil → X-Forwarded-For stays untrusted (default unchanged).
+	trustedProxies, err := parseTrustedProxies(trustedProxyCIDRs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	// Fail-closed exposure check (#59) — runs after config-file resolution so
+	// it sees the effective addr/token regardless of where they came from.
+	// DELIBERATELY passes only *apiToken (#190): a read-only token alone must NOT
+	// satisfy the bind — a non-loopback listener still requires the write/admin
+	// token, so a read token can never open the writes/proxies to the network.
+	// opts.syntheticDemo (#476) is the sole non-token exemption and is reachable
+	// only via `tierd demo`, never from a serve flag/env — see serveOptions.
+	if err := validateBind(*addr, *apiToken, opts.syntheticDemo); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	// Apply a --prices override (#68) BEFORE store.Open: Open runs the #55 cost
+	// recompute, which prices rows via ComputeCost, so the table must be settled
+	// first. A bad file exits non-zero rather than silently using the embedded
+	// default. With no override, the embedded default (loaded at package init)
+	// stays active.
+	// table_hash/file_hash (#713) ride along on the SAME record as the version:
+	// an operator diffing two installs' startup logs needs the content identity
+	// next to the version it disagrees with, not in a second line to correlate.
+	if info, ok := loadPricesOverride(*pricesPath); ok {
+		logger.Info("loaded price-table override", "path", *pricesPath,
+			"version", info.Version, "effective_date", info.EffectiveDate, "models", info.ModelCount,
+			"table_hash", info.TableHash, "file_hash", info.FileHash)
+	} else {
+		info := store.ActivePriceTableInfo()
+		logger.Info("using embedded price table",
+			"version", info.Version, "effective_date", info.EffectiveDate, "models", info.ModelCount,
+			"table_hash", info.TableHash, "file_hash", info.FileHash)
+	}
+
+	// Two-artifacts-one-truth gate for subscription routes (#113), run HERE
+	// because it is the first point at which both artifacts are settled: the
+	// price table has taken any --prices override, and the config block is
+	// parsed. It is BEFORE store.Open on purpose — a misconfiguration should
+	// fail startup without having touched the database.
+	if err := checkSubscriptionCoverage(subscriptionsCfg, logger); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	// Ensure the database directory exists before opening.
+	if err := os.MkdirAll(filepath.Dir(*dbPath), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "create db dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	db, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open db: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = db.Close() }()
+	if n := db.UpgradeNotice(); n != "" {
+		_, _ = fmt.Fprintln(os.Stderr, n)
+	}
+
+	mux := http.NewServeMux()
+
+	// Shared watcher health state. Only allocated when --watch-repo is set;
+	// otherwise nil flows into api.New, which makes /healthz report
+	// status=not_configured. Avoids reserving a heap object that would
+	// otherwise be never written to and would invite a future reader to
+	// wonder "why is this here?"
+	var watcherState *health.WatcherState
+	if len(watchRepos) > 0 {
+		watcherState = health.NewWatcherState()
+	}
+
+	// REST API.
+	// Metrics registry + the fixed metric set (#67). Built before the handler so
+	// the auth-gated GET /metrics route is mounted by Register.
+	srvMetrics := newServeMetrics(version)
+	// Route unknown-model pricing fallbacks into tier_unknown_model_events_total
+	// (#68). Set once here, before serving (the write-once-before-serve seam in
+	// internal/store); the nil-default recorder is a no-op for `tierd score`.
+	// Installed AFTER store.Open by design: the counter is a LIVE mispriced-spend
+	// signal, so the one-time #55 historical recompute (which also runs through
+	// ComputeCost during Open) is intentionally NOT counted — its unknown models
+	// still surface via the one-time WARN log, just not this counter.
+	store.SetUnknownModelRecorder(srvMetrics.unknownModels)
+	// Cost-weighted companions (#135): the micro-dollar cost billed at the
+	// unknown-model fallback rate, and the total priced cost across all events.
+	// Same write-once-before-serve seam and the same live-signal rationale as the
+	// event counter above (the historical #55 recompute during Open is not
+	// counted). The 10-minute ticker below reads these to alert on the SHARE of
+	// window spend billed at the fallback rate.
+	store.SetUnknownModelCostRecorder(srvMetrics.unknownModelCost)
+	store.SetPricedCostRecorder(srvMetrics.pricedCost)
+	store.SetCostClampRecorder(srvMetrics.costClamps)
+	// Route parser-boundary negative-token clamps into
+	// tier_negative_tokens_clamped_total (#121). Same write-once-before-serve
+	// discipline as the recorder above; the nil default is a no-op for
+	// `tierd score` and unit tests, so no clamp is lost when serving.
+	collector.SetClampRecorder(srvMetrics.clampedNegTok)
+
+	apiHandler := api.New(db, logger, *apiToken, watcherState, version, api.RateLimitConfig{
+		MaxFailures:    *authMaxFailures,
+		Window:         *authFailureWindow,
+		Lockout:        *authLockout,
+		TrustedProxies: trustedProxies,
+	}, api.WithCommit(commit), api.WithPolledProviders(startedPollerProviders(adminSettings, openaiSettings)...))
+	apiHandler.SetMetricsRegistry(srvMetrics.reg)
+	// Wire the unjoined-identity gauge (#125), same write-once-before-serve seam
+	// as the registry above; /scores Sets it per read, nil-safe elsewhere.
+	apiHandler.SetIdentityGauge(srvMetrics.identityUnjoined)
+	// Wire the pricing-divergence counter (#233), same seam; /events Inc()s it when
+	// a shipper's client cost_usd disagrees with the server's authoritative price.
+	apiHandler.SetPricingDivergenceCounter(srvMetrics.pricingDivergence)
+	// Read-only viewer token (#190), same write-once-before-serve seam. Empty =
+	// no read scope armed. Must precede Register so the read routes bind the
+	// scope-aware middleware.
+	apiHandler.SetReadToken(*readToken)
+	// Scrape-only metrics token (#944), same seam; opens GET /metrics only.
+	apiHandler.SetMetricsToken(*metricsToken)
+	// Reporting mode + k-anonymity floor (#185), same write-once-before-serve seam.
+	// In team mode the served /scores, the dashboard it feeds, and /scores/{developer}
+	// never name an individual developer.
+	apiHandler.SetAggregation(aggMode, *kAnonymity)
+	// Sealed months (#913): in team/division mode every /scores, /report_manifest
+	// and /scores/compare read is a sealed calendar month. Every anonymised serve
+	// builds the sealer, so a read-only one serves what a writable one sealed;
+	// only a writable one starts it (StartSealer, below).
+	if err := apiHandler.EnableSealing(sealCfg.grace, sealCfg.sealFrom); err != nil {
+		fmt.Fprintf(os.Stderr, "sealing: %v\n", err)
+		return 1
+	}
+	logger.Info("aggregation mode", "mode", *aggregation, "k_anonymity", *kAnonymity, "report_grace", sealCfg.grace.String())
+	if err := logSealArm(context.Background(), db, sealCfg, logger); err != nil {
+		logger.Error("read the pinned seal floor", "err", err)
+	}
+	if err := logSealOverdue(context.Background(), apiHandler, sealCfg, logger); err != nil {
+		logger.Error("read whether sealing is stalled", "err", err)
+	}
+	if err := logSealConfigGap(context.Background(), apiHandler, logger); err != nil {
+		logger.Error("read the newest sealed month's config", "err", err)
+	}
+	// Team-mode empty-hierarchy tripwire (#232): warn loudly at startup when team
+	// aggregation is armed with no hierarchy populated, so an operator does not
+	// trust a one-row "other" dashboard. A cheap single read; never blocks serve.
+	checkEmptyTeamHierarchy(context.Background(), aggMode, db, logger)
+	// Announce which auth scopes are armed so an operator can confirm at startup
+	// that the write and (optionally) read credentials took effect. Booleans
+	// only — the secrets themselves are never logged.
+	logger.Info("API auth scopes",
+		"write_armed", *apiToken != "",
+		"read_armed", *readToken != "",
+		"metrics_armed", *metricsToken != "")
+	// Announce the RESOLVED failed-login lockout state (#36). Config parity (#85)
+	// newly lets an operator disable the brute-force throttle by committing
+	// http.auth.max_failures: 0 into a repo YAML — a persistent, invisible loss of
+	// defence-in-depth. Logging the resolved values (thresholds are not secrets)
+	// makes an accidental disable obvious at boot rather than discovered under attack.
+	logger.Info("auth failed-login lockout",
+		"enabled", *authMaxFailures > 0,
+		"max_failures", *authMaxFailures,
+		"window", authFailureWindow.String(),
+		"lockout", authLockout.String())
+	// Read-only public-demo mode (#429): mount ONLY the read + health routes — every
+	// write/ingest/admin route is structurally absent (404), not merely token-gated,
+	// so a leaked token cannot reach any mutation. The webhook, the proxies, the
+	// JSONL watcher, and the coverage pollers below are ALL skipped for the same
+	// reason; any --watch-repo / poller config is deliberately ignored in this mode.
+	// For the community demo instance on synthetic data behind a rate-limiter.
+	if *readOnly {
+		apiHandler.RegisterReadOnly(mux)
+		logger.Warn("READ-ONLY mode ENABLED (#429): write/ingest/admin API routes, the GitHub webhook, the proxies, the watcher, and the pollers are OFF (404 / not started). Any ingest config is ignored. The webhook payload retention prune still runs, at every database open and daily, and DELETES webhook_payloads rows past its age limit or row cap (unexpired rows too, once the table is over the cap). NOTE: read-only governs WRITES only — the read routes stay OPEN per the token/aggregation config, so public exposure is safe ONLY on synthetic data, or with a read-token + a k-anonymized aggregation (team/division).")
+	} else {
+		apiHandler.Register(mux)
+	}
+
+	// GitHub webhook — mounted only when a secret is configured (#60). An
+	// unvalidated webhook would let anyone who can reach the listener forge
+	// merged-PR outcomes or fake revert pushes. The handler also fails closed
+	// internally; not mounting keeps the surface off the mux entirely and makes the
+	// disabled state visible at startup. In read-only mode (#429) the choke point
+	// above has already blanked *webhookSecret, so this falls to the disabled branch.
+	if *webhookSecret != "" {
+		// Push-to-default-branch capture (#196) is opt-in via --push-capture. When
+		// enabled the handler also captures qualifying direct commits to the default
+		// branch as degraded outcomes; unattributed commits are counted so the drop
+		// is observable in /metrics.
+		whOpts := buildWebhookOptions(*pushCapture, srvMetrics.pushUnattributed, srvMetrics.pushMergeLeak, srvMetrics.pushMissingPushedAt, generatedPathsCfg, sizeLabelsCfg)
+		if *pushCapture {
+			logger.Info("push-to-default-branch outcome capture is ENABLED (#196): direct commits to the default branch earn degraded 0.5, per-issue-per-UTC-day outcomes")
+		}
+		mux.Handle("POST /webhook/github", webhook.New(db, *webhookSecret, logger, whOpts...))
+	} else {
+		logger.Warn("TIER_WEBHOOK_SECRET is not set — POST /webhook/github is disabled (fail closed, #60)")
+	}
+
+	// Dashboard.
+	mux.Handle("/", dashboard.New())
+
+	// Documentation (#449). Mounted UNCONDITIONALLY — including read-only
+	// public-demo mode (#429), right next to the dashboard above and OUTSIDE the
+	// `if *readOnly` write-route choke point. The served pages are static,
+	// read-only HTML generated from the markdown in docs/ (see internal/docs and
+	// tools/docgen); they carry no JavaScript and expose nothing to write or
+	// token-gate, so they are safe for the public demo.
+	mux.Handle("/docs/", docs.New())
+
+	// eventSink is the shared collector.Ingester the live collectors funnel
+	// through (#46 closes the #27 asymmetry): the proxy and the watcher route
+	// their writes through ingester.Store(db) — the same adapter the JSONL and
+	// admin/usage collectors already used — so the store-write path is uniform no
+	// matter which collector produced the event. Per-collector concerns (the
+	// Source name via SourceTagger, the watcher's RecordEvent stamp via
+	// RecordingIngester) are layered as decorators on top of this one base rather
+	// than re-implemented at each write site.
+	eventSink := ingester.Store(db)
+
+	// Reverse proxies — only registered when flags are explicitly set and the
+	// target URL has a valid http/https scheme and non-empty host. Gated
+	// behind the API token via X-Tier-Token (#59): without the gate the
+	// proxy is an open relay to the provider for anyone who can reach it.
+	//
+	// The bare eventSink is passed straight through: proxy.New builds its own
+	// collector.SourceProxy tagger around it internally (#337), so there is no
+	// separate SourceTagger wrap to keep in sync here — a proxy whose events land
+	// with an empty source is unconstructable.
+	// anyProxyMounted records whether ANY reverse proxy is live, for the Opencode
+	// double-count warning further down (#719). Unlike the Codex hazard, which is
+	// specific to /openai/, Opencode can be pointed at any of the three: it speaks
+	// whichever API its configured provider uses.
+	anyProxyMounted := false
+	if t := parseProxyTarget(*anthropicTarget, logger); t != nil {
+		anyProxyMounted = true
+		p := proxy.New(t, proxy.ProviderAnthropic, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
+		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
+		registerProxy(mux, "/anthropic", p, apiHandler.ProxyAuth, logger)
+		logger.Info("Anthropic proxy", "path", "/anthropic/", "target", *anthropicTarget)
+	}
+	if t := parseProxyTarget(*openaiTarget, logger); t != nil {
+		anyProxyMounted = true
+		p := proxy.New(t, proxy.ProviderOpenAI, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
+		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
+		registerProxy(mux, "/openai", p, apiHandler.ProxyAuth, logger)
+		logger.Info("OpenAI proxy", "path", "/openai/", "target", *openaiTarget)
+		// Double-count hazard (#459 task 2) — see codexProxyDoubleCountWarn.
+		if w := codexProxyDoubleCountWarn(codexSettings != nil, true); w != "" {
+			logger.Warn(w, "proxy_path", "/openai/", "collector", collector.SourceCodexRollout)
+		}
+	}
+	// #459 task 4: mount /gemini/. The parser (parseGemini) has existed since
+	// v1 (#1), extended by #122 (thinking/cache tokens) and #300 (host
+	// stamping) — only the mount was missing, so a Gemini client pointed at
+	// TIER before this landed got a plain 404 with no signal why.
+	if t := parseProxyTarget(*geminiTarget, logger); t != nil {
+		anyProxyMounted = true
+		p := proxy.New(t, proxy.ProviderGemini, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
+		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
+		registerProxy(mux, "/gemini", p, apiHandler.ProxyAuth, logger)
+		logger.Info("Gemini proxy", "path", "/gemini/", "target", *geminiTarget)
+	}
+
+	srv := &http.Server{
+		Addr: *addr,
+		// requestLogger wraps the whole mux so every request (API, webhook,
+		// dashboard, proxy) gets one structured access-log line (#67), including
+		// one browserGuard refuses (#893).
+		Handler:      requestLogger(logger, srvMetrics.http, browserGuard(mux, hostCheckArmed(*addr, *apiToken, opts.syntheticDemo))),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// watcherCtx outlives a single request and is cancelled on shutdown so
+	// the fsnotify loop drains cleanly. Created even when no --watch-repo is
+	// set, so we can use cancel() unconditionally below.
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	defer watcherCancel()
+
+	// srvErr carries any fatal server error (HTTP listener crash or watcher
+	// unrecoverable failure) back to the main goroutine. Buffered to 2 so
+	// neither writer blocks the other on a race during shutdown.
+	srvErr := make(chan error, 2)
+
+	// supDone is closed when the watcher supervisor goroutine has fully
+	// returned. Shutdown JOINs on it before the deferred db.Close runs (#146):
+	// Watcher.Run waits for in-flight inserts (inflight.Wait) before returning,
+	// so once Supervise has returned no watcher insert can still be racing the
+	// DB close. Pre-closed when no watcher is configured so the join is a no-op.
+	supDone := make(chan struct{})
+
+	// #913-D9: every pulled source is registered for the seal gate before any
+	// source starts, so a source's first successful pass always finds its row. A
+	// read-only serve starts none and registers nothing.
+	if !*readOnly {
+		sources := sealGatedSources(adminSettings, openaiSettings, subscriptionsCfg, codexSettings, opencodeSettings, museSettings)
+		if err := registerSealSources(watcherCtx, db, sources, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "register sources for sealing: %v\n", err)
+			return 1
+		}
+	}
+
+	// Live JSONL ingestion via fsnotify (issue #18). Disabled when no
+	// --watch-repo is set; the watcher would otherwise drain events for
+	// nothing. As of #28 the watcher runs under a Supervisor that restarts
+	// it with exponential backoff on transient failures (fsnotify channel
+	// closed, inotify ENOSPC, etc.) and only terminates after 5 failures
+	// inside a 60-second window. The Supervisor updates watcherState so
+	// /healthz reports the current state to any operator polling.
+	if len(watchRepos) > 0 {
+		resolved, err := resolveWatchRepos(watchRepos)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watch-repo: %v\n", err)
+			// Post-store.Open: return so the deferred db.Close runs (#146).
+			return 1
+		}
+		w := &collector.Watcher{
+			Repos: resolved,
+			// Operator overrides for repository identity (#231). Absent -> the
+			// watcher reads remote.origin.url, then degrades to 'unqualified' with
+			// one warning per repo. Required for forks, where origin names the fork
+			// and the upstream webhook names the upstream.
+			RepoSlugs: watchRepoSlugs,
+			// Events funnel through the shared collector.Ingester (#46). The
+			// watcher's source is "jsonl" — it is the live counterpart of the
+			// JSONLCollector, tailing the same Claude Code session files — so it
+			// shares SourceJSONL. RecordingIngester stamps watcherState.RecordEvent
+			// (so /healthz last_event_ts reflects live ingestion, #50) AND the
+			// tier_watcher_events_total counter (#67) on every event the watcher
+			// lands. watcherState is non-nil here (allocated in the same
+			// len(watchRepos) > 0 guard).
+			Ingester: ingester.RecordingIngester(
+				watcherEventRecorder{watcherState, srvMetrics.watcherEvents},
+				ingester.SourceTagger(collector.SourceJSONL, eventSink),
+			),
+			// Checkpoints (#71) persist per-file tail state directly to the store;
+			// they are a resume cache, not a token-event sink, so they bypass the
+			// Ingester decorators above.
+			Checkpoints: db,
+			Logger:      logger,
+			// Surface silent capture degradation (#142): a failed watch add is
+			// otherwise logged-and-swallowed, so a macOS laptop that hits its fd
+			// limit goes blind directory-by-directory with nothing observable.
+			// Route each failure to /healthz (watch_add_failures) and /metrics
+			// (errno-labelled counter). watcherState is non-nil in this guard.
+			OnWatchAddFailure: func(_ string, err error) {
+				watcherState.RecordWatchAddFailure(err)
+				srvMetrics.watcherWatchAddFail.Inc(watchAddErrno(err))
+			},
+		}
+		w.SetWorktreeAttribution(wtSetting.attribution(resolved))
+		sup := &health.Supervisor{
+			Run:    w,
+			State:  watcherState,
+			Logger: logger,
+		}
+		go func() {
+			// close(supDone) on return is the join the shutdown sequence waits
+			// on so no watcher insert can race the db.Close (#146).
+			defer close(supDone)
+			if err := sup.Supervise(watcherCtx); err != nil {
+				select {
+				case srvErr <- fmt.Errorf("watcher supervisor: %w", err):
+				default:
+					// srvErr is already populated by the HTTP listener — log
+					// and let the existing error path drive shutdown.
+					logger.Error("watcher supervisor exited", "err", err)
+				}
+			}
+		}()
+	} else {
+		// No watcher configured: nothing to drain, so the shutdown join is a
+		// no-op. Pre-close so shutdownServer never blocks waiting for it.
+		close(supDone)
+	}
+
+	// Anthropic Admin API usage/cost poller (#138): org-level remainder ingestion +
+	// actual-spend reconciliation. Started only when the collectors.anthropic_admin
+	// config block is present and valid. Cancelled via watcherCtx on shutdown.
+	//
+	// DELIBERATE ASYMMETRY with the watcher supervisor above: the poller goroutine
+	// does NOT feed srvErr. Coverage polling is a reconciliation feed, not a
+	// liveness-critical data plane, so a poll failure logs ERROR and retries on the
+	// next tick (Poller.Run swallows poll errors) — a dead poller must never take
+	// down serve.
+	if adminSettings != nil {
+		adminClient := anthropicadmin.NewClient(anthropicadmin.ClientConfig{
+			APIKey: adminSettings.apiKey,
+			Logger: logger,
+		})
+		adminPoller := anthropicadmin.NewPoller(anthropicadmin.PollerConfig{
+			Client:   adminClient,
+			Store:    db,
+			Org:      adminSettings.org,
+			Interval: adminSettings.interval,
+			Logger:   logger,
+			Metrics: anthropicAdminMetrics{
+				polls:      srvMetrics.adminPolls,
+				events:     srvMetrics.adminEvents,
+				costDeltas: srvMetrics.adminCostDeltas,
+			},
+			Settled: sealSettled(db, collector.SourceAnthropicAdmin, logger),
+		})
+		logger.Info("Anthropic Admin poller enabled", "org", adminSettings.org, "poll_interval", adminSettings.interval)
+		go func() {
+			// Run returns nil on ctx cancel (clean shutdown); it never surfaces a
+			// poll error, so a non-nil return here is unexpected and worth logging.
+			if err := adminPoller.Run(watcherCtx, time.Time{}, ingester.Store(db)); err != nil {
+				logger.Error("anthropic-admin poller exited", "err", err)
+			}
+		}()
+	} else {
+		logger.Info("Anthropic Admin poller disabled (no collectors.anthropic_admin config block)")
+	}
+
+	// OpenAI Usage/Costs API poller (#139): the structural twin of the Anthropic
+	// Admin poller above — org-level OpenAI remainder ingestion + actual-spend
+	// reconciliation, started only when collectors.openai_usage is present and
+	// valid, cancelled via watcherCtx on shutdown. Same DELIBERATE ASYMMETRY: a
+	// poll failure logs ERROR and retries; it never feeds srvErr, so a dead
+	// poller cannot take down serve.
+	if openaiSettings != nil {
+		openaiClient := openaiusage.NewClient(openaiusage.ClientConfig{
+			APIKey: openaiSettings.apiKey,
+			Logger: logger,
+		})
+		openaiPoller := openaiusage.NewPoller(openaiusage.PollerConfig{
+			Client:   openaiClient,
+			Store:    db,
+			Org:      openaiSettings.org,
+			Interval: openaiSettings.interval,
+			Logger:   logger,
+			Metrics: openaiUsageMetrics{
+				polls:      srvMetrics.openaiPolls,
+				events:     srvMetrics.openaiEvents,
+				costDeltas: srvMetrics.openaiCostDeltas,
+			},
+			Settled: sealSettled(db, collector.SourceOpenAIUsage, logger),
+		})
+		logger.Info("OpenAI Usage poller enabled", "org", openaiSettings.org, "poll_interval", openaiSettings.interval)
+		go func() {
+			// Run returns nil on ctx cancel (clean shutdown); it never surfaces a
+			// poll error, so a non-nil return here is unexpected and worth logging.
+			if err := openaiPoller.Run(watcherCtx, time.Time{}, ingester.Store(db)); err != nil {
+				logger.Error("openai-usage poller exited", "err", err)
+			}
+		}()
+	} else {
+		logger.Info("OpenAI Usage poller disabled (no collectors.openai_usage config block)")
+	}
+	warnUndeclaredManualCosts(watcherCtx, db, logger, startedPollers(adminSettings, openaiSettings))
+
+	// Subscription flat-fee reconciler (#113/#155): keeps org_actual_spend
+	// carrying each configured plan's monthly fee, so Spend Leverage's
+	// actual-paid side reflects what the org really pays for its flat-fee
+	// routes. One catch-up pass at startup, then the current period on a slow
+	// tick. Cancelled via watcherCtx on shutdown.
+	//
+	// Same DELIBERATE ASYMMETRY as the pollers above: it does NOT feed srvErr. A
+	// failed post logs ERROR and is retried on the next tick — fee bookkeeping
+	// that lags an hour is recoverable, a dead server is not.
+	//
+	// feeDone is the shutdown JOIN: unlike the pollers, this goroutine opens
+	// transactions, so shutdown waits for it before the deferred db.Close rather
+	// than closing the pool underneath one.
+	feeDone := make(chan struct{})
+	if len(subscriptionsCfg) > 0 {
+		logger.Info("subscription fee reconciler enabled", "routes", len(subscriptionsCfg),
+			"interval", subscriptionFeeReconcileInterval)
+		go func() {
+			defer close(feeDone)
+			runSubscriptionFeeReconciler(watcherCtx, db, subscriptionsCfg, logger, subscriptionFeeReconcileInterval,
+				sealSettled(db, subscriptionFeeSource, logger))
+		}()
+	} else {
+		logger.Info("subscription fee reconciler disabled (no subscriptions config block)")
+		close(feeDone) // pre-closed so the shutdown join is an instant no-op
+	}
+
+	// Webhook payload retention (#846): store.Open pruned at boot; this re-prunes
+	// every webhookPruneInterval so a server that never restarts still honours the
+	// ~90-day / 50,000-row bounds. A DELETE driven only by the clock, so it also
+	// runs under --read-only, exactly as the boot prune does. pruneDone is its
+	// shutdown JOIN, for the same reason as feeDone: it opens a transaction.
+	pruneDone := make(chan struct{})
+	go func() {
+		defer close(pruneDone)
+		runWebhookPayloadPruner(watcherCtx, db, webhookPruneInterval, logger)
+	}()
+
+	// The background sealer (#913-D4 ruling B′): a seal pass now, then one every
+	// hour, in a writable team/division serve only. sealDone is its shutdown JOIN,
+	// for the same reason as feeDone: each seal is a transaction. It is closed
+	// already when the sealer never started.
+	sealDone, _ := apiHandler.StartSealer(watcherCtx, *readOnly)
+
+	// The four JOINED writers — the watcher supervisor (supDone), the
+	// subscription-fee reconciler (feeDone), the webhook payload pruner
+	// (pruneDone) and the background sealer (sealDone) — are now live, so from
+	// here on every exit path must join them before the deferred db.Close runs,
+	// including the ones that never reach the select at the bottom of this
+	// function. The join is NOT exhaustive: the
+	// Anthropic Admin and OpenAI Usage pollers (started above) and the Codex
+	// rollout and Opencode collectors (started below) also write through the
+	// store, have no done channel, and are only cancelled, never waited for.
+	//
+	// The two `return 1`s below (the Codex-rollout config errors) are exactly
+	// that: they unwind straight past shutdownServer into `defer db.Close`, which
+	// would close the pool underneath an open reconciler transaction. That is the
+	// precise race shutdownServer's own doc says the join exists to prevent
+	// "rather than relying on the race being small", so relying on it here would
+	// contradict this file. It is inherited — supDone (started above) is bypassed
+	// by the same two returns, and so are pruneDone and sealDone — so ONE defer
+	// covers all four writers.
+	//
+	// ORDER IS THE WHOLE POINT. `defer db.Close` is registered far earlier
+	// (store.Open), so LIFO runs this join FIRST. It cancels before waiting,
+	// because on these paths nothing else has: the deferred watcherCancel is
+	// registered earlier too, so it would otherwise run after this and the join
+	// would sit out its full timeout waiting for goroutines nobody had told to
+	// stop. On the normal paths shutdownServer has already cancelled and joined,
+	// so all four channels are closed and this is a silent no-op.
+	// ⚠️ ONE-SHOT. joinBackgroundWriters is idempotent when the channels are
+	// CLOSED, but not when a writer is WEDGED: it burns its full drainTimeout per
+	// open channel and gives up. Without this flag an orderly shutdown that timed
+	// out would join twice — measured at drainTimeout=200ms, 202.5ms then 403.9ms
+	// — which at the real 15s turns a wedged SIGTERM drain into 30s (120s if all
+	// four writers are wedged: each join is then 60s, four writers × 15s), duplicates the timeout ERROR, and re-samples live=true
+	// so the Info below fires on a plain SIGTERM claiming a startup abort that did
+	// not happen. The second join also buys nothing: the first already gave up, so
+	// db.Close lands underneath the wedged writer either way.
+	shutdownJoined := false
+	defer func() {
+		if shutdownJoined {
+			return
+		}
+		if joinBackgroundWriters(watcherCancel, supDone, feeDone, pruneDone, sealDone, watcherDrainTimeout, logger) {
+			// Only reachable from an abrupt exit, and there it is not a race: on
+			// that path nothing has cancelled the background context yet, so the
+			// writers ARE still running and this join is what stops them. Saying so
+			// is the difference between "tierd died at startup" and "tierd died at
+			// startup and closed its database cleanly".
+			logger.Info("drained background writers before closing the database (startup aborted before the shutdown sequence)")
+		}
+	}()
+
+	// Codex rollout-log collector (#464): local, per-developer, per-call Codex
+	// capture from ~/.codex/sessions/**/rollout-*.jsonl. It is the path that
+	// captures Codex as Codex is actually run: the proxy can parse the Responses
+	// shape since #459 task 2, but only for traffic deliberately pointed at it
+	// with API-key auth, and that parser has never seen live traffic. Before
+	// #464 Codex spend was invisible to TIER entirely (#463).
+	//
+	// SCOPED TO THE SAME REPOS AS THE JSONL WATCHER. A Codex session whose cwd
+	// is outside every --watch-repo is dropped, not attributed: cross-repo bleed
+	// would put another project's dollars on this project's issues (#15). With
+	// no watched repo there is nothing to attribute to, so we say so and skip.
+	//
+	// Same DELIBERATE ASYMMETRY as the pollers above: a scan failure is logged
+	// and retried on the next tick; it never feeds srvErr, so a corrupt rollout
+	// log or an unreadable ~/.codex cannot take down serve.
+	switch {
+	case codexSettings == nil:
+		logger.Info("Codex rollout collector disabled (no --codex-rollout flag and no collectors.codex_rollout config block)")
+	case len(watchRepos) == 0:
+		// Defense in depth: the fail-fast guard after resolveCodexRolloutConfig
+		// (#479) already aborts a non-read-only serve in this state, and
+		// read-only nulls codexSettings (caught by the case above), so this
+		// branch is now unreachable in normal flow. Kept as a belt-and-braces
+		// log in case a future refactor reorders those guards.
+		logger.Warn("Codex rollout collector enabled but NO --watch-repo is set; it has no repository to attribute Codex spend to and will stay idle. Add --watch-repo (or watch.repos) to capture Codex (#464)")
+	default:
+		resolved, err := resolveWatchRepos(watchRepos)
+		if err != nil {
+			// Unreachable in practice: the watcher branch above resolved the
+			// same list and returned on error. Handle it rather than assume.
+			fmt.Fprintf(os.Stderr, "watch-repo: %v\n", err)
+			return 1
+		}
+		targets := make([]codexrollout.RepoTarget, 0, len(resolved))
+		for _, p := range resolved {
+			// Reuse the SAME operator slug overrides the watcher gets (#231), so
+			// Claude Code and Codex rows for one repo carry an identical repo
+			// identity and join the same outcomes. A fork whose origin differs
+			// from the upstream would otherwise have its Codex spend land under
+			// a second repo identity.
+			targets = append(targets, codexrollout.RepoTarget{Path: p, Slug: watchRepoSlugs[p]})
+		}
+		codexCollector, err := codexrollout.New(codexrollout.Config{
+			SessionsDir: codexSettings.sessionsDir,
+			Repos:       targets,
+			Interval:    codexSettings.interval,
+			Logger:      logger,
+			Settled:     sealSettled(db, collector.SourceCodexRollout, logger),
+			Lost:        sealLost(db, collector.SourceCodexRollout),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "codex-rollout: %v\n", err)
+			return 1
+		}
+		// time.Time{} bounds the FIRST pass only: it backfills every rollout log
+		// on disk once (idempotency keys make a re-run of that backfill a no-op
+		// at the store), after which the collector's own scan cursor bounds each
+		// tick to what changed (#464 R3). The cursor is in-memory by design — a
+		// restart pays the one-time backfill again rather than carrying a
+		// persisted checkpoint whose staleness would be a second failure mode.
+		logger.Info("Codex rollout collector enabled",
+			"repos", resolved,
+			"sessions_dir", cmp.Or(codexSettings.sessionsDir, "(default ~/.codex/sessions)"),
+			"scan_interval", codexSettings.interval)
+		// OBSERVABILITY (#464 Y7): a collector that silently stops producing rows
+		// must be visible somewhere other than the log. RecordingIngester stamps
+		// health state's last_event_ts (so /healthz reflects Codex capture, not
+		// just the JSONL watcher) and tier_codex_rollout_events_total, which is
+		// what an operator alerts on. watcherState is non-nil here: this branch
+		// only runs when len(watchRepos) > 0, the same guard that allocates it.
+		//
+		// It is NOT wrapped in a health.Supervisor, unlike the watcher. The
+		// Supervisor exists to restart a Run that FAILED; this Run never returns
+		// an error — a failing pass is logged and retried on the next tick by
+		// design (see Collector.Run) — so supervising it would restart nothing
+		// and report a liveness it cannot actually observe.
+		codexIngester := ingester.RecordingIngester(
+			codexRolloutEventRecorder{watcherState, srvMetrics.codexRolloutEvents},
+			ingester.SourceTagger(collector.SourceCodexRollout, eventSink),
+		)
+		go func() {
+			// Run returns nil on ctx cancel (clean shutdown); it never surfaces a
+			// scan error, so a non-nil return here is unexpected and worth logging.
+			if err := codexCollector.Run(watcherCtx, time.Time{}, codexIngester); err != nil {
+				logger.Error("codex-rollout collector exited", "err", err)
+			}
+		}()
+	}
+
+	// Opencode collector (#719): local, per-developer, per-call capture from the
+	// SQLite session store Opencode writes to ~/.local/share/opencode/opencode.db.
+	// Opened READ-ONLY, never immutable — Opencode holds a live WAL.
+	//
+	// SCOPED TO THE SAME REPOS AS THE JSONL WATCHER, for the same reason Codex is:
+	// a message whose recorded cwd is outside every --watch-repo is dropped, not
+	// attributed (#15).
+	//
+	// Same DELIBERATE ASYMMETRY as the collectors above: a scan failure is logged
+	// and retried on the next tick; it never feeds srvErr, so a locked, corrupt or
+	// migrated Opencode database cannot take down serve.
+	switch {
+	case opencodeSettings == nil:
+		logger.Info("Opencode collector disabled (no --opencode flag and no collectors.opencode config block)")
+	case len(watchRepos) == 0:
+		// Unreachable in normal flow — opencodeWatchCheck already aborted a
+		// non-read-only serve in this state, and read-only nulls the settings.
+		// Kept as a belt-and-braces log in case a future refactor reorders those.
+		logger.Warn("Opencode collector enabled but NO --watch-repo is set; it has no repository to attribute Opencode spend to and will stay idle (#719)")
+	default:
+		resolved, err := resolveWatchRepos(watchRepos)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watch-repo: %v\n", err)
+			return 1
+		}
+		targets := make([]opencode.RepoTarget, 0, len(resolved))
+		for _, p := range resolved {
+			// The SAME operator slug overrides the watcher and the Codex collector
+			// get (#231), so all three sources' rows for one repo carry an
+			// identical repo identity and join the same outcomes.
+			targets = append(targets, opencode.RepoTarget{Path: p, Slug: watchRepoSlugs[p]})
+		}
+		opencodeCollector, err := opencode.New(opencode.Config{
+			DBPath:   opencodeSettings.dbPath,
+			Repos:    targets,
+			Interval: opencodeSettings.interval,
+			Logger:   logger,
+			// The watermark rides the watcher_checkpoint table (#71) so a restart
+			// resumes instead of re-scanning the whole store. It is a DERIVED
+			// cache — losing it costs one idempotent re-scan and nothing else —
+			// which is why passing the store here is an optimization, not a
+			// correctness dependency.
+			Checkpoints: db,
+			Settled:     sealSettled(db, collector.SourceOpencode, logger),
+			Lost:        sealLost(db, collector.SourceOpencode),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "opencode: %v\n", err)
+			return 1
+		}
+		// The RESOLVED path, from the collector itself — not the configured one
+		// with a hardcoded default substituted. Under a relocated HOME those are
+		// different strings, and showing an operator a path that is not the one
+		// being read is the same class of misdirection as an unescaped DSN.
+		logger.Info("Opencode collector enabled",
+			"repos", resolved,
+			"db_path", opencodeCollector.DBPath(),
+			"scan_interval", opencodeSettings.interval)
+		// 🔴 THE PRICE-TABLE PRECONDITION, said at boot rather than discovered in a
+		// wrong number: a --prices table that drops the embedded glm-5.3 rows prices
+		// their events at the guessed self-hosted-medium fallback, with no other
+		// symptom than a plausible-looking dashboard. Only the models tier supports
+		// on this route are probed (R-2026-09-28-12: GLM-5.3 only); any other model
+		// that arrives is named by the per-model unknown-model WARN at pricing time.
+		for _, m := range opencodeUnauditedStartupModels() {
+			logger.Warn("the active price table has NO audited rate for this model@provider; any captured Opencode event using it will be priced at the GUESSED self-hosted-medium fallback ($0.50/M), not at Z.ai's published rates",
+				"model", m, "provider", "zai-coding-plan",
+				"fix", "the active --prices table dropped the embedded row for this model: copy the embedded glm-5.3 and glm-5.3-flash model-only rows (internal/store/prices.yaml) back into it with a fresh version:, or drop --prices (--prices REPLACES the whole table)")
+		}
+		// Double-count hazard — see opencodeProxyDoubleCountWarn.
+		if w := opencodeProxyDoubleCountWarn(true, anyProxyMounted); w != "" {
+			logger.Warn(w, "collector", collector.SourceOpencode)
+		}
+		// OBSERVABILITY: the characteristic failure of this collector is a SILENT
+		// one (an Opencode schema change makes every scan match nothing while
+		// still succeeding), so a flat tier_opencode_events_total is the signal an
+		// operator alerts on. watcherState is non-nil here: this branch only runs
+		// when len(watchRepos) > 0, the same guard that allocates it.
+		//
+		// NOT wrapped in a health.Supervisor, for the same reason the Codex
+		// collector is not: its Run never returns an error, so supervising it
+		// would restart nothing and report a liveness it cannot observe.
+		opencodeIngester := ingester.RecordingIngester(
+			opencodeEventRecorder{watcherState, srvMetrics.opencodeEvents},
+			ingester.SourceTagger(collector.SourceOpencode, eventSink),
+		)
+		go func() {
+			// time.Time{} bounds the FIRST pass only; from then on the persisted
+			// watermark bounds each tick to what changed.
+			if err := opencodeCollector.Run(watcherCtx, time.Time{}, opencodeIngester); err != nil {
+				logger.Error("opencode collector exited", "err", err)
+			}
+		}()
+	}
+
+	// Muse Code collector (#895): local, per-developer, per-call capture from the
+	// session logs Muse writes under ~/.local/share/muse/sessions. Scoped to the
+	// same repos as the JSONL watcher, and — like the two collectors above — a
+	// failing pass is logged and retried, never fed to srvErr.
+	switch {
+	case museSettings == nil:
+		logger.Info("Muse collector disabled (no --muse flag and no collectors.muse config block)")
+	case len(watchRepos) == 0:
+		// Unreachable in normal flow — museWatchCheck already aborted this state.
+		logger.Warn("Muse collector enabled but NO --watch-repo is set; it has no repository to attribute Muse spend to and will stay idle (#895)")
+	default:
+		resolved, err := resolveWatchRepos(watchRepos)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "watch-repo: %v\n", err)
+			return 1
+		}
+		targets := make([]muse.RepoTarget, 0, len(resolved))
+		for _, p := range resolved {
+			// The SAME slug overrides as the other collectors (#231), so every
+			// source's rows for one repo share one repo identity.
+			targets = append(targets, muse.RepoTarget{Path: p, Slug: watchRepoSlugs[p]})
+		}
+		museCollector, err := muse.New(muse.Config{
+			Home:     museSettings.home,
+			Repos:    targets,
+			Interval: museSettings.interval,
+			Logger:   logger,
+			Settled:  sealSettled(db, collector.SourceMuse, logger),
+			Lost:     sealLost(db, collector.SourceMuse),
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "muse: %v\n", err)
+			return 1
+		}
+		logger.Info("Muse collector enabled",
+			"repos", resolved,
+			"sessions_dir", museCollector.SessionsDir(),
+			"scan_interval", museSettings.interval)
+		// A flat tier_muse_events_total is the signal an operator alerts on; not
+		// wrapped in a health.Supervisor because Run never returns an error.
+		museIngester := ingester.RecordingIngester(
+			museEventRecorder{watcherState, srvMetrics.museEvents},
+			ingester.SourceTagger(collector.SourceMuse, eventSink),
+		)
+		go func() {
+			if err := museCollector.Run(watcherCtx, time.Time{}, museIngester); err != nil {
+				logger.Error("muse collector exited", "err", err)
+			}
+		}()
+	}
+
+	// Unknown-model fallback-share monitor (#135): every 10 minutes, WARN if the
+	// cost billed at the unknown-model fallback rate in the last interval exceeded
+	// unknownCostShareWarnThreshold of total priced cost — the "passive gaming"
+	// signal where a newly-launched model bills at the near-free $0.50/M fallback
+	// and quietly inflates TIER. Cancelled via watcherCtx on shutdown.
+	go runUnknownCostShareMonitor(watcherCtx, unknownCostShareCheckInterval,
+		srvMetrics.unknownModelCost, srvMetrics.pricedCost, logger)
+
+	// Zero-outcome tripwire (#189): fail loud when cost accrued in the last
+	// zeroOutcomeWindow but NO outcomes were recorded there — the silent-TIER-0
+	// signal for trunk-based teams (direct pushes behind flags, no pull_request
+	// event) or a broken webhook. Runs a startup check then re-checks periodically;
+	// surfaces via a WARN log AND the tier_zero_outcome_tripwire metric. Cancelled
+	// via watcherCtx on shutdown. (The actual push-to-default-branch CAPTURE path
+	// is deferred to #196; this issue is the fail-loud tripwire only.)
+	go runZeroOutcomeTripwire(watcherCtx, zeroOutcomeWindow, zeroOutcomeCheckInterval,
+		db, srvMetrics.zeroOutcomeTripwire, logger)
+
+	// WAL size tripwire (#669): the store's connection pool was raised from 1 to
+	// maxOpenConns, and above 1 a continuously-open reader can stop a passive
+	// checkpoint from ever RESETTING the -wal sidecar. Measured: it then grows
+	// without bound, and the first symptom an operator sees is DISK, not latency.
+	// This publishes tier_sqlite_wal_bytes and WARNs past walSizeWarnBytes, so the
+	// condition is visible long before the disk is. Cancelled via watcherCtx.
+	go runWALSizeTripwire(watcherCtx, *dbPath, walSizeCheckInterval,
+		srvMetrics.walBytes, srvMetrics.walStatErrors, logger)
+
+	go func() {
+		logger.Info("tierd listening", "addr", *addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			srvErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Both the fatal-error path and the signal path run the SAME shutdown
+	// sequence (cancel → join watcher → drain HTTP), so the deferred db.Close
+	// always runs strictly AFTER the watcher has drained (#146). The fatal path
+	// no longer calls os.Exit — that skipped every defer, leaving the DB open
+	// and the watcher mid-insert; it now returns 1 so db.Close and the drain
+	// run identically to a clean SIGTERM.
+	select {
+	case err := <-srvErr:
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		shutdownServer(watcherCancel, supDone, feeDone, pruneDone, sealDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownJoined = true
+		logger.Info("tierd stopped")
+		return 1
+	case <-quit:
+		shutdownServer(watcherCancel, supDone, feeDone, pruneDone, sealDone, srv, watcherDrainTimeout, httpShutdownTimeout, logger)
+		shutdownJoined = true
+		logger.Info("tierd stopped")
+		return 0
+	}
+}
+
+// httpShutdownTimeout bounds the graceful HTTP drain (unchanged from the
+// original inline 10s). watcherDrainTimeout bounds how long shutdown waits for
+// the watcher supervisor to join before closing the DB anyway (#146): a
+// pathological insert hang must not make SIGTERM hang forever (systemd would
+// SIGKILL, but we want a logged, orderly give-up). 15s > httpShutdownTimeout so
+// a healthy watcher always joins well within it.
+const httpShutdownTimeout = 10 * time.Second
+
+// watcherDrainTimeout is a var, not a const, ONLY so a test can lower it. The
+// double-join it guards against (see the shutdownJoined flag) costs one full
+// drainTimeout per wedged writer, so pinning it at the shipped 15s would mean a
+// 30s test. Production never assigns to this.
+var watcherDrainTimeout = 15 * time.Second
+
+// shutdownServer is the single graceful-shutdown sequence shared by the signal
+// and fatal-error paths (#146). Order is load-bearing: cancel the watcher
+// context, JOIN the supervisor (supDone) so Watcher.Run's inflight.Wait has
+// returned and no insert can race the caller's deferred db.Close, then drain
+// the HTTP server. The join is bounded by drainTimeout: if the watcher wedges
+// (an insert that never returns) it logs an ERROR and proceeds to close anyway,
+// so a stuck watcher can't make shutdown ignore SIGTERM indefinitely. supDone
+// is pre-closed when no watcher is configured, making the join an instant no-op.
+//
+// feeDone joins the subscription-fee reconciler (#113) on the same terms and for
+// the same reason: it is a TRANSACTIONAL WRITER, and its #155 startup catch-up is
+// the longest-running write this process issues. Closing the pool underneath an
+// open transaction is exactly what the supDone join exists to prevent — so the
+// reconciler gets the same treatment rather than relying on the race being
+// small. Pre-closed when no subscription is configured.
+//
+// pruneDone joins the webhook payload pruner (#846), the third background
+// writer, on the same terms: each prune is one transaction. It is never
+// pre-closed — the pruner runs in every serve, --read-only included.
+//
+// sealDone joins the background sealer (#913), the fourth, on the same terms:
+// each seal is one transaction. It is closed already when the sealer never
+// started (developer mode, --read-only).
+func shutdownServer(watcherCancel context.CancelFunc, supDone, feeDone, pruneDone, sealDone <-chan struct{}, srv *http.Server, drainTimeout, httpTimeout time.Duration, logger *slog.Logger) {
+	// This is the path that normally does the draining, so the "did I have to
+	// drain anyone" answer is uninteresting here — it is the abrupt-exit defer in
+	// run() that reports it.
+	_ = joinBackgroundWriters(watcherCancel, supDone, feeDone, pruneDone, sealDone, drainTimeout, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+}
+
+// joinBackgroundWriters cancels the background context and waits for exactly
+// four DB-writing goroutines — the watcher supervisor, the subscription-fee
+// reconciler, the webhook payload pruner and the background sealer — to
+// return, so the caller's deferred db.Close cannot close the pool underneath
+// one of THEIR open transactions. It does NOT wait for the Anthropic Admin and OpenAI Usage
+// pollers or the Codex rollout and Opencode collectors: they also write through
+// the store but have no done channel, so the cancel reaches them and nothing
+// here waits for them to return.
+//
+// It is split out of shutdownServer because it is needed on two kinds of exit:
+// the orderly one (shutdownServer, which then drains HTTP) and the abrupt one (a
+// post-store.Open `return 1` that unwinds straight into `defer db.Close`).
+// Duplicating the sequence for the second case would let the two drift.
+//
+// It returns whether any writer was STILL LIVE when it was called: false means
+// the caller's path had already drained them (the orderly shutdown, where this is
+// a silent no-op), true means this call is the one that stopped them. The abrupt
+// path uses that to tell an operator its database was closed cleanly despite the
+// startup failure — and it is a fact worth having, because on that path the value
+// is not a race: nothing has cancelled the context yet, so the writers are
+// necessarily still running.
+//
+// Idempotent by construction: cancelling an already-cancelled context is a no-op
+// and every channel is receive-only and closed-once.
+//
+// Each join is bounded by drainTimeout and logs an ERROR rather than blocking
+// forever: a wedged writer must not make SIGTERM hang (systemd would SIGKILL, but
+// we want a logged, orderly give-up).
+func joinBackgroundWriters(watcherCancel context.CancelFunc, supDone, feeDone, pruneDone, sealDone <-chan struct{}, drainTimeout time.Duration, logger *slog.Logger) bool {
+	// Sampled BEFORE the cancel, or the answer would be a race against how fast
+	// the goroutines notice it.
+	live := !isClosed(supDone) || !isClosed(feeDone) || !isClosed(pruneDone) || !isClosed(sealDone)
+	watcherCancel()
+	select {
+	case <-supDone:
+	case <-time.After(drainTimeout):
+		logger.Error("watcher failed to drain before shutdown timeout; closing DB anyway",
+			"timeout", drainTimeout)
+	}
+	select {
+	case <-feeDone:
+	case <-time.After(drainTimeout):
+		logger.Error("subscription fee reconciler failed to drain before shutdown timeout; closing DB anyway",
+			"timeout", drainTimeout)
+	}
+	select {
+	case <-pruneDone:
+	case <-time.After(drainTimeout):
+		logger.Error("webhook payload pruner failed to drain before shutdown timeout; closing DB anyway",
+			"timeout", drainTimeout)
+	}
+	select {
+	case <-sealDone:
+	case <-time.After(drainTimeout):
+		logger.Error("background sealer failed to drain before shutdown timeout; closing DB anyway",
+			"timeout", drainTimeout)
+	}
+	return live
+}
+
+// isClosed reports whether a done-channel has already been closed, without
+// blocking. Only valid for channels that are closed-and-never-sent-on, which is
+// what supDone, feeDone, pruneDone and sealDone are.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// unknownCostShareWarnThreshold is the fraction of interval priced spend billed
+// at the unknown-model fallback rate above which runUnknownCostShareMonitor logs
+// a WARN (#135). 5% is small enough to catch a newly-launched model quietly
+// eating the denominator, large enough to ignore incidental one-off unknowns.
+const unknownCostShareWarnThreshold = 0.05
+
+// unknownCostShareCheckInterval is how often the fallback-share monitor samples
+// the two cost counters. 10 minutes: long enough that a handful of unknown
+// events cannot trip a spurious WARN, short enough to surface a systematic
+// mispricing within one working session.
+const unknownCostShareCheckInterval = 10 * time.Minute
+
+// runUnknownCostShareMonitor samples the unknown-model and total priced-cost
+// counters every interval and calls checkUnknownCostShare on the per-interval
+// DELTAS (the counters are monotone, so delta = now - previous). It returns when
+// ctx is cancelled (shutdown). No initial sample is emitted — the first tick
+// establishes the baseline for the first real interval.
+func runUnknownCostShareMonitor(ctx context.Context, interval time.Duration, unknown, priced *costRecorder, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	prevUnknown, prevPriced := unknown.Total(), priced.Total()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			curUnknown, curPriced := unknown.Total(), priced.Total()
+			checkUnknownCostShare(curUnknown-prevUnknown, curPriced-prevPriced, logger)
+			prevUnknown, prevPriced = curUnknown, curPriced
+		}
+	}
+}
+
+// checkUnknownCostShare logs a WARN when the unknown-model fallback cost over an
+// interval exceeded unknownCostShareWarnThreshold of the total priced cost.
+// Deltas are micro-dollar counter increments over the interval. It is pure and
+// synchronously testable (deltas + logger in, one optional WARN out) — no ticker,
+// no clock. Returns true when it warned. A non-positive unknown or total delta
+// is silent: no fallback spend to flag, or no priced spend to divide by.
+func checkUnknownCostShare(unknownDeltaMicro, totalDeltaMicro int64, logger *slog.Logger) bool {
+	if unknownDeltaMicro <= 0 || totalDeltaMicro <= 0 {
+		return false
+	}
+	share := float64(unknownDeltaMicro) / float64(totalDeltaMicro)
+	if share <= unknownCostShareWarnThreshold {
+		return false
+	}
+	logger.Warn("unknown-model fallback exceeds threshold of priced spend this interval; add the missing models to prices.yaml",
+		"share", share,
+		"threshold", unknownCostShareWarnThreshold,
+		"unknown_usd", store.MicroToDollars(unknownDeltaMicro),
+		"total_usd", store.MicroToDollars(totalDeltaMicro))
+	return true
+}
+
+// zeroOutcomeCheckInterval is how often the zero-outcome tripwire re-queries after
+// its startup check (#189). 1h: the window is measured in days, so an hourly
+// re-check surfaces a newly-broken outcome path within a working session without
+// hammering the DB.
+const zeroOutcomeCheckInterval = time.Hour
+
+// windowActivityStore is the store slice the zero-outcome tripwire needs (#189).
+// A method-subset interface (consumer-side, per CLAUDE.md's store-seam note) keeps
+// checkZeroOutcome unit-testable with a fake — no real DB, ticker, or clock.
+type windowActivityStore interface {
+	WindowActivity(ctx context.Context, since time.Time) (store.WindowActivity, error)
+}
+
+// teamHierarchyStore is the store slice the empty-hierarchy startup tripwire
+// needs (#232, #270). Consumer-side subset, like windowActivityStore, so the
+// check is unit-testable with a fake. It carries BOTH level reads so the check
+// can probe the level that is actually armed (see checkEmptyTeamHierarchy).
+type teamHierarchyStore interface {
+	TeamsForDevelopers(ctx context.Context) (map[string]string, error)
+	DivisionsForDevelopers(ctx context.Context) (map[string]string, error)
+}
+
+// checkEmptyTeamHierarchy warns once at startup when an ANONYMIZED aggregation
+// mode — team (#232) or division (#270) — is armed but org_hierarchy names no
+// group AT THE ACTIVE LEVEL. Without any named group, EVERY developer falls in
+// the "" group, under the k-anonymity floor, and folds into a single "other"
+// bucket, while period_membership opens no seat so org_actual_spend allocation
+// reads 0 — the required EU-safe mode renders one anonymous row that looks like a
+// working dashboard.
+//
+// The probe is LEVEL-SPECIFIC, not "is the table empty": division is nullable
+// (unlike team), so a hierarchy with every team populated but every division NULL
+// has a non-empty team map yet still collapses entirely to "other" in division
+// mode. Probing the active level's resolver — and treating "all labels blank" the
+// same as "table empty" — catches that case, which is the one division mode is
+// MOST prone to. Returns true when the warning fired, false otherwise (developer
+// mode, a named group exists, or a query error). A query error is surfaced but
+// never blocks serve — the check is advisory, not a gate.
+func checkEmptyTeamHierarchy(ctx context.Context, mode scoring.AggregationMode, st teamHierarchyStore, logger *slog.Logger) bool {
+	if !mode.Anonymized() {
+		return false
+	}
+	// Select the active level's hierarchy read explicitly. A new anonymized level
+	// added to scoring.AggregationMode without wiring its read here must NOT silently
+	// fall through to the team probe (which would check team-population while, say,
+	// org mode is armed): fail loud and skip, mirroring how internal/api's
+	// (*Handler).groupLabelFunc errors on a mode with no registered label (#270). The
+	// api.groupLabelOf map is the sibling seam; it lives in another package,
+	// so this switch is the local mirror — keep the two level lists in lockstep.
+	var read func(context.Context) (map[string]string, error)
+	switch mode {
+	case scoring.AggregationTeam:
+		read = st.TeamsForDevelopers
+	case scoring.AggregationDivision:
+		read = st.DivisionsForDevelopers
+	default:
+		logger.Warn("aggregation startup check: no org_hierarchy probe wired for this anonymized mode; skipping empty-hierarchy check (a new level needs its read added here)", "mode", mode.String())
+		return false
+	}
+	labels, err := read(ctx)
+	if err != nil {
+		logger.Warn("aggregation startup check: could not read org_hierarchy", "mode", mode.String(), "err", err)
+		return false
+	}
+	named := 0
+	for _, label := range labels {
+		if label != "" {
+			named++
+		}
+	}
+	if named == 0 {
+		logger.Warn("--aggregation " + mode.String() + " is set but org_hierarchy names no " + mode.String() + " (the table is empty, or every " + mode.String() + " is blank): all developers will aggregate into 'other' (the k-anonymity floor folds every unmapped developer into one bucket), and org_actual_spend allocation will read 0. Populate hierarchy via PUT /api/v1/org_hierarchy/{developer} or bulk POST /api/v1/org_hierarchy before trusting /scores (#232)")
+		return true
+	}
+	return false
+}
+
+// walSizeCheckInterval is how often the -wal sidecar is sampled. 5 minutes: the
+// failure this watches for is DISK filling over hours, never a spike, so a cheap
+// os.Stat at this cadence costs nothing and still surfaces sustained growth
+// inside one working session.
+const walSizeCheckInterval = 5 * time.Minute
+
+// walSizeWarnBytes is the -wal size above which serve WARNs.
+//
+// 🔴 THE NUMBER IS DERIVED FROM A MEASURED CEILING, NOT PICKED. A healthy WAL
+// pins to SQLite's default 1000-page autocheckpoint threshold — 4,148,872 bytes
+// measured, ~4.1MB — in EVERY configuration that can reset it, including the
+// zero-reader control at the raised pool. 64MB is ~15x that ceiling: far enough
+// above to never fire on a healthy install that momentarily overshoots between
+// checkpoints (the worst measured overshoot under a periodic checkpointer was
+// 1.68x), and far below the point where disk is in danger. See tier_sqlite_wal_bytes.
+const walSizeWarnBytes = 64 << 20
+
+// runWALSizeTripwire samples the -wal sidecar immediately, then every interval
+// until ctx is cancelled — the same lifecycle as runZeroOutcomeTripwire, so the
+// goroutine joins cleanly on shutdown with no leak.
+// It exits on ctx cancellation; nothing joins it, and nothing needs to — unlike
+// the other background loops it touches only the filesystem, never the store, so
+// it cannot outlive db.Close() into a use-after-close.
+//
+// 🔴 IT WARNS ON TRANSITION, NOT ON EVERY SAMPLE, AND THAT IS NOT COSMETIC. A
+// starved WAL does not shrink on its own — the condition is permanent by
+// construction until an operator acts — so warning every pass would emit 288
+// identical multi-line WARNs a day, indefinitely. checkZeroOutcome can warn every
+// pass precisely because its condition SELF-CLEARS when an outcome lands; this
+// one does not, and a log line that repeats forever is one operators filter out.
+// The gauge still carries the current value on every sample, so the metric stays
+// continuous while the log stays readable. A re-crossing warns again.
+func runWALSizeTripwire(ctx context.Context, dbPath string, interval time.Duration, gauge *metrics.GaugeVec, errs *metrics.CounterVec, logger *slog.Logger) {
+	wasTripped := checkWALSize(dbPath, gauge, errs, logger)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tripped := checkWALSize(dbPath, gauge, errs, logger, wasTripped)
+			wasTripped = tripped
+		}
+	}
+}
+
+// checkWALSize stats the -wal sidecar, publishes the gauge, and WARNs when it is
+// over walSizeWarnBytes. Returns true when tripped.
+//
+// A missing -wal is NOT an error and NOT a zero-size WAL to be warned about: the
+// sidecar does not exist until the first write after open, and it is removed on a
+// clean close. Both read as 0 bytes, which is the healthy value.
+//
+// ⚠️ Like checkZeroOutcome, a stat error leaves the gauge UNTOUCHED rather than
+// flapping it to 0 — a transient filesystem error must not read as "the WAL is
+// fine now".
+// suppressWarn (variadic so the startup call reads cleanly) carries the PREVIOUS
+// sample's tripped state: when it is true the condition is already known and the
+// WARN is suppressed. The return value is always the current state regardless.
+func checkWALSize(dbPath string, gauge *metrics.GaugeVec, errs *metrics.CounterVec, logger *slog.Logger, suppressWarn ...bool) bool {
+	fi, err := os.Stat(dbPath + "-wal")
+	if errors.Is(err, os.ErrNotExist) {
+		gauge.Set(0)
+		return false
+	}
+	if err != nil {
+		// 🔴 COUNT IT, because leaving the gauge untouched has a false-green mode.
+		// Not flapping the gauge to 0 is right for a TRANSIENT error, but a
+		// PERSISTENT one (vanished mount, ENOTDIR, EACCES) would otherwise freeze
+		// tier_sqlite_wal_bytes at its last healthy sample forever and a scraper
+		// could not tell stale from calm. The counter is what distinguishes them.
+		errs.Inc()
+		logger.Warn("wal size tripwire: stat failed — tier_sqlite_wal_bytes is now STALE, not necessarily healthy; see tier_sqlite_wal_stat_errors_total", "err", err)
+		return false
+	}
+	size := fi.Size()
+	gauge.Set(float64(size))
+	if !evalWALSize(size) {
+		return false
+	}
+	if len(suppressWarn) > 0 && suppressWarn[0] {
+		return true // already reported; the gauge above still carries the value
+	}
+	logger.Warn("wal size tripwire: the SQLite -wal sidecar is far above the size a passive checkpoint resets it to, which means a reader is holding a snapshot almost continuously and the WAL can be copied but never RESET — it will keep growing until disk fills, and disk is the first symptom an operator sees (#669). MOST LIKELY CAUSE FIRST: a long-running `tierd reprice` or `tierd repair-repo` DRY RUN, which holds one DEFERRED read transaction open across a full-table scan by design (so it does not contend with a live serve) and therefore pins a WAL read mark for its whole duration. Otherwise: any other process holding a read transaction open, or a client polling a read endpoint back-to-back. A gap as short as 500ms was measured to restore the healthy ceiling completely",
+		"wal_bytes", size,
+		"warn_at_bytes", int64(walSizeWarnBytes))
+	return true
+}
+
+// evalWALSize is the pure tripwire predicate, split out so the decision is
+// unit-testable without a filesystem, ticker, gauge or clock — mirroring
+// evalZeroOutcome.
+func evalWALSize(size int64) bool { return size > walSizeWarnBytes }
+
+// runZeroOutcomeTripwire runs the startup check immediately, then re-checks every
+// interval until ctx is cancelled (shutdown) — mirroring runUnknownCostShareMonitor's
+// lifecycle, so the goroutine joins cleanly on watcherCtx cancellation with no
+// leak. It owns no state beyond the ticker.
+func runZeroOutcomeTripwire(ctx context.Context, window, interval time.Duration, st windowActivityStore, gauge *metrics.GaugeVec, logger *slog.Logger) {
+	// Startup check first (the acceptance criterion is a startup check AND a
+	// periodic re-check), then the ticker loop.
+	checkZeroOutcome(ctx, window, st, gauge, logger)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkZeroOutcome(ctx, window, st, gauge, logger)
+		}
+	}
+}
+
+// checkZeroOutcome queries the window once and evaluates the tripwire. It sets the
+// gauge (1 tripped / 0 clear) and WARNs when tripped; returns true when tripped.
+// A query error is logged and treated as not-tripped, and it deliberately does NOT
+// touch the gauge — keeping the last known value rather than flapping to 0 on a
+// transient DB error. Split from evalZeroOutcome so the predicate is pure-testable.
+func checkZeroOutcome(ctx context.Context, window time.Duration, st windowActivityStore, gauge *metrics.GaugeVec, logger *slog.Logger) bool {
+	since := time.Now().Add(-window).UTC()
+	act, err := st.WindowActivity(ctx, since)
+	if err != nil {
+		logger.Warn("zero-outcome tripwire: window activity query failed", "err", err)
+		return false
+	}
+	if !evalZeroOutcome(act) {
+		gauge.Set(0)
+		return false
+	}
+	gauge.Set(1)
+	logger.Warn("zero-outcome tripwire: cost accrued but ZERO outcomes recorded in window — team TIER will read ~0; check GitHub webhook delivery, or a trunk-based workflow whose merges don't fire pull_request events (enable outcomes.push_capture / --push-capture to capture direct commits to the default branch, #196)",
+		"window_days", int(window/(24*time.Hour)),
+		"cost_usd", store.MicroToDollars(act.CostMicro))
+	return true
+}
+
+// evalZeroOutcome is the pure tripwire predicate: cost accrued in the window AND no
+// outcome landed there. Split out so the decision is unit-testable without a DB,
+// ticker, gauge, or clock.
+func evalZeroOutcome(a store.WindowActivity) bool {
+	return a.CostMicro > 0 && a.Outcomes == 0
+}
+
+// applyIntFromConfig mirrors applyStringFromConfig for an int-typed flag: it sets
+// the flag from the config file only when the operator did not pass it on the CLI,
+// it did not pick up an env-var default, and the config key was present (non-nil).
+// Honours CLI > env > config > builtin default. A flag with no env-var layer (e.g.
+// zero-outcome-window-days) simply passes an envVarSet that lacks its key, so the
+// env dimension is a no-op for it.
+func applyIntFromConfig(fs *flag.FlagSet, setFlags, envVarSet map[string]bool, name string, v *int) {
+	if setFlags[name] || envVarSet[name] || v == nil {
+		return
+	}
+	if err := fs.Set(name, strconv.Itoa(*v)); err != nil {
+		fmt.Fprintf(os.Stderr, "config: apply %s: %v\n", name, err)
+		os.Exit(1)
+	}
+}
+
+// applyDurationFromConfig mirrors applyIntFromConfig for a duration-typed flag
+// (#85: --auth-failure-window, --auth-lockout). The config value arrives as a
+// STRING (config.AuthConfig documents why: go.yaml.in/yaml/v3 decodes a bare int
+// into time.Duration as nanoseconds and won't decode "15m" at all), so this helper
+// validates it with time.ParseDuration — the SAME parser the CLI flag.Duration uses
+// — before applying, guaranteeing a config-sourced duration is parsed identically to
+// a flag-sourced one. A malformed value (e.g. failure_window: "banana") fails loud at
+// startup naming the config key rather than silently falling back to the default.
+//
+// It deliberately does NOT reject non-positive durations (e.g. "0s"): the >0
+// sanity check is a resolved-value concern the caller enforces AFTER this in the
+// existing MaxFailures>0 validation block, so a config combo like
+// {max_failures: 5, lockout: "0s"} still trips that guard exactly as the flag path
+// would. Honours CLI > env (none here) > config > builtin default.
+func applyDurationFromConfig(fs *flag.FlagSet, setFlags, envVarSet map[string]bool, name string, v *string) {
+	if setFlags[name] || envVarSet[name] || v == nil {
+		return
+	}
+	d, err := parseConfigDuration(name, *v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if err := fs.Set(name, d.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "config: apply %s: %v\n", name, err)
+		os.Exit(1)
+	}
+}
+
+// parseConfigDuration parses a config-sourced duration string for the given flag
+// name (#85). It is the SAME time.ParseDuration the CLI --auth-* duration flags use,
+// so a value from the YAML file is validated byte-identically to one from the command
+// line — the config-vs-flag divergence class is closed by construction. On failure it
+// returns a descriptive error naming the config key and the offending value. Pure and
+// unit-testable; applyDurationFromConfig exits non-zero on the error.
+func parseConfigDuration(name, value string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s: invalid duration %q: %w", name, value, err)
+	}
+	return d, nil
+}
+
+// validateAuthLockout enforces the auth-lockout coherence rule (#36) on the RESOLVED
+// values (#85). A non-zero MaxFailures with a non-positive window or lockout would be
+// a limiter that looks armed but can never trip — auth silently un-throttled — so it
+// is a fail-loud startup error. Because the config wiring feeds the very same flag
+// variables the CLI does, this validates a config-sourced combo identically to a
+// flag-sourced one: an operator cannot smuggle a lockout-disabling value past it via
+// YAML that the flag path would have rejected. Pure and unit-testable; the caller
+// exits non-zero on error.
+func validateAuthLockout(maxFailures int, window, lockout time.Duration) error {
+	if maxFailures > 0 && (window <= 0 || lockout <= 0) {
+		return fmt.Errorf("--auth-failure-window and --auth-lockout must be > 0 when --auth-max-failures > 0")
+	}
+	return nil
+}
+
+// envBool resolves a boolean flag's env-var default (#196). Empty/unset → false;
+// otherwise strconv.ParseBool ("true/false/1/0/t/f"). A malformed value fails loud
+// rather than silently defaulting — a typo'd TIER_PUSH_CAPTURE=yes must not quietly
+// leave capture off (correct-from-start).
+func envBool(name string) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s must be a boolean (true|false|1|0), got %q\n", name, v)
+		os.Exit(1)
+	}
+	return b
+}
+
+// envIntDefault resolves an int-valued flag's env-var default (#185). Empty/unset
+// → fallback; otherwise strconv.Atoi. A malformed value fails loud rather than
+// silently falling back to the default — the same correct-from-start discipline as
+// envBool, so a typo'd TIER_K_ANONYMITY=five can't quietly leave the floor at 5.
+func envIntDefault(name string, fallback int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s must be an integer, got %q\n", name, v)
+		os.Exit(1)
+	}
+	return n
+}
+
+// envDurationDefault resolves a duration flag's env-var default. A malformed
+// value exits non-zero rather than falling back, as envIntDefault does.
+func envDurationDefault(name string, fallback time.Duration) time.Duration {
+	d, err := parseEnvDuration(name, os.Getenv(name), fallback)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	return d
+}
+
+// parseEnvDuration is envDurationDefault's pure core: empty means fallback,
+// otherwise the same time.ParseDuration the flag and the config key use.
+func parseEnvDuration(name, value string, fallback time.Duration) (time.Duration, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a Go duration such as 336h, got %q: %w", name, value, err)
+	}
+	return d, nil
+}
+
+// defaultReportGrace and minReportGrace are the #913 D2 ruling's grace
+// default (14 days) and minimum (1 day).
+const (
+	defaultReportGrace = 14 * 24 * time.Hour
+	minReportGrace     = 24 * time.Hour
+)
+
+// validateReportGrace refuses a --report-grace below minReportGrace.
+func validateReportGrace(d time.Duration) error {
+	if d < minReportGrace {
+		return fmt.Errorf("--report-grace must be >= %s, got %s (#913)", minReportGrace, d)
+	}
+	return nil
+}
+
+// resolveAggregationMode maps the resolved --aggregation string to a
+// scoring.AggregationMode (#185, #270). Empty is a hard error — the setting is
+// REQUIRED with no silent default (see the flag help and the CLAUDE.md compliance
+// note) — and any value other than "team", "division", or "developer" is rejected
+// with the same guidance. Pure and unit-testable (string in, mode-or-error out);
+// the caller exits non-zero on error. It is the inverse of AggregationMode.String.
+func resolveAggregationMode(s string) (scoring.AggregationMode, error) {
+	switch s {
+	case "team":
+		return scoring.AggregationTeam, nil
+	case "division":
+		return scoring.AggregationDivision, nil
+	case "developer":
+		return scoring.AggregationDeveloper, nil
+	case "":
+		return 0, fmt.Errorf("--aggregation is REQUIRED and has no default: set it to 'team' (team-only aggregates) or 'division' (division-only aggregates, one level up) — both k-anonymized and never naming an individual, the safe choice under EU works-council / GDPR Art. 22 co-determination — or 'developer' (named per-developer rows). Provide it via --aggregation, the TIER_AGGREGATION env var, or the config key aggregation (#185, #270)")
+	default:
+		return 0, fmt.Errorf("--aggregation must be 'team', 'division', or 'developer', got %q (#185, #270)", s)
+	}
+}
+
+// validateKAnonymity enforces the k-anonymity hard minimum (#185): a floor below
+// scoring.MinKAnonymity (3) would leave an anonymity set small enough to single
+// out an individual, so it is a fail-loud startup error. Pure and unit-testable;
+// the caller exits non-zero on error.
+func validateKAnonymity(k int) error {
+	if k < scoring.MinKAnonymity {
+		return fmt.Errorf("--k-anonymity must be >= %d, got %d (#185: a smaller cohort floor would defeat k-anonymity)", scoring.MinKAnonymity, k)
+	}
+	return nil
+}
+
+// applyBoolFromConfig sets a bool-typed flag from the config file when the operator
+// did not pass it on the CLI AND it did not pick up its env-var default AND the
+// config key was present (non-nil). Honours CLI > env > config > builtin default,
+// the same precedence as applyStringFromConfig.
+func applyBoolFromConfig(fs *flag.FlagSet, setFlags, envVarSet map[string]bool, name string, v *bool) {
+	if setFlags[name] || envVarSet[name] || v == nil {
+		return
+	}
+	if err := fs.Set(name, strconv.FormatBool(*v)); err != nil {
+		fmt.Fprintf(os.Stderr, "config: apply %s: %v\n", name, err)
+		os.Exit(1)
+	}
+}
+
+// applyStringFromConfig sets a string-typed flag's value from the config
+// file when ALL of:
+//   - the operator did not pass the flag on the command line,
+//   - the flag did not pick up a non-empty value from its env-var default,
+//   - the config file actually had a value for the field (non-nil pointer).
+//
+// Honours the documented precedence: CLI > env > config > builtin default.
+// fs.Set's error is surfaced rather than discarded — string-valued flags
+// can't error today, but a future custom flag.Value with validation would
+// silently swallow misconfiguration without this check.
+func applyStringFromConfig(fs *flag.FlagSet, setFlags, envVarSet map[string]bool, name string, v *string) {
+	if setFlags[name] || envVarSet[name] || v == nil {
+		return
+	}
+	if err := fs.Set(name, *v); err != nil {
+		fmt.Fprintf(os.Stderr, "config: apply %s: %v\n", name, err)
+		os.Exit(1)
+	}
+}
+
+// parseTrustedProxies converts the --trusted-proxy-cidr / http.trusted_proxy_cidrs
+// string list into netip.Prefix values, failing loud on any malformed entry
+// (#131) — a silent skip would leave an operator believing a proxy is trusted
+// when it isn't. An empty input returns (nil, nil): no CIDRs means X-Forwarded-For
+// is never trusted, the default byte-identical to the pre-#131 behavior. A bare
+// IP (the most common mistake) is rejected with a message pointing at the /32
+// or /128 fix rather than the raw netip parse error.
+func parseTrustedProxies(in []string) ([]netip.Prefix, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(in))
+	for _, c := range in {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			// A bare IP parses as an Addr but not a Prefix; nudge toward the fix.
+			if _, aerr := netip.ParseAddr(c); aerr == nil {
+				return nil, fmt.Errorf("--trusted-proxy-cidr %q: missing prefix length; use %s/32 (IPv4) or %s/128 (IPv6) for a single host", c, c, c)
+			}
+			return nil, fmt.Errorf("--trusted-proxy-cidr %q: %w", c, err)
+		}
+		// Reject IPv4-mapped-IPv6 prefixes (e.g. ::ffff:10.0.0.0/104): peers and
+		// XFF hops are Unmap()'d to native form before the containment check, so
+		// a mapped prefix would silently never match — a "trusted" proxy that is
+		// never trusted. Fail loud toward the native form rather than accept a
+		// CIDR that can't fire (#131).
+		if p.Addr().Is4In6() {
+			return nil, fmt.Errorf("--trusted-proxy-cidr %q: IPv4-mapped IPv6 CIDR never matches; write the native IPv4 form (e.g. 10.0.0.0/8)", c)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// resolveWatchRepos validates each --watch-repo argument: resolves to
+// absolute, checks the directory exists and contains a .git entry. Fail-fast
+// at startup beats a silent watcher that ingests nothing because every repo
+// path was a typo.
+//
+// Accepts both .git as a directory (normal clone) and .git as a regular file
+// (git worktree, submodule), since the watcher cares only about the working
+// tree's existence, not the gitdir layout.
+func resolveWatchRepos(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, r := range in {
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			return nil, fmt.Errorf("--watch-repo %q: %w", r, err)
+		}
+		if _, err := os.Stat(filepath.Join(abs, ".git")); err != nil {
+			return nil, fmt.Errorf("--watch-repo %q: not a git repository (.git not found)", r)
+		}
+		out = append(out, abs)
+	}
+	return out, nil
+}
+
+// validateBind enforces the fail-closed exposure rule (#59): binding beyond
+// loopback without an API token would expose per-developer spend, the score
+// ranking, and an open relay to the upstream providers — so it is a startup
+// error, not a warning. Hostnames other than "localhost" are refused in
+// tokenless mode: what they resolve to can't be known statically, and
+// fail-closed beats guessing. "localhost" itself is trusted by convention —
+// an /etc/hosts that points it somewhere routable can defeat the check, and
+// we accept that deliberately rather than break the most common dev
+// invocation. Zoned IPv6 literals ([::1%lo0]) are refused, also
+// deliberately: net.ParseIP rejects zones and the safe direction is to ask
+// the operator for the plain form.
+//
+// This makes tokenless mode safe BY DEFAULT, not unconditionally: an SSH
+// tunnel or container port-map (docker run -p 0.0.0.0:8080:8080) can still
+// re-expose a loopback listener from outside the process.
+//
+// syntheticDemo (#476) is the ONE exemption: `tierd demo` serves an invented
+// dataset in --read-only mode (every write/ingest/admin route is structurally
+// absent), so a non-loopback bind exposes nothing real. That bit is set only by
+// runDemo and is unreachable from any serve flag or env var, so a `serve` over
+// REAL data on a non-loopback bind without a token is still refused — the whole
+// point of routing the exemption through an in-code signal rather than a flag.
+func validateBind(addr, apiToken string, syntheticDemo bool) error {
+	if apiToken != "" || syntheticDemo {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid --addr %q: %v", addr, err)
+	}
+	if isLoopbackHost(host) {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind %q without an API token: a non-loopback listener would expose unauthenticated spend data and an open provider relay; set --api-token (or TIER_API_TOKEN) or bind to 127.0.0.1", addr)
+}
+
+// checkDistinctTokens refuses any two equal, non-empty tokens among the write,
+// read and metrics tokens (#190, #944): an equal pair would classify as one
+// scope and silently grant the other token's routes.
+func checkDistinctTokens(apiToken, readToken, metricsToken string) error {
+	if err := checkReadToken(apiToken, readToken); err != nil {
+		return err
+	}
+	if metricsToken == "" {
+		return nil
+	}
+	if metricsToken == apiToken {
+		return fmt.Errorf("--metrics-token must differ from --api-token: a metrics token equal to the write token would grant write access (#944)")
+	}
+	if metricsToken == readToken {
+		return fmt.Errorf("--metrics-token must differ from --read-token: the read token must not scrape /metrics in team or division mode (#944)")
+	}
+	return nil
+}
+
+// checkReadToken enforces the read/write token distinctness rule (#190): a
+// read-only viewer token equal to the write api token would be classified as
+// the WRITE scope (api.Handler.classify prefers write on a tie) and silently
+// grant write access, defeating the least-privilege purpose of the read scope.
+// Both empty, only one set, or two distinct non-empty values are all fine —
+// only an equal, non-empty pair is refused. Pure and unit-testable; called
+// after @file/env/config resolution so it sees the effective secrets.
+func checkReadToken(apiToken, readToken string) error {
+	if readToken == "" || apiToken == "" {
+		return nil
+	}
+	if readToken == apiToken {
+		return fmt.Errorf("--read-token must differ from --api-token: a read token equal to the write token would grant write access, defeating the read-only scope (#190)")
+	}
+	return nil
+}
+
+// secretEnvFallback gives the secret flag `name` the value of envVar when the
+// flag was not given on the command line; call it after fs.Parse. A secret
+// flag is registered with an EMPTY default because flag.PrintDefaults prints a
+// non-empty string default into --help and parse-error usage, so a default
+// read from the environment would print the secret (#1004, #237 R1). A flag
+// given on the command line wins even when given empty.
+func secretEnvFallback(fs *flag.FlagSet, p *string, name, envVar string) {
+	given := false
+	fs.Visit(func(f *flag.Flag) { given = given || f.Name == name })
+	if !given {
+		*p = os.Getenv(envVar)
+	}
+}
+
+// resolveSecretFlag supports `@/path/to/file` indirection for secret-valued
+// flags — --api-token, --read-token, --metrics-token, and --webhook-secret (#37). Passing a secret as a literal
+// flag value leaks it to `ps aux`, shell history, and process-accounting logs on
+// a multi-user host. A value beginning with '@' is instead read from the file at
+// the remaining path (a single trailing newline is trimmed), so the secret never
+// appears on the command line. Any other value is returned unchanged, preserving
+// the env-var default and the literal-value path for laptop testing. A literal
+// secret that genuinely begins with '@' is unsupported — API tokens and webhook
+// secrets are base64/hex and never start with '@'; use the env var for that edge.
+//
+// setting names the flag or config key in the loose-permissions WARN (see
+// warnLooseSecretFile); it is a caller constant, never the secret.
+func resolveSecretFlag(setting, raw string) (string, error) {
+	if !strings.HasPrefix(raw, "@") {
+		return raw, nil
+	}
+	path := raw[1:]
+	if path == "" {
+		return "", fmt.Errorf("empty file path after '@'")
+	}
+	// Reject non-regular files up front so `@/dev/zero` (would read forever) or
+	// `@/some/dir` fails fast with a clear message instead of hanging or
+	// surfacing a confusing read error.
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat secret file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("secret file %q is not a regular file", path)
+	}
+	warnLooseSecretFile(setting, path, info.Mode().Perm())
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read secret file %q: %w", path, err)
+	}
+	// Trim trailing CR/LF — `echo secret > file` or an editor appends one (and
+	// TrimRight collapses an accidental run of them). Other trailing whitespace
+	// is preserved in case it is genuinely part of the secret.
+	secret := strings.TrimRight(string(b), "\r\n")
+	// The '@' prefix is unambiguous "a secret lives in this file" intent, so an
+	// empty result is a misconfiguration (truncated mount, not-yet-populated
+	// secret), NOT a request to disable auth. Fail closed — an empty token would
+	// silently turn off the Bearer gate and relax the non-loopback bind check.
+	if secret == "" {
+		return "", fmt.Errorf("secret file %q is empty", path)
+	}
+	return secret, nil
+}
+
+// looseSecretFileWarned dedupes warnLooseSecretFile per path for the process
+// lifetime, so two settings naming one file produce one WARN.
+var looseSecretFileWarned sync.Map
+
+// secretFileIsLoose reports whether a secret file's permission bits grant any
+// group or other access. Always false on Windows, where Unix mode bits are
+// synthesized from the read-only attribute and say nothing about who can read.
+func secretFileIsLoose(goos string, perm os.FileMode) bool {
+	return goos != "windows" && perm&0o077 != 0
+}
+
+// warnLooseSecretFile emits one WARN when a secret file is readable (or
+// writable) beyond its owner (#920). It never refuses: Docker and Kubernetes
+// secret mounts are commonly 0444/0644 and must keep working. Logs the setting
+// and the mode only: never the file's contents, and never the path, which comes
+// from a secret flag or api_key config value (setting identifies the file).
+func warnLooseSecretFile(setting, path string, perm os.FileMode) {
+	if !secretFileIsLoose(runtime.GOOS, perm) {
+		return
+	}
+	if _, seen := looseSecretFileWarned.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	slog.Warn("secret file is accessible to group or other users; restrict it to its owner",
+		"setting", setting,
+		"mode", fmt.Sprintf("%04o", uint32(perm)),
+		"remedy", looseSecretFileRemedy)
+}
+
+// looseSecretFileRemedy is fixed text, never built from the path: a chmod is
+// wrong for a secret mount tierd reads as another uid, and refused on a
+// read-only mount, so it names both fixes and leaves the file to "setting".
+const looseSecretFileRemedy = "restrict the file to the user tierd runs as: chmod 600 if that user owns it; " +
+	"for a container or Kubernetes secret mount, narrow the mount's file mode (mode/defaultMode) only as far as " +
+	"tierd's user can still read it; a WARN on a mount tierd reads as another user is expected"
+
+// startedPoller is one org usage poller serve starts: the price-table provider
+// whose usage it counts and the token_events source its rows carry.
+type startedPoller struct{ provider, source string }
+
+// startedPollers names the org usage pollers serve starts (#854). It tests
+// exactly what the poller start blocks test — the resolved settings being
+// non-nil — so a config block that is present but invalid (serve exits) or
+// neutralized by --read-only never counts as a running poller.
+func startedPollers(admin *anthropicAdminSettings, oai *openAIUsageSettings) []startedPoller {
+	var out []startedPoller
+	if admin != nil {
+		out = append(out, startedPoller{anthropicadmin.Provider, collector.SourceAnthropicAdmin})
+	}
+	if oai != nil {
+		out = append(out, startedPoller{openaiusage.Provider, collector.SourceOpenAIUsage})
+	}
+	return out
+}
+
+// startedPollerProviders is startedPollers' provider tags, for
+// api.WithPolledProviders.
+func startedPollerProviders(admin *anthropicAdminSettings, oai *openAIUsageSettings) []string {
+	var out []string
+	for _, p := range startedPollers(admin, oai) {
+		out = append(out, p.provider)
+	}
+	return out
+}
+
+// undeclaredManualCostCounter is the store read warnUndeclaredManualCosts needs.
+type undeclaredManualCostCounter interface {
+	UndeclaredManualCostsOnPolledDays(ctx context.Context, provider, pollerSource string) (int, int64, error)
+}
+
+// undeclaredManualCostsWarning is the startup WARN for #854's pre-upgrade rows.
+const undeclaredManualCostsWarning = "undeclared manual rows that may be counted twice: POST /api/v1/costs rows with no billed_to, for this provider, " +
+	"on UTC days its org usage poller covered (the day match is approximate: a manual row's time is when it was posted, not its usage day)"
+
+// warnUndeclaredManualCosts logs one WARN per started poller whose provider has
+// undeclared manual rows on days that poller covered (#854), with their count and
+// dollar sum and the shared remedy. Nothing is logged for a count of 0.
+func warnUndeclaredManualCosts(ctx context.Context, st undeclaredManualCostCounter, logger *slog.Logger, pollers []startedPoller) {
+	for _, p := range pollers {
+		n, micro, err := st.UndeclaredManualCostsOnPolledDays(ctx, p.provider, p.source)
+		if err != nil {
+			logger.Error("could not count undeclared manual /costs rows", "provider", p.provider, "err", err)
+			continue
+		}
+		if n == 0 {
+			continue
+		}
+		logger.Warn(undeclaredManualCostsWarning,
+			"provider", p.provider, "rows", n, "cost_usd", store.MicroToDollars(micro),
+			"remedy", api.PolledProviderOverlapRemedy)
+	}
+}
+
+// anthropicAdminSettings is the resolved, validated Anthropic Admin poller config
+// (#138): the Admin key already de-referenced from any @file, the org, and a
+// parsed poll interval. nil means the poller is disabled.
+type anthropicAdminSettings struct {
+	apiKey   string
+	org      string
+	interval time.Duration
+}
+
+// minAnthropicAdminInterval is the config floor for poll_interval. Below this the
+// org poll adds provider load without materially fresher settled-day data
+// (settlement lags a full day regardless of poll cadence).
+const minAnthropicAdminInterval = 5 * time.Minute
+
+// resolveAnthropicAdminConfig validates the collectors.anthropic_admin block and
+// resolves its secret. Returns (nil, nil) when the block is absent (disabled). A
+// present block MUST carry a non-empty api_key (after @file resolution) and org;
+// poll_interval defaults to 1h and must parse to >= 5m. Any violation is a
+// fail-fast startup error (correct-from-start: a misconfigured poller is louder
+// than a silently disabled one). The resolved key is never logged.
+func resolveAnthropicAdminConfig(c *config.AnthropicAdminConfig) (*anthropicAdminSettings, error) {
+	if c == nil {
+		return nil, nil // block absent → disabled
+	}
+	rawKey := ""
+	if c.APIKey != nil {
+		rawKey = *c.APIKey
+	}
+	key, err := resolveSecretFlag("collectors.anthropic_admin.api_key", rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("collectors.anthropic_admin.api_key: %w", err)
+	}
+	if key == "" {
+		return nil, fmt.Errorf("collectors.anthropic_admin: api_key is required when the block is present")
+	}
+	org := ""
+	if c.Org != nil {
+		org = *c.Org
+	}
+	if org == "" {
+		return nil, fmt.Errorf("collectors.anthropic_admin: org is required when the block is present")
+	}
+	interval := anthropicadmin.DefaultPollInterval
+	if c.PollInterval != nil && *c.PollInterval != "" {
+		d, err := time.ParseDuration(*c.PollInterval)
+		if err != nil {
+			return nil, fmt.Errorf("collectors.anthropic_admin.poll_interval: %w", err)
+		}
+		interval = d
+	}
+	if interval < minAnthropicAdminInterval {
+		return nil, fmt.Errorf("collectors.anthropic_admin.poll_interval must be >= %s, got %s", minAnthropicAdminInterval, interval)
+	}
+	return &anthropicAdminSettings{apiKey: key, org: org, interval: interval}, nil
+}
+
+// openAIUsageSettings is the resolved, validated OpenAI Usage/Costs poller
+// config (#139) — the structural twin of anthropicAdminSettings. nil means the
+// poller is disabled.
+type openAIUsageSettings struct {
+	apiKey   string
+	org      string
+	interval time.Duration
+}
+
+// minOpenAIUsageInterval is the config floor for poll_interval, same rationale
+// as minAnthropicAdminInterval: below this the org poll adds provider load
+// without materially fresher settled-day data (settlement lags a full day
+// regardless of poll cadence).
+const minOpenAIUsageInterval = 5 * time.Minute
+
+// resolveOpenAIUsageConfig validates the collectors.openai_usage block and
+// resolves its secret. Mirrors resolveAnthropicAdminConfig exactly: (nil, nil)
+// when the block is absent (disabled); a present block MUST carry a non-empty
+// api_key (after @file resolution) and org; poll_interval defaults to 1h and
+// must parse to >= 5m. Any violation is a fail-fast startup error
+// (correct-from-start: a misconfigured poller is louder than a silently
+// disabled one). The resolved key is never logged.
+func resolveOpenAIUsageConfig(c *config.OpenAIUsageConfig) (*openAIUsageSettings, error) {
+	if c == nil {
+		return nil, nil // block absent → disabled
+	}
+	rawKey := ""
+	if c.APIKey != nil {
+		rawKey = *c.APIKey
+	}
+	key, err := resolveSecretFlag("collectors.openai_usage.api_key", rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("collectors.openai_usage.api_key: %w", err)
+	}
+	if key == "" {
+		return nil, fmt.Errorf("collectors.openai_usage: api_key is required when the block is present")
+	}
+	org := ""
+	if c.Org != nil {
+		org = *c.Org
+	}
+	if org == "" {
+		return nil, fmt.Errorf("collectors.openai_usage: org is required when the block is present")
+	}
+	interval := openaiusage.DefaultPollInterval
+	if c.PollInterval != nil && *c.PollInterval != "" {
+		d, err := time.ParseDuration(*c.PollInterval)
+		if err != nil {
+			return nil, fmt.Errorf("collectors.openai_usage.poll_interval: %w", err)
+		}
+		interval = d
+	}
+	if interval < minOpenAIUsageInterval {
+		return nil, fmt.Errorf("collectors.openai_usage.poll_interval must be >= %s, got %s", minOpenAIUsageInterval, interval)
+	}
+	return &openAIUsageSettings{apiKey: key, org: org, interval: interval}, nil
+}
+
+// codexRolloutSettings is the resolved, validated Codex rollout-log collector
+// config (#464). nil means the collector is disabled.
+type codexRolloutSettings struct {
+	sessionsDir string // "" → the collector's ~/.codex/sessions default
+	interval    time.Duration
+}
+
+// resolveCodexRolloutConfig validates the collectors.codex_rollout block and the
+// --codex-rollout flag into one decision.
+//
+// Enablement is an OR: either the flag or the presence of the config block turns
+// the collector on. It differs from the two org pollers on purpose — those need a
+// credential, so a bare flag could not enable them, while this one reads local
+// files that need no secret. The block exists only to override the defaults, so
+// requiring it in order to use the flag would be ceremony with no safety value.
+//
+// A present-but-invalid block is a fail-fast startup error (correct-from-start: a
+// misconfigured collector must be louder than a silently disabled one), even when
+// the flag alone would have enabled it — an operator who wrote scan_interval: "2s"
+// needs to be told, not quietly given 5m.
+func resolveCodexRolloutConfig(c *config.CodexRolloutConfig, flagEnabled bool) (*codexRolloutSettings, error) {
+	if c == nil && !flagEnabled {
+		return nil, nil // neither flag nor block → disabled
+	}
+	s := &codexRolloutSettings{interval: codexrollout.DefaultScanInterval}
+	if c == nil {
+		return s, nil
+	}
+	if c.SessionsDir != nil {
+		s.sessionsDir = strings.TrimSpace(*c.SessionsDir)
+	}
+	if c.ScanInterval != nil && *c.ScanInterval != "" {
+		d, err := time.ParseDuration(*c.ScanInterval)
+		if err != nil {
+			return nil, fmt.Errorf("collectors.codex_rollout.scan_interval: %w", err)
+		}
+		s.interval = d
+	}
+	if s.interval < codexrollout.MinScanInterval {
+		return nil, fmt.Errorf("collectors.codex_rollout.scan_interval must be >= %s, got %s", codexrollout.MinScanInterval, s.interval)
+	}
+	return s, nil
+}
+
+// opencodeSettings is the resolved, validated Opencode collector config (#719).
+// nil means the collector is disabled.
+type opencodeSettingsT struct {
+	dbPath   string // "" → the collector's ~/.local/share/opencode/opencode.db default
+	interval time.Duration
+}
+
+// resolveOpencodeConfig validates the collectors.opencode block and the
+// --opencode flag into one decision. Structurally identical to
+// resolveCodexRolloutConfig, and for the same reasons: enablement is an OR
+// (neither needs a credential), and a present-but-invalid block is a fail-fast
+// startup error even when the flag alone would have enabled it.
+func resolveOpencodeConfig(c *config.OpencodeConfig, flagEnabled bool) (*opencodeSettingsT, error) {
+	if c == nil && !flagEnabled {
+		return nil, nil // neither flag nor block → disabled
+	}
+	s := &opencodeSettingsT{interval: opencode.DefaultScanInterval}
+	if c == nil {
+		return s, nil
+	}
+	if c.DBPath != nil {
+		s.dbPath = strings.TrimSpace(*c.DBPath)
+	}
+	if c.ScanInterval != nil && *c.ScanInterval != "" {
+		d, err := time.ParseDuration(*c.ScanInterval)
+		if err != nil {
+			return nil, fmt.Errorf("collectors.opencode.scan_interval: %w", err)
+		}
+		s.interval = d
+	}
+	if s.interval < opencode.MinScanInterval {
+		return nil, fmt.Errorf("collectors.opencode.scan_interval must be >= %s, got %s", opencode.MinScanInterval, s.interval)
+	}
+	return s, nil
+}
+
+// museSettingsT is the resolved, validated Muse collector config (#895). nil
+// means the collector is disabled.
+type museSettingsT struct {
+	home     string // "" → the collector's ~/.local/share/muse default
+	interval time.Duration
+}
+
+// resolveMuseConfig validates the collectors.muse block and the --muse flag into
+// one decision, with resolveOpencodeConfig's rules: enablement is an OR, and a
+// present-but-invalid block is a fail-fast startup error.
+func resolveMuseConfig(c *config.MuseConfig, flagEnabled bool) (*museSettingsT, error) {
+	if c == nil && !flagEnabled {
+		return nil, nil
+	}
+	s := &museSettingsT{interval: muse.DefaultScanInterval}
+	if c == nil {
+		return s, nil
+	}
+	if c.Home != nil {
+		s.home = strings.TrimSpace(*c.Home)
+	}
+	if c.ScanInterval != nil && *c.ScanInterval != "" {
+		d, err := time.ParseDuration(*c.ScanInterval)
+		if err != nil {
+			return nil, fmt.Errorf("collectors.muse.scan_interval: %w", err)
+		}
+		s.interval = d
+	}
+	if s.interval < muse.MinScanInterval {
+		return nil, fmt.Errorf("collectors.muse.scan_interval must be >= %s, got %s", muse.MinScanInterval, s.interval)
+	}
+	return s, nil
+}
+
+// parseProxyTarget parses a URL string for use as a proxy target.
+// Returns nil if the URL is empty, malformed, or missing a valid http/https scheme.
+func parseProxyTarget(rawURL string, logger *slog.Logger) *url.URL {
+	if rawURL == "" {
+		return nil
+	}
+	t, err := url.Parse(rawURL)
+	if err != nil || t.Host == "" || (t.Scheme != "http" && t.Scheme != "https") {
+		logger.Warn("invalid proxy target URL, skipping", "url", rawURL)
+		return nil
+	}
+	return t
+}
+
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "tier.db"
+	}
+	return filepath.Join(home, ".tier", "tier.db")
+}

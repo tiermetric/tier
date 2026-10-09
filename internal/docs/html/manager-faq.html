@@ -1,0 +1,828 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIER for engineering managers: common questions — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="tier-for-engineering-managers-common-questions">TIER for engineering managers: common questions</h1>
+<p>TIER (Token Impact &amp; Efficiency Ratio) measures how much merged work a team gets
+for its AI spend. This page answers the questions engineering managers ask about
+it, with the command for each answer. It assumes a TIER server is already
+running; installing one, and getting spend and merged work into it, are covered
+in the project <a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">README</a>. For what the number itself means, start
+with <a href="understanding-tier.html" rel="nofollow">understanding-tier.md</a>.</p>
+<h2 id="what-do-i-need-before-i-run-these-commands">What do I need before I run these commands?</h2>
+<p>Three values. Ask the person who runs your TIER server for them.</p>
+<ul>
+<li>
+<p><strong>The server address.</strong> The web address your TIER server answers on, for
+example <code>https://tier.example.com</code>. If TIER runs on your own laptop, it is
+<code>http://127.0.0.1:8080</code>. Open that address in a browser to see the dashboard.
+Set it once in each terminal window you use:</p>
+<pre><code>export TIER_HOST=https://tier.example.com   # your server&#39;s address, no trailing slash
+</code></pre>
+</li>
+<li>
+<p><strong>The admin token.</strong> A long random password that the person who runs the
+server chose when they started it (the <code>--api-token</code> flag or the
+<code>TIER_API_TOKEN</code> environment variable). You need it to load teams and identity
+mappings and to read those lists back. It also works for everything the
+read-only token does.</p>
+</li>
+<li>
+<p><strong>The read-only token.</strong> An optional second password (<code>--read-token</code> or
+<code>TIER_READ_TOKEN</code>). It can read scores and open the dashboard; in <code>developer</code>
+mode it can also download the raw records behind the scores (see the next
+question). The server refuses it for every admin request, including loading
+teams and reading the team list back. If your server has no read-only token,
+use the admin token wherever this page reads <code>~/.tier/read-token</code>.</p>
+</li>
+</ul>
+<p>Save each token in a file that only you can read. These commands work in bash
+or zsh. The <code>read</code> line asks for the token without showing it on screen or
+saving it in your shell history: it waits with nothing on screen while you
+paste, then you press Enter:</p>
+<pre><code>mkdir -p ~/.tier &amp;&amp; chmod 700 ~/.tier
+( umask 077; read -rs t; printf &#39;%s\n&#39; &#34;$t&#34; &gt; ~/.tier/api-token )
+chmod 600 ~/.tier/api-token
+</code></pre>
+<p>Do the same for the read-only token, saving it as <code>~/.tier/read-token</code>.</p>
+<p>On the dashboard, if the server needs a token, a password box appears next to
+the Refresh button. Paste the read-only token there and click Refresh. The page
+keeps it until you close the browser tab.</p>
+<p>The examples pass the token to <code>curl</code> through a pipe (<code>printf … | curl -H @-</code>)
+rather than on the command line, because on most systems anyone else logged in
+to the same machine can see a program&#39;s command line in the list of running
+programs (<code>ps</code>). <code>printf</code> is built into bash and zsh, so it never shows up in
+that list. Only a server listening on this machine alone (<code>127.0.0.1</code>) can run
+with sign-in turned off; <code>tierd serve</code> refuses to start on any other address
+without an admin token. If a request with no token works instead of failing
+with HTTP 401, sign-in is off: drop the <code>printf</code> line and the <code>-H @-</code>.</p>
+<p>Every <code>curl</code> here fails on an HTTP error (<code>-f</code>, or <code>--fail-with-body</code> where
+the error text matters). When the server answers with an error, such as 401
+for a wrong token or 400 for a bad request, curl prints
+<code>The requested URL returned error: 401</code> and passes nothing on to <code>jq</code>, so an
+error cannot be read as an empty answer. <code>-f</code> also drops the server&#39;s own
+explanation of the error. To see it, keep the <code>printf</code> line, run the <code>curl</code>
+part with <code>-sS --fail-with-body</code> in place of <code>-fsS</code> (curl 7.76 or later), and
+leave off the <code>| jq …</code> stage: <code>jq</code> would swallow the explanation, and a wrong
+token can then print something that looks like a real, empty answer.</p>
+<p>The examples also use <code>jq</code>, a free tool that picks fields out of JSON
+(<code>brew install jq</code> on a Mac, <code>sudo apt install jq</code> on Debian or Ubuntu). The
+full setup is in the project README under
+<a href="https://github.com/tiermetric/tier/blob/main/README.md#what-you-need-before-you-start" rel="nofollow">What you need before you start</a>.</p>
+<h2 id="can-i-see-my-developers-names">Can I see my developers&#39; names?</h2>
+<p>That depends on one setting, chosen by whoever starts the server.
+<code>tierd serve</code>, the command that starts TIER&#39;s server, will not start without
+<code>--aggregation</code>, and there is no default
+(<a href="quickstart.html#5-the-full-tier-score" rel="nofollow">quickstart.md</a>):</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>What reports show</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>developer</code></td>
+<td>Every developer, one row each, on the dashboard and in <code>GET /api/v1/scores</code>.</td>
+</tr>
+<tr>
+<td><code>team</code></td>
+<td>Teams only. No individual appears in any report.</td>
+</tr>
+<tr>
+<td><code>division</code></td>
+<td>Divisions only, one level above teams. No individual appears.</td>
+</tr>
+</tbody>
+</table>
+<p>In <code>developer</code> mode, anyone with the read-only token sees every developer&#39;s
+row, and that includes you as their manager. The same token can also download
+the raw records behind the rows (<code>GET /api/v1/events</code>): each recorded AI
+message&#39;s time, model, repository, issue and session id, per developer. A token
+cannot be limited to one team: one server holds one set of data for everyone it
+records. The manager
+and the developer see the same page. Use it to coach practice, never to
+appraise: TIER is not for pay, promotion, performance reviews, improvement plans
+or discipline. TIER cannot enforce that; your policy or works agreement (a
+written agreement with your works council or other employee representatives)
+has to (see <a href="#how-do-i-use-this-to-help-my-team-get-better" rel="nofollow">How do I use this to help my team get better?</a>).</p>
+<p><strong>Planned, not yet built.</strong> Developer mode will stop relying on one
+shared read token. Each developer&#39;s page will open only to that developer, their
+declared manager and, if the operator turns it on, a skip-level manager, and the
+developer will be able to read the log of who viewed it. The shared token will
+keep only the pages with no names on them. Per-developer rows will be kept for
+90 days by default, and an operator will be able to raise that to at most 365
+days, which covers an annual coaching cycle. Company history older than that
+will live in a roll-up with no names in it. Each developer&#39;s page will show the
+levers (the cost figures a team can change, listed in the last section of this
+page) first and the TIER number last. None of this exists today, and the design
+may change before it ships. Today TIER deletes no score data automatically:
+per-developer spend and merged-work rows stay until an admin erases that person.
+The one exception is raw GitHub webhook bodies (if the webhook is on), which can
+include a contributor&#39;s name or email address. They are deleted automatically
+once they are about 90 days old, or sooner if more than 50,000 are stored, and
+an erase does not rewrite them
+(<a href="privacy.html#data-subject-rights-access-and-erasure-gdpr-art-15--art-17" rel="nofollow">privacy.md</a>).</p>
+<p>In <code>team</code> and <code>division</code> mode there is a minimum group size, called <em>k</em>: the
+fewest people a group must have before TIER shows it by name. <em>k</em> is set with
+<code>--k-anonymity</code>; the default is 5 and the server refuses anything below 3.
+TIER counts people, not identifiers (#856). An identifier with spend or merged
+work in the window you asked for counts toward <em>k</em> only if all of these hold:</p>
+<ul>
+<li>it is on the roster (loaded with <code>tierd hierarchy import</code> or
+<code>PUT /api/v1/org_hierarchy</code>) at some point during the window, after aliases
+are joined (next section), so two identifiers of one person count once;</li>
+<li>it is not a bot: GitHub&#39;s account type <code>Bot</code> on a pull request the webhook
+recorded in the window, a login ending in <code>[bot]</code>, or a known bot login such
+as <code>Copilot</code> or <code>dependabot</code>;</li>
+<li>it has <em>captured</em> activity in the window: spend a collector or the proxy
+recorded, or merged work from a pull request. Spend entered by hand through
+<code>POST /api/v1/costs</code> and merged work captured only from direct pushes do not
+count on their own.</li>
+</ul>
+<p>Spend recorded under <code>unattributed</code> is left out of every figure (see below).
+Any other identifier that does not count keeps its spend and merged work in
+its group&#39;s figures; it just does not make the group bigger. On top of that, each figure needs its own <em>k</em>: a group&#39;s
+cost is shown only if at least <em>k</em> counted people in it have captured spend
+(hand-entered spend does not count here either), its merged-work points only if
+at least <em>k</em> have merged work, and its paid spend (<code>actual_paid_usd</code>) only if at
+least <em>k</em> have paid spend. So five people where only one has spend, or only one
+has an invoice, is not shown. <code>tier</code> and <code>cost_per_point</code> need cost and points;
+<code>spend_leverage</code> needs cost and paid spend. <code>coverage_pct</code> splits cost into
+per-request and daily or hand-entered parts, and each part that is not zero
+needs <em>k</em> counted people with captured spend behind it.</p>
+<p>This means more groups are withheld than before #856. The response says how many
+identifiers did not count, and why, in <code>data_quality.uncounted_active_ids</code>
+(<code>manual_only</code>, <code>push_only</code>, <code>not_on_roster</code>, <code>bot</code>), once for the whole window.
+To bring those people back into the count, capture their work through a
+collector or the proxy and put them on the roster. This protects what someone
+holding the read-only token can see. Anyone holding the write token can still
+edit the roster and aliases, so treat that token as an admin credential (#908).
+A group smaller than <em>k</em> is folded into a row called <code>other</code>. That row also holds
+everyone with no team (in <code>division</code> mode, no division) and any team you named
+<code>other</code>, and it does not say which is which. If <code>other</code> is itself smaller than
+<em>k</em>, TIER withholds the whole response: every team row, <code>other</code> and the company
+<code>total</code>. It says so in <code>data_quality.kanon_suppressed</code>, an object that gives how
+many counted people were withheld and the <em>k</em> in force. A group can be withheld
+with <em>k</em> or more people in it when one of its figures is carried by fewer than <em>k</em>
+of them. The named rows go too because another view that folds one of those teams
+into its own <code>other</code> row (a period comparison does) would let anyone subtract the
+team&#39;s row and read the hidden group&#39;s numbers. In these modes each report is
+one calendar month (<code>?period=YYYY-MM</code>), and whether a month&#39;s rows are shown is
+decided once, when the month is sealed.
+They are shown if <code>other</code> then holds at least <em>k</em> counted people (people with
+no team, or in a team too small for its own row) and every figure it shows is
+carried by at least <em>k</em> of them, or if no identifier in it has any spend or
+merged work. Until it is sealed the month is not served at all (a <code>404</code>,
+carrying <code>sealable_at</code> when the month will become sealable); once sealed it
+never changes, so a withheld month stays
+withheld, and there is no wider window to ask for (#913; see the
+<a href="api-compatibility.html#api-changelog" rel="nofollow">API changelog</a>). Putting the people in
+<code>other</code> on teams does not help unless each of those teams reaches <em>k</em> on its
+own.</p>
+<p>In these modes the response shows <strong>one breakdown</strong> of the window (#864): the
+team (or division) rows and the company <code>total</code>. It leaves out the per-work-type
+<code>work_types</code> view, the spend breakdown <code>cost_composition</code> (by model, by token
+type, linked and unlinked), and the attribution figures <code>unattributed_buckets</code>
+and <code>exploratory_cost_share</code>, and it refuses <code>?work_type=</code>. It does not show
+<code>attributed_cost_share</code>: beside the team rows and the total it could reveal one
+person&#39;s spend. Spend TIER cannot tie to any person (an org-usage poller&#39;s
+remainder, proxy requests with no developer header) is left out of every figure
+in these modes; see <code>excludes_unattributed_spend</code> in
+<a href="api-compatibility.html#get-apiv1scores" rel="nofollow">api-compatibility.md</a>. A second breakdown can be subtracted from the first: team totals
+minus work-type totals recovered a 3-person group&#39;s spend in testing, and a model
+only one developer used showed that developer&#39;s spend in the model breakdown.
+Issue #937 tracks an audit that would let those views come back. The per-developer endpoint
+<code>GET /api/v1/scores/{developer}</code> answers not found (HTTP 404) for every name in
+these modes; in <code>developer</code> mode it returns that one developer&#39;s score.</p>
+<p>In <code>developer</code> mode the &#34;name&#34; is an identifier, not a person&#39;s real name. On
+the spend side it is the developer&#39;s OS username (what <code>whoami</code> prints on their
+machine), unless they send spend with <code>tierd ship --developer &lt;name&gt;</code>. Two
+people with the same username on different machines would share one
+identifier, so give one of them a different <code>--developer</code>. On the merged-work
+side it is the GitHub login of the pull request&#39;s author. When those differ,
+map them once (next section) so each person appears as one row.</p>
+<p>To see which mode a server is running:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+  curl -fsS -H @- &#34;$TIER_HOST/api/v1/scores&#34; |
+  jq &#39;{error, aggregation, developers: (.developers | length)}&#39;
+</code></pre>
+<p>An <code>error</code> that is not <code>null</code> means the request failed; read it before the
+other two fields. <code>&#34;aggregation&#34;: null</code> means developer mode, because a team or division server
+always fills that field in. In developer mode, a <code>developers</code> count of 0 means
+the server has no data for the last 90 days yet. <code>&#34;team&#34;</code> or <code>&#34;division&#34;</code> means
+names are off; in those modes the <code>developers</code> count is always 0, because no
+individual rows are sent. If the command prints nothing, read curl&#39;s error
+line: the request failed. On a <code>team</code> or <code>division</code> server a 404 there means no
+month is sealed yet (or sealing is not armed); run it with <code>--fail-with-body</code> in
+place of <code>-f</code> (<code>curl -sS --fail-with-body</code>) and <code>jq</code> prints the 404&#39;s <code>error</code>
+and <code>aggregation</code>.</p>
+<p>Team mode exists for organisations where employee-representation rules, such as
+works councils in Germany, France and the Netherlands, or data-protection law
+such as GDPR, may restrict measuring named employees.
+<a href="legal-and-privacy.html#deployment-decision-table-team-only-vs-per-developer-by-jurisdiction" rel="nofollow">legal-and-privacy.md</a>
+sets out that reasoning, a table of recommended modes by country, and the
+consultation steps before go-live. It is not legal advice, and neither is this
+page. Two things to know before you decide:</p>
+<ul>
+<li>Team mode removes names from reports. The database still stores
+per-developer identifiers, and admin requests such as
+<code>GET /api/v1/org_hierarchy</code> still list them.</li>
+<li>Changing modes means restarting the server with a different flag. It changes
+who is named in every report from then on, so we recommend clearing it with
+the people it covers first; the consultation steps are in the same document.</li>
+</ul>
+<h2 id="can-i-keep-names-and-teams-in-a-file-and-load-them">Can I keep names and teams in a file and load them?</h2>
+<p>You can keep teams in a spreadsheet and load them as a CSV file. There is no
+field for a real name: TIER stores only the identifiers it is given, so keep the
+mapping from login to real name in your HR system or your own spreadsheet. (If
+someone&#39;s username is their real name, such as <code>jane.smith</code>, that is what TIER
+stores.)</p>
+<p>What exists today (all of these need the admin token):</p>
+<table>
+<thead>
+<tr>
+<th>Request</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /api/v1/developer_alias</code></td>
+<td>Tells TIER that two identifiers are the same person.</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/developer_alias</code></td>
+<td>Lists every alias.</td>
+</tr>
+<tr>
+<td><code>DELETE /api/v1/developer_alias/{alias}</code></td>
+<td>Removes one alias.</td>
+</tr>
+<tr>
+<td><code>POST /api/v1/org_hierarchy</code></td>
+<td>Loads a list of developer → team, division, org in one call. <code>tierd hierarchy import</code> sends a CSV file here.</td>
+</tr>
+<tr>
+<td><code>PUT /api/v1/org_hierarchy/{developer}</code></td>
+<td>Adds or changes one developer.</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/org_hierarchy</code></td>
+<td>Returns everything loaded so far.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Step 1: join each person&#39;s two identities.</strong> <code>alias</code> is the identifier on the
+spend side: the OS username, which the developer can get by running <code>whoami</code> on
+their machine. <code>canonical</code> is their GitHub login, shown on their GitHub profile
+page. Do this once for each person whose two identifiers differ:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
+  curl -fsS -X POST -H @- -H &#34;Content-Type: application/json&#34; \
+    -d &#39;{&#34;alias&#34;:&#34;jane-laptop&#34;,&#34;canonical&#34;:&#34;jsmith&#34;}&#39; \
+    &#34;$TIER_HOST/api/v1/developer_alias&#34;
+# prints nothing when it works (HTTP 201)
+</code></pre>
+<p>One GitHub login can have several aliases, for example one per laptop; send one
+request for each. An alias also applies to spend recorded before you added it,
+because TIER joins identities each time it computes a score. It does not change
+which team that earlier spend counts toward (see below).</p>
+<p>If you skip this, that person shows up as two identifiers: one with spend and no
+merged work, the other with merged work and no spend, and neither score means
+anything. <code>GET /api/v1/scores</code> lists identifiers found on only one side under
+<code>data_quality.unjoined_developers</code> (developer mode shows the identifiers; team
+mode shows only counts). That list also includes anyone who simply had no merged
+work in the window yet, so check each name before you add an alias.</p>
+<p><strong>Step 2: write the team file.</strong> Make a spreadsheet with this header row and one
+row per developer, then export it as CSV (Google Sheets: File &gt; Download &gt; CSV;
+Excel: Save As &gt; CSV UTF-8):</p>
+<pre><code>developer,team,division,org
+jsmith,platform,infrastructure,acme
+bdiaz,payments,product,acme
+</code></pre>
+<ul>
+<li><code>developer</code> is the canonical identifier, the GitHub login from step 1. An
+alias also works; the server resolves it when you load.</li>
+<li><code>team</code> is required. <code>division</code> is optional and is what <code>division</code> mode groups
+by; in that mode, anyone with no division is grouped into <code>other</code>. <code>org</code> is
+optional; it matters only if finance records an org-level invoice (what the
+organisation paid a provider, sent to <code>POST /api/v1/org_actual_spend</code>; see the
+README&#39;s <a href="https://github.com/tiermetric/tier/blob/main/README.md#api-reference" rel="nofollow">API reference</a>), and then it must match
+that invoice&#39;s <code>org</code> exactly. An empty cell is the same as leaving the field
+out.</li>
+<li>Each value can be up to 256 characters. Names are stored exactly as typed, so
+<code>Platform</code> and <code>platform</code> are two different teams.</li>
+<li>The header must be exactly these four columns, in any order. Any other column
+is refused, so a name column cannot slip in.</li>
+</ul>
+<p><strong>Step 3: load it.</strong> <code>tierd hierarchy import</code> reads the CSV, checks it, and sends
+it to the server. It needs the <code>tierd</code> program on your machine (see the README)
+and the admin token:</p>
+<pre><code>TIER_API_TOKEN=@$HOME/.tier/api-token \
+  tierd hierarchy import --server &#34;$TIER_HOST&#34; teams.csv
+# hierarchy import: 2 rows written
+</code></pre>
+<p>Add <code>--dry-run</code> to check the file without sending it. The load is all or
+nothing. If one row is bad, nothing is written and the error names the row with
+its CSV line, for example <code>line 4: developer is empty</code>. The same
+person on two rows, under any id or alias, is rejected the same way. One load
+takes up to 1,000 rows and 1 MiB; split a bigger file into several, and never
+put one person in two files. Loading the same file again is safe; it
+overwrites. A load only adds and updates: a developer left out of the file keeps
+their current team, and no request just takes a developer off a team; you can
+only move them to another. If the command says the outcome is unknown, or a request fails with HTTP
+503 (another write held the database for a moment), run the same command again.</p>
+<p>Without <code>tierd</code>, send the same rows to <code>POST /api/v1/org_hierarchy</code> as a JSON
+array of objects with the same four fields. Save them in a file called
+<code>teams.json</code>; leave out <code>division</code> or <code>org</code> if you do not use them:</p>
+<pre><code>[
+  {&#34;developer&#34;: &#34;jsmith&#34;, &#34;team&#34;: &#34;platform&#34;, &#34;division&#34;: &#34;infrastructure&#34;, &#34;org&#34;: &#34;acme&#34;},
+  {&#34;developer&#34;: &#34;bdiaz&#34;, &#34;team&#34;: &#34;payments&#34;, &#34;division&#34;: &#34;product&#34;, &#34;org&#34;: &#34;acme&#34;}
+]
+</code></pre>
+<p>Then send it from the same directory:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
+  curl -sS --fail-with-body -X POST -H @- -H &#34;Content-Type: application/json&#34; \
+    --data-binary @teams.json &#34;$TIER_HOST/api/v1/org_hierarchy&#34;
+# prints {&#34;accepted&#34;:2} when it works (HTTP 201)
+</code></pre>
+<p>This uses <code>--fail-with-body</code> rather than <code>-f</code> so that an error prints the
+server&#39;s explanation. The explanation names the row by its position counting
+from 0 (<code>org_hierarchy[3]</code> is the fourth object). The request and response
+shapes are in <a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a>.</p>
+<p>The server resolves each <code>developer</code> through the aliases it already knows at the
+moment you load, so run step 1 before step 3. To move one person later (this
+resolves aliases the same way):</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
+  curl -fsS -X PUT -H @- -H &#34;Content-Type: application/json&#34; \
+    -d &#39;{&#34;team&#34;:&#34;payments&#34;,&#34;division&#34;:&#34;product&#34;,&#34;org&#34;:&#34;acme&#34;}&#39; \
+    &#34;$TIER_HOST/api/v1/org_hierarchy/jsmith&#34;
+# prints the stored row
+</code></pre>
+<p>TIER keeps a dated history of team membership. Every load and every move is
+dated by the server&#39;s clock at the moment it is made; no request field, file
+column or flag can set that date. Team and division rows are computed from the
+membership each developer had at the time of each event: spend at the event&#39;s
+own timestamp, merged work at the time it merged, an invoice at the start of its
+month. So a move affects only the future. A person&#39;s earlier spend and merged
+work stay with the team they were in when it happened, in every window and in
+both periods of a comparison. Aliases follow the same rule. Each identifier
+keeps its own dated team history: adding an alias puts that identifier in its
+person&#39;s team from that moment, pointing it at someone else moves it to their
+team from that moment, and deleting it places it by its own assignment from
+that moment: the team you assigned that identifier itself, if it has an
+assignment of its own (for example one you loaded before you made it an
+alias), and no team if it has none. Spend and merged work recorded under the identifier before the change
+stay in the team it was in then, or in <code>other</code> if it had none. When you move a
+person, all of their aliases move with them, also from that moment. A server
+clock that has been set back is the one exception: a move made then is dated
+at the earlier time, so spend and merged work already recorded after that time
+move to the new team. TIER refuses a move (<code>409</code>) only when the clock reads
+earlier than the person&#39;s current assignment began, so keep the host&#39;s clock
+synchronised. If an issue&#39;s spend came before a
+move and it merged after, the old team shows the spend and the new team shows
+the merged work. History from before a developer&#39;s first assignment stays in
+<code>other</code> (the no-team row) even after you assign them. When you upgrade to the
+version that added this, the assignments you had already loaded are kept for all
+past data; only people you assign after the upgrade start on the day you assign
+them. Request and response shapes for all of these requests are in
+<a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a>.</p>
+<h2 id="where-are-my-teams-scores">Where are my teams&#39; scores?</h2>
+<p>In <code>team</code> or <code>division</code> mode, they are the main view. The dashboard shows one row
+per team (or division), and <code>GET /api/v1/scores</code> returns them in the <code>teams</code>
+array. Teams under the <em>k</em> floor appear inside <code>other</code>.</p>
+<p>In these modes, choose a sealed calendar month with <code>?period=YYYY-MM</code>; leave
+the parameter out to read the latest sealed month. <code>since=</code> and <code>until=</code> work
+only in <code>developer</code> mode. For September 2026:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+  curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;period=2026-09&#34; |
+  jq -c &#39;{predates: .data_quality.window_predates_cost_capture},
+    ((.teams // [])[] | {team, tier, weighted_points, total_cost_usd, ranked})&#39;
+</code></pre>
+<p>The first line printed is about the month. <code>predates: true</code> means the month
+starts before TIER began recording spend: merged work from before that point
+counts but its spend does not, so the rows can read too high. Pick a later sealed
+month. <code>predates</code> is <code>null</code> when TIER had no coverage start to report — no spend
+recorded yet, or the server could not read it. Each line after it is one team
+(or division); if none follow, the
+month has no data or its rows were withheld (see <code>data_quality.kanon_suppressed</code>
+above). A sealed month
+carries no <code>data_quality.cost_coverage_safe_since</code>. If curl reports a 404, that
+month is not sealed; run the curl part with <code>-sS --fail-with-body</code> in place of
+<code>-fsS</code>, with the <code>| jq</code> stage left off, to read the reason.</p>
+<p>For one team, select its row by the name exactly as you loaded it; in <code>division</code>
+mode, use the division name instead:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+  curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;period=2026-09&#34; |
+  jq &#39;{row: ((.teams // [])[] | select(.team == &#34;platform&#34;)), predates: .data_quality.window_predates_cost_capture}&#39;
+</code></pre>
+<p>The <code>row</code> holds that team&#39;s <code>tier</code>, <code>weighted_points</code>, <code>total_cost_usd</code>
+(at list price), <code>cost_per_point</code> and <code>ranked</code>. If the team has no named row that
+month, <code>jq</code> prints nothing: it may have no data, be folded into <code>other</code>, or be
+withheld. <code>predates</code> means the same as above.</p>
+<p>In <code>developer</code> mode, the dashboard lists developers and also has a table headed
+&#34;Where the points and spend went, by team&#34;. It splits the company total by team,
+in team-name order, with a &#34;No team&#34; row for developers you have not assigned.
+The read-only token reads the same split from <code>team_rollups</code>. Developer mode
+rejects <code>?period=</code> with HTTP 400. Use this command, replacing <code>since</code> with the
+dashboard&#39;s <strong>From</strong> date; if <strong>To</strong> has a date, add <code>--data-urlencode &#34;until=…&#34;</code>
+in <code>YYYY-MM-DD</code> form:</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+  curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;since=2026-08-28&#34; |
+  jq -c &#39;{window_predates_cost_capture: .data_quality.window_predates_cost_capture,
+    cost_coverage_safe_since: .data_quality.cost_coverage_safe_since},
+    ((.team_rollups // [])[] | {team, unassigned, tier, weighted_points, total_cost_usd, ranked})&#39;
+</code></pre>
+<p>The dashboard defaults to 30 days back; the API defaults to midnight UTC 90 days
+ago through now. Match the window to compare figures. Spend counts when it was
+spent, merged work when it merged. For one team&#39;s roll-up in <code>team</code>, add
+<code>--data-urlencode &#34;team=platform&#34;</code> to the curl command. If
+<code>data_quality.window_predates_cost_capture</code> is <code>true</code>, move <code>since</code> to
+<code>data_quality.cost_coverage_safe_since</code> or later. Both fields are absent (printed
+as <code>null</code> above) when TIER had no coverage start to report — no spend recorded
+yet, or the server could not read it. The no-team row has <code>&#34;unassigned&#34;: true</code>
+and no team name. It also holds spend that could not be tied to any person, such
+as proxy calls that named no developer, recorded under <code>unattributed</code>.</p>
+<p>In <code>team</code> and <code>division</code> mode <code>?team=</code> is refused with a 400. It rolls up a single team with
+no minimum group size, so honouring it there would expose a one-person team. In
+<code>developer</code> mode every developer is already named, so it reveals nothing new.</p>
+<p>Read <code>ranked</code> before you quote a team&#39;s number. Despite its name, it does not put
+anyone in order; it says whether there is enough evidence to read the number.
+<code>ranked: false</code> means the team has too little evidence behind it in this window:
+fewer than 3 merged outcomes (normally a merged pull request that names an
+issue), less than $5 of spend at list price, or any one merged outcome whose
+developer recorded fewer than 1,000 AI tokens (input, output and cache tokens
+together) against that issue in the 14 days before it merged. The number is
+still reported, but do not present it as a headline figure.</p>
+<h2 id="how-do-the-team-scores-add-up-to-one-company-score">How do the team scores add up to one company score?</h2>
+<p>They don&#39;t add up, and they aren&#39;t averaged. TIER is weighted points of merged
+work per $1,000 of AI spend. Each merged outcome earns points from the size
+label on its pull request (from 0.5 for <code>size/xs</code> to 8 for <code>size/xl</code>), or from
+an estimate when there is no label, times a quality factor that can drop, for
+example when the change is reverted for a code problem (<a href="rubric.html" rel="nofollow">rubric.md</a>).
+Spend is priced at published list prices
+(<a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a>), not at what you were billed:
+discounts and subscription fees are not applied. What you actually paid can be
+recorded separately and shows beside the score as <code>actual_paid_usd</code> and
+<code>spend_leverage</code> (list-price cost divided by the amount paid); neither changes
+TIER. For a team, and for the company <code>total</code>, TIER adds up everyone&#39;s points,
+adds up everyone&#39;s cost, and divides once. Every developer counts, whether
+their own row is <code>ranked</code> or not.</p>
+<p>Here is why that matters, with made-up numbers:</p>
+<table>
+<thead>
+<tr>
+<th>(illustrative)</th>
+<th>Weighted points</th>
+<th>List-price cost</th>
+<th>TIER (points ÷ cost in thousands of dollars)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Team A</td>
+<td>60</td>
+<td>$2,000</td>
+<td>60 ÷ 2.00 = 30</td>
+</tr>
+<tr>
+<td>Team B</td>
+<td>10</td>
+<td>$250</td>
+<td>10 ÷ 0.25 = 40</td>
+</tr>
+<tr>
+<td>Average of the two scores</td>
+<td></td>
+<td></td>
+<td>(30 + 40) ÷ 2 = 35</td>
+</tr>
+<tr>
+<td>Pooled, which TIER reports</td>
+<td>70</td>
+<td>$2,250</td>
+<td>70 ÷ 2.25 = 31.1</td>
+</tr>
+</tbody>
+</table>
+<p>The company spent $2,250 and got 70 points, which is 31.1 points per $1,000.
+Applying the average of 35 to the $2,250 spent would imply 35 × 2.25 = 78.75
+points; the teams delivered 70. The average gives Team B, which spent one eighth
+as much, the same say as Team A. Pooling counts each team in proportion to what
+it spent. A team&#39;s own score is built the same way from its developers: summed
+points over summed cost, not an average of developer scores.</p>
+<p>The company <code>total</code> covers every developer in the window, including anyone not
+assigned to a team. In <code>team</code> or <code>division</code> mode, whenever
+<code>data_quality.kanon_suppressed</code> is present (see
+<a href="#can-i-see-my-developers-names" rel="nofollow">Can I see my developers&#39; names?</a>), the <code>total</code>
+is withheld along with every team row.</p>
+<p>The pooled <code>total</code> mixes every kind of work, so it is not a fair way to compare
+teams that do different work. For comparisons, use <code>work_types</code> in the same
+response (in <code>developer</code> mode; <code>team</code> and <code>division</code> mode do not publish it). It scores each category (<code>feature</code>, <code>bug</code>, <code>security</code>, <code>incident</code>,
+<code>tech-debt</code>, <code>research</code>, <code>compliance</code>) separately; compare bug work with bug
+work. How a pull request gets its category is in <a href="rubric.html" rel="nofollow">rubric.md</a>. There
+is also no absolute &#34;good&#34; TIER. The fair comparison is a team against itself
+over time, under the same rules. Those rules have version numbers, stamped on
+every <code>/api/v1/scores</code> response as <code>rubric.version</code> and <code>price_table.version</code>:
+the rubric version fixes how merged work turns into points, and the price-table
+version fixes what each AI model&#39;s tokens cost. A change in either moves the
+number without any change in the work (<a href="rubric.html" rel="nofollow">rubric.md</a>).</p>
+<h2 id="why-does-most-of-our-spend-say-no-issue-attached-did-we-never-merge-that-work">Why does most of our spend say &#34;no issue attached&#34;? Did we never merge that work?</h2>
+<p>Not necessarily. &#34;Unattributed&#34; means TIER could not connect that spend to an
+issue number. It does not mean the work never merged, unless the pull request
+named no issue; see below.</p>
+<p>Spend and merged work meet on the issue id (together with the repository, so
+issue 42 in two repositories stays two issues):</p>
+<ul>
+<li>Spend: every Claude Code message is recorded with its git branch. A Codex CLI
+session is recorded with the branch it started on, for every message in it. TIER
+first looks for a commit on that branch, made within 30 minutes either side of
+the message, whose subject line names an issue (<code>closes #42</code>, <code>#42</code>, or a
+tracker key such as Jira&#39;s <code>TIER-99</code>). If there is none, it reads the issue
+from the branch name: <code>feature/42-login</code> becomes issue 42, <code>fix/TIER-99-crash</code>
+becomes <code>TIER-99</code>. Commits are matched on the last part of the branch name, so
+<code>feature/42-login</code> and <code>42-login</code> count as the same branch.</li>
+<li>Merged work: a merged pull request is tied to an issue from its branch name
+or from its description (<code>closes #42</code>).</li>
+</ul>
+<p><strong>Which branch gets recorded.</strong> With worktree attribution off (the default),
+TIER uses the branch Claude Code records: the branch of the directory the
+session was started in, not of the directory where the work happens.
+Switching branches in that same checkout (<code>git checkout -b feature/42-login</code>) is
+picked up from the next message. Moving the work elsewhere is not: a session
+started in the main checkout that edits a sibling worktree
+(<code>git worktree add ../app-42 -b feature/42-login</code>) keeps recording <code>main</code>, and
+so does every subagent it starts, because a subagent takes its parent&#39;s branch.
+That spend lands in <code>unattributed:main</code> even after the pull request merges and
+scores for issue 42. The fix is to start the session inside the worktree on the
+issue branch (<code>cd ../app-42 &amp;&amp; claude</code>); the subagents it starts then record
+that branch too. <code>--worktree-attribution</code> is an opt-in preview that infers the
+worktree from the file paths a session&#39;s tool calls name, so it reads more of
+the session file than the default
+(<a href="privacy.html#worktree-attribution-off-by-default" rel="nofollow">privacy.md</a>); read
+<a href="how-it-works.html#measured-accuracy-read-this-before-turning-it-on" rel="nofollow">how-it-works.md</a>
+before turning it on.</p>
+<p>Spend that finds no issue is kept, labelled with the reason:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>What happened</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>unattributed:main</code></td>
+<td>The recorded branch was <code>main</code> or <code>master</code>. TIER does not guess an issue here, and skips the commit check too, even if a pull request merged minutes later: a guess could credit the spend to the wrong issue, and TIER treats that as worse than leaving it unlinked.</td>
+</tr>
+<tr>
+<td><code>unattributed:branch-without-issue</code></td>
+<td>A named branch with no issue number in it (<code>scratch</code>, <code>wip-refactor</code>) and no matching commit.</td>
+</tr>
+<tr>
+<td><code>unattributed:detached-head</code></td>
+<td>Git was not on any branch (a &#34;detached HEAD&#34;, which is what you get after checking out a single commit or tag), or no branch was recorded at all. Opencode sessions always land here, because Opencode does not record a branch.</td>
+</tr>
+<tr>
+<td><code>unattributed:foreign-repo</code></td>
+<td>Only with <code>--worktree-attribution</code> on: the work was in a worktree of a repository TIER was not configured to watch. The other repository is never named.</td>
+</tr>
+<tr>
+<td><code>unattributed</code></td>
+<td>Plain <code>unattributed</code>, with no reason after it: spend from a source that never sees a branch. That is TIER&#39;s proxy (a relay an app can send its AI calls through so TIER meters them) when the app sends no <code>X-Tier-Issue</code> header naming the issue, or an org-level billing feed (a poller that reads Anthropic&#39;s or OpenAI&#39;s organisation-wide usage report). Setup for both is in the README under <a href="https://github.com/tiermetric/tier/blob/main/README.md#capturing-tokens" rel="nofollow">Capturing tokens</a>.</td>
+</tr>
+</tbody>
+</table>
+<p>So a pull request can merge, count as finished work, and still leave the spend
+that produced it in one of these buckets. The reverse also happens, and it does
+lose merged work: a pull request with no issue reference in its branch or
+description records no outcome at all
+(<a href="conventions.html#consequence-of-a-miss" rel="nofollow">conventions.md</a>).</p>
+<p>Unattributed spend stays in the cost and earns no points. The pooled scores (a
+developer&#39;s, a team&#39;s, and the company <code>total</code>) divide all points by all spend,
+so for them it makes no difference which issue the spend is tied to. What can
+move them is the merged work behind it. If the spend paid for a pull request that merged with
+no issue number, TIER has no record of that work, so the score reads lower than
+it should. If the pull request did name an issue and only the spend was recorded
+on <code>main</code>, the merged work still counts in full and the pooled score is not
+skewed; the spend just is not tied to its issue, so that issue&#39;s own cost reads
+low. The dashboard&#39;s low-coverage note says the same: if some unlinked spend paid
+for merged work with no issue number, read the score as a floor. The per-type
+scores in <code>work_types</code> are different: they count only spend tied to an issue of
+that type, so they read high while much spend is unlinked.</p>
+<p>Where to see it:</p>
+<ul>
+<li>The dashboard&#39;s <strong>Attribution coverage</strong> banner turns red below 50%, and the
+panel under it breaks the unlinked spend down by the labels above (the panel
+in <code>developer</code> mode only). In <code>team</code> and <code>division</code> mode the share is not
+published, so the banner says coverage is not shown, and the headline reads
+&#34;provisional&#34;; that means unknown, not low.</li>
+<li>In the API, <code>data_quality.attributed_cost_share</code> is the linked fraction,
+<code>data_quality.unattributed_buckets</code> is the breakdown, and
+<code>data_quality.exploratory_cost_share</code> is the <code>main</code> and <code>master</code> share on its
+own; all are shares of the window&#39;s list-price cost. The last two appear in
+<code>developer</code> mode only, and are left out when the window has no unattributed
+spend. In <code>team</code> and <code>division</code> mode the first does not appear either, and
+<code>data_quality.attribution_coverage</code> reads <code>&#34;not_shown&#34;</code> (see
+<a href="api-compatibility.html#get-apiv1scores" rel="nofollow">api-compatibility.md</a>).</li>
+<li>A developer can check their own machine with
+<code>tierd doctor --repo ~/src/your-repo</code> (the path to their checkout). It reads
+the last 7 days; in <code>developer</code> mode the banner reads the dashboard&#39;s window,
+30 days unless you change the From date. Its &#34;issue attribution&#34; line reports
+how much feature-branch spend is tied to an issue. That is a different share
+from the banner&#39;s, which is taken over all spend. It fails below 50%, warns between 50%
+and 90%, and passes at 90% or more. Change the failure line with <code>--min-attribution</code>, which
+takes a fraction between 0 and 1 (<code>--min-attribution 0.4</code> for 40%); the 90%
+line does not move. Spend recorded on <code>main</code> or <code>master</code>, on a detached HEAD,
+or with no branch is left out of that figure and reported on a separate line,
+&#34;spend not on a feature branch&#34;.</li>
+</ul>
+<p>What raises attribution:</p>
+<ol>
+<li>Put the issue number in every branch name: <code>feature/42-login</code>,
+<code>fix/42</code>, <code>fix/TIER-99-crash</code>. The accepted patterns are in
+<a href="conventions.html#issue-references--attribution" rel="nofollow">conventions.md</a>. Avoid a bare
+four-digit number from 1900 to 2099; TIER reads it as a year.</li>
+<li>Start the AI session in the checkout that is on the issue branch: switch
+branches there first, or <code>cd</code> into that branch&#39;s worktree before you start.
+A session started in the main checkout keeps recording <code>main</code> for work it
+does in another worktree, as described above.</li>
+<li>Put <code>closes #42</code> in the pull request description, so the merged work is
+linked too.</li>
+<li>Decide how much work on <code>main</code> you want. Some of it can be planning and
+review. TIER keeps it in the cost and shows it as its own share, so the team
+can decide whether that amount is intended.</li>
+</ol>
+<p>These changes work going forward. Spend already recorded keeps the label it got
+when TIER first read it; renaming a branch or adding a commit later does not
+move it, and there is no command today that relabels stored spend.</p>
+<h2 id="how-do-i-use-this-to-help-my-team-get-better">How do I use this to help my team get better?</h2>
+<p>Use the figures to change how the team works with AI. They grade the work, not
+the worker. They describe how AI spend turned into merged work: which models the
+spend went to, how much input was served from cache, how much spend is tied to
+an issue. In <code>developer</code> mode you see each developer&#39;s figures, on the same page
+they see, so you can talk with them about exactly those figures. Those figures must never go
+into pay, promotion, performance reviews, improvement plans or discipline; TIER
+cannot enforce that, so your policy has to.</p>
+<p>Do not rank developers against each other or build a leaderboard from these
+figures. The dashboard lists developers in identifier order and never sorts
+them by TIER; a row with too little evidence stays in its place with a &#34;below
+evidence floor&#34; tag. Compare a person or a team with their own earlier periods,
+within one kind of work. Before the number itself, read the attribution
+coverage and, where there is one, the confidence interval: each ranked developer
+row in <code>developer</code> mode carries a 95% interval (<code>ci_low</code> and <code>ci_high</code>, drawn as a
+whisker on the dashboard bar), and team rows and the company <code>total</code> carry none.</p>
+<p><a href="peer-learning.html" rel="nofollow">peer-learning.md</a> is the full method for a team. In four
+steps:</p>
+<ol>
+<li>
+<p>Hold a team review of the levers. Read the name-free figures on the dashboard
+or in <code>/api/v1/scores</code>: cache reuse (<code>cost_composition.cache_read_share</code>, the
+share of input tokens read from the provider&#39;s cache), spend on premium
+models (<code>cost_composition.premium_model_share</code>, the share of spend on models
+whose list input price is $4 or more per million tokens), work on <code>main</code>
+(<code>data_quality.exploratory_cost_share</code>), and yield within each work type
+(<code>work_types</code>). These are published in <code>developer</code> mode only; a server in
+<code>team</code> or <code>division</code> mode shows the team rows and the total. Ask the team
+what explains each one. Some can be missing, for
+the reasons given under &#34;Where to see it&#34; in
+<a href="#why-does-most-of-our-spend-say-no-issue-attached-did-we-never-merge-that-work" rel="nofollow">Why does most of our spend say &#34;no issue attached&#34;? Did we never merge that work?</a>.
+If attribution is low, fix that first: the per-type scores in <code>work_types</code>
+count only spend tied to an issue, so they read high while much spend is
+unlinked.</p>
+</li>
+<li>
+<p>Agree one practice change, such as &#34;use the cheaper model for routine
+refactors&#34;. One change at a time, so that if the score moves you know which
+change to look at.</p>
+</li>
+<li>
+<p>Compare the team&#39;s score before and after the change, over two periods that
+have both ended and are the same length. Spend and merged work are each
+counted by their own date, so a period&#39;s edges can move its score either way.
+Work paid for before the start that merges inside the period adds points
+without its spend, and reads high. Spend near the end whose work merges after
+the period adds cost without points, and reads low. A short period has less
+in the middle to outweigh its edges, so it moves more
+(<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>). In <code>developer</code>
+mode, ask for the team&#39;s roll-up once per period:</p>
+<pre><code>for period in 2026-05-04,2026-06-01 2026-06-01,2026-06-29; do
+  printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+    curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;team=platform&#34; \
+      --data-urlencode &#34;since=${period%,*}&#34; --data-urlencode &#34;until=${period#*,}&#34; |
+    jq -c &#39;{tier: .team.tier, ranked: .team.ranked, predates: .data_quality.window_predates_cost_capture, safe_since: .data_quality.cost_coverage_safe_since}&#39;
+done
+</code></pre>
+<p>Each period is a start date and an end date, written <code>YYYY-MM-DD</code>, in UTC.
+The start date is included and the end date is not, so
+<code>2026-06-01,2026-06-29</code> is June 1 through June 28, the same 28 days as the
+first period.</p>
+<p>In <code>team</code> or <code>division</code> mode the server refuses <code>?team=</code>, <code>since</code> and <code>until</code>
+with a 400: it answers one sealed calendar month per call. Compare two
+months instead, and read the team&#39;s row:</p>
+<pre><code>for period in 2026-05 2026-06; do
+  printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+    curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;period=$period&#34; |
+    jq -c &#39;{row: ((.teams // [])[] | select(.team == &#34;platform&#34;) | {tier, ranked}), predates: .data_quality.window_predates_cost_capture}&#39;
+done
+</code></pre>
+<p>Months differ in length by up to three days, the nearest a sealed read comes
+to equal periods. A sealed month carries no <code>safe_since</code>; if <code>predates</code> is
+<code>true</code>, pick a later month. If curl reports a 404, that month is not sealed;
+<code>--fail-with-body</code> in place of <code>-f</code>, with the <code>| jq</code> stage left off, prints
+the reason.
+If curl printed no error and <code>jq</code> printed nothing, there is no <code>platform</code> row
+that month. To see why, run the same <code>curl</code> with
+<code>jq -c &#39;{teams: [(.teams // [])[].team], total: (.total != null), suppressed: .data_quality.kanon_suppressed}&#39;</code>.
+If <code>teams</code> lists <code>other</code>, <code>platform</code> had fewer than <em>k</em> developers with work
+that month (or none at all) and anything it had is folded into <code>other</code>. If
+<code>suppressed</code> is not <code>null</code>, figures were withheld, as described in
+<a href="#can-i-see-my-developers-names" rel="nofollow">Can I see my developers&#39; names?</a>. If <code>teams</code> is <code>[]</code>, <code>total</code> is <code>false</code> and <code>suppressed</code> is <code>null</code>,
+the month has no data at all.
+In <code>division</code> mode the row&#39;s <code>team</code> field holds the division name.</p>
+<p>Compare the two <code>tier</code> values as a direction, not a measured effect: team
+roll-ups carry no confidence interval. Check that <code>ranked</code> is <code>true</code> in both
+periods; if either is <code>false</code>, there is too little evidence to read the
+change. If <code>predates</code> is <code>true</code> for the earlier period, it started before
+TIER was recording spend: its merged work counts but the spend before that
+point does not, so its score reads too high. In <code>developer</code> mode, pick a
+start date on or after the <code>safe_since</code> date the command prints
+(<code>data_quality.cost_coverage_safe_since</code>); it is <code>null</code> only when TIER has
+recorded no spend at all.
+<code>GET /api/v1/scores/compare</code> does not help here. It covers the whole company
+with no team filter, and its <code>total</code> and <code>teams</code> rows always say
+<code>significant: false</code>. Only its per-developer rows carry significance, so it
+suits one developer&#39;s before and after. Use those in a coaching conversation
+with that developer, never in an appraisal.</p>
+</li>
+<li>
+<p>Write the practice down in your team&#39;s own runbook: what changed, which
+figure you watched, what happened, keep or drop. TIER does not record
+practice changes, so the note is where another team can find and copy one.</p>
+</li>
+</ol>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

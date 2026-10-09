@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tiermetric/tier/docs/contracts/tier-jsonl-ingestion.schema.json",
+  "title": "tier-jsonl-ingestion",
+  "description": "Shape of ONE line of a Claude Code session JSONL file (~/.claude/projects/**/*.jsonl) as consumed by tier's internal/collector parser (parseSessionFile + live watcher). The producer is EXTERNAL (Claude Code) and tier does not control this format; this schema documents the subset of fields the parser reads and depends on. Seam: tier-jsonl-ingestion (owner: tier). Exercise class: captured-sample replay (no network, no service endpoint). Field names below are the wire names the parser unmarshals (internal/collector/jsonl.go); they are camelCase at the top level and snake_case inside message.usage, exactly as Claude Code emits them. No field is marked required because session lines are heterogeneous by type (a non-assistant line legitimately carries no message) and the producer is external; freshness/completeness is enforced by the captured-sample replay gate (total_usd != 0 AND empty_cwd == 0), not by this schema.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Entry kind. tier attributes tokens from assistant entries (message.usage). Non-assistant lines are skipped, not rejected."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 capture time. Required for /scores windowing; a session whose entries lack a parseable timestamp cannot be attributed to a window."
+    },
+    "gitBranch": {
+      "type": "string",
+      "description": "Working-tree branch at capture time. May appear on any line, not only line 1."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory at capture time; feeds repository attribution. NOT guaranteed on line 1 (the #96 regression that silently zeroed every current-format session). An empty cwd across a session carrying real usage is the negative-guard FAIL condition the captured-sample gate asserts (empty_cwd > 0)."
+    },
+    "sessionId": {
+      "type": "string",
+      "description": "Opaque session UUID; the grouping key for context-bloat / rework-loop token-waste signatures (#238). Stored as token_events.session_id."
+    },
+    "message": {
+      "type": "object",
+      "description": "Present on assistant entries. Carries the model and per-message token usage tier prices.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message id. Streaming emits multiple entries sharing one id with partial/zero counts; the parser dedups by id and keeps the largest-total (post-stream definitive) entry."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model that produced the message; the pricing key tier reprices against its own price table."
+        },
+        "role": {
+          "type": "string",
+          "description": "Message role (e.g. assistant)."
+        },
+        "usage": {
+          "type": "object",
+          "description": "Per-message token counts. The load-bearing payload: TOTAL cost across a session must be non-zero for a session carrying real usage (the gate asserts total_usd != 0).",
+          "properties": {
+            "input_tokens": { "type": "integer", "minimum": 0 },
+            "output_tokens": { "type": "integer", "minimum": 0 },
+            "cache_read_input_tokens": { "type": "integer", "minimum": 0 },
+            "cache_creation_input_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Rolled-up cache-write count. Authoritative source is the nested cache_creation object when present; this scalar is the legacy/pre-1h fallback."
+            },
+            "cache_creation": {
+              "type": "object",
+              "description": "TTL split for cache writes (5m vs 1h). Absent on legacy JSONL, in which case all cache writes are bucketed as 5m. Present-with-zeros is distinguished from absent.",
+              "properties": {
+                "ephemeral_5m_input_tokens": { "type": "integer", "minimum": 0 },
+                "ephemeral_1h_input_tokens": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

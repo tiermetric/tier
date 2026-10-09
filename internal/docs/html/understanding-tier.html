@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Understanding TIER — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="understanding-tier">Understanding TIER</h1>
+<p>TIER (Token Impact &amp; Efficiency Ratio) is explained here in three layers. Each
+layer stands on its own, so read only as far as you need.</p>
+<ol>
+<li><strong><a href="#layer-1--the-short-answer" rel="nofollow">The short answer</a></strong> — what TIER is and why a team would want it, in plain words.</li>
+<li><strong><a href="#layer-2--how-the-meter-works" rel="nofollow">How the meter works</a></strong> — where the numbers come from. Technical terms are defined where they first appear.</li>
+<li><strong><a href="#layer-3--the-full-method-page-by-page" rel="nofollow">The full method, page by page</a></strong> — how to run it on real data, then each rule in brief with a link to the page that defines it.</li>
+</ol>
+<hr>
+<h2 id="layer-1--the-short-answer">Layer 1 — The short answer</h2>
+<p>The bill from an AI coding tool tells you how much you spent. It does not tell
+you what the spending produced. TIER measures that second thing: <strong>how much
+finished work you got for each dollar of AI use.</strong></p>
+<p>The number is <strong>outcome points per $1,000</strong>. Higher means more finished work
+for the same money.</p>
+<ul>
+<li><strong>The top of the fraction is finished work.</strong> A piece of work counts only
+once it has been merged, which means accepted into the team&#39;s main code.
+Bigger pieces earn more points. With GitHub&#39;s webhook connected, work that
+later fails its GitHub Actions run or has to be undone earns fewer; without
+the webhook, TIER sees neither.</li>
+<li><strong>The bottom is what the AI use costs at the AI vendors&#39; published prices</strong>,
+in US dollars, taken from a price table built into TIER. It is deliberately
+<em>not</em> your invoice. Discounts and credits differ between companies and change
+over time. A fixed price list means the same work always costs the same, so
+this month can be compared with last month.</li>
+</ul>
+<p>Compare a team with its own history, not with other teams. The kind of work a
+team takes on moves the number, and the number cannot tell the kind of work
+apart from the skill of the people doing it.</p>
+<p><strong>What it is for.</strong> TIER is built to coach the practice, not the person. It
+shows where AI spend turned into finished work and where it did not, so a team
+can change how it works. It is not for pay, promotion or performance reviews.
+That is a rule for the people who use TIER. The software cannot enforce it.
+Points follow the size of the finished work, not how hard it was: someone who
+spends a lot of AI effort on a small fix to a hard problem scores lower than
+someone making routine changes of the same size. A low number describes the
+work, not the developer&#39;s ability.</p>
+<p><strong>Who sees what.</strong> TIER has three reporting modes. Its server will not start
+until someone picks one, because there is no default. Whichever mode you pick,
+read <a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a> first. In some countries,
+Germany, France and the Netherlands among them, even reporting by group can
+require consulting employee representatives.</p>
+<ul>
+<li><code>team</code> and <code>division</code> only ever show groups. A group with fewer than five
+counted people is merged into one catch-all row, so the reports name no
+individual. TIER counts people, not raw IDs: an ID counts only if, in the
+window, it is on the roster, is not a bot, and has activity a collector,
+the proxy or a merged pull request recorded (a hand-entered <code>/costs</code> row or
+a push-only commit does not count). A person who works under two names
+counts once after their IDs are mapped together
+(<a href="#three-things-that-will-bite-you" rel="nofollow">more detail</a>). Five is the default. The operator can
+change it, but never to fewer than three. Whoever holds the server&#39;s
+administrator token (its password for changes) can still export one
+person&#39;s stored records, so that person&#39;s request to see their data can be
+answered.</li>
+<li><code>developer</code> shows a named row for every person. It carries the heaviest
+legal obligations in those countries, so it should be a deliberate choice.
+Where a team uses it, the intended use is coaching: the developer and their
+manager look at the same page together. Today, anyone who can read the server
+sees every developer&#39;s row;
+<a href="#the-limits-stated-plainly" rel="nofollow">The limits, stated plainly</a> says who that is.
+Access limited to each person&#39;s own row is planned but not built.</li>
+</ul>
+<p><strong>One caveat.</strong> The number is an estimate built from real records, not an exact
+reading. Spend is recorded when it happens, but work only counts when it
+merges, which comes later. So a period that ended very recently reads too low,
+and a period that starts before TIER began recording spend reads too high.
+Layer 2 explains both.</p>
+<p><strong>A real example.</strong> On TIER&#39;s own repository, over the 30 days to 2026-07-21,
+TIER measured <strong>221</strong> outcome points per $1,000 across 152 merged pieces of
+work. In the same period, <strong>72.1%</strong> of the spend could not be linked to a
+specific piece of work. (These are the figures the project&#39;s
+<a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">README</a> publishes.) &#34;Could not be linked&#34; is not the same as
+&#34;wasted&#34;. The unlinked spend is still counted in the bottom of the fraction.
+What it lacks is a label saying which task it went to.</p>
+<p><strong>Try it.</strong> Install TIER with Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories)
+(<code>go install github.com/tiermetric/tier/cmd/tierd@latest</code>), or download a
+release; <a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a> covers both. Then run
+<code>tierd demo</code> and open <code>http://127.0.0.1:8080</code> in a browser. The demo fills the
+dashboard with invented developers and spend, and picks the <code>developer</code> mode
+for you. To measure your own work, see
+<a href="#from-install-to-a-first-real-score" rel="nofollow">From install to a first real score</a>.</p>
+<p><strong>Next:</strong> <a href="#layer-2--how-the-meter-works" rel="nofollow">How the meter works</a>.</p>
+<hr>
+<h2 id="layer-2--how-the-meter-works">Layer 2 — How the meter works</h2>
+<p>The score is a ratio:</p>
+<pre><code>TIER = outcome points ÷ (list-price cost of the AI use / 1,000)
+</code></pre>
+<p>Read it as <strong>&#34;outcome points per $1,000.&#34;</strong> The <em>list-price cost</em> is what the
+AI use would cost at the vendors&#39; published per-token prices, not what you
+paid. TIER computes the ratio per developer. A team&#39;s or division&#39;s score is
+its members&#39; points added together, divided by their costs added together. It
+is not an average of individual scores. In developer mode the API covers the
+last 90 days and the dashboard the last 30 by default, and both can be changed.
+In team and division mode both read one whole sealed calendar month, the latest
+by default; pick another in the dashboard&#39;s month picker or with <code>?period=YYYY-MM</code>.</p>
+<p>Both halves come from records that already exist: AI session logs, and merged
+pull requests. Neither comes from surveys or timesheets. The main human
+judgment in the formula is the size label on a pull request, covered below (a
+revert&#39;s reason is also read from keywords in its human-written message).</p>
+<h3 id="the-bottom-half-dollars">The bottom half: dollars</h3>
+<p>TIER reads the session files your AI coding tool already writes to disk. For
+Claude Code, these are JSONL files (one JSON record per line) under
+<code>~/.claude/projects/</code>. Each AI reply in them records its token counts and the
+model&#39;s name. A <em>token</em> is a fragment of text a few characters long, and it is
+the unit AI vendors bill by. Codex CLI, Opencode and Meta&#39;s Muse Code have
+their own local readers, each switched on by a flag. Other tools can be captured through an
+optional proxy. <a href="https://github.com/tiermetric/tier/blob/main/README.md#capturing-tokens" rel="nofollow">README § Capturing tokens</a>
+lists which tools are supported and how well tested each one is.</p>
+<p>Tokens become dollars through a <strong>reference price table</strong> built into the
+program. It holds the vendors&#39; published prices in US dollars per million
+tokens, under one version number for the whole table. That choice is
+deliberate. An invoice bundles discounts, credits and negotiated rates, so
+identical work would cost different amounts at different discount levels. A
+list price makes the same work cost the same. The table changes only when you
+install a new TIER release or supply your own table. On a flat-rate
+subscription, the figure is what your usage would have cost at list price, not
+what you paid. If you record what you actually paid, TIER reports the ratio
+between the two as a separate number. See
+<a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a> for why, and
+<a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> for the table itself.</p>
+<p>Spend is linked to a piece of work through the branch the AI session was on.
+TIER looks for the issue number (the ticket number in your tracker) in the
+branch name, such as <code>feature/42-login</code> or <code>fix/TIER-99-crash</code>, or in a commit
+on that branch made around the same time. Spend it cannot link lands in an
+<strong>unattributed</strong> bucket. It stays in the bottom half of the fraction, so it
+still lowers the number. It is reported as its own line alongside the score,
+and withheld with the totals when the anonymity rule described below hides
+them. The bucket&#39;s label says why the link failed:</p>
+<table>
+<thead>
+<tr>
+<th>Bucket</th>
+<th>What happened</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>unattributed:main</code></td>
+<td>recorded on <code>main</code> or <code>master</code>, which carry no issue number</td>
+</tr>
+<tr>
+<td><code>unattributed:branch-without-issue</code></td>
+<td>recorded on a named branch with no issue number in its name</td>
+</tr>
+<tr>
+<td><code>unattributed:detached-head</code></td>
+<td>no branch was recorded (a detached HEAD, or none at all)</td>
+</tr>
+<tr>
+<td><code>unattributed</code></td>
+<td>from a source that never sees a branch: the proxy, or a vendor&#39;s billing feed</td>
+</tr>
+</tbody>
+</table>
+<p><code>unattributed:main</code> can have a technical cause rather than a missing ticket.
+Here is one. A developer starts an AI session in the main copy of the
+repository, then has it work in a second working copy (a git &#34;worktree&#34;)
+checked out on a feature branch. In one installation&#39;s session files, examined
+on 2026-09-26, Claude Code recorded the branch where the session started and
+did not record a later <code>cd</code> into another worktree. Other installations and
+Claude Code versions have not been checked. Helper agents that Claude Code runs
+in worktrees of their own can land on <code>main</code> the same way;
+<a href="#attribution--how-spend-is-tied-to-work" rel="nofollow">Attribution</a> in Layer 3 explains how.</p>
+<p>The remedy is to start the session inside the worktree, on a branch whose name
+carries the issue number. A worktree on a branch without one moves the spend to
+<code>unattributed:branch-without-issue</code> instead. The fix applies to future sessions
+only: spend already recorded keeps the label it was given. <code>tierd doctor --repo .</code>
+reports how much of your spend it could link, so you can check whether the fix
+worked.</p>
+<h3 id="the-top-half-outcome-points">The top half: outcome points</h3>
+<p>Only <strong>merged</strong> pull requests count, and only those that name an issue, either
+in the branch name or in a line such as <code>closes #42</code> in the description. A
+merged pull request with no issue reference is skipped, because its work cannot
+be joined to its spend. &#34;Merged&#34; means the merge was recorded (by GitHub, or
+through TIER&#39;s outcomes API for other trackers). It does not mean deployed.
+Unmerged work adds cost and no points.</p>
+<p>Each merged pull request earns points from its size label, on a fixed scale of
+five sizes:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>xs</code></td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>m</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>l</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>xl</code></td>
+<td>8</td>
+</tr>
+</tbody>
+</table>
+<p>A person, or your own automation, puts the label on the pull request in GitHub.
+A pull request with no recognised label is sized from its diff instead, on the
+same five weights.</p>
+<p>The weights are <strong>locked</strong>. You can rename the labels in the config file, but
+TIER refuses any weight not on this scale. The lock keeps your own history
+comparable: a weight change would silently rescale every earlier period. Fixed
+weights are also one precondition for ever comparing two installations, but
+only one. Both would also need the same price-table version, the same version
+of the scoring rules, and the same labelling habits. Until you have all of
+that, compare a team with its own history.</p>
+<p>Each pull request&#39;s weight is then multiplied by a <strong>quality multiplier</strong>
+between 0.1 and 1.0 when it comes from GitHub (an outcome sent through the
+outcomes API carries the quality its sender set, from 0 to 1). It is 1.0
+unless something goes wrong after the merge and GitHub&#39;s webhook reports it;
+without the webhook nothing lowers it after the merge.
+A failing GitHub Actions run (the automated build and tests) on the merge commit within 48
+hours lowers it to 0.7, unless a re-run of the same check soon passes. A revert
+within 60 days lowers it to 0.8 when the revert was a business decision, or to
+0.1 when it was a code problem. TIER tells the two apart from keywords in the
+revert&#39;s human-written commit message, and treats a revert as a code problem
+unless the message gives only business reasons. The worst of these wins. Failed checks <em>before</em> the merge do not count. A revert
+can arrive weeks after the merge, so a past period&#39;s score can still move. The
+numerator is <code>Σ(weight × quality)</code>.</p>
+<h3 id="three-things-that-will-bite-you">Three things that will bite you</h3>
+<p><strong>1. Task mix moves the number, and the number cannot separate it from
+skill.</strong> A quarter spent building new features and a quarter spent chasing
+production bugs will not score the same. The number cannot say how much of
+the gap comes from the work and how much from the people. Compare a team to its
+own history, not to another team&#39;s number.</p>
+<p><strong>2. Small groups are anonymized, by design.</strong> In the <code>team</code> and <code>division</code>
+modes, TIER groups developers by the team (or division) the operator assigns
+each one to. A group with fewer <em>counted</em> people than the anonymity
+floor (five by default, never below three) is folded into one catch-all row
+named <code>other</code>, along with developers who have no team. Since #856 the count is
+of people, not IDs: an ID counts only if it is on the roster during the window
+(after its aliases are joined, see
+<a href="#attribution--how-spend-is-tied-to-work" rel="nofollow">Attribution</a>), is not a bot, and has
+activity a collector, the proxy or a pull request captured in the window. Each
+figure also needs its own floor: a group&#39;s cost is shown only if enough counted
+people in it have captured spend, its points only if enough have merged work,
+and its paid spend only if enough have paid spend; the fidelity split
+(<code>coverage_pct</code>) needs enough people behind each part of it. <a href="manager-faq.html" rel="nofollow">manager-faq.md</a> has the full rule and how to bring
+uncounted people back. Folding drops nothing: the folded spend and points stay in <code>other</code> and
+in the totals. If <code>other</code> is itself below the floor, it is withheld along with
+the totals, because subtracting the named rows from the totals would reveal
+it, and TIER says so rather than showing an empty page. If you are evaluating
+TIER on your own, pick <code>developer</code> mode (<code>tierd serve --aggregation developer</code>):
+in <code>team</code> or <code>division</code> mode a group of one is always folded away and you will
+not see your own row. The full command is in
+<a href="quickstart.html#5-the-full-tier-score" rel="nofollow">quickstart.md §5</a>.</p>
+<p><strong>3. The two halves must cover the same stretch of work.</strong> Both halves are
+counted over the same calendar dates. TIER does not pair each merged pull
+request with the exact spend that produced it. Spend is recorded when it
+happens, and points arrive later, at merge. Two things follow:</p>
+<ul>
+<li>A window that ends too recently reads <strong>low</strong>. Its spend is in, but some of
+its work has not merged yet.</li>
+<li>A window that starts before TIER began recording spend reads <strong>high</strong>. That
+starting point is your installation&#39;s <em>cost horizon</em>. Work merged before it
+is counted, but its spend was never recorded, so it looks free.</li>
+</ul>
+<p>On one real multi-repo installation, measured on 2026-07-26, the API&#39;s default
+90-day window gave a number about twice as high as the trailing 30 days, which
+roughly matched the period whose spend had been recorded. TIER warns about this
+second case, with a dashboard banner and a <code>tierd doctor</code> check, but it still
+computes the number. There is
+no fixed safe length. In developer mode, the rule of thumb is a window several
+times longer than your usual time from first AI use to merge, starting after the
+cost horizon. In team and division mode the window is a sealed month: read
+months that start on or after the cost horizon; reading an earlier one, the
+dashboard banner names the first such month.
+See <a href="interpreting-the-number.html#practical-guidance" rel="nofollow">interpreting-the-number.md</a>.</p>
+<p><strong>Next:</strong> <a href="#layer-3--the-full-method-page-by-page" rel="nofollow">The full method, page by page</a>.
+Before you rely on any score, read
+<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>, which covers windows,
+skew and when a score is too early to trust.</p>
+<hr>
+<h2 id="layer-3--the-full-method-page-by-page">Layer 3 — The full method, page by page</h2>
+<p>Layer 2 gave the formula, the weights and the multiplier values. For each step,
+this layer says what the program does, gives each rule&#39;s key numbers in brief
+and links the page that owns it, so each rule has one copy to keep correct. For a code-grounded account of what the tool does and does not do
+today, read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> alongside it.</p>
+<h3 id="from-install-to-a-first-real-score">From install to a first real score</h3>
+<p>This is the single-developer path. Each step is in
+<a href="quickstart.html" rel="nofollow">quickstart.md</a> with its full output.</p>
+<ol>
+<li>
+<p><strong>Install.</strong> Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories), or a release download:
+<a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a>.</p>
+</li>
+<li>
+<p><strong>Check capture.</strong> In your repository&#39;s folder, run <code>tierd doctor --repo .</code>.
+It reports what TIER can read on this machine and how much of your spend it
+could link to an issue.</p>
+</li>
+<li>
+<p><strong>See the cost side.</strong> <code>tierd score --repo .</code> prints cost per issue from
+your local session files. It needs no server and no GitHub access. It shows
+cost only, not a TIER score. It reads Claude Code sessions only; Codex,
+Opencode and Muse Code spend is picked up in steps 5 and 6, with the flags
+named in step 6.</p>
+</li>
+<li>
+<p><strong>Load merged work.</strong> <code>tierd backfill --repo &lt;owner&gt;/&lt;name&gt; --token @&lt;file&gt;</code>
+reads your merged pull requests from GitHub. <code>&lt;owner&gt;/&lt;name&gt;</code> is the
+repository as it appears in its GitHub URL. <code>&lt;file&gt;</code> is a file holding a
+GitHub token that can read the repository&#39;s pull requests;
+<a href="https://github.com/tiermetric/tier/blob/main/README.md#what-you-need-before-you-start" rel="nofollow">README § What you need before you start</a>
+shows how to create one.</p>
+</li>
+<li>
+<p><strong>Serve.</strong> <code>tierd serve --aggregation developer --watch-repo &lt;path&gt;</code>, where
+<code>&lt;path&gt;</code> is the folder of your local checkout. Leave it running. No token
+is needed because none was set; without one, the server accepts
+connections only from this machine, unless something forwards that port,
+such as an SSH tunnel or a reverse proxy.</p>
+</li>
+<li>
+<p><strong>Load past spend.</strong> In a second terminal, run
+<code>tierd ship --server http://127.0.0.1:8080 --repo &lt;path&gt;</code>.
+<code>--watch-repo</code> only picks up new activity, so without this step the score
+divides up to 90 days of merged work by only the spend in session files
+written to after step 5, and reads too high. <code>ship</code> sends the last 90 days of session files still on
+your disk. <code>--server</code> is the address the server from step 5 listens on,
+and <code>&lt;path&gt;</code> is the same checkout folder. It needs no <code>--api-token</code>,
+because the server has none set. <code>ship</code> reads Claude Code sessions only,
+unless you add <code>--codex-rollout</code> for Codex, <code>--opencode</code> for Opencode or
+<code>--muse</code> for Muse Code; add the same flag to the step 5 <code>serve</code> command.
+Without it, a run on a repository where you used only one of those tools
+finds nothing and stops with an error that blames the <code>--repo</code> path.</p>
+</li>
+<li>
+<p><strong>Join your two names.</strong> Spend from steps 5 and 6 is recorded under your
+computer&#39;s login name, which <code>echo $USER</code> prints. Merged work from step 4
+is recorded under your GitHub login, which your GitHub profile page shows,
+or which <code>gh api user -q .login</code> prints if you have the GitHub CLI. If the
+two are the same, skip this step. If they differ, you appear twice in the
+scores: once with spend and no merged work, once with merged work and no
+spend. Tell the server they are one person:</p>
+<pre><code>curl -f -X POST http://127.0.0.1:8080/api/v1/developer_alias \
+  -H &#34;Content-Type: application/json&#34; \
+  -d &#39;{&#34;alias&#34;:&#34;&lt;login-name&gt;&#34;,&#34;canonical&#34;:&#34;&lt;github-login&gt;&#34;}&#39;
+</code></pre>
+<p><code>&lt;login-name&gt;</code> is what <code>echo $USER</code> printed and <code>&lt;github-login&gt;</code> is your
+GitHub login. No token header is needed, because the server has none set.
+The server answers <code>201 Created</code> with an empty body, so the command prints
+nothing when it works. The join also applies to spend and work already
+loaded. The team-server form is in
+<a href="https://github.com/tiermetric/tier/blob/main/README.md#identity-mapping" rel="nofollow">README § Identity mapping</a>.</p>
+</li>
+<li>
+<p><strong>Open the dashboard.</strong> Open <code>http://127.0.0.1:8080</code>, or read the same
+scores as JSON with <code>curl -f http://127.0.0.1:8080/api/v1/scores</code>.</p>
+</li>
+</ol>
+<p>Everything is stored in one SQLite database file on the machine running the
+server, <code>~/.tier/tier.db</code> by default. For a shared team server, with tokens,
+the GitHub webhook, and spend sent in from each developer&#39;s laptop, see
+<a href="https://github.com/tiermetric/tier/blob/main/README.md#run-it-for-a-team" rel="nofollow">README § Run it for a team</a>.</p>
+<h3 id="capture--how-spend-gets-measured">Capture — how spend gets measured</h3>
+<p>TIER is <strong>JSONL-first</strong>. The primary path reads the session files the tool
+already writes locally. On that path no proxy sits in front of your model
+provider and no request is intercepted. An optional reverse proxy exists for
+tools that write no usable local log, and open-weights and self-hosted models
+have their own capture path. On a team, each developer runs <code>tierd ship</code> on
+their own machine. It reads the local session files and sends the cost
+records to the team&#39;s server; this is the <em>laptop-shipper</em> setup.</p>
+<ul>
+<li>Capture paths and the laptop-shipper topology — <a href="https://github.com/tiermetric/tier/blob/main/README.md#capturing-tokens" rel="nofollow">README § Capturing tokens</a></li>
+<li>Self-hosted and open-weights models — <a href="open-weights-capture.html" rel="nofollow">open-weights-capture.md</a></li>
+<li>What is read, stored, and never touched — <a href="privacy.html" rel="nofollow">privacy.md</a></li>
+</ul>
+<h3 id="pricing--how-tokens-become-dollars">Pricing — how tokens become dollars</h3>
+<p><code>ComputeCost</code>, the function that turns an event&#39;s token counts into dollars,
+prices each event against the table in <code>internal/store/prices.yaml</code>. That file
+is compiled into the program and is the single source of truth. It is
+versioned as one unit: any price change bumps the table&#39;s single version
+number. Each cost is fixed when it is recorded and stamped with the version
+that priced it, so upgrading TIER does not reprice history. <code>tierd reprice</code> is
+the explicit, audited way to do that, and a window whose costs span several
+versions is flagged.</p>
+<p>Before lookup, a model name is lowercased and a trailing date stamp (plus
+<code>-preview</code> or <code>-latest</code>) is removed. Dated snapshots of one model therefore
+share a price, while differently named versions keep their own. A model not in
+the table is priced by a guess. If its name carries a parameter count (such as
+<code>70b</code>), it gets a self-hosted size-class rate. Otherwise it gets the flat
+self-hosted-medium rate of $0.50 per million tokens. Either way the server
+writes a one-time warning per model name to its log and counts the event in the
+<code>tier_unknown_model_events_total</code> metric. Open-weights models are priced by
+model <em>and</em> by the host serving them, because the cost belongs to the host,
+not the weights.</p>
+<ul>
+<li>Why list prices, not invoices — <a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a></li>
+<li>The table, and §4&#39;s list of corrections to older copies of it — <a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a></li>
+<li>Normalization rules and the target governance model — <a href="cost-normalization-spec.html" rel="nofollow">cost-normalization-spec.md</a></li>
+</ul>
+<h3 id="attribution--how-spend-is-tied-to-work">Attribution — how spend is tied to work</h3>
+<p>Spend is joined to an issue through the issue reference carried by the
+session&#39;s branch. Merged work is joined through the pull request&#39;s branch name
+or a <code>closes #N</code> line in its body. Cost is attributed to your <strong>shipping
+identity</strong>: the developer name stamped on your cost records, which is your
+computer&#39;s login name unless you override it. Outcomes are attributed to the
+<strong>PR author&#39;s GitHub login</strong>. When those differ, they must be mapped to one
+developer (an alias, recorded through the API), or cost and outcomes land in
+separate rows and cannot be paired. The mapping is applied when scores are
+read, so it corrects past windows too. Developers who appear on only one side
+are reported in the response&#39;s <code>unjoined_developers</code> note, by name in
+<code>developer</code> mode and as a count otherwise. The anonymity floor counts the IDs
+mapped to one person once, and only if that person also meets the rest of the
+rule in <a href="#three-things-that-will-bite-you" rel="nofollow">Three things that will bite you</a>
+(item 2), so load the alias map before relying on it.</p>
+<p>Claude Code can run helper agents in worktrees of their own, on branch names
+it makes up (<code>worktree-agent-</code> followed by a code). Those names carry no issue
+number, so TIER uses the last branch a person named earlier in the same session
+file. If that branch was <code>main</code>, the helper&#39;s spend lands on <code>main</code> too.</p>
+<ul>
+<li>Branch, label, and issue-reference conventions — <a href="conventions.html" rel="nofollow">conventions.md</a></li>
+<li>Identity mapping — <a href="https://github.com/tiermetric/tier/blob/main/README.md#identity-mapping" rel="nofollow">README § Identity mapping</a>. It carries both the team-server form and the tokenless laptop form (<code>http://127.0.0.1:8080</code>, no <code>Authorization</code> header). The tokenless form works only against a server started with no token, which then accepts connections from the same computer alone; anyone logged in to that computer can use it too, as can anything that forwards its port.</li>
+</ul>
+<h3 id="scoring--how-outcomes-become-points">Scoring — how outcomes become points</h3>
+<p>The canonical rubric defines the fixed <code>{0.5, 1, 3, 5, 8}</code> size scale, the
+label taxonomy, the fallback for a pull request with no recognised label, and
+the quality multiplier derived from quality events. The fallback sizes a pull
+request from its diff: lines changed plus ten for each file changed, bucketed
+onto the same five weights.</p>
+<p>Two checks decide whether a score has enough behind it to read. A row is only
+treated as sound once it has at least 3 outcomes and at least $5 of list-price
+spend; below that it is still shown, marked as below the evidence floor. A
+merged pull request is flagged when its developer recorded fewer than 1,000
+tokens against its issue in the 14 days before the merge: its points still count, but its developer&#39;s row is
+marked as not sound, because TIER cannot tell whether the work used AI it
+never saw, was badly attributed, or was genuinely done without AI. Direct commits to the main branch, with no
+pull request, count only if the operator turns on <code>--push-capture</code>, and then at
+the smallest weight, 0.5.</p>
+<ul>
+<li>The canonical rubric, and why it defines no absolute good/bad band — <a href="rubric.html" rel="nofollow">rubric.md</a></li>
+<li>The quality multiplier&#39;s degradation rules — <a href="quality-degradation-spec.html" rel="nofollow">quality-degradation-spec.md</a></li>
+<li>Outcome ingest for teams not on GitHub — <a href="outcomes-api.html" rel="nofollow">outcomes-api.md</a></li>
+<li>GitHub webhook wiring — <a href="webhook-setup.html" rel="nofollow">webhook-setup.md</a></li>
+</ul>
+<h3 id="reading-the-result">Reading the result</h3>
+<p>There is no good or bad value. The rubric deliberately defines no absolute
+band, so your first settled window is your baseline, and later windows are
+read against it.</p>
+<p>Two notes in the <code>data_quality</code> block of the <code>GET /api/v1/scores</code> response say
+when a score needs care, and the dashboard shows each as a notice.
+<code>window_predates_cost_capture</code> is <code>true</code> when the window starts before the cost
+horizon. In <code>developer</code> mode, start it at <code>cost_coverage_safe_since</code> instead
+(the dashboard&#39;s <strong>From</strong> date, or <code>?since=</code> on the API). In <code>team</code> and
+<code>division</code> mode the server reports whole sealed months and refuses <code>?since=</code>,
+so there is no <code>cost_coverage_safe_since</code>; pick a later sealed month that
+begins at or after the cost horizon, in the dashboard&#39;s month picker or with
+<code>?period=YYYY-MM</code> on the API. A month that is not sealed yet answers <code>404</code>;
+when the month will become sealable, the answer gives the time it becomes
+eligible (<code>sealable_at</code>), and a month before the earliest sealable one, or one
+the sealer skipped, answers without it. <code>kanon_suppressed</code> says the anonymity
+floor withheld the <code>other</code> row and the totals.</p>
+<ul>
+<li>Honest reading, windowing skew, and when a score is too early to trust — <a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a></li>
+<li>Where TIER sits alongside DORA (the DevOps Research and Assessment delivery metrics), SPACE (a developer-productivity framework) and DX Core 4 (which folds DORA, SPACE and DevEx into four dimensions) — <a href="how-tier-relates.html" rel="nofollow">how-tier-relates.md</a></li>
+<li>Moving practices between people without ranking them — <a href="peer-learning.html" rel="nofollow">peer-learning.md</a></li>
+</ul>
+<h3 id="the-limits-stated-plainly">The limits, stated plainly</h3>
+<p>TIER can be gamed. The known ways are documented: label inflation, splitting
+pull requests, picking cheap work, and several failure modes that are
+structural rather than deliberate. Read
+<a href="adversarial-analysis.html" rel="nofollow">adversarial-analysis.md</a> before the score is used
+anywhere it could affect how people are treated.</p>
+<p>Measuring developers individually is regulated in some jurisdictions. Two
+separate kinds of rule apply. Works-council co-determination rules, such as
+Germany&#39;s §87 BetrVG, can require the works council&#39;s agreement before a
+monitoring tool is introduced. GDPR Article 22 restricts decisions about a
+person made solely by automated processing. Read
+<a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a> <strong>before</strong> you pick a reporting
+mode, whichever you pick. <code>developer</code> aggregation carries the heaviest
+obligations, but that page also lists works-council consultation and a data
+protection impact assessment (DPIA) for <code>team</code> mode in several countries.</p>
+<p>In <code>developer</code> mode, anyone who can read the server today sees every
+developer&#39;s row. That means anyone
+who holds one of its tokens (the administrator token or the read-only viewer
+token), or, when no token is set, anyone on the same computer, plus anyone
+reaching it through something that forwards its port, such as an SSH tunnel or
+a reverse proxy.</p>
+<h3 id="interfaces">Interfaces</h3>
+<ul>
+<li><code>/api/v1</code> compatibility contract — what is pinned and what may change — <a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a></li>
+<li>Operator security model — <a href="security.html" rel="nofollow">security.md</a></li>
+<li>Full documentation index — <a href="README.html" rel="nofollow">docs/README.md</a></li>
+</ul>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

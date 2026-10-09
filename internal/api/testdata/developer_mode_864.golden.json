@@ -1,0 +1,535 @@
+{
+  "?since=": {
+    "cost_composition": {
+      "attributed_cost_usd": 42.94,
+      "by_class": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input_tok": 11000,
+        "output_tok": 0
+      },
+      "by_model": [
+        {
+          "cost_usd": 39.75,
+          "host": "unknown",
+          "model": "claude-sonnet-4",
+          "premium": false,
+          "share": 0.8995247793618466
+        },
+        {
+          "cost_usd": 4.44,
+          "host": "unknown",
+          "model": "claude-opus-4",
+          "premium": true,
+          "share": 0.10047522063815342
+        }
+      ],
+      "cache_read_share": 0,
+      "premium_model_share": 0.10047522063815342,
+      "total_cost_usd": 44.19,
+      "unattributed_cost_usd": 1.25,
+      "unattributed_share": 0.02828694274722788
+    },
+    "data_quality": {
+      "attributed_cost_share": 0.9717130572527721,
+      "attributed_outcome_share": 1,
+      "cost_coverage_safe_since": "\u003ctime\u003e",
+      "cost_coverage_start": "\u003ctime\u003e",
+      "exploratory_cost_share": 0.02828694274722788,
+      "unattributed_buckets": [
+        {
+          "bucket": "unattributed:main",
+          "cost_usd": 1.25,
+          "share": 0.02828694274722788
+        }
+      ],
+      "window_predates_cost_capture": true
+    },
+    "developers": [
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 4.5,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e1",
+        "exploratory_cost_share": 0,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 2,
+        "spend_leverage": 0,
+        "tier": 222.22222222222223,
+        "total_cost_usd": 13.5,
+        "weighted_points": 3
+      },
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 8.22,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e2",
+        "exploratory_cost_share": 0,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 1,
+        "spend_leverage": 0,
+        "tier": 121.65450121654501,
+        "total_cost_usd": 16.44,
+        "weighted_points": 2
+      },
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 7.125,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e3",
+        "exploratory_cost_share": 0.08771929824561403,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 1,
+        "spend_leverage": 0,
+        "tier": 140.35087719298244,
+        "total_cost_usd": 14.25,
+        "weighted_points": 2
+      }
+    ],
+    "price_table": "\u003cprice_table\u003e",
+    "rubric": {
+      "version": 1
+    },
+    "segment_reconciliation": {
+      "developers": [
+        {
+          "developer": "e1",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 13500000,
+          "outcome_linked_cost_usd": 13.5,
+          "unattributed_cost_micro": 0,
+          "unattributed_cost_usd": 0,
+          "window_cost_micro": 13500000,
+          "window_cost_usd": 13.5
+        },
+        {
+          "developer": "e2",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 16440000,
+          "outcome_linked_cost_usd": 16.44,
+          "unattributed_cost_micro": 0,
+          "unattributed_cost_usd": 0,
+          "window_cost_micro": 16440000,
+          "window_cost_usd": 16.44
+        },
+        {
+          "developer": "e3",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 13000000,
+          "outcome_linked_cost_usd": 13,
+          "unattributed_cost_micro": 1250000,
+          "unattributed_cost_usd": 1.25,
+          "window_cost_micro": 14250000,
+          "window_cost_usd": 14.25
+        }
+      ],
+      "total": {
+        "no_outcome_cost_micro": 0,
+        "no_outcome_cost_usd": 0,
+        "outcome_linked_cost_micro": 42940000,
+        "outcome_linked_cost_usd": 42.94,
+        "unattributed_cost_micro": 1250000,
+        "unattributed_cost_usd": 1.25,
+        "window_cost_micro": 44190000,
+        "window_cost_usd": 44.19
+      }
+    },
+    "since": "\u003ctime\u003e",
+    "team_rollups": [
+      {
+        "actual_paid_usd": 0,
+        "cost_per_point": 6.312857142857142,
+        "coverage_pct": 100,
+        "ranked": true,
+        "spend_leverage": 0,
+        "team": "eng",
+        "tier": 158.40687938447613,
+        "total_cost_usd": 44.19,
+        "unassigned": false,
+        "weighted_points": 7
+      }
+    ],
+    "total": {
+      "actual_paid_usd": 0,
+      "cost_per_point": 6.312857142857142,
+      "coverage_pct": 100,
+      "ranked": true,
+      "spend_leverage": 0,
+      "tier": 158.40687938447613,
+      "total_cost_usd": 44.19,
+      "weighted_points": 7
+    },
+    "work_types": [
+      {
+        "developers": [
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 2.5,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e1",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 400,
+            "total_cost_usd": 2.5,
+            "weighted_points": 1
+          }
+        ],
+        "total": {
+          "actual_paid_usd": 0,
+          "cost_per_point": 2.5,
+          "coverage_pct": 100,
+          "ranked": false,
+          "spend_leverage": 0,
+          "tier": 400,
+          "total_cost_usd": 2.5,
+          "weighted_points": 1
+        },
+        "work_type": "bug"
+      },
+      {
+        "developers": [
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 5.5,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e1",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 181.81818181818184,
+            "total_cost_usd": 11,
+            "weighted_points": 2
+          },
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 8.22,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e2",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 121.65450121654501,
+            "total_cost_usd": 16.44,
+            "weighted_points": 2
+          },
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 6.5,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e3",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 153.84615384615384,
+            "total_cost_usd": 13,
+            "weighted_points": 2
+          }
+        ],
+        "total": {
+          "actual_paid_usd": 0,
+          "cost_per_point": 6.739999999999999,
+          "coverage_pct": 100,
+          "ranked": true,
+          "spend_leverage": 0,
+          "tier": 148.3679525222552,
+          "total_cost_usd": 40.44,
+          "weighted_points": 6
+        },
+        "work_type": "feature"
+      }
+    ]
+  },
+  "?work_type=feature\u0026since=": {
+    "cost_composition": {
+      "attributed_cost_usd": 42.94,
+      "by_class": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input_tok": 11000,
+        "output_tok": 0
+      },
+      "by_model": [
+        {
+          "cost_usd": 39.75,
+          "host": "unknown",
+          "model": "claude-sonnet-4",
+          "premium": false,
+          "share": 0.8995247793618466
+        },
+        {
+          "cost_usd": 4.44,
+          "host": "unknown",
+          "model": "claude-opus-4",
+          "premium": true,
+          "share": 0.10047522063815342
+        }
+      ],
+      "cache_read_share": 0,
+      "premium_model_share": 0.10047522063815342,
+      "total_cost_usd": 44.19,
+      "unattributed_cost_usd": 1.25,
+      "unattributed_share": 0.02828694274722788
+    },
+    "data_quality": {
+      "attributed_cost_share": 0.9717130572527721,
+      "attributed_outcome_share": 1,
+      "cost_coverage_safe_since": "\u003ctime\u003e",
+      "cost_coverage_start": "\u003ctime\u003e",
+      "exploratory_cost_share": 0.02828694274722788,
+      "unattributed_buckets": [
+        {
+          "bucket": "unattributed:main",
+          "cost_usd": 1.25,
+          "share": 0.02828694274722788
+        }
+      ],
+      "window_predates_cost_capture": true
+    },
+    "developers": [
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 4.5,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e1",
+        "exploratory_cost_share": 0,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 2,
+        "spend_leverage": 0,
+        "tier": 222.22222222222223,
+        "total_cost_usd": 13.5,
+        "weighted_points": 3
+      },
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 8.22,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e2",
+        "exploratory_cost_share": 0,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 1,
+        "spend_leverage": 0,
+        "tier": 121.65450121654501,
+        "total_cost_usd": 16.44,
+        "weighted_points": 2
+      },
+      {
+        "actual_paid_usd": 0,
+        "ci_high": 0,
+        "ci_low": 0,
+        "cost_per_point": 7.125,
+        "cost_per_point_ci_high": 0,
+        "cost_per_point_ci_low": 0,
+        "coverage_pct": 100,
+        "developer": "e3",
+        "exploratory_cost_share": 0.08771929824561403,
+        "flagged_outcomes": 0,
+        "ranked": false,
+        "sample_n": 1,
+        "spend_leverage": 0,
+        "tier": 140.35087719298244,
+        "total_cost_usd": 14.25,
+        "weighted_points": 2
+      }
+    ],
+    "price_table": "\u003cprice_table\u003e",
+    "rubric": {
+      "version": 1
+    },
+    "segment_reconciliation": {
+      "developers": [
+        {
+          "developer": "e1",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 13500000,
+          "outcome_linked_cost_usd": 13.5,
+          "unattributed_cost_micro": 0,
+          "unattributed_cost_usd": 0,
+          "window_cost_micro": 13500000,
+          "window_cost_usd": 13.5
+        },
+        {
+          "developer": "e2",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 16440000,
+          "outcome_linked_cost_usd": 16.44,
+          "unattributed_cost_micro": 0,
+          "unattributed_cost_usd": 0,
+          "window_cost_micro": 16440000,
+          "window_cost_usd": 16.44
+        },
+        {
+          "developer": "e3",
+          "no_outcome_cost_micro": 0,
+          "no_outcome_cost_usd": 0,
+          "outcome_linked_cost_micro": 13000000,
+          "outcome_linked_cost_usd": 13,
+          "unattributed_cost_micro": 1250000,
+          "unattributed_cost_usd": 1.25,
+          "window_cost_micro": 14250000,
+          "window_cost_usd": 14.25
+        }
+      ],
+      "total": {
+        "no_outcome_cost_micro": 0,
+        "no_outcome_cost_usd": 0,
+        "outcome_linked_cost_micro": 42940000,
+        "outcome_linked_cost_usd": 42.94,
+        "unattributed_cost_micro": 1250000,
+        "unattributed_cost_usd": 1.25,
+        "window_cost_micro": 44190000,
+        "window_cost_usd": 44.19
+      }
+    },
+    "since": "\u003ctime\u003e",
+    "team_rollups": [
+      {
+        "actual_paid_usd": 0,
+        "cost_per_point": 6.312857142857142,
+        "coverage_pct": 100,
+        "ranked": true,
+        "spend_leverage": 0,
+        "team": "eng",
+        "tier": 158.40687938447613,
+        "total_cost_usd": 44.19,
+        "unassigned": false,
+        "weighted_points": 7
+      }
+    ],
+    "total": {
+      "actual_paid_usd": 0,
+      "cost_per_point": 6.312857142857142,
+      "coverage_pct": 100,
+      "ranked": true,
+      "spend_leverage": 0,
+      "tier": 158.40687938447613,
+      "total_cost_usd": 44.19,
+      "weighted_points": 7
+    },
+    "work_types": [
+      {
+        "developers": [
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 5.5,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e1",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 181.81818181818184,
+            "total_cost_usd": 11,
+            "weighted_points": 2
+          },
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 8.22,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e2",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 121.65450121654501,
+            "total_cost_usd": 16.44,
+            "weighted_points": 2
+          },
+          {
+            "actual_paid_usd": 0,
+            "ci_high": 0,
+            "ci_low": 0,
+            "cost_per_point": 6.5,
+            "cost_per_point_ci_high": 0,
+            "cost_per_point_ci_low": 0,
+            "coverage_pct": 100,
+            "developer": "e3",
+            "exploratory_cost_share": 0,
+            "flagged_outcomes": 0,
+            "ranked": false,
+            "sample_n": 1,
+            "spend_leverage": 0,
+            "tier": 153.84615384615384,
+            "total_cost_usd": 13,
+            "weighted_points": 2
+          }
+        ],
+        "total": {
+          "actual_paid_usd": 0,
+          "cost_per_point": 6.739999999999999,
+          "coverage_pct": 100,
+          "ranked": true,
+          "spend_leverage": 0,
+          "tier": 148.3679525222552,
+          "total_cost_usd": 40.44,
+          "weighted_points": 6
+        },
+        "work_type": "feature"
+      }
+    ]
+  }
+}

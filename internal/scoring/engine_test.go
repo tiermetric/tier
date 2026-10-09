@@ -1,0 +1,780 @@
+package scoring
+
+import (
+	"fmt"
+	"math"
+	"math/rand/v2"
+	"strings"
+	"testing"
+)
+
+func TestComputeDeveloper(t *testing.T) {
+	outcomes := []Outcome{
+		{Developer: "alice", IssueID: "issue-1", Weight: 8, Quality: 1.0},
+		{Developer: "alice", IssueID: "issue-2", Weight: 3, Quality: 1.0},
+	}
+	// From tier-workflow.md worked example: Alice total cost $20.85
+	// TIER = 11.0 / (20.85/1000) = 527.6
+	s := ComputeDeveloper("alice", outcomes, 20.85, 20.85, 0)
+	if math.Abs(s.WeightedPoints-11.0) > 0.001 {
+		t.Errorf("WeightedPoints = %v, want 11.0", s.WeightedPoints)
+	}
+	expected := 11.0 / (20.85 / 1000.0)
+	if math.Abs(s.TIER-expected) > 0.01 {
+		t.Errorf("TIER = %v, want %.2f", s.TIER, expected)
+	}
+	if s.CoveragePercent != 100.0 {
+		t.Errorf("coverage = %v, want 100.0", s.CoveragePercent)
+	}
+}
+
+func TestComputeDeveloperReverted(t *testing.T) {
+	outcomes := []Outcome{
+		{Developer: "bob", IssueID: "issue-3", Weight: 5, Quality: 0.5},
+	}
+	s := ComputeDeveloper("bob", outcomes, 10.0, 10.0, 0)
+	if math.Abs(s.WeightedPoints-2.5) > 0.001 {
+		t.Errorf("WeightedPoints with revert = %v, want 2.5", s.WeightedPoints)
+	}
+}
+
+func TestComputeDeveloperNoCost(t *testing.T) {
+	// No cost → TIER is 0, no divide-by-zero.
+	s := ComputeDeveloper("carol", nil, 0, 0, 0)
+	if s.TIER != 0 {
+		t.Errorf("TIER with zero cost = %v, want 0", s.TIER)
+	}
+}
+
+func TestRollupTeam(t *testing.T) {
+	// From tier-workflow.md: Alice TIER=118.3, Bob TIER=97.9
+	// Team: 16.5 / (158.0/1000) = 104.4
+	alice := DeveloperScore{Developer: "alice", WeightedPoints: 6.0, TotalCostUSD: 50.70, CoveragePercent: 100}
+	alice.TIER = alice.WeightedPoints / (alice.TotalCostUSD / 1000.0)
+
+	bob := DeveloperScore{Developer: "bob", WeightedPoints: 10.5, TotalCostUSD: 107.30, CoveragePercent: 100}
+	bob.TIER = bob.WeightedPoints / (bob.TotalCostUSD / 1000.0)
+
+	team := RollupTeam("backend", []DeveloperScore{alice, bob})
+	if math.Abs(team.TotalCostUSD-158.0) > 0.001 {
+		t.Errorf("team cost = %v, want 158.0", team.TotalCostUSD)
+	}
+	expectedTIER := 16.5 / (158.0 / 1000.0)
+	if math.Abs(team.TIER-expectedTIER) > 0.1 {
+		t.Errorf("team TIER = %v, want %.1f", team.TIER, expectedTIER)
+	}
+}
+
+// TestComputeDeveloper_SpendLeverage covers the CFO-facing sidecar:
+// SpendLeverage = TotalCostUSD / ActualPaidUSD. An enterprise contract that
+// charges $400 for what would have been $1,000 at list price gives the
+// developer a 2.5× leverage number — what gets pitched to the CFO.
+func TestComputeDeveloper_SpendLeverage(t *testing.T) {
+	outcomes := []Outcome{
+		{Developer: "alice", IssueID: "issue-1", Weight: 8, Quality: 1.0},
+	}
+	s := ComputeDeveloper("alice", outcomes, 1000.0, 1000.0, 400.0)
+	if math.Abs(s.SpendLeverage-2.5) > 0.001 {
+		t.Errorf("SpendLeverage = %v, want 2.5", s.SpendLeverage)
+	}
+	if s.ActualPaidUSD != 400.0 {
+		t.Errorf("ActualPaidUSD = %v, want 400.0", s.ActualPaidUSD)
+	}
+}
+
+// TestComputeDeveloper_SpendLeverageNoActualSpend confirms the dashboard-
+// friendly "no leverage data yet" path: when finance has not posted an invoice
+// for the period, SpendLeverage stays 0 (rendered as "—") rather than NaN or
+// Inf, which would break JSON encoding (json.Marshal returns an error on NaN).
+func TestComputeDeveloper_SpendLeverageNoActualSpend(t *testing.T) {
+	s := ComputeDeveloper("alice", nil, 1000.0, 0, 0)
+	if s.SpendLeverage != 0 {
+		t.Errorf("SpendLeverage with zero actual_paid = %v, want 0", s.SpendLeverage)
+	}
+}
+
+// TestComputeDeveloper_SpendLeverageOverCredited covers the #24 over-credit
+// case: when credit memos exceed the invoice, ActualPaidUSD is negative.
+// SpendLeverage stays 0 (dashboard renders "—") per the product decision
+// that a negative leverage multiplier has no meaningful interpretation.
+func TestComputeDeveloper_SpendLeverageOverCredited(t *testing.T) {
+	s := ComputeDeveloper("alice", nil, 1000.0, 0, -50.0)
+	if s.SpendLeverage != 0 {
+		t.Errorf("SpendLeverage with negative actual_paid = %v, want 0 (per #24 product decision)", s.SpendLeverage)
+	}
+	// ActualPaidUSD itself is recorded truthfully — only the derived
+	// leverage metric is suppressed.
+	if s.ActualPaidUSD != -50.0 {
+		t.Errorf("ActualPaidUSD = %v, want -50.0 (negative net is recorded)", s.ActualPaidUSD)
+	}
+}
+
+// TestRollupTeam_SpendLeverage verifies the team aggregate uses summed values,
+// not an average of individual leverage ratios — same principle as team TIER.
+// Two developers at different leverage ratios produce a team ratio weighted by
+// their absolute dollar amounts.
+func TestRollupTeam_SpendLeverage(t *testing.T) {
+	alice := DeveloperScore{Developer: "alice", TotalCostUSD: 1000, ActualPaidUSD: 400, SpendLeverage: 2.5}
+	bob := DeveloperScore{Developer: "bob", TotalCostUSD: 500, ActualPaidUSD: 250, SpendLeverage: 2.0}
+	team := RollupTeam("backend", []DeveloperScore{alice, bob})
+
+	wantLeverage := 1500.0 / 650.0
+	if math.Abs(team.SpendLeverage-wantLeverage) > 0.001 {
+		t.Errorf("team SpendLeverage = %v, want %.4f (1500/650, not avg(2.5,2.0))",
+			team.SpendLeverage, wantLeverage)
+	}
+	if team.ActualPaidUSD != 650.0 {
+		t.Errorf("team ActualPaidUSD = %v, want 650.0", team.ActualPaidUSD)
+	}
+}
+
+// --- #64: FormatReport coverage (was 0%) ---
+
+func TestFormatReport_Empty(t *testing.T) {
+	out := FormatReport(nil, "2026-01-01", AggregationDeveloper)
+	if !strings.Contains(out, "No data found") {
+		t.Errorf("empty scores: output = %q, want the no-data message", out)
+	}
+}
+
+// TestFormatReport_SortsAndTotals pins the three load-bearing behaviors:
+// ordering by identifier, the recomputed team-total row (points and cost summed,
+// TIER and coverage derived — NOT averaged), and the explanatory footer. Input is
+// deliberately unsorted, and the higher TIER belongs to the later identifier, so
+// the test fails if rows are ordered by TIER (#830: no leaderboard) or left in
+// input order.
+func TestFormatReport_SortsAndTotals(t *testing.T) {
+	// SampleN is set because the TEAM TOTAL row is now gated on the ranking floor
+	// (#606): it is rolled up through RollupTeam, whose gate reads the SUMMED
+	// outcome count. Without it the aggregate is legitimately unranked and its TIER
+	// is withheld — which is the correct behaviour, but not what this test measures.
+	// TestFormatReport_TeamTotalWithheldBelowFloor covers that arm.
+	scores := []DeveloperScore{
+		{Developer: "zoe", TIER: 1200, WeightedPoints: 3, TotalCostUSD: 2.5, CoveragePercent: 100, SampleN: 2},
+		{Developer: "alice", TIER: 100, WeightedPoints: 1, TotalCostUSD: 10, CoveragePercent: 50, SampleN: 2},
+	}
+	out := FormatReport(scores, "2026-01-01", AggregationDeveloper)
+
+	if !strings.Contains(out, "TIER Report — since 2026-01-01") {
+		t.Errorf("missing header; out=%q", out)
+	}
+	ai, zi := strings.Index(out, "alice"), strings.Index(out, "zoe")
+	if ai == -1 || zi == -1 || ai > zi {
+		t.Errorf("rows not ordered by identifier (alice@%d, zoe@%d)", ai, zi)
+	}
+	// Team totals: points 4, cost 12.5 → TIER = 4/(12.5/1000) = 320.
+	// Coverage = (2.5×100% + 10×50%) / 12.5 = 60%.
+	totalIdx := strings.Index(out, "TEAM TOTAL")
+	if totalIdx == -1 {
+		t.Fatalf("missing TEAM TOTAL row; out=%q", out)
+	}
+	totalLine := strings.SplitN(out[totalIdx:], "\n", 2)[0]
+	// The four numeric columns are positional (TIER, cost, points, coverage),
+	// the last four whitespace-separated fields. Matching by column keeps a
+	// value like "4.0" from false-matching digits bleeding in from another field.
+	fields := strings.Fields(totalLine)
+	if len(fields) < 4 {
+		t.Fatalf("TEAM TOTAL line malformed: %q", totalLine)
+	}
+	cols := fields[len(fields)-4:]
+	for i, want := range []string{"320.0", "12.5000", "4.0", "60%"} {
+		if cols[i] != want {
+			t.Errorf("TEAM TOTAL column %d = %q, want %q (line %q)", i, cols[i], want, totalLine)
+		}
+	}
+	if !strings.Contains(out, "Formula: TIER") || !strings.Contains(out, "Fidelity: %") {
+		t.Errorf("missing explanatory footer; out=%q", out)
+	}
+}
+
+// TestFormatReport_ZeroCostNoDivByZero pins the guard for the all-estimated /
+// no-spend case: points over zero cost must not produce NaN/Inf.
+//
+// ⚠️ The ASSERTION MOVED in #606 and the reason matters. The team row used to
+// render "0.0" here and this test read the report text. It no longer does: $0.00
+// is below MinRankedCostUSD, so the row is unranked and its TIER column is
+// withheld as "—". That em dash would MASK the very defect this test exists to
+// catch — if RollupTeam started emitting NaN or +Inf for a zero-cost quotient, the
+// withheld branch would overwrite it and the report scan would still pass.
+//
+// So the division guard is now asserted where it actually lives (RollupTeam's
+// `if ts.TotalCostUSD > 0`), and the report scan is kept as the second arm for the
+// per-developer rows, which still print their own numbers.
+func TestFormatReport_ZeroCostNoDivByZero(t *testing.T) {
+	scores := []DeveloperScore{{Developer: "carol", WeightedPoints: 2}}
+
+	// (a) The guard itself, upstream of any formatting that could hide it.
+	team := RollupTeam("", scores)
+	if math.IsNaN(team.TIER) || math.IsInf(team.TIER, 0) {
+		t.Errorf("RollupTeam produced TIER = %v for %v points over $0 of cost; the engine must "+
+			"not divide when cost is 0", team.TIER, team.WeightedPoints)
+	}
+	if team.Ranked {
+		t.Errorf("a $0.00 window cannot clear the $%.2f evidence floor, yet ranked = true — "+
+			"the withheld-column assertion below would then be measuring nothing",
+			MinRankedCostUSD)
+	}
+
+	// (b) The rendered report: still no NaN/Inf anywhere, and the aggregate row is
+	// present and withheld rather than headlining a meaningless 0.0.
+	out := FormatReport(scores, "2026-01-01", AggregationDeveloper)
+	if strings.Contains(out, "NaN") || strings.Contains(out, "Inf") {
+		t.Errorf("zero-cost report leaked NaN/Inf: %q", out)
+	}
+	if !strings.Contains(out, "TEAM TOTAL") {
+		t.Errorf("missing TEAM TOTAL row; out=%q", out)
+	}
+	if got := reportTotalTIER(t, out); got != "—" {
+		t.Errorf("TEAM TOTAL TIER = %q for a $0.00 window, want %q: zero cost is below the "+
+			"evidence floor, and 0.0 would read as the worst possible yield when the honest "+
+			"statement is that it cannot be scored", got, "—")
+	}
+}
+
+// --- #133: ranking floor + bootstrap CI ---
+
+// TestComputeDeveloper_OneLuckyPRIsUnranked is the C3 regression: a single
+// 0.5-weight PR against $0.0004 of cost yields a stratospheric TIER that used
+// to top the leaderboard. It must now be flagged unranked so it can't outrank a
+// developer with real evidence behind their number.
+func TestComputeDeveloper_OneLuckyPRIsUnranked(t *testing.T) {
+	s := ComputeDeveloper("lucky",
+		[]Outcome{{Developer: "lucky", IssueID: "1", Weight: 0.5, Quality: 1.0}},
+		0.0004, 0.0004, 0)
+	if s.Ranked {
+		t.Errorf("one $0.0004 PR must be unranked, got Ranked=true (TIER=%v)", s.TIER)
+	}
+	if s.SampleN != 1 {
+		t.Errorf("SampleN = %d, want 1", s.SampleN)
+	}
+	// The lucky TIER is still computed and carried (listed, not hidden).
+	if s.TIER <= 0 {
+		t.Errorf("unranked row should still carry its computed TIER, got %v", s.TIER)
+	}
+}
+
+// TestComputeDeveloper_RankedRequiresBothFloors pins the two-threshold gate,
+// including the >= boundaries on both dimensions.
+func TestComputeDeveloper_RankedRequiresBothFloors(t *testing.T) {
+	mkOutcomes := func(n int) []Outcome {
+		out := make([]Outcome, n)
+		for i := range out {
+			out[i] = Outcome{Developer: "d", IssueID: "i", Weight: 1, Quality: 1.0}
+		}
+		return out
+	}
+	cases := []struct {
+		name       string
+		n          int
+		costUSD    float64
+		wantRanked bool
+	}{
+		{"n=3 and $5 exactly -> ranked (both boundaries)", 3, 5.00, true},
+		{"n=2 and $500 -> unranked (too few outcomes)", 2, 500, false},
+		{"n=50 and $4.99 -> unranked (below cost floor)", 50, 4.99, false},
+		{"n=3 and $5.01 -> ranked", 3, 5.01, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := ComputeDeveloper("d", mkOutcomes(tc.n), tc.costUSD, tc.costUSD, 0)
+			if s.Ranked != tc.wantRanked {
+				t.Errorf("Ranked = %v, want %v (n=%d, cost=%.2f)",
+					s.Ranked, tc.wantRanked, tc.n, tc.costUSD)
+			}
+			if s.SampleN != tc.n {
+				t.Errorf("SampleN = %d, want %d", s.SampleN, tc.n)
+			}
+		})
+	}
+}
+
+// TestFormatReport_BelowFloorRowTaggedInIdentifierOrder pins #830: rows are
+// listed by identifier whatever their evidence, and a below-floor row carries its
+// own tag instead of being grouped under a separator. The unranked row sorts FIRST
+// by name here, so the old ranked-first order would fail this test.
+func TestFormatReport_BelowFloorRowTaggedInIdentifierOrder(t *testing.T) {
+	// adam: enormous TIER but only 1 outcome / $0.0004 → below the floor.
+	adam := ComputeDeveloper("adam",
+		[]Outcome{{Weight: 0.5, Quality: 1.0}}, 0.0004, 0.0004, 0)
+	// zed: modest TIER but 3 outcomes / $10 → clears the floor.
+	zed := ComputeDeveloper("zed",
+		[]Outcome{{Weight: 3, Quality: 1}, {Weight: 5, Quality: 1}, {Weight: 8, Quality: 1}},
+		10, 10, 0)
+	if adam.Ranked || !zed.Ranked {
+		t.Fatalf("fixture premise broken: adam.Ranked=%v zed.Ranked=%v", adam.Ranked, zed.Ranked)
+	}
+
+	out := FormatReport([]DeveloperScore{zed, adam}, "2026-01-01", AggregationDeveloper)
+
+	line := func(name string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, name+" ") {
+				return l
+			}
+		}
+		t.Fatalf("no row for %s; out=%q", name, out)
+		return ""
+	}
+	if ai, zi := strings.Index(out, line("adam")), strings.Index(out, line("zed")); ai >= zi {
+		t.Errorf("rows not ordered by identifier: adam@%d zed@%d", ai, zi)
+	}
+	if !strings.HasSuffix(line("adam"), "% *") {
+		t.Errorf("below-floor row is not marked: %q", line("adam"))
+	}
+	if strings.Contains(line("zed"), "*") {
+		t.Errorf("a row that clears the floor is marked below it: %q", line("zed"))
+	}
+	if strings.Contains(out, "---") {
+		t.Errorf("the report still draws a floor separator; out=%q", out)
+	}
+	// The marker means nothing without its legend, and the legend must name all
+	// three conditions Ranked gates on, from the constants (#133, #136). Once: the
+	// fixture's TEAM TOTAL clears the floor, so nothing else prints the reason.
+	if n := strings.Count(out, "* below evidence floor"); n != 1 {
+		t.Errorf("below-floor legend printed %d times, want exactly 1; out=%q", n, out)
+	}
+	wantReason := fmt.Sprintf("n < %d outcomes, an outcome with < %d AI tokens in the %d days "+
+		"before it merged, or < $%g cost",
+		MinRankedOutcomes, MinAttributableTokens, AttributableWindowDays, MinRankedCostUSD)
+	// The legend prints the reason one clause per line.
+	wantLegend := strings.ReplaceAll(wantReason, ", ", ",\n  ")
+	if n := strings.Count(out, wantLegend); n != 1 {
+		t.Errorf("legend states the floor reason %d times, want exactly 1 (%q); out=%q", n, wantLegend, out)
+	}
+	// The marked row and every legend line fit the report's 72-column rule (the
+	// footer's prose is out of scope here).
+	inLegend := false
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "* below") {
+			inLegend = true
+		} else if strings.HasPrefix(l, "─") {
+			inLegend = false
+		}
+		if !inLegend && !strings.HasPrefix(l, "adam ") {
+			continue
+		}
+		if w := len([]rune(l)); w > 72 {
+			t.Errorf("line is %d columns, wider than the 72-column rule: %q", w, l)
+		}
+	}
+}
+
+// fixedDenomCI runs BootstrapCI with the whole denominator in the FIXED term (no
+// per-outcome cost) — i.e. the pre-#495 numerator-only behaviour, expressed through
+// the joint signature. The #133 percentile-machinery goldens are pinned through it,
+// and the coverage control arm uses it as the "denominator pinned" comparator.
+func fixedDenomCI(contribs []float64, totalCostUSD float64, b int, rng *rand.Rand) (lo, hi float64) {
+	return BootstrapCI(contribs, make([]float64, len(contribs)), totalCostUSD, b, rng)
+}
+
+// TestBootstrapCI_Deterministic pins the golden interval for a fixed seed and
+// asserts the point TIER lies inside it. Golden values captured with rand.NewPCG(1,2)
+// under a FIXED denominator (all cost in the fixed term) — the #133 percentile
+// machinery is unchanged by #495, so these goldens must still hold.
+func TestBootstrapCI_Deterministic(t *testing.T) {
+	contribs := []float64{3, 5, 8}
+	const costUSD = 10.0
+	rng := rand.New(rand.NewPCG(1, 2))
+	lo, hi := fixedDenomCI(contribs, costUSD, 1000, rng)
+
+	const wantLo, wantHi = 900, 2400 // golden: index 25 and 974 of sorted resamples
+	if lo != wantLo || hi != wantHi {
+		t.Errorf("BootstrapCI = [%v, %v], want golden [%v, %v]", lo, hi, wantLo, wantHi)
+	}
+	// Point TIER = (3+5+8)/(10/1000) = 1600 must sit inside the interval.
+	const point = 1600.0
+	if lo > point || point > hi {
+		t.Errorf("point TIER %v not within [%v, %v]", point, lo, hi)
+	}
+}
+
+// TestBootstrapCI_TrimsInteriorPercentiles proves the 2.5/97.5 index selection
+// actually trims (unlike the [3,5,8] case, whose CI bounds ARE the support
+// min/max, so any index in the tails would pass). With 10 contributions the
+// all-min / all-max resamples occur with probability 1e-10, far rarer than
+// 2.5%, so a correct index at 25/974 lands strictly inside the support: an
+// off-by-one or 0/(b-1) index bug would push a bound to the support extreme and
+// fail. Golden captured with rand.NewPCG(7,11), fixed denominator.
+func TestBootstrapCI_TrimsInteriorPercentiles(t *testing.T) {
+	contribs := []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10} // n=10
+	const costUSD = 10.0
+	rng := rand.New(rand.NewPCG(7, 11))
+	lo, hi := fixedDenomCI(contribs, costUSD, 1000, rng)
+
+	// Support extremes: all-min sum=10 → TIER 1000; all-max sum=100 → TIER 10000.
+	const supportLo, supportHi = 1000.0, 10000.0
+	if lo <= supportLo || hi >= supportHi {
+		t.Errorf("CI [%v, %v] not strictly inside support (%v, %v) — percentile trimming not applied",
+			lo, hi, supportLo, supportHi)
+	}
+	const wantLo, wantHi = 3600, 7300 // golden at indices 25 and 974
+	if lo != wantLo || hi != wantHi {
+		t.Errorf("BootstrapCI = [%v, %v], want golden [%v, %v]", lo, hi, wantLo, wantHi)
+	}
+	// Point TIER = Σ(1..10)/(10/1000) = 55/0.01 = 5500, inside the interval.
+	const point = 5500.0
+	if lo > point || point > hi {
+		t.Errorf("point TIER %v not within [%v, %v]", point, lo, hi)
+	}
+}
+
+// TestBootstrapCI_DegenerateSingleOutcome: with one outcome every resample is
+// that same outcome, so the interval collapses to the point estimate — and with a
+// per-outcome cost the joint denominator collapses to that same single value too.
+func TestBootstrapCI_DegenerateSingleOutcome(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	// The whole cost carried as this outcome's own cost (fixed term 0): every draw
+	// is the single outcome, so num=4 and cost=8 every replicate → TIER 500.
+	lo, hi := BootstrapCI([]float64{4}, []float64{8}, 0, 1000, rng)
+	point := 4.0 / (8.0 / 1000.0) // 500
+	if lo != point || hi != point {
+		t.Errorf("single-outcome CI = [%v, %v], want lo==hi==%v", lo, hi, point)
+	}
+}
+
+// TestBootstrapCI_ZeroCost: a non-positive TOTAL denominator (no per-outcome cost,
+// no fixed cost) has no meaningful TIER, so the interval is (0,0) — no panic/Inf.
+func TestBootstrapCI_ZeroCost(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	lo, hi := BootstrapCI([]float64{3, 5, 8}, []float64{0, 0, 0}, 0, 1000, rng)
+	if lo != 0 || hi != 0 {
+		t.Errorf("zero-cost CI = [%v, %v], want [0, 0]", lo, hi)
+	}
+}
+
+// TestBootstrapCI_GuardsReturnZero pins the full "return (0,0), no panic" contract
+// across every early-exit guard, including b<=0, a nil rng, a non-positive total
+// cost, and the #495 mismatched-slice-length guard.
+func TestBootstrapCI_GuardsReturnZero(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	z3 := []float64{0, 0, 0}
+	cases := []struct {
+		name      string
+		contribs  []float64
+		costs     []float64
+		fixedCost float64
+		b         int
+		rng       *rand.Rand
+	}{
+		{"zero resamples", []float64{3, 5, 8}, z3, 10, 0, rng},
+		{"negative resamples", []float64{3, 5, 8}, z3, 10, -5, rng},
+		{"no contributions", nil, nil, 10, 1000, rng},
+		{"non-positive total cost", []float64{3, 5, 8}, z3, 0, 1000, rng},
+		{"negative total cost", []float64{3, 5, 8}, z3, -1, 1000, rng},
+		{"mismatched slice lengths", []float64{3, 5, 8}, []float64{1, 2}, 10, 1000, rng},
+		{"nil rng", []float64{3, 5, 8}, z3, 10, 1000, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lo, hi := BootstrapCI(tc.contribs, tc.costs, tc.fixedCost, tc.b, tc.rng)
+			if lo != 0 || hi != 0 {
+				t.Errorf("BootstrapCI = [%v, %v], want [0, 0]", lo, hi)
+			}
+		})
+	}
+}
+
+// (Note: there is deliberately no "joint is always wider than pinned" test. With
+// POSITIVE weight↔cost correlation the joint interval can be NARROWER — an
+// expensive-large outcome partly cancels in the ratio — which is exactly the
+// correlation #495 says pinning throws away. Coverage, not width, is the invariant.)
+
+// TestBootstrapCI_Coverage is the #495 coverage control arm: on a synthetic
+// population whose denominator genuinely varies, the JOINT interval achieves ~nominal
+// 95% coverage of the true TIER, while the pre-#495 pinned-denominator interval
+// UNDERcovers by a clear margin. A regression to pinning the denominator collapses
+// the joint coverage toward the pinned number and fails this test.
+func TestBootstrapCI_Coverage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("coverage simulation is skipped under -short")
+	}
+	// Population of (contribution, cost) pairs: positive correlation (bigger work
+	// costs more) plus heavy-tailed lognormal cost — the regime where pinning the
+	// denominator understates the interval.
+	type oc struct{ contrib, cost float64 }
+	pgen := rand.New(rand.NewPCG(101, 202))
+	pop := make([]oc, 200)
+	var popC, popCost float64
+	for i := range pop {
+		w := 0.5 + 7.5*pgen.Float64()                    // contribution in [0.5, 8]
+		c := 0.05 * w * math.Exp(1.1*pgen.NormFloat64()) // cost correlated with w, lognormal
+		pop[i] = oc{w, c}
+		popC += w
+		popCost += c
+	}
+	trueTIER := popC / (popCost / 1000.0)
+
+	const trials, n, b = 400, 25, 300
+	rng := rand.New(rand.NewPCG(303, 404))
+	var jointHits, pinnedHits int
+	for tr := 0; tr < trials; tr++ {
+		contribs := make([]float64, n)
+		costs := make([]float64, n)
+		var sampleCost float64
+		for i := 0; i < n; i++ {
+			o := pop[rng.IntN(len(pop))]
+			contribs[i], costs[i] = o.contrib, o.cost
+			sampleCost += o.cost
+		}
+		if jLo, jHi := BootstrapCI(contribs, costs, 0, b, rng); jLo <= trueTIER && trueTIER <= jHi {
+			jointHits++
+		}
+		if pLo, pHi := fixedDenomCI(contribs, sampleCost, b, rng); pLo <= trueTIER && trueTIER <= pHi {
+			pinnedHits++
+		}
+	}
+	jointCov := float64(jointHits) / trials
+	pinnedCov := float64(pinnedHits) / trials
+	t.Logf("coverage: joint=%.3f pinned=%.3f (nominal 0.95, trueTIER=%.1f)", jointCov, pinnedCov, trueTIER)
+	// Joint must be reasonably near nominal (bootstrap ratio CIs undercover a little
+	// at n=25; allow Monte-Carlo slack).
+	if jointCov < 0.85 {
+		t.Errorf("joint coverage %.3f far below nominal 0.95 — denominator not resampled (#495)", jointCov)
+	}
+	// Control arm: pinning the denominator must undercover by a clear margin.
+	if pinnedCov > jointCov-0.06 {
+		t.Errorf("pinned-denominator coverage %.3f is not materially worse than joint %.3f — #495 fix has no measurable effect", pinnedCov, jointCov)
+	}
+}
+
+// TestBootstrapCI_JointGolden pins the JOINT numeric path (#495) with a fixed seed on
+// multi-outcome PAIRED data: both the numerator and the denominator are accumulated
+// from ONE index set per replicate. A regression that draws separate indices for the
+// two sums (breaking the weight↔cost pairing), or reverts to a fixed denominator,
+// changes these goldens — a case the coverage aggregate alone might not catch if the
+// broken interval still brackets the point TIER.
+func TestBootstrapCI_JointGolden(t *testing.T) {
+	contribs := []float64{3, 5, 8, 2}
+	costs := []float64{0.4, 0.7, 1.2, 0.3}
+	rng := rand.New(rand.NewPCG(3, 4))
+	lo, hi := BootstrapCI(contribs, costs, 0, 1000, rng)
+
+	const wantLo, wantHi = 6666.666666666667, 7272.727272727272 // golden captured with rand.NewPCG(3,4)
+	if lo != wantLo || hi != wantHi {
+		t.Errorf("joint BootstrapCI = [%v, %v], want golden [%v, %v]", lo, hi, wantLo, wantHi)
+	}
+	// Strict positive width — a joint interval on varied paired data must not collapse.
+	if !(lo < hi) {
+		t.Errorf("joint interval must have strict positive width, got [%v, %v]", lo, hi)
+	}
+	// Point TIER = Σcontrib / (Σcost/1000) must sit inside the interval.
+	point := (3.0 + 5 + 8 + 2) / ((0.4 + 0.7 + 1.2 + 0.3) / 1000)
+	if lo > point || point > hi {
+		t.Errorf("point TIER %.1f not within [%v, %v]", point, lo, hi)
+	}
+}
+
+// --- #136: zero-token-outcome tripwire ---
+
+// TestComputeDeveloper_ZeroTokenOutcomeUnranks is the C6/G-02 unit regression:
+// a developer who clears BOTH #133 floors but has a single zero-token outcome is
+// forced unranked, the flag is counted, and — critically — the outcome's points
+// are unchanged (visibility, not score surgery).
+func TestComputeDeveloper_ZeroTokenOutcomeUnranks(t *testing.T) {
+	// 3 outcomes / $10 cost clears both #133 floors; one carries ZeroToken.
+	outcomes := []Outcome{
+		{Developer: "d", IssueID: "1", Weight: 3, Quality: 1},
+		{Developer: "d", IssueID: "2", Weight: 5, Quality: 1},
+		{Developer: "d", IssueID: "3", Weight: 8, Quality: 1, ZeroToken: true},
+	}
+	s := ComputeDeveloper("d", outcomes, 10, 10, 0)
+
+	if s.Ranked {
+		t.Errorf("Ranked = true, want false (one zero-token outcome must unrank)")
+	}
+	if s.FlaggedOutcomes != 1 {
+		t.Errorf("FlaggedOutcomes = %d, want 1", s.FlaggedOutcomes)
+	}
+	// Points are 3+5+8 = 16 regardless of the flag — the number is not altered.
+	if s.WeightedPoints != 16 {
+		t.Errorf("WeightedPoints = %v, want 16 (flag must not touch points)", s.WeightedPoints)
+	}
+	if s.SampleN != 3 {
+		t.Errorf("SampleN = %d, want 3", s.SampleN)
+	}
+}
+
+// TestComputeDeveloper_NoZeroTokenStaysRanked is the negative control: the same
+// floors-clearing developer with all outcomes above the token floor stays ranked
+// with zero flags. Pins that the tripwire only fires on ZeroToken outcomes.
+func TestComputeDeveloper_NoZeroTokenStaysRanked(t *testing.T) {
+	outcomes := []Outcome{
+		{Developer: "d", IssueID: "1", Weight: 3, Quality: 1},
+		{Developer: "d", IssueID: "2", Weight: 5, Quality: 1},
+		{Developer: "d", IssueID: "3", Weight: 8, Quality: 1},
+	}
+	s := ComputeDeveloper("d", outcomes, 10, 10, 0)
+	if !s.Ranked {
+		t.Errorf("Ranked = false, want true (no flags, both floors cleared)")
+	}
+	if s.FlaggedOutcomes != 0 {
+		t.Errorf("FlaggedOutcomes = %d, want 0", s.FlaggedOutcomes)
+	}
+}
+
+// TestFormatReport_FidelityCopy pins the #136 relabel of the text report: the
+// column header reads "Fidelity" (not "Coverage") and the footer states the
+// of-CAPTURED-spend scoping plus the completeness caveat.
+func TestFormatReport_FidelityCopy(t *testing.T) {
+	out := FormatReport([]DeveloperScore{
+		{Developer: "alice", TIER: 100, WeightedPoints: 3, TotalCostUSD: 10, CoveragePercent: 100, Ranked: true},
+	}, "2026-01-01", AggregationDeveloper)
+
+	if !strings.Contains(out, "Fidelity") {
+		t.Errorf("report header missing 'Fidelity'; out=%q", out)
+	}
+	if strings.Contains(out, "Coverage") {
+		t.Errorf("report still says 'Coverage'; out=%q", out)
+	}
+	// Footer scoping: "CAPTURED" and the not-measured completeness caveat.
+	if !strings.Contains(out, "CAPTURED") {
+		t.Errorf("footer missing of-CAPTURED-spend scoping; out=%q", out)
+	}
+	if !strings.Contains(out, "completeness of capture is NOT measured") {
+		t.Errorf("footer missing completeness caveat; out=%q", out)
+	}
+	// Every developer row clears the floor, so no row is marked and the legend
+	// explaining the marker is absent (#830).
+	if strings.Contains(out, "* below evidence floor") {
+		t.Errorf("below-floor legend printed for a report with no below-floor row; out=%q", out)
+	}
+	if strings.Contains(out, "% *") {
+		t.Errorf("a row that clears the floor carries the below-floor marker; out=%q", out)
+	}
+}
+
+// rollupDev builds a DeveloperScore the way production does — through
+// ComputeDeveloper — so SampleN and FlaggedOutcomes are DERIVED from real
+// outcomes rather than typed in. A hand-built struct would let these tests assert
+// intent against a fixture that the real pipeline could never produce.
+func rollupDev(name string, outcomes int, weightEach, costUSD float64, zeroTokens int) DeveloperScore {
+	var os []Outcome
+	for i := 0; i < outcomes; i++ {
+		os = append(os, Outcome{
+			Developer: name,
+			IssueID:   fmt.Sprintf("%s-%d", name, i),
+			Weight:    weightEach,
+			Quality:   1.0,
+			ZeroToken: i < zeroTokens,
+		})
+	}
+	return ComputeDeveloper(name, os, costUSD, costUSD, 0)
+}
+
+// TestRollupTeam_RankedFromSummedInputs pins #502: the #133/#136 evidence floor
+// now applies to the team rollup, judged on the SUMMED inputs against the SAME
+// developer constants. Before this, RollupTeam never set Ranked at all, so every
+// team aggregate reached the wire as ranked evidence.
+//
+// The boundary rows are the point of the table: >= is not >, so exactly
+// MinRankedOutcomes outcomes and exactly MinRankedCostUSD dollars must RANK,
+// while one cent and one outcome below must not.
+func TestRollupTeam_RankedFromSummedInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		devs []DeveloperScore
+		want bool
+	}{
+		{
+			name: "both floors cleared exactly, no flags",
+			devs: []DeveloperScore{rollupDev("alice", MinRankedOutcomes, 1.0, MinRankedCostUSD, 0)},
+			want: true,
+		},
+		{
+			name: "one outcome short of the floor, spend far above it",
+			devs: []DeveloperScore{rollupDev("alice", MinRankedOutcomes-1, 1.0, 100.0, 0)},
+			want: false,
+		},
+		{
+			name: "one cent short of the spend floor, outcomes far above it",
+			devs: []DeveloperScore{rollupDev("alice", 20, 1.0, MinRankedCostUSD-0.01, 0)},
+			want: false,
+		},
+		{
+			name: "both floors cleared but one zero-token outcome",
+			devs: []DeveloperScore{rollupDev("alice", 20, 1.0, 100.0, 1)},
+			want: false,
+		},
+		{
+			name: "flagged outcome sits on a DIFFERENT member than the evidence",
+			devs: []DeveloperScore{
+				rollupDev("alice", 20, 1.0, 100.0, 0),
+				rollupDev("bob", 1, 1.0, 10.0, 1),
+			},
+			want: false,
+		},
+		{
+			name: "empty team",
+			devs: nil,
+			want: false,
+		},
+		{
+			name: "the #502 case: 28 points against $0.0001 of measured spend",
+			devs: []DeveloperScore{rollupDev("alice", 2, 14.0, 0.0001, 0)},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := RollupTeam("backend", tt.devs)
+			if ts.Ranked != tt.want {
+				t.Errorf("RollupTeam Ranked = %v, want %v (points %.2f, cost %.4f)",
+					ts.Ranked, tt.want, ts.WeightedPoints, ts.TotalCostUSD)
+			}
+		})
+	}
+}
+
+// TestRollupTeam_RankedUsesSumsNotMemberVerdicts is the control against the
+// tempting wrong implementation: Ranked = every member is Ranked. Three
+// developers with one outcome and $2 each are EVERY ONE below both floors, yet
+// the team number is computed from their sums (3 outcomes, $6) — and it is the
+// sums the floor must judge, because the sums are the evidence standing behind
+// the number being published.
+//
+// An implementation that ANDed the members' flags would return false here and
+// pass every case in the table above.
+func TestRollupTeam_RankedUsesSumsNotMemberVerdicts(t *testing.T) {
+	devs := []DeveloperScore{
+		rollupDev("alice", 1, 1.0, 2.0, 0),
+		rollupDev("bob", 1, 1.0, 2.0, 0),
+		rollupDev("carol", 1, 1.0, 2.0, 0),
+	}
+	for _, d := range devs {
+		if d.Ranked {
+			t.Fatalf("fixture broken: %s is ranked individually, so this test no longer "+
+				"distinguishes summed evidence from an AND over members", d.Developer)
+		}
+	}
+	ts := RollupTeam("backend", devs)
+	if !ts.Ranked {
+		t.Errorf("team Ranked = false with %d summed outcomes and $%.2f summed cost; the floor "+
+			"must judge the sums the team TIER is computed from, not each member",
+			MinRankedOutcomes, ts.TotalCostUSD)
+	}
+}
+
+// TestRollupTeam_UnrankedKeepsTheTrueQuotient pins the house rule from #136 that
+// #502 explicitly preserves: the number is never altered, only its ranking
+// authority revoked. The below-floor team still carries its exact TIER —
+// 28 / (0.0001/1000) = 2.8e8 — and cost_per_point stays unfloored beside it.
+//
+// This is the guard against "fixing" #502 in the engine by flooring the
+// denominator (option A) or by zeroing/omitting TIER for an unranked row: both
+// would pass a test that only checked Ranked.
+func TestRollupTeam_UnrankedKeepsTheTrueQuotient(t *testing.T) {
+	ts := RollupTeam("backend", []DeveloperScore{rollupDev("alice", 2, 14.0, 0.0001, 0)})
+	if ts.Ranked {
+		t.Fatal("fixture broken: this team must be below the floor for the test to mean anything")
+	}
+	const wantTIER = 28.0 / (0.0001 / 1000.0) // 2.8e8
+	if math.Abs(ts.TIER-wantTIER) > 1.0 {
+		t.Errorf("unranked team TIER = %v, want %v — the arithmetic must be untouched; "+
+			"ranking authority is withheld at the presentation layer, not in the formula",
+			ts.TIER, wantTIER)
+	}
+	wantCPP := 0.0001 / 28.0
+	if math.Abs(ts.CostPerPoint-wantCPP) > 1e-12 {
+		t.Errorf("unranked team CostPerPoint = %v, want %v (unfloored)", ts.CostPerPoint, wantCPP)
+	}
+}

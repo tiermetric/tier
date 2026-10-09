@@ -1,0 +1,871 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="privacy">Privacy</h1>
+<p>TIER is built so that adopting it does not mean handing over your source code or
+your prompts. This document states exactly what TIER reads, what it stores, and
+what it never touches — each claim grounded in the code so a security reviewer
+can audit it.</p>
+<h2 id="the-core-guarantee">The core guarantee</h2>
+<blockquote>
+<p><strong>TIER never stores prompt or completion content, and never sends it anywhere
+you have not already sent it.</strong> Every capture path parses with an allowlist. The
+Claude Code JSONL parser deserializes only <code>type</code>, <code>timestamp</code>, <code>gitBranch</code>,
+<code>cwd</code>, <code>sessionId</code>, and <code>message.{id,model,role,usage.*}</code> — token counts, not
+text; the optional reverse proxy passes your prompts on to the provider you chose
+and reads each response as it passes back to extract <code>id</code>/<code>model</code>/<code>usage</code>,
+which is all it keeps; the Codex
+rollout-log parser reads six fields, none of which is content; the Opencode
+reader touches one table (<code>message</code>) and six fields inside its JSON blob, never
+the tables holding prompts, tool output, or credentials; and the Muse Code
+reader decodes ids, timestamps, token counts, model names, the workspace root
+and branch records, never prompt, reply or tool text. One opt-in switch widens
+the Claude Code read: with <strong>worktree attribution</strong> on (<code>--worktree-attribution</code>,
+<strong>off by default</strong>), the parser also reads the file or folder <em>paths</em> in tool
+calls and uses the one that seven tools name, never the file&#39;s contents, the
+tool&#39;s other arguments, or a command line. See
+<a href="#worktree-attribution-off-by-default" rel="nofollow">Worktree attribution</a>.</p>
+</blockquote>
+<h2 id="why-the-guarantee-holds">Why the guarantee holds</h2>
+<p>TIER parses inputs with <strong>allowlist structs</strong>. Only the fields named in the
+struct are deserialized; every other JSON field — including any prompt or
+completion text — is silently dropped by the JSON decoder and never enters
+memory as a named value, let alone the database.</p>
+<ul>
+<li>
+<p><strong>JSONL capture</strong> (<code>internal/collector/jsonl.go</code>, the <code>jsonlEntry</code> struct):
+reads <code>type</code>, <code>timestamp</code>, <code>gitBranch</code>, <code>cwd</code>, <code>sessionId</code>, and under
+<code>message</code>: <code>id</code>, <code>model</code>, <code>role</code>, and the <code>usage</code> token counters
+(<code>input_tokens</code>, <code>output_tokens</code>, <code>cache_creation_input_tokens</code>,
+<code>cache_read_input_tokens</code>, and the 5m/1h cache-creation split). There is <strong>no
+content or text field</strong> in the struct. With worktree attribution on, a second,
+separate allowlist struct reads tool-call paths; it is described in
+<a href="#worktree-attribution-off-by-default" rel="nofollow">Worktree attribution</a>.</p>
+</li>
+<li>
+<p><strong>Codex rollout-log capture</strong> (<code>internal/collector/codexrollout/parse.go</code>, the
+<code>rolloutLine</code> struct, #464): reads exactly six fields — the line <code>type</code> and
+<code>timestamp</code>, and under <code>payload</code>: <code>id</code> (the session UUID), <code>cwd</code>, <code>git.branch</code>,
+<code>model</code>, plus the <code>token_count</code> event&#39;s <code>info.total_token_usage</code> counters.
+Codex rollout logs contain a great deal more than that — the agent&#39;s full system
+prompt (<code>base_instructions</code>), your prompts, the model&#39;s messages and reasoning
+traces, tool output, and patch bodies — and <strong>none of it is deserialized</strong>: those
+fields have no counterpart in the struct, so the JSON decoder discards them. The
+<code>cwd</code> is read to decide which repository a session belongs to (a session outside
+every watched repo is dropped) and is <strong>not stored</strong> by this path — and, since it
+is never stored, it is never forwarded either, including by <code>tierd ship --codex-rollout</code> (#492). What that flag sends is the same usage-event shape as
+every other collector, listed under &#34;Where it goes&#34; below; enabling Codex capture
+adds no new <em>category</em> of data to what leaves the machine.</p>
+</li>
+<li>
+<p><strong>Opencode capture</strong> (<code>internal/collector/opencode</code>, opt-in with <code>--opencode</code>,
+#719): Opencode keeps its sessions in a <strong>SQLite database</strong> rather than JSONL
+files, and TIER opens it <strong>read-only</strong> (<code>mode=ro</code>; never <code>immutable=1</code>, which
+would ignore Opencode&#39;s live write-ahead log). It reads <strong>one table</strong>,
+<code>message</code>, and from each row&#39;s JSON blob only the <code>role</code>, <code>modelID</code>,
+<code>providerID</code>, the <code>tokens</code> counts, <code>time.completed</code>, and the <code>path.cwd</code> used to
+decide which repository the message belongs to. That database also contains
+OAuth access and refresh tokens (<code>account</code>), API credentials (<code>credential</code>), and
+prompt and tool-output text (<code>part</code>) — <strong>none of which TIER reads, stores, or
+forwards.</strong> The <code>cwd</code> is used for the repo decision and is not stored, exactly as
+in the two paths above, so <code>tierd ship --opencode</code> adds no new <em>category</em> of data
+to what leaves the machine either.</p>
+</li>
+<li>
+<p><strong>Muse Code capture</strong> (<code>internal/collector/muse/parse.go</code>, opt-in with
+<code>--muse</code>, #895): Muse Code&#39;s <code>session.jsonl</code> logs hold your prompts, the
+model&#39;s replies, tool arguments and tool output. The reader decodes each line
+in <strong>two stages</strong>: first only the fields every record carries (the record
+<code>id</code>, <code>recorded_at</code>, the session id <code>stream.id</code>, the run id, and the record
+and event kinds), and then, only for the five record kinds it uses, a second narrow
+struct for that kind: the model name and token counts of a billed call
+(<code>model_completed</code> or <code>automated_review_completed</code>, plus the review&#39;s
+<code>completed_at_ms</code>), the <code>workspace_root</code> of a <code>metadata</code> record, the run
+id, <code>workspace_root</code>, VCS and branch reference of a <code>workspace_branch</code>
+record, and the two ids of a <code>memory_reminder_child_session_linked</code> record
+(<code>parent_run_id</code> and <code>child_session_id</code>, which tie a subagent session to the
+run that started it, #901). <strong>No prompt, reply or tool text is ever decoded</strong>, and
+<code>TestDecoderAllowlist</code> fails if a field is added to any of those structs. It
+opens only files named <code>session.jsonl</code>, not the other files Muse keeps beside
+them. The <code>workspace_root</code> decides which repository a session belongs to and is
+<strong>not stored</strong>; the branch becomes an issue id, and the branch name itself is
+not stored. The Muse <strong>session id is stored</strong> (see &#34;Session id&#34; below). The
+collector keeps its scan position in memory and writes no checkpoint row, so
+<code>tierd ship --muse</code> adds no new <em>category</em> of data to what leaves the machine.</p>
+</li>
+<li>
+<p><strong>Reverse-proxy capture</strong> (<code>internal/proxy/proxy.go</code>): the provider response
+parsers read only the message <code>id</code>, the <code>model</code>, and the <code>usage</code> token counts
+from the response body. The client gets the same response content
+the provider sent; TIER extracts usage and forwards the rest untouched. (Not
+always the same bytes: the proxy drops the client&#39;s <code>Accept-Encoding</code>, so a response the
+client asked to have compressed arrives uncompressed.)</p>
+</li>
+</ul>
+<p>Because the parsers are allowlists, adding no new fields is the default —
+capturing content would require deliberately adding a content field, which does
+not exist.</p>
+<h2 id="worktree-attribution-off-by-default">Worktree attribution (off by default)</h2>
+<p><strong>Why it exists.</strong> Claude Code writes, on every line of a session file, the
+folder the session started in (<code>cwd</code>) and that folder&#39;s git branch
+(<code>gitBranch</code>). Many developers, and most coding agents, start Claude Code in the
+main checkout of a repository and then do the work in a <strong>git worktree</strong>: a
+second checkout of the same repository, on its own branch, in its own folder
+(made with <code>git worktree add</code>). The session file still says &#34;main&#34;, so TIER
+books that spend to <code>unattributed:main</code> instead of to the issue the work was
+for. Worktree attribution (#823) finds the worktree the session actually worked
+in, from the paths its tool calls named. That needs a wider read of the session
+file than the token parser makes, so it is <strong>off unless you turn it on</strong>. It is
+an opt-in preview: its measured accuracy, and why a wrong attribution is
+permanent, are in
+<a href="how-it-works.html#measured-accuracy-read-this-before-turning-it-on" rel="nofollow">how-it-works.md</a>.
+How to turn it on, and the rules it applies, are in
+<a href="how-it-works.html#worktree-attribution-823-off-by-default" rel="nofollow">how-it-works.md</a>. This
+section states what it reads and what it keeps.</p>
+<p><strong>What it reads from the session file.</strong> A second allowlist struct
+(<code>toolPathLine</code> in <code>internal/collector/toolpath.go</code>), separate from the token
+parser&#39;s, decodes from each assistant line only:</p>
+<ul>
+<li>each content block&#39;s <code>type</code>, and its tool <code>name</code>;</li>
+<li>from each block&#39;s tool input, whatever the tool (MCP tools included), the
+string values of three keys, <code>file_path</code>, <code>notebook_path</code> and <code>path</code>, spelled
+exactly so. The decoder copies those three values into memory and skips every
+other member of the input unread.</li>
+</ul>
+<p>It then <strong>keeps one path per tool call, for seven tools only</strong>: <code>file_path</code> for
+<code>Read</code>, <code>Edit</code>, <code>MultiEdit</code> and <code>Write</code>; <code>notebook_path</code> for <code>NotebookEdit</code>;
+<code>path</code> for <code>Glob</code> and <code>Grep</code>. Every other decoded value, including a <code>path</code>
+that an MCP tool or <code>Bash</code> carries, is discarded there, before any disk read,
+and never leaves memory. What the decoder skips is never copied: the text
+<code>Edit</code> removes and inserts, the content <code>Write</code> writes, the pattern <code>Grep</code>
+searches for, and <code>Bash</code>&#39;s <code>command</code>. A relative path, a network path
+(starting <code>//</code> or <code>\\</code>), a path over 4,096 bytes and a path containing a NUL byte
+are dropped; at most 16 distinct paths are kept from one line
+(<code>maxToolPathsPerLine</code>), from at most 64 content blocks (<code>maxToolBlocksPerLine</code>).
+It also reads two markers each line already carries, <code>isSidechain</code> and
+<code>agentId</code>, which tell a subagent&#39;s lines apart from its parent&#39;s
+(<code>messageLineHead</code> in <code>internal/collector/messagemerge.go</code>).</p>
+<p><strong>Which session files.</strong> <code>tierd ship</code> and <code>tierd score</code> decode the tool paths
+of every Claude Code session file whose session ended on or after <code>--since</code>,
+and look up the git files below for every path they keep, <strong>before</strong> they drop
+the sessions whose <code>cwd</code> is outside the repositories you named with <code>--repo</code>
+(<code>parseSessionFileAttributed</code> in <code>internal/collector/jsonl.go</code>). So the <code>.git</code>
+pointer files and worktree admin folders of other projects on the machine are
+read too, to recognise them as another repository&#39;s; nothing from a dropped
+session is stored. The live watcher also decodes the tool paths of every
+session file it reads, but looks up git files only for sessions whose <code>cwd</code> is
+in a watched repository.</p>
+<p><strong>Command lines are not read.</strong> Reading <code>Bash</code> commands (for <code>cd &lt;path&gt;</code> or
+<code>git -C &lt;path&gt;</code>) was considered and is <strong>not built</strong>. The operator ruled
+(via #826, recorded on #823) that it comes later, as its own change, behind its
+own switch, off by default.</p>
+<p><strong>What it reads from disk.</strong> For each path it keeps, and for the session&#39;s own
+<code>cwd</code> (rule 1 in how-it-works.md), it reads git&#39;s own bookkeeping files, never
+the file the path names, and it never runs <code>git</code> to do it (<code>worktreeIndex</code> in
+<code>internal/collector/worktreeindex.go</code>, <code>branchAt</code> in
+<code>internal/collector/worktreereflog.go</code>). TIER still runs <code>git log</code> on the
+repositories you configured, as it does with the switch off.</p>
+<ul>
+<li>the <code>.git</code> entry found by walking up from the path. In a linked worktree this
+is a small file pointing at the worktree&#39;s admin folder,
+<code>&lt;main checkout&gt;/.git/worktrees/&lt;name&gt;/</code>;</li>
+<li>in that admin folder, <code>commondir</code> and <code>gitdir</code>, which must point back at the
+same worktree (a moved, pruned or forged worktree fails this check and is not
+used), and <code>HEAD</code>;</li>
+<li>the worktree&#39;s reflog, <code>logs/HEAD</code> in the same folder, at most 1 MiB. It lists
+every checkout with a time (<code>checkout: moving from A to B</code>), which is how
+TIER learns which branch the worktree had checked out when each message was
+written. The whole file is read into memory; each line also carries the
+committer&#39;s name and email and, for a commit, its subject line, and none of
+them is kept;</li>
+<li>owners, permissions and modification times of those files. What is checked
+differs by file. The <code>.git</code> pointer file and the admin folder must be owned by
+the OS user running <code>tierd</code>. <code>HEAD</code>, the <code>logs</code> folder and <code>logs/HEAD</code> must be
+owned by that user <strong>and</strong> not writable by everyone. <code>commondir</code> and <code>gitdir</code>
+get neither check of their own; they are trusted only because they sit in the
+checked admin folder and must point back at the same worktree. A file that
+fails its check is not trusted, and the path falls back to today&#39;s rule.</li>
+</ul>
+<p>Paths under <code>/tmp</code> and <code>~/.claude</code> are ignored.</p>
+<p><strong>What it stores.</strong></p>
+<ul>
+<li>For every Claude Code event it records, one fixed label naming the rule that
+chose the issue: <code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code> or <code>carry</code>
+(<code>token_events.attribution_rule</code>, see <a href="#what-is-stored" rel="nofollow">What IS stored</a>). It
+is <strong>never path text</strong>: TIER refuses or drops any other value.</li>
+<li>Spend in a worktree of a repository you did not configure (not one of the
+command&#39;s <code>--repo</code> or watched repositories) goes to the
+fixed issue label <code>unattributed:foreign-repo</code>, with the repository stored as
+<code>unqualified</code>. That repository&#39;s name and path are not stored.</li>
+<li>In live watch mode only, the watcher&#39;s checkpoint row for a session file also
+holds the absolute path of the worktree it is carrying from one message to the
+next, so a restart resumes correctly (see <strong>Watcher tail-state</strong> under
+<a href="#what-is-stored" rel="nofollow">What IS stored</a>). That checkpoint stays in the local database
+and is never sent.</li>
+</ul>
+<p><strong>What it never stores or sends.</strong> No tool-call path is written to an event or
+sent by <code>tierd ship</code>, and the code that reads and classifies the paths logs
+nothing. The dry-run audit
+(<code>tierd score --worktree-attribution</code>) prints counts, repository names, issue
+labels, session ids and times, never a path or any message content, and stores
+nothing. With the switch off, none of this is read and events carry no rule.</p>
+<p><strong>Messages held back until they finish (live watch mode only).</strong> One reply can be
+written as several lines of the session file, spread over minutes. With worktree
+attribution on, the live watcher (<code>tierd serve --watch-repo</code>) does not store a
+message until it has all of its lines, so each message is judged once, from
+every path it named. A message still open at the end of the file is held back:
+no event is stored for it meanwhile, though the file&#39;s checkpoint row (its
+path, and the session id) is saved. When the file has had no new line for
+<strong>600 seconds</strong> (<code>idleRelease</code> in <code>internal/collector/watcherattr.go</code>), the next
+read releases it and stores it. The longest pause between two lines of one
+message was 417 seconds when this was measured (2026-09-30, over 156,834
+multi-line messages in 8,532 session files on one machine), so the wait is
+longer than any measured pause. Idleness is judged by the file&#39;s modification
+time, and after a restart the watcher reads at once any file whose checkpoint
+stops short of its end. <strong>A known gap:</strong> if a line of a message arrives after
+that message was released, it is read as a fragment and stored again under the
+same message key; the store keeps the larger token counts and the <strong>first</strong>
+row&#39;s issue, rule, cost and price version, so a late fragment cannot move a
+message to a different issue, and that row&#39;s cost stays priced on the counts it
+was first stored with while its token counts rise. A message held back when an
+erasure runs can be stored after it: see the erasure limits under
+<a href="#data-subject-rights-access-and-erasure-gdpr-art-15--art-17" rel="nofollow">Data-subject rights</a>.
+<code>tierd ship</code> reads each file whole in one pass and holds nothing back.</p>
+<h2 id="what-is-stored">What IS stored</h2>
+<p>TIER stores, in a <strong>single local SQLite file</strong> with <strong>no external
+transmission</strong>:</p>
+<ul>
+<li><strong>Developer identifier</strong> — an OS username (JSONL) or GitHub login (PR
+outcomes), and any alias→canonical mapping you configure.</li>
+<li><strong>Issue id</strong> — derived from the branch name or PR/commit body (e.g.
+<code>issue-42</code>, <code>TIER-99</code>), or a fixed <code>unattributed:…</code> label naming why none
+was found. With worktree attribution on, spend in a worktree of a repository
+you did not configure gets the fixed label <code>unattributed:foreign-repo</code>
+and the repository <code>unqualified</code>, so that repository is not named.</li>
+<li><strong>Repository</strong> (<code>token_events.repo</code>, <code>outcomes.repo</code>, #231) — the canonical
+<code>owner/repo</code> slug a cost was spent in or an outcome was earned in, taken from
+a per-repo <code>repo:</code> override, the repository&#39;s <code>remote.origin.url</code>, a GitHub
+webhook&#39;s <code>repository.full_name</code>, or the optional <code>repo</code> field of
+<code>POST /api/v1/events</code> or <code>POST /api/v1/outcomes</code>. It is the reserved value
+<code>unqualified</code> when the producer could not know the repository. A slug can
+identify a person: a personal repository such as <code>alice/side-project</code> names
+its owner.</li>
+<li><strong>Model names</strong> — e.g. <code>claude-opus-4-8</code>.</li>
+<li><strong>Token counts</strong> — input, output, and the cache read/write counters.</li>
+<li><strong>Cost</strong> — list-price cost in integer micro-dollars, computed from the token
+counts via a versioned reference price table.</li>
+<li><strong>Pricing provenance</strong> (<code>token_events.price_version</code>, #233;
+<code>token_events.host</code> and <code>token_events.billing_mode</code>, #300) — the version of
+the price table that computed the row&#39;s cost (<code>0</code> for a row no version was
+stamped on); the serving host the cost was priced against (for example the
+reverse proxy&#39;s upstream host name or an Opencode provider id), or <code>unknown</code>
+when the producer does not know it; and how that host bills: <code>per_token</code>,
+<code>subscription</code> or <code>self_hosted_amortized</code>. A caller of <code>POST /api/v1/events</code>
+may send its own <code>host</code> (up to 256 bytes), and TIER stores that string trimmed
+and lowercased but otherwise as sent, so it holds whatever the caller put in
+it — and a self-hosted host name such as <code>alice-laptop.local</code> can name a
+person.</li>
+<li><strong>Session id</strong> (<code>token_events.session_id</code>, #238) — the <strong>opaque agent session
+UUID</strong> an event belongs to (Claude Code&#39;s <code>sessionId</code>, the Codex rollout
+log&#39;s <code>session_meta.id</code>, the <code>session_id</code> column of Opencode&#39;s <code>message</code>
+table, or the Muse Code log&#39;s <code>stream.id</code>), so context-bloat and rework-loop token-waste can be
+diagnosed at session grain. It is a random identifier only; it <strong>carries no
+prompt content, no completion text, and no file contents</strong>, and is <strong>NULL</strong> for
+rows a session-blind producer (the reverse proxy or an Admin-API poller)
+captured.</li>
+<li><strong>Idempotency key</strong> (<code>token_events.idempotency_key</code>, #21) — the dedup key that
+makes a replayed event update one row instead of adding a second. TIER&#39;s own
+collectors and the reverse proxy store a SHA-256 hex digest. A caller of
+<code>POST /api/v1/costs</code> or <code>POST /api/v1/events</code> chooses its own key, and TIER
+stores that string as sent, so it holds whatever the caller put in it — which
+can include personal data such as an email address. It is <strong>NULL</strong> for rows
+that were stored without a key.</li>
+<li><strong>Billing declaration</strong> (<code>token_events.billed_to</code>, #854) — <code>other</code> when a
+<code>POST /api/v1/costs</code> caller declared the row&#39;s spend is not billed to an org
+whose usage poller the server runs; <strong>NULL</strong> on every other row.</li>
+<li><strong>Attribution rule</strong> (<code>token_events.attribution_rule</code>, #823) — which rule
+assigned the row&#39;s issue id: one of the fixed labels <code>branch</code>, <code>worktree-cwd</code>,
+<code>worktree-toolpath</code> or <code>carry</code>, <strong>never path text</strong>. It is <strong>NULL</strong> on older
+rows and on rows no rule was recorded for, is written only when the row is
+first inserted, is included in the data-subject export, and is erased with the
+row.</li>
+<li><strong>PR metadata</strong> — PR number, author login, size-derived weight, quality, and
+the merge commit SHA.</li>
+<li><strong>Watcher tail-state</strong> (<strong>live watch mode only</strong> — <code>--watch-repo</code> or the
+<code>watch.repos</code> config key) — when live ingestion is enabled, TIER persists one
+operational checkpoint row per watched
+JSONL file (<code>watcher_checkpoint</code>) so a restart resumes tailing from the last
+parsed byte instead of re-reading each file from the start. Each row&#39;s
+<code>metadata</code> column holds a small JSON blob describing the session being tailed:
+the <strong>absolute working-directory path</strong> (<code>cwd</code>), the <strong>git branch</strong> (and, when
+an isolated-agent session inherits one, the most recent human-named git branch
+seen so far in that file), and the <strong>session id</strong> (a UUID), plus the session
+start time, the first-observed model name, and an internal parse-sequence
+counter. With worktree attribution on (#823), it also holds the <strong>absolute
+path of the linked git worktree</strong> currently carried, if any.
+Nothing here is captured unless you run the watcher; a one-shot
+<code>tierd score</code> writes no checkpoint. Each row is keyed by the session file&#39;s
+<strong>absolute path</strong>. For Claude Code that file sits under the home directory of
+the account that ran the session, so the key itself names the <strong>OS username</strong>,
+the session&#39;s <strong>working directory</strong> (Claude Code names the project folder
+after the absolute working-directory path, so the folder name is effectively
+that path), and the session file&#39;s name, which is the session UUID. The row also holds the file&#39;s inode, the byte
+offset read so far, and a CRC-32 of the file&#39;s first bytes. An erasure keeps
+the key; see <strong>Data-subject rights</strong> below.</li>
+<li><strong>Opencode scan watermark</strong> (<strong>only with the Opencode collector enabled</strong> —
+<code>--opencode</code> or the <code>collectors.opencode</code> config key) — the Opencode collector
+shares the same <code>watcher_checkpoint</code> table, under a row whose key is
+<code>opencode-db:&lt;path to opencode.db&gt;:&lt;scope digest&gt;</code>. The digest is SHA-256
+of the sorted configured repository paths (absolute where possible) and slugs;
+changing their order does not change the key. Adding a repository changes the
+key and triggers an idempotent backfill, including its rows older than the
+previous watermark. Legacy keys without the digest are not resumed, so an
+upgrade also triggers one idempotent backfill. Its <code>metadata</code> blob holds <strong>two integers
+and a schema tag, and nothing else</strong>: the highest Opencode <code>message.time_updated</code>
+already processed (epoch milliseconds), and the number of rows in Opencode&#39;s own
+<code>migration</code> table (a schema-drift tripwire). It carries <strong>no cwd, no branch, no
+session id, no model name and no developer identifier</strong> — unlike the JSONL
+watcher&#39;s blob above, which describes a session; this one describes only how far
+a scan got.</li>
+<li><strong>Raw GitHub webhook payloads</strong> (<strong>only when the GitHub webhook path is
+enabled</strong> — i.e. you set <code>webhook_secret</code> / <code>TIER_WEBHOOK_SECRET</code> and point
+GitHub deliveries at <code>POST /webhook/github</code>; that endpoint is fail-closed and
+stays disabled without a secret) — for each <em>processed</em> delivery
+(<code>pull_request</code>, <code>push</code>, <code>workflow_run</code>), TIER retains the <strong>raw GitHub webhook
+request body</strong>, gzipped, in the <code>webhook_payloads</code> table so a score input can
+be re-derived months later (#137). Unlike every token-capture path above, this
+raw body <strong>does contain personal data</strong>: commit author <strong>names and email
+addresses</strong>, <strong>PR titles and descriptions</strong>, and <strong>commit messages</strong> — whatever
+GitHub places in a standard webhook payload (up to a 1 MB body). It is the same
+PR/commit metadata GitHub itself already stores, and TIER adds no prompt text,
+completion text or file contents to it. ⚠️ <strong>The titles, descriptions and commit
+messages are free text, stored as written:</strong> anything someone pasted into them
+(code, a prompt, a secret) is stored with them. A body is kept for every
+delivery of those event types, before any filter on action or branch, so pull
+requests that never merge and pushes to any branch are kept too; per GitHub&#39;s
+documentation, an <code>edited</code> delivery also carries the previous title and
+description. Editing text out on GitHub does not remove TIER&#39;s copy, and the
+per-developer erasure does not reach it: it stays until the retention bound
+below prunes it, unless you delete the rows directly (see <em>Known residual —
+<code>webhook_payloads</code></em>).
+Retention is <strong>bounded</strong>: rows are pruned at startup and then every 24 hours
+while the server runs, by two limits — a <strong>90-day age cap</strong> and a <strong>50,000-row cap</strong> (oldest evicted first),
+enforced by <code>PruneWebhookPayloads</code> (<code>internal/store/audit.go</code>). Both bounds are
+currently compile-time constants (<code>webhookPayloadRetentionDays</code> /
+<code>webhookPayloadMaxRows</code> in <code>internal/store/audit.go</code>), <strong>not config keys</strong> —
+there is no setting to change the window or cap without a code change, and no
+flag to keep the webhook path enabled while suppressing retention. The one
+operator control is the path itself: <strong>to store none of this, run TIER without
+the webhook path</strong> (JSONL capture and <code>tierd ship</code> never populate
+<code>webhook_payloads</code>).</li>
+<li><strong>Sealed reports</strong> (<code>sealed_report</code>, #913) — the finished aggregate report for
+a closed reporting period, stored once and never recomputed, with the settings
+it was built under. It holds only aggregate figures.</li>
+<li><strong>Sealed per-label totals</strong> (<code>sealed_rollup</code>, #913) — for each label in a
+sealed period, the totals the report was built from (points, costs, outcome
+counts) before small groups were folded together. They are never served, and
+a label with a single member holds that one person&#39;s totals.</li>
+<li><strong>Sealed person keys</strong> (<code>sealed_person</code>, #913) — for each label and measure in
+a sealed period, one keyed hash per person counted there. The hash is computed
+from the person&#39;s canonical id under the install secret, not stored as the id,
+but whoever holds the database file can recompute it from a guessed id.</li>
+<li><strong>Install secret</strong> (<code>install_secret</code>, #913) — one random key per database,
+used for the sealed person keys. It names no one.</li>
+<li><strong>Canonical-id history</strong> (<code>canonical_id_history</code>, #975) — every link from an
+alias to a canonical id, with the last sealed period committed before the
+alias edit that made it and before the edit that re-pointed or deleted the
+alias, so an erasure can
+find sealed person keys computed from a canonical id an alias edit has since
+retired. A link that already existed when schema version 4 first opened the
+database has no start time: when it began is unknown. Rows are never
+rewritten, except that a link&#39;s end is set once; an erasure deletes rows.</li>
+</ul>
+<p>This list is not every table: the other per-developer tables (<code>actual_spend</code>,
+<code>org_hierarchy</code>, <code>period_membership</code>, <code>quality_events</code>, <code>quality_history</code>,
+<code>repo_repair_audit</code>, <code>push_outcome_commits</code> and <code>push_outcome_audit</code>) are in the erasure table under <strong>Data-subject rights</strong>
+below, which also covers the audit ledgers and the operator-identifying fields
+they carry (<code>actor</code>, <code>reason</code>, <code>forgotten_by</code>).</p>
+<p>None of this is prompt text, completion text, code, file contents, or diffs, with
+one exception: the free text in a raw webhook payload (for example PR titles, descriptions
+and commit messages, above) is stored as written, with whatever was pasted into it. The <code>session_id</code> above is likewise an <strong>opaque UUID</strong> — it groups a
+session&#39;s events without persisting anything the session said or produced. Two of the entries above are conditional and hold data an auditor
+should note. An ordinary watcher tail-state row is <strong>derived operational state,
+safe to delete</strong> — the watcher rebuilds it from the live file on the next change.
+⚠️ <strong>An erasure tombstone is not</strong> (see <strong>Data-subject rights</strong> below): deleting
+one while its session file still exists lets the watcher read that file from the
+start and store the erased session again. The tail-state contains no prompt or
+completion text and no file contents; its <code>cwd</code>, its path key and (with worktree
+attribution on) its worktree path are absolute <em>paths</em> (filesystem locations, not
+the contents of any file), which can reveal an OS username or an internal project
+name. The raw webhook
+payloads are the one place TIER holds third-party personal data (contributor names
+and emails) <strong>at rest</strong>, bounded to ~90 days. Because of both, operators should
+treat the local database file (mode <code>0600</code>, single-tenant) accordingly — and may
+decline the webhook path entirely to store none of the webhook PII.</p>
+<h2 id="data-subject-rights-access-and-erasure-gdpr-art-15--art-17">Data-subject rights: access and erasure (GDPR Art. 15 / Art. 17)</h2>
+<p>Because TIER stores personal data keyed to a named developer, it ships two
+bearer-gated (write/admin-scoped) admin endpoints so an operator can honour a
+data-subject access or erasure request without hand-editing the database (#184):</p>
+<ul>
+<li>
+<p><strong>Erasure</strong> — <code>DELETE /api/v1/developer/{id}</code> deletes every row stored under
+that person&#39;s identifiers, and erases their watcher tail-state (see
+<strong>Watcher tail-state</strong> below), in <strong>one transaction</strong> (all-or-nothing). It
+first resolves <code>{id}</code> through the alias map (single-hop) and then removes rows
+stored under the canonical id <em>or</em> any raw login that aliases to it, across
+<strong>all</strong> developer-PII tables:</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>token_events</code></td>
+<td>per-developer token counts and list-price cost</td>
+</tr>
+<tr>
+<td><code>outcomes</code></td>
+<td>per-developer PR/issue outcomes, weight, quality</td>
+</tr>
+<tr>
+<td><code>actual_spend</code></td>
+<td>per-developer actual-paid amounts</td>
+</tr>
+<tr>
+<td><code>org_hierarchy</code></td>
+<td>the developer&#39;s team/division/org</td>
+</tr>
+<tr>
+<td><code>period_membership</code></td>
+<td>the developer&#39;s org-membership windows</td>
+</tr>
+<tr>
+<td><code>hierarchy_membership</code></td>
+<td>the developer&#39;s dated team/division history, including the rows each alias carries from the day it was added (#886, #914)</td>
+</tr>
+<tr>
+<td><code>quality_events</code></td>
+<td>per-developer CI/revert quality signals</td>
+</tr>
+<tr>
+<td><code>quality_history</code></td>
+<td>per-developer quality-transition log</td>
+</tr>
+<tr>
+<td><code>repo_repair_audit</code></td>
+<td>which repositories a <code>tierd repair-repo</code> run moved this developer&#39;s stored spend into</td>
+</tr>
+<tr>
+<td><code>push_outcome_commits</code></td>
+<td>the SHA, repository, commit time and GitHub push time (<code>push_order</code>, #938) of each direct commit push capture folded into an outcome (#849); erasure removes only this developer&#39;s entries: a push outcome that also holds another developer&#39;s commit is kept and re-owned to that developer</td>
+</tr>
+<tr>
+<td><code>push_outcome_audit</code></td>
+<td>each time a push outcome in this developer&#39;s name was superseded by a merged PR or re-owned (#849); erasure also blanks this developer&#39;s commit SHAs in other developers&#39; rows</td>
+</tr>
+<tr>
+<td><code>developer_alias</code></td>
+<td>the developer&#39;s alias→canonical mappings</td>
+</tr>
+<tr>
+<td><code>canonical_id_history</code></td>
+<td>every link from one of the developer&#39;s ids to a canonical id, and every link from another alias to one of the developer&#39;s ids (#975)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Watcher tail-state (<code>watcher_checkpoint</code>) is erased by a tombstone, not
+always deleted (#919).</strong> The table has no <code>developer</code> column. The erasure
+finds the person&#39;s rows through the session ids of their stored
+<code>token_events</code> rows, read before those rows are deleted. For each row it
+finds: if the session file no longer exists, the row is deleted. Otherwise
+its <code>metadata</code> (the <code>cwd</code>, branch, session id, model, start time,
+counters and worktree path) is replaced by the marker <code>{&#34;erased&#34;:true}</code>, and the row keeps its
+path key, inode, byte offset and head CRC. The watcher reads that row before
+every read of the file and skips the file unless a full read of its first
+bytes (as many as the row recorded) finds different content: appends
+included, across restarts, and when the file is replaced by a byte-identical
+copy with a new inode (a backup restore, <code>rsync</code>, an atomic save). A file at
+the same path whose first bytes differ is a new session and is captured
+normally.
+Seven limits, stated plainly:</p>
+<ul>
+<li><strong>The path key is kept.</strong> It names the OS username, the session&#39;s working
+directory and the session UUID (see <strong>Watcher tail-state</strong> above). Before the erasure
+the export returns it. After the erasure no stored row links it to the
+person, so the export no longer returns it; the path itself still says what
+it says.</li>
+<li><strong>A tombstoned row lasts as long as its session file.</strong> The watcher removes
+it once the file is deleted: at startup, or when it sees the removal. An
+operator can also delete the session file. No age limit removes it: TIER has
+no age-based pruning of per-developer data today (the per-developer
+retention planned in #826 is not built), and a retention limit would not
+remove it either, the planned 365-day ceiling included, because removing it
+while the file exists would let the watcher store the erased session again.</li>
+<li><strong>Unjoinable rows are not found.</strong> A row whose session left no stored
+<code>token_events</code> row cannot be linked to a person, so neither the erasure nor
+the export can find it. For example, the watcher can record tail-state for
+a session whose working directory is outside every watched repository, and
+such a session stores no events. These rows hold the same <code>cwd</code>, branch and
+session id.
+Nothing ages them out today. They go when their session file is deleted.
+⚠️ Do not delete such a row while its session file exists: the watcher
+then reads that file again from the start and stores whatever it can
+attribute. To retire one while its file exists, tombstone it instead: set
+its <code>metadata</code> to <code>{&#34;erased&#34;:true}</code>. Erasures made before this release did
+not touch this table at all, so each one left that person&#39;s rows here as
+ordinary rows that nothing now links to them; retire those the same way.</li>
+<li><strong>Lines being read during the erasure are stored after it.</strong> If the erasure
+commits while the watcher is already reading new lines from that person&#39;s
+file, those lines are stored after the erasure; calling the erasure
+endpoint again removes them. Where the file already had a row, the
+tombstone stops every later read. A file on its very first read has no row
+yet, so it gets no tombstone: the watcher saves an ordinary row for it and
+goes on capturing it. Calling the erasure endpoint again once any of that
+session&#39;s lines are stored removes them and tombstones the file. There is
+one gap: if the erasure commits after the watcher stored lines from a file
+with no row but before it saved the row, the erasure removes those lines
+and the watcher then saves an ordinary row after them. The erased lines do
+not return, but no stored line now joins that row, so neither the erasure
+nor the export can find it, and it keeps the session&#39;s <code>cwd</code>, branch and
+session id. It stays that way until the session writes a new line: the
+watcher stores that line, and calling the erasure endpoint again removes it
+and tombstones the file. If the session never writes again, the row goes
+when its session file is deleted. The same holds for a new session file at
+a path whose tombstone the watcher has just released.</li>
+<li><strong>A message held back by worktree attribution can be stored after the
+erasure.</strong> With worktree attribution on, the watcher holds back a message
+still being written until its session file has had no new line for 600
+seconds (see
+<a href="#worktree-attribution-off-by-default" rel="nofollow">Worktree attribution</a>). If the
+person&#39;s session has <strong>no stored event yet</strong> when the erasure commits (a
+session that has just started, for example), its file&#39;s checkpoint row
+names the session id, but no stored <code>token_events</code> row carries that id, so
+the erasure cannot link the row to the person and does not tombstone it.
+When the hold ends, the watcher stores the message under the person, as an
+ordinary row, and goes on capturing the file. A session that already has a
+stored event is found and tombstoned as usual. If worktree attribution is on
+for the server&#39;s watcher, call the erasure endpoint again after the
+person&#39;s session files have had no new line for more than 600 seconds, and
+check the person&#39;s export: that call removes what was stored in between and
+tombstones the file.</li>
+<li><strong>A moved or renamed session file is not covered.</strong> Once the old path is
+gone the watcher deletes its tombstone, and it reads the file at its new
+path from the start (a move within the watched projects directory is seen
+at once), storing the erased session again. Calling the erasure endpoint
+again after that removes those rows and tombstones the file at its new
+path.</li>
+<li><strong><code>tierd ship</code> is not covered.</strong> The tombstone protects only the watcher on
+the server host. <code>tierd ship</code> re-posts every event in its <code>--since</code> window
+(90 days by default) on each run, and the server de-duplicates by
+idempotency key. After an erasure there is nothing left to de-duplicate
+against, so the next ship run stores those events again for as long as the
+lines are still in the JSONL files on the shipping machine. Stop running
+<code>tierd ship</code> for that person before erasing.</li>
+</ul>
+<p><strong>Sealed reporting periods keep the person&#39;s contribution (#913, #914).</strong> An
+erase removes everything attributable to the person, but a sealed k-anonymous
+aggregate keeps their contribution — including an unserved pre-fold total for
+a label they alone held in that period — because removing it would let a
+reader recover their figures by subtraction. A sealed period stores its served
+report, per-label pre-fold totals, and for each label and measure the people
+counted, each as a keyed hash of their canonical id (HMAC-SHA256 under a random
+per-install secret). The erasure deletes none of these rows and changes no
+report or total. It replaces with a fresh random tombstone each keyed hash
+computed from an id the person has at erase time (their canonical id and
+every alias pointing to it), and, in each period, each keyed hash computed
+from a canonical id that one of those ids was linked to when that period was
+sealed (<code>canonical_id_history</code>, #975; a period counts when it was sealed
+after the alias edit that made the link and before the edit that ended it,
+in the order the database committed them, and a link with no start time
+counts from the beginning). For example, if <code>alice-gh</code> pointed at <code>alice</code> when July was
+sealed and was later re-pointed at <code>alice.smith</code>, erasing <code>alice.smith</code>
+tombstones July&#39;s key for <code>alice</code>; an alias created by mistake and removed
+before any period was sealed tombstones nothing. One tombstone is used per
+period, reused under every label and measure the hash was held under, so no
+stored key can be recomputed from those ids afterwards. The erasure&#39;s
+<code>sealed_person</code> count (which <code>total_deleted</code> includes) is the rows this
+erasure tombstoned. What remains:</p>
+<ul>
+<li>each replaced row keeps a <code>tombstoned</code> flag, so a label the person alone
+held in a period still shows that its only member was later erased;</li>
+<li>⚠️ <strong>the erasure deletes stored rows only under the ids the person has at
+erase time, never under a retired canonical id.</strong> A retired id&#39;s own rows
+(for example events recorded under <code>alice</code> itself) are not deleted, because
+that id may now belong to someone else. Its keys in periods sealed while the
+person&#39;s alias was linked to it are still tombstoned, and that changes no
+figure.</li>
+<li>⚠️ <strong>links are followed only from the ids the person has at erase time.</strong>
+A period attributed through an alias that has since been deleted, or
+re-pointed at someone else, keeps its key live (for example: <code>alice-gh</code>
+pointed at <code>alice</code> when July was sealed and was later deleted; erasing
+<code>alice.smith</code> does not reach July&#39;s key for <code>alice</code>), because following
+links that point at a retired canonical id could tombstone another
+person&#39;s keys. In that case <strong>also erase the retired id by name</strong>, after
+checking it is not now another person&#39;s id.</li>
+</ul>
+<p>The companion <code>repo_repair_row_audit</code> ledger is <strong>not</strong> listed because it has
+no <code>developer</code> column to erase by: only a repair id, a row id, and the
+before/after repository slug (<code>old_repo</code>, <code>new_repo</code>). It deliberately does not
+copy the resolving <code>session_id</code>, precisely so that an audit record designed to
+outlive the row it describes cannot carry a session id past an erasure.
+⚠️ <strong>Its repository slugs DO survive an erasure — a residual, stated plainly.</strong>
+A slug can identify a person (a personal repository such as
+<code>alice/side-project</code> names its owner; see <strong>Repository</strong> above). They are kept
+because this ledger is the per-row before-image a <code>tierd repair-repo</code> run is
+reversed from by hand (there is no <code>--undo</code>), and like the other audit ledgers
+it is built to outlive the rows it describes. TIER has no command, endpoint or
+retention job that removes these rows today; retention of the audit ledgers is
+deferred (#141).</p>
+<p><strong>All five audit ledgers</strong> — <code>reprice_audit</code>, <code>reprice_row_audit</code>,
+<code>repo_repair_audit</code>, <code>repo_repair_row_audit</code>, <code>cost_correction_audit</code> — are
+<strong>append-only by construction: no code path mutates them; the tables
+themselves are not protected against direct database access.</strong> One of them
+carries more than that, and it is narrow: <code>cost_correction_audit</code> (the
+money-rewrite ledger) refuses <code>UPDATE</code> at the schema level, so no code path
+can <strong>silently</strong> rewrite a recorded correction — a mutation would have to
+drop the trigger first. <code>DELETE</code> is deliberately <strong>not</strong> refused on any of them — erasure
+(below) and future retention/GC are lawful deletes, and no database
+constraint can tell a lawful delete from tampering. None of this is
+tamper-proofing against someone holding the database file.</p>
+<p>The <code>cost_correction_audit</code> ledger (#346, the sanctioned <code>POST /costs</code>
+cost-correction override) follows the SAME pattern and is <strong>also not
+listed</strong>: it holds no <code>developer</code> column, and — after an earlier draft got
+this backwards — deliberately does <strong>not</strong> copy the correction&#39;s
+<code>idempotency_key</code> either, precisely because that field is often
+client-chosen and could embed personal data (an email, a ticket
+reference), and this ledger is designed to outlive the row it describes.
+It carries only a server-generated <code>token_event_id</code> (which simply stops
+resolving once the row it names is erased or pruned — correct, not a bug)
+plus <code>old_cost_micro</code>/<code>new_cost_micro</code> and the operator-supplied <code>actor</code>/
+<code>reason</code> that explain the correction. <code>actor</code>/<code>reason</code> name the OPERATOR
+who made the correction, not the data subject whose spend was corrected —
+the same third-party-identifier class as the <code>webhook_payloads</code> residual
+below — so they are not erased by this endpoint. Operators must not put a
+data subject&#39;s own name or email in <code>reason</code>; nothing technical enforces
+that today.</p>
+<p>The <code>price_table_registry</code> table (#714 — the record binding each price-table
+<code>version:</code> to the content identity of the table served under it) is <strong>also not
+listed, and holds no personal data</strong>: a version integer, two content hashes, an
+effective date, a model count, a source, a <code>tool_version</code>, a <code>first_seen</code>
+timestamp, and — once retired — <code>forgotten_at</code> plus a <code>forgotten_by</code> that names
+the OPERATOR who retired it (self-asserted, and a third party to any data
+subject whose spend was measured — the same class as <code>cost_correction_audit</code>&#39;s
+<code>actor</code>). The companion <code>price_forget_audit</code> ledger carries the same fields and
+is likewise not personal data about a data subject. It describes a
+<strong>price table, not a person</strong>, and it carries no <code>developer</code> column to erase by.
+⚠️ One honest caveat, stated rather than glossed: its <code>source</code> is a filesystem
+path, and on a workstation install that path can incidentally contain an OS
+username (<code>/Users/alice/prices.yaml</code>). That is operator-environment provenance —
+the same third-party/operator class as <code>tool_version</code> and the <code>webhook_payloads</code>
+residual below, not personal data <em>about</em> the data subject whose spend was
+measured. It is never served over HTTP.
+⚠️ <strong><code>tierd prices forget-version --commit</code> does NOT remove it.</strong> It <em>retires</em>
+the identity — the row is kept and stamped, and a <code>price_forget_audit</code> entry is
+written — deliberately, so the record of what a price version meant survives its
+own retirement. Treat that as a <strong>retention</strong> decision: neither command erases
+this row, and the same override path is in any case written to stderr at startup
+and into <code>tierd score-log --json</code>, both far likelier to leave the machine than a
+database row. There is no erasure path for it today; if a deployment ever needs
+one, it belongs alongside the other audit-ledger retention questions, not as a
+side effect of the escape hatch.</p>
+<p>⚠️ <strong><code>actor</code> is a self-asserted claim, not a verified identity — the audit
+trail records who the caller says they are.</strong> It is unvalidated free text
+the caller chooses (length-capped only), and nothing checks it against the
+credential that made the request. Nothing can today: <code>POST /api/v1/costs</code> is
+gated — when a token is configured at all — by a single global write token
+with no subject, so there is no
+principal for the server to record instead. Treat every <code>actor</code> value as a
+claim to be corroborated, not as an attribution. Binding it to a verified
+principal requires the identity layer tracked as #65.</p>
+<p>The same holds for the corrected row&#39;s <code>developer</code>: nothing binds the
+authenticating principal to it either, which is the half that matters for
+data accuracy (Art. 5(1)(d)). What <em>is</em> bounded is <strong>reach</strong> —
+<code>POST /api/v1/costs</code> forces <code>source=&#34;api&#34;</code> and the correction path compares
+it, so an override can only ever touch a manually imported row.
+Automatically captured spend cannot be corrected through this endpoint at
+all.</p>
+<p>The erasure endpoint returns per-table deleted-row counts; the
+<code>watcher_checkpoint</code> count (and so <code>total_deleted</code>) is rows tombstoned plus
+rows deleted. It is
+<strong>idempotent</strong> (a second call, or a call for an unknown developer, deletes
+nothing and returns <code>404</code>).</p>
+</li>
+<li>
+<p><strong>Access (DSAR)</strong> — <code>GET /api/v1/developer/{id}/export</code> returns every row
+stored under the same resolved identifier set, plus the person&#39;s watcher
+tail-state rows (path key and <code>metadata</code> included), found by the same
+session-id join the erasure uses, as JSON — the portable artifact you hand to
+the data subject. It cannot return the unjoinable tail-state rows described
+under <strong>Erasure</strong> above, because nothing stored links them to the person.
+⚠️ It does not list the person&#39;s sealed person keys either (which sealed
+periods, labels and measures counted them), although TIER could compute them.
+That is a known residual; whether the export should list them is not yet
+decided. The same holds for the person&#39;s <code>canonical_id_history</code> rows (#975),
+which the erasure deletes but the export does not return; that question is
+also still open.</p>
+</li>
+</ul>
+<p><strong>Known residual — <code>webhook_payloads</code>.</strong> The structured erasure above does <strong>not</strong>
+rewrite the raw GitHub webhook bodies retained in <code>webhook_payloads</code> (only present
+when the webhook path is enabled). As described in <em>What IS stored</em> above, those
+raw bodies may embed a contributor&#39;s name or email address. Surgically editing a
+gzipped raw audit body to redact one identifier is out of scope for the erasure
+endpoint; the <strong>mitigation is the retention bound</strong> — every such row is pruned at
+startup and then every 24 hours while the server runs, by a 90-day age cap and a
+50,000-row cap (<code>PruneWebhookPayloads</code>),
+so any identifier embedded there ages out within ~90 days. An operator who must
+guarantee immediate removal of that residual must delete the affected
+<code>webhook_payloads</code> rows directly. Running TIER without the webhook path stops new
+payloads from being stored, but rows already stored stay until the retention bound
+removes them or someone deletes them. The bound still runs with the webhook path
+off: each time tierd opens the database, and every 24 hours while <code>tierd serve</code>
+runs (<code>cmd/tierd/webhook_prune.go</code>).
+<code>org_actual_spend</code> is org-level (no developer column) and holds no personal data,
+so it is correctly outside the erasure/export scope.</p>
+<p><strong>Deleted bytes are overwritten at the next checkpoint.</strong> TIER opens its database
+with SQLite&#39;s <code>secure_delete</code> on, so a prune or an erasure zeroes the deleted rows
+once SQLite next checkpoints its write-ahead log into the database file
+(automatically after about 1,000 page writes, and at shutdown) instead of leaving
+them readable in free pages (#862). Until then the old page can remain readable in
+the database file or the <code>-wal</code> file.</p>
+<p>The <code>-wal</code> file also keeps its own copy of recently written rows after that
+checkpoint. SQLite trims the file back to 4 MiB, but that removes only what lies
+beyond the first 4 MiB; a row inside them stays readable until SQLite writes over
+it. The <code>-wal</code> file is removed only when the last connection to the database closes
+cleanly. If TIER crashes or is killed, or another program such as <code>tierd backup</code>
+still has the database open when TIER stops, the file stays on disk until the
+database is next opened and closed cleanly.</p>
+<p><strong>This covers deletes made by this version and later.</strong> <code>secure_delete</code> zeroes a
+page when a delete frees it; it does not go back over pages that were already free.
+Rows pruned or erased by an earlier TIER version therefore stay readable in the
+database file after you upgrade, until SQLite reuses those pages. To clear them
+now, replace the database with a compacted copy:</p>
+<ol>
+<li>Stop <code>tierd serve</code>.</li>
+<li>As the user that runs TIER, run
+<code>tierd backup --db &lt;path&gt; --out &lt;new-path&gt;</code>, where <code>&lt;path&gt;</code> is the <code>--db</code> you
+give <code>tierd serve</code> (default <code>~/.tier/tier.db</code>) and <code>&lt;new-path&gt;</code> does not exist
+yet. <code>tierd backup</code> writes the copy with <code>VACUUM INTO</code>, which rebuilds the file
+from its live rows only, so the copy has no free pages and no deleted rows.</li>
+<li>Move the old database file, and its <code>-wal</code> and <code>-shm</code> files if they exist, out
+of the directory. Rename the copy to the old database&#39;s name.</li>
+<li>Start <code>tierd serve</code> and confirm your data is there. Then delete the old files
+you moved aside: they still hold the deleted rows.</li>
+</ol>
+<h2 id="where-it-goes">Where it goes</h2>
+<p>Nowhere by default. The database is a local file (SQLite). The only outbound
+network traffic TIER makes is:</p>
+<ul>
+<li>the <strong>reverse proxies</strong> (<code>/anthropic/</code>, <code>/openai/</code>, <code>/gemini/</code>) forwarding your
+API calls to their upstream: by default <code>api.anthropic.com</code>, <code>api.openai.com</code>
+and <code>generativelanguage.googleapis.com</code>, or whatever <code>--anthropic-target</code>,
+<code>--openai-target</code> (any OpenAI-compatible host) and <code>--gemini-target</code> name. This
+happens only for traffic you route through them;</li>
+<li>the <strong>Anthropic Admin API</strong> and <strong>OpenAI Usage API pollers</strong>, which fetch your
+organization&#39;s usage and cost reports from <code>api.anthropic.com</code> and
+<code>api.openai.com</code> — only when the <code>collectors.anthropic_admin</code> or
+<code>collectors.openai_usage</code> config block is present;</li>
+<li><code>tierd backfill</code>, which reads a repository&#39;s merged pull requests from the
+GitHub REST API (<code>api.github.com</code>, or the <code>--github-api-url</code> you pass) — only
+when you run it;</li>
+<li><code>tierd hierarchy import</code>, which sends the rows of your team CSV (<code>developer</code>,
+<code>team</code>, <code>division</code>, <code>org</code>) to a central <code>tierd</code> you operate, as
+<code>POST /api/v1/org_hierarchy</code> to the <code>--server</code> URL — only when you run it
+without <code>--dry-run</code>;</li>
+<li><code>tierd doctor --server</code>, which sends <code>GET /api/v1/scores</code> to the central
+<code>tierd</code> you name, to check that it answers, accepts your token, and agrees on
+the clock and the price table, and then <code>GET /api/v1/report_manifest</code>, to
+check whether sealing is stalled — only when you pass <code>--server</code>;</li>
+<li><code>tierd seal --status --server</code>, which sends one
+<code>GET /api/v1/report_manifest</code> to the <code>tierd</code> you name, to read why sealing is
+stalled — only when you pass <code>--server</code>; and</li>
+<li><code>tierd ship</code> forwarding <strong>captured usage events</strong> (the fields listed above,
+never content) to a central <code>tierd</code> you operate — from Claude Code sessions by
+default, from Codex rollout logs when <code>--codex-rollout</code> is passed, from the
+Opencode session store when <code>--opencode</code> is passed, and from Muse Code session
+logs when <code>--muse</code> is passed. All four produce the same event shape; none
+forwards a <code>cwd</code>, a Muse <code>workspace_root</code> or any content. With
+<code>--worktree-attribution</code> on, Claude Code events also carry their
+<code>attribution_rule</code> label and may carry the <code>unattributed:foreign-repo</code> issue
+label; no tool-call path is forwarded.</li>
+</ul>
+<p>TIER does not call home, and it does not transmit your data to the project
+maintainers or any third party.</p>
+<h2 id="legal-deployment-guidance">Legal deployment guidance</h2>
+<p>This document bounds what TIER stores as <em>content</em>. It does not resolve the
+<em>labor-law</em> question: per-developer cost attribution is personal data about a
+named individual, and in TIER&#39;s EU target markets (DE Betriebsrat
+co-determination, FR/NL works councils, GDPR Art. 22 profiling) measuring
+named individuals is co-determined or restricted. For deployment
+guidance — works-council prerequisites, DPIA pointers, and a team-only vs
+per-developer decision table by jurisdiction — see
+<a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a>. (Positioning guidance, not legal
+advice.)</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{"type":"last-prompt","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"type":"mode","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"type":"permission-mode","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"gitBranch":"feature/0-seam-sample","type":"attachment","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8","cwd":"__TIER_REPO__","timestamp":"2026-05-27T14:34:42.001Z"}
+{"type":"file-history-snapshot"}
+{"gitBranch":"feature/0-seam-sample","type":"user","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8","cwd":"__TIER_REPO__","timestamp":"2026-05-27T14:34:44.463Z","message":{"role":"user"}}
+{"gitBranch":"feature/0-seam-sample","type":"attachment","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8","cwd":"__TIER_REPO__","timestamp":"2026-05-27T14:34:44.463Z"}
+{"gitBranch":"feature/0-seam-sample","type":"attachment","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8","cwd":"__TIER_REPO__","timestamp":"2026-05-27T14:34:44.463Z"}
+{"type":"last-prompt","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"type":"mode","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"type":"permission-mode","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"type":"ai-title","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8"}
+{"gitBranch":"feature/0-seam-sample","type":"assistant","sessionId":"63dc0764-0418-431c-8e0c-a1756e08edb8","cwd":"__TIER_REPO__","timestamp":"2026-05-27T14:34:47.227Z","message":{"model":"claude-opus-4-7","usage":{"input_tokens":6,"cache_creation_input_tokens":38698,"cache_read_input_tokens":0,"output_tokens":125,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":38698,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":6,"output_tokens":125,"cache_read_input_tokens":0,"cache_creation_input_tokens":38698,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":38698},"type":"message"}],"speed":"standard"},"role":"assistant","id":"msg_012XdSi3hSntA2dxK9MvjeJX"}}

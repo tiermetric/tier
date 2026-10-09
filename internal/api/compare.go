@@ -1,0 +1,587 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"sort"
+	"time"
+
+	"github.com/tiermetric/tier/internal/scoring"
+	"github.com/tiermetric/tier/internal/store"
+)
+
+// --- GET /api/v1/scores/compare (#277) ---
+//
+// Before/after period comparison: two half-open [since, until) windows (#276) in,
+// per-row deltas plus a CI-overlap significance flag out. Window A is the "before"
+// leg, window B the "after" leg; every delta is B - A. The endpoint reuses the same
+// windowed scores computation as GET /scores (loadWindow), so a compared score can
+// never diverge from what /scores reports for the same window.
+//
+// Three security/correctness invariants, ruled server-side for #277 (2026-07-12,
+// #277=A), all enforced here rather than left to a client diffing
+// two /scores calls:
+//
+//  1. Two-window k-anonymity INTERSECTION (anonymized modes): a group is a named row
+//     only if it clears the k-floor in BOTH windows; sub-k in either folds to "other"
+//     in both. Delegated to scoring.CompareTeamsKAnon so presence never differs across
+//     windows and no sub-k aggregate leaks through a delta. See its doc comment. This
+//     applies to team (#185) AND division (#270) — the level is just the label map.
+//  2. Anonymized guard: in ANY anonymized mode (team/division) this endpoint NEVER
+//     emits a named per-developer delta — Developers is an explicit empty array and
+//     the rows are k-anonymized group aggregates, exactly as /scores behaves.
+//  3. Per-window data_quality: each window carries its OWN data_quality block
+//     (a mixed-version / zero-token signal can apply to one window and not the
+//     other), built by the same dataQualityBlock the /scores path uses — so the
+//     zero-token identities are name-suppressed to a bare count in an anonymized
+//     mode on this surface too.
+
+// compareResponse is the wire shape of GET /api/v1/scores/compare (#277).
+type compareResponse struct {
+	WindowA compareWindowMeta `json:"window_a"`
+	WindowB compareWindowMeta `json:"window_b"`
+	// PriceTable stamps the active price-table version (#233); a compare over two
+	// windows priced under different tables surfaces that per window via each
+	// window's data_quality.mixed_price_versions (developer mode only), not here.
+	PriceTable priceTableJSON `json:"price_table"`
+	// Mode echoes the server's aggregation mode (#185, #270) — "developer", "team",
+	// or "division" — so a consumer knows whether Developers or Teams carries the
+	// rows. It is scoring.AggregationMode.String(), the same discriminator
+	// scoresResponse.Aggregation carries.
+	Mode string `json:"mode"`
+	// Developers is the per-developer deltas in developer mode; an explicit empty
+	// array in an anonymized mode (never nil, never a named row) mirroring /scores.
+	Developers []developerDeltaJSON `json:"developers"`
+	// Teams is the per-group deltas in an anonymized mode only (#185, #270), each a
+	// k-anonymized aggregate present in BOTH windows by construction. Absent, with
+	// KAnonSuppressed declared, when either window's own "other" bucket or the
+	// comparison's does not reach k: the whole comparison is withheld (#864).
+	Teams []teamDeltaJSON `json:"teams,omitempty"`
+	// Total is the name-free grand-rollup delta across every developer in each
+	// window.
+	//
+	// ⚠️ ABSENT in two distinct cases, and a consumer must be able to tell them apart:
+	// both windows empty, OR a sub-k residual was suppressed (#593) — in which case
+	// this delta would reconstruct the hidden cohort by subtraction from the named
+	// group deltas. KAnonSuppressed below is what distinguishes them. The pre-#593
+	// wording ("present in both modes; nil when both windows are empty") stated the
+	// absence contract as complete and is no longer true.
+	Total *teamDeltaJSON `json:"total,omitempty"`
+	// KAnonSuppressed declares a k-anonymity suppression on this comparison (#593).
+	//
+	// It sits at the top level rather than inside a window's data_quality because the
+	// suppression is a property of the COMPARISON: CompareTeamsKAnon folds on the
+	// union of both windows, so a cohort is withheld from both sides together or from
+	// neither. Attaching it to one window would imply the other was unaffected.
+	//
+	// Without it this endpoint went silently quiet — review caught that, and it is the
+	// same defect the top-level /scores declaration exists to prevent.
+	KAnonSuppressed *kanonSuppressedJSON `json:"kanon_suppressed,omitempty"`
+}
+
+// compareWindowMeta is one window's echoed bounds and its OWN data_quality (#277
+// caveat 3): the mixed-version / zero-token signal is per window, so it lives on
+// the window rather than at the top level.
+type compareWindowMeta struct {
+	Since string `json:"since"`
+	// Until is omitted when the window is open-ended (no until given).
+	Until       string           `json:"until,omitempty"`
+	DataQuality *dataQualityJSON `json:"data_quality,omitempty"`
+}
+
+// scoreSideJSON is one developer's score on one side (window) of a comparison. It
+// mirrors the ranked-relevant fields of developerScoreJSON, including the bootstrap
+// CI (#133) that drives the significance test. Zero-valued (and PresentA/PresentB
+// false on the parent) when the developer had no data in that window.
+type scoreSideJSON struct {
+	TIER            float64 `json:"tier"`
+	WeightedPoints  float64 `json:"weighted_points"`
+	TotalCostUSD    float64 `json:"total_cost_usd"`
+	ActualPaidUSD   float64 `json:"actual_paid_usd"`
+	SpendLeverage   float64 `json:"spend_leverage"`
+	CoveragePercent float64 `json:"coverage_pct"`
+	// CostPerPoint is USD per weighted point (#239) for this developer on this side,
+	// carried for contract parity with /scores' developer rows and the team compare
+	// sides (via newTeamScoreJSON). It is the SAME scoring.DeveloperScore.CostPerPoint
+	// /scores serializes — NULL for a zero-point side (#472), never a misleading 0 or
+	// +Inf. No self-relative cost_per_point CI here: the CI is a significance
+	// input driven by the TIER interval on the parent delta, not a per-side field.
+	CostPerPoint *float64 `json:"cost_per_point"`
+	SampleN      int      `json:"sample_n"`
+	CILow        float64  `json:"ci_low"`
+	CIHigh       float64  `json:"ci_high"`
+	Ranked       bool     `json:"ranked"`
+}
+
+// developerDeltaJSON is one developer's before/after comparison (developer mode).
+// PresentA/PresentB report whether the developer had data in each window; a delta
+// and the significance flag are meaningful only when BOTH are true (they are 0 /
+// false otherwise, never fabricated from an absent side).
+type developerDeltaJSON struct {
+	Developer           string        `json:"developer"`
+	PresentA            bool          `json:"present_a"`
+	PresentB            bool          `json:"present_b"`
+	A                   scoreSideJSON `json:"a"`
+	B                   scoreSideJSON `json:"b"`
+	DeltaTIER           float64       `json:"delta_tier"`
+	DeltaWeightedPoints float64       `json:"delta_weighted_points"`
+	DeltaTotalCostUSD   float64       `json:"delta_total_cost_usd"`
+	// Significant is true only when the developer is present AND ranked (#133) in
+	// BOTH windows and the two bootstrap CIs do NOT overlap. Any overlap, or an
+	// unranked/below-floor window, renders it false: the move is within noise or
+	// the sample cannot support the claim.
+	Significant bool `json:"significant"`
+}
+
+// teamDeltaJSON is one group's (or the "other" residual's) before/after comparison
+// in an anonymized mode (#185, #270, #277). Team is omitempty so the name-free grand
+// Total does not ship a misleading empty key. Significant is ALWAYS false in an
+// anonymized mode: group aggregates carry no bootstrap CI (an interval is a
+// per-developer signal, #133), so the endpoint never asserts a significance the data
+// cannot back.
+type teamDeltaJSON struct {
+	Team                string        `json:"team,omitempty"`
+	A                   teamScoreJSON `json:"a"`
+	B                   teamScoreJSON `json:"b"`
+	DeltaTIER           float64       `json:"delta_tier"`
+	DeltaWeightedPoints float64       `json:"delta_weighted_points"`
+	DeltaTotalCostUSD   float64       `json:"delta_total_cost_usd"`
+	Significant         bool          `json:"significant"`
+	// Ranked is the DERIVED ranking verdict of the comparison itself (#605), and
+	// the rule it encodes is one sentence: anything derived from an unranked input
+	// is itself unranked. It is `A.Ranked && B.Ranked` — a boolean AND over the two
+	// sides' own #133/#136 verdicts, never a third floor.
+	//
+	// It is computed ONCE, here, rather than per render site. That is the whole
+	// point: #502 added `ranked` to the rollup and it reached exactly one of the
+	// org headline's three consumers, because the other two RE-DERIVED the quotient
+	// from raw sums instead of reading the struct. A derived field with a single
+	// producer can be read; a rule re-implemented at each consumer drifts at each
+	// consumer.
+	//
+	// Why AND and not OR: with a ranked baseline and an unranked selected window,
+	// publishing Δ hands the reader `selected = baseline + Δ` — a perfect
+	// reconstruction of the number the floor just refused to rank. The
+	// one-ranked-one-unranked case is precisely where withholding matters, so it is
+	// the case the AND catches.
+	//
+	// Always present (no omitempty): a `false` here is the LOAD-BEARING value, so
+	// omitting it would drop the verdict rather than encode it. (Not an invitation to
+	// feature-detect on field presence — docs/api-compatibility.md forbids that and
+	// points consumers at livez's `version`.)
+	Ranked bool `json:"ranked"`
+}
+
+func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request) {
+	// Window A = before, window B = after. Each window's since_/until_ params share
+	// the exact grammar and validation as /scores' since/until (#276): half-open,
+	// UTC-anchored, until > since, retention-checked.
+	// Strict parameter allowlist (#590), same posture as /scores. This endpoint does
+	// NOT implement ?repo=, and that is exactly why the allowlist matters here: it
+	// returns the same class of cost figure from the same shared loadWindow, so
+	// silently ignoring a repo= would reproduce #590's defect one endpoint over.
+	// Rejecting it says "not supported here" instead of handing back a fleet
+	// aggregate that looks scoped. Scoped comparison is a real feature and can be
+	// added deliberately; being quietly unscoped is not a feature.
+	if h.sealedRead() {
+		h.serveSealedCompare(w, r) // #913: two sealed months, never two free windows
+		return
+	}
+	if !rejectUnknownQueryParams(w, r, "since_a", "until_a", "since_b", "until_b") {
+		return
+	}
+	sinceA, untilA, ok := h.parseCompareWindow(w, r, "since_a", "until_a")
+	if !ok {
+		return
+	}
+	sinceB, untilB, ok := h.parseCompareWindow(w, r, "since_b", "until_b")
+	if !ok {
+		return
+	}
+
+	var winA, winB windowScores
+	var horizon time.Time
+	var hasHorizon bool
+	var perSource map[string]time.Time
+	var teams compareTeamData
+	err := h.store.ReadSnapshot(r.Context(), func(snap *store.Snapshot) error {
+		var err, herr error
+		winA, err = h.loadWindow(r.Context(), snap, sinceA, untilA, store.FleetWide)
+		if err != nil {
+			h.logger.Error("compare load window a", "err", err)
+			return err
+		}
+		winB, err = h.loadWindow(r.Context(), snap, sinceB, untilB, store.FleetWide)
+		if err != nil {
+			h.logger.Error("compare load window b", "err", err)
+			return err
+		}
+		if h.aggregation.Anonymized() {
+			winA, winB = withoutPseudoDevelopers(winA), withoutPseudoDevelopers(winB)
+		}
+
+		// Cost horizon (#512), attached to BOTH windows. Compare is the endpoint that
+		// needs it most: window A is by construction the OLDER one, so it is the window
+		// most likely to reach back past the horizon — and when it does, a full count of
+		// its outcomes divided by near-zero cost renders as a dramatic apparent CHANGE
+		// in TIER between the periods, carrying a significance flag, that is entirely an
+		// artifact of when capture was installed.
+		//
+		// One lookup shared across both windows: the horizon is a property of the
+		// installation, not of a window. A failure logs and omits on both, matching
+		// /scores rather than 500-ing a whole comparison over a missing annotation.
+		horizon, hasHorizon, herr = snap.CostCoverageStart(r.Context(), store.FleetWide)
+		if herr != nil {
+			h.logger.Error("compare query cost coverage start", "err", herr)
+			hasHorizon = false
+		} else if perSource, err = snap.SourceCoverageStart(r.Context(), store.FleetWide); err != nil {
+			h.logger.Error("compare query per-source coverage start", "err", err)
+			perSource = nil
+		}
+
+		if h.aggregation.Anonymized() {
+			teams, err = h.loadCompareTeams(r.Context(), snap, winA, winB)
+			if err != nil {
+				h.logger.Error("compare teams", "mode", h.aggregation.String(), "err", err)
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		h.logger.Error("compare snapshot", "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Both windows, membership and census have been read in one snapshot.
+	// Its rollback releases the connection before bootstrap and assembly.
+	if h.beforeWindowAssembly != nil {
+		h.beforeWindowAssembly()
+	}
+	activePrices := store.ActivePriceTableInfo()
+	resp := compareResponse{
+		WindowA: compareWindowMeta{
+			Since: sinceA.Format("2006-01-02"),
+			Until: untilString(untilA),
+			DataQuality: withCostHorizon(
+				dataQualityBlock(h.aggregation, winA.zeroTokenOutcomes, winA.priceVersions, winA.hasSpend()),
+				sinceA, horizon, hasHorizon, perSource),
+		},
+		WindowB: compareWindowMeta{
+			Since: sinceB.Format("2006-01-02"),
+			Until: untilString(untilB),
+			DataQuality: withCostHorizon(
+				dataQualityBlock(h.aggregation, winB.zeroTokenOutcomes, winB.priceVersions, winB.hasSpend()),
+				sinceB, horizon, hasHorizon, perSource),
+		},
+		PriceTable: priceTableStamp(activePrices),
+		// Never nil: developer mode fills it, an anonymized mode leaves it an explicit
+		// empty array so no consumer mistakes absence for "not loaded" or a named view.
+		Developers: []developerDeltaJSON{},
+	}
+	resp.Mode = h.aggregation.String()
+
+	var kanonSuppressed scoring.KAnonSuppression
+	if h.aggregation.Anonymized() {
+		kanonSuppressed = h.compareTeams(&resp, teams)
+	} else {
+		resp.Developers = compareDevelopers(winA, winB)
+	}
+
+	// Grand-total delta: a name-free rollup over every developer in each window.
+	//
+	// 🔴 #593: "name-free" is NOT the same as "safe". It used to be emitted in both
+	// modes unconditionally on the reasoning that it never singles anyone out — true in
+	// isolation, false in the presence of the named rows beside it, because the
+	// difference between them IS the suppressed cohort. Withheld whenever the residual
+	// was suppressed. Developer mode is unaffected: it names everyone anyway, so there
+	// is nothing to reconstruct.
+	if kanonSuppressed.Any() {
+		// Declare it, or the missing total is indistinguishable from two empty windows.
+		resp.KAnonSuppressed = compareSuppressedJSON(kanonSuppressed)
+	} else {
+		resp.Total = compareTotal(winA.devScores, winB.devScores)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// compareSuppressedJSON declares a withheld comparison: its total and named rows
+// go with the residual (#593, #864).
+func compareSuppressedJSON(sup scoring.KAnonSuppression) *kanonSuppressedJSON {
+	return &kanonSuppressedJSON{
+		Developers:    sup.Developers,
+		KAnonymity:    sup.K,
+		WithheldTotal: true,
+		WithheldTeams: true, // #864: the named rows go with the residual
+		// Compare ships no cost-composition sidecar, so claiming one was withheld
+		// would be false. Same for the #466 segment reconciliation: it is a
+		// /scores-only surface, and compare never builds one.
+		WithheldCostComposition:       false,
+		WithheldSegmentReconciliation: false,
+	}
+}
+
+type compareTeamData struct {
+	groupsA, groupsB windowGroups
+	censusA, censusB kanonCensus
+}
+
+// loadCompareTeams keeps both windows' dated membership and census reads in
+// the caller's snapshot. The returned inputs retain no reader.
+func (h *Handler) loadCompareTeams(ctx context.Context, r windowReader, winA, winB windowScores) (compareTeamData, error) {
+	label, err := h.groupLabelFunc()
+	if err != nil {
+		return compareTeamData{}, err
+	}
+	// Each window is grouped by DATED membership on its own (#886): an event in
+	// window A counts toward the group its developer held at that event's time,
+	// whatever they hold today or in window B, so a move changes neither window's
+	// history.
+	groupsA, err := h.groupWindow(ctx, r, winA, label)
+	if err != nil {
+		return compareTeamData{}, err
+	}
+	groupsB, err := h.groupWindow(ctx, r, winB, label)
+	if err != nil {
+		return compareTeamData{}, err
+	}
+	// #856: each window is counted on its own evidence, by the same census
+	// /scores uses. Nothing from the census is published here: a per-window count
+	// of uncounted ids is not stated on /compare.
+	censusA, err := h.kanonCensusFor(ctx, r, winA, groupsA.roster)
+	if err != nil {
+		return compareTeamData{}, err
+	}
+	censusB, err := h.kanonCensusFor(ctx, r, winB, groupsB.roster)
+	if err != nil {
+		return compareTeamData{}, err
+	}
+	return compareTeamData{groupsA: groupsA, groupsB: groupsB, censusA: censusA, censusB: censusB}, nil
+}
+
+// compareTeams fills resp.Teams with the two-window k-anonymized group deltas (#277
+// invariant 1). It runs under the SAME anonymized guard as /scores: Developers stays
+// an explicit empty array (set by the caller) and every emitted row is a name-free
+// aggregate that cleared the k-floor in BOTH windows, or the "other" residual. The
+// level (team #185 / division #270) is the membership field groupLabelFunc names,
+// resolved per event from dated membership (#886).
+//
+// Returns whether a sub-k residual was WITHHELD (#593), so the caller can drop the
+// grand-total delta with it. Compare needs this as much as /scores does: its `total`
+// is a rollup over every developer in each window, so subtracting the named group
+// deltas reconstructs the suppressed cohort's delta — and a delta is arguably a
+// sharper disclosure than a level, since it says how one small group's efficiency
+// MOVED between two periods.
+//
+// It folds only the inputs loaded before the live snapshot ended.
+func (h *Handler) compareTeams(resp *compareResponse, data compareTeamData) scoring.KAnonSuppression {
+	groupsA, groupsB, censusA, censusB := data.groupsA, data.groupsB, data.censusA, data.censusB
+	rows, sup := scoring.CompareLabeledKAnon(groupsA.rows, groupsB.rows, h.kAnonymity, censusA.scoring(), censusB.scoring())
+	// 🔴 #864: each window's own "other" bucket — the one /scores folds for that
+	// window alone, by the same fold and census — must reach k too, or the whole
+	// comparison is withheld. The intersection above folds a group that is sub-k in
+	// the OTHER window into "other", so without this a comparison's "other" (or its
+	// total) minus that group's row from /scores or from a second comparison is the
+	// window's own sub-k residual (TestOneBreakdown_CompareOwnOtherBothWindows).
+	for _, side := range []struct {
+		rows   []scoring.LabeledScore
+		census kanonCensus
+	}{{groupsA.rows, censusA}, {groupsB.rows, censusB}} {
+		if _, own := scoring.AggregateLabeledKAnon(side.rows, h.kAnonymity, side.census.scoring()); own.Any() && (!sup.Any() || own.Developers > sup.Developers) {
+			sup = own // developers reports the larger side's count, whatever the order
+		}
+	}
+	if sup.Any() {
+		return sup // the whole comparison is withheld, named rows included
+	}
+	for _, tc := range rows {
+		resp.Teams = append(resp.Teams, newTeamDeltaJSON(tc.Team, tc.A, tc.B))
+	}
+	return sup
+}
+
+// compareDevelopers builds the per-developer deltas (developer mode). It emits the
+// UNION of developers across both windows with PresentA/PresentB flags. Developer
+// mode has no k-anonymity suppression — /scores already names every developer in
+// any window — so exposing that a developer had data in one window and not the
+// other leaks nothing a caller could not already get from two /scores calls. A
+// delta and significance are computed ONLY when the developer is present in both
+// windows; a one-window developer's delta stays 0 and Significant false rather than
+// being fabricated against an absent (implicitly-zero) side.
+func compareDevelopers(winA, winB windowScores) []developerDeltaJSON {
+	a := indexWindowSides(winA)
+	b := indexWindowSides(winB)
+
+	names := make(map[string]struct{}, len(a)+len(b))
+	for dev := range a {
+		names[dev] = struct{}{}
+	}
+	for dev := range b {
+		names[dev] = struct{}{}
+	}
+	sorted := make([]string, 0, len(names))
+	for dev := range names {
+		sorted = append(sorted, dev)
+	}
+	sort.Strings(sorted)
+
+	out := make([]developerDeltaJSON, 0, len(sorted))
+	for _, dev := range sorted {
+		sa, okA := a[dev]
+		sb, okB := b[dev]
+		row := developerDeltaJSON{
+			Developer: dev,
+			PresentA:  okA,
+			PresentB:  okB,
+			A:         sa,
+			B:         sb,
+		}
+		if okA && okB {
+			row.DeltaTIER = sb.TIER - sa.TIER
+			row.DeltaWeightedPoints = sb.WeightedPoints - sa.WeightedPoints
+			row.DeltaTotalCostUSD = sb.TotalCostUSD - sa.TotalCostUSD
+			row.Significant = sa.Ranked && sb.Ranked &&
+				ciDisjoint(sa.CILow, sa.CIHigh, sb.CILow, sb.CIHigh)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// indexWindowSides maps each developer in a window to its serialized side. The
+// bootstrap CI (#133) comes from developerWindowCI — the SAME derivation /scores
+// uses — so a developer's CI on the compare endpoint is bit-identical to what
+// /scores reports for that window, and the significance test can never drift.
+// Unranked rows keep a zero CI (an interval is meaningless there).
+func indexWindowSides(win windowScores) map[string]scoreSideJSON {
+	m := make(map[string]scoreSideJSON, len(win.devScores))
+	for _, s := range win.devScores {
+		lo, hi := developerWindowCI(win.byDev, win.issueCostIndex, s)
+		m[s.Developer] = scoreSideJSON{
+			TIER:            s.TIER,
+			WeightedPoints:  s.WeightedPoints,
+			TotalCostUSD:    s.TotalCostUSD,
+			ActualPaidUSD:   s.ActualPaidUSD,
+			SpendLeverage:   s.SpendLeverage,
+			CoveragePercent: s.CoveragePercent,
+			// The SAME source /scores' developer cost_per_point uses (#239): the
+			// engine-computed, points-guarded DeveloperScore.CostPerPoint — so a
+			// compare A-side is bit-identical to /scores for the same window.
+			CostPerPoint: costPerPointOrNull(s.WeightedPoints, s.CostPerPoint),
+			SampleN:      s.SampleN,
+			CILow:        lo,
+			CIHigh:       hi,
+			Ranked:       s.Ranked,
+		}
+	}
+	return m
+}
+
+// compareTotal is the name-free grand-rollup delta: RollupTeam over every developer
+// in each window (the same rollup /scores' `total` uses), then B - A. Returns nil
+// when both windows are empty so the response omits the key. It singles out no one,
+// so it is safe in both developer and anonymized mode.
+func compareTotal(aScores, bScores []scoring.DeveloperScore) *teamDeltaJSON {
+	if len(aScores) == 0 && len(bScores) == 0 {
+		return nil
+	}
+	a := scoring.RollupTeam("", aScores)
+	b := scoring.RollupTeam("", bScores)
+	row := newTeamDeltaJSON("", a, b)
+	return &row
+}
+
+// newTeamDeltaJSON is the ONE place a before/after aggregate row is built — the
+// k-anonymized `teams[]` rows and the name-free grand `total` alike. Having a
+// single producer is the point rather than a tidiness: see teamDeltaJSON.Ranked for
+// why the derived verdict must be computed once here instead of at each consumer.
+//
+// Significance is ALWAYS false for an aggregate: group rollups carry no bootstrap
+// CI (an interval is a per-developer signal, #133), so the endpoint never asserts
+// a move it cannot back — see teamDeltaJSON.Significant.
+func newTeamDeltaJSON(team string, a, b scoring.TeamScore) teamDeltaJSON {
+	return teamDeltaOfSides(team, teamSideJSON(a), teamSideJSON(b))
+}
+
+// teamDeltaOfSides is newTeamDeltaJSON over two built sides: a sealed
+// comparison's total takes its sides from the two stored bodies (#913).
+func teamDeltaOfSides(team string, a, b teamScoreJSON) teamDeltaJSON {
+	return teamDeltaJSON{
+		Team:                team,
+		A:                   a,
+		B:                   b,
+		DeltaTIER:           b.TIER - a.TIER,
+		DeltaWeightedPoints: b.WeightedPoints - a.WeightedPoints,
+		DeltaTotalCostUSD:   b.TotalCostUSD - a.TotalCostUSD,
+		Significant:         false,
+		// Anything derived from an unranked input is itself unranked (#605).
+		Ranked: a.Ranked && b.Ranked,
+	}
+}
+
+// teamSideJSON maps a scoring.TeamScore onto the teamScoreJSON wire shape used for
+// one side of a group (or total) comparison. It routes through newTeamScoreJSON so
+// the side carries the SAME fields (including cost_per_point, #239) a /scores team
+// row does, then BLANKS Team: the label lives on the parent teamDeltaJSON row, not
+// on each side (and the grand Total row is name-free by construction). The
+// Developers slice on TeamScore is already nil past the k-anon boundary (#185) and
+// is never serialized here.
+func teamSideJSON(ts scoring.TeamScore) teamScoreJSON {
+	j := newTeamScoreJSON(ts)
+	j.Team = "" // the name lives on the parent teamDeltaJSON row, not the side
+	return j
+}
+
+// ciDisjoint reports whether two 95% bootstrap TIER intervals do NOT overlap (#277
+// significance test). Non-overlapping intervals are the conservative signal that a
+// before/after move is beyond sampling noise; any overlap renders the move NOT
+// significant, so the dumbbell never implies a difference the sample cannot support
+// (#133). The caller additionally requires both windows to be ranked.
+func ciDisjoint(aLo, aHi, bLo, bHi float64) bool {
+	return aHi < bLo || bHi < aLo
+}
+
+// parseCompareWindow parses one window's since_/until_ params for the compare
+// endpoint, applying the identical grammar and validation as parseWindowUpperBound
+// (#276): since defaults to 90 days ago and is UTC-anchored; until is optional
+// (empty = open-ended) and, when set, must be strictly after since; the lower bound
+// is checked against the retention horizon (#252). On any violation it writes the
+// HTTP error itself and returns ok=false.
+func (h *Handler) parseCompareWindow(w http.ResponseWriter, r *http.Request, sinceKey, untilKey string) (since, until time.Time, ok bool) {
+	since, err := parseSince(r.URL.Query().Get(sinceKey))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid "+sinceKey+": "+err.Error())
+		return time.Time{}, time.Time{}, false
+	}
+	since = sinceUTC(since)
+
+	until, err = parseUntil(r.URL.Query().Get(untilKey))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid "+untilKey+": "+err.Error())
+		return time.Time{}, time.Time{}, false
+	}
+	if !until.IsZero() {
+		until = until.UTC()
+		if !until.After(since) {
+			writeError(w, http.StatusBadRequest,
+				untilKey+" must be after "+sinceKey+" (half-open ["+sinceKey+", "+untilKey+") window)")
+			return time.Time{}, time.Time{}, false
+		}
+	}
+	if err := h.checkWindowRetention(since); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return time.Time{}, time.Time{}, false
+	}
+	return since, until, true
+}
+
+// untilString formats a window upper bound for the response echo: the empty string
+// for an open-ended (zero) until so the JSON omits the key, else the UTC date.
+func untilString(until time.Time) string {
+	if until.IsZero() {
+		return ""
+	}
+	return until.Format("2006-01-02")
+}
