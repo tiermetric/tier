@@ -2,6 +2,11 @@
   "division-k5": {
     "aggregation": "division",
     "data_quality": {
+      "aggregate_pricing": {
+        "approximation_notice": "Provider daily remainders, if present, use base-rate aggregate approximations and may understate genuine long-context cost, raising TIER. Historical provider aggregates can differ from request-level billing in either direction. Provider remainders use pseudo-developer attribution and are excluded from identified-group denominators. Population and cost ceilings are not shown in this mode.",
+        "ceiling_status": "not_shown",
+        "cutover": "aggregate-approx-v1-2026-10-14"
+      },
       "attributed_outcome_share": 1,
       "attribution_coverage": "not_shown",
       "cost_coverage_safe_since": "2026-05-11",
@@ -53,6 +58,11 @@
   "team-k5": {
     "aggregation": "team",
     "data_quality": {
+      "aggregate_pricing": {
+        "approximation_notice": "Provider daily remainders, if present, use base-rate aggregate approximations and may understate genuine long-context cost, raising TIER. Historical provider aggregates can differ from request-level billing in either direction. Provider remainders use pseudo-developer attribution and are excluded from identified-group denominators. Population and cost ceilings are not shown in this mode.",
+        "ceiling_status": "not_shown",
+        "cutover": "aggregate-approx-v1-2026-10-14"
+      },
       "attributed_outcome_share": 1,
       "attribution_coverage": "not_shown",
       "cost_coverage_safe_since": "2026-05-11",
@@ -104,6 +114,11 @@
   "team-k6": {
     "aggregation": "team",
     "data_quality": {
+      "aggregate_pricing": {
+        "approximation_notice": "Provider daily remainders, if present, use base-rate aggregate approximations and may understate genuine long-context cost, raising TIER. Historical provider aggregates can differ from request-level billing in either direction. Provider remainders use pseudo-developer attribution and are excluded from identified-group denominators. Population and cost ceilings are not shown in this mode.",
+        "ceiling_status": "not_shown",
+        "cutover": "aggregate-approx-v1-2026-10-14"
+      },
       "attributed_outcome_share": 1,
       "attribution_coverage": "not_shown",
       "cost_coverage_safe_since": "2026-05-11",

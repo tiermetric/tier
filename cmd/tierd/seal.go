@@ -370,7 +370,7 @@ func runSealCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if n := db.UpgradeNotice(); n != "" {
 		_, _ = fmt.Fprintln(stderr, n)
 	}
-	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit))
+	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit), api.WithStoredScoringPolicy())
 	h.SetAggregation(settings.mode, settings.k)
 	if *skip != "" {
 		return runSealSkip(ctx, h, settings, *skip, *reason, *dryRun, *yes, stdin, stdout, refused, cannotRun)

@@ -36,6 +36,17 @@
       "cost_coverage_safe_since": "\u003ctime\u003e",
       "cost_coverage_start": "\u003ctime\u003e",
       "exploratory_cost_share": 0.02828694274722788,
+      "join_readiness": {
+        "ambiguous_repo_blind_matches": [],
+        "ambiguous_repo_blind_matches_total": 0,
+        "cost_only_repos": [],
+        "incompatible_repos": [],
+        "incompatible_repos_total": 0,
+        "issue_spend_without_same_developer_outcome": [],
+        "issue_spend_without_same_developer_outcome_total": 0,
+        "outcome_only_repos": [],
+        "unqualified_cost_share": 0
+      },
       "unattributed_buckets": [
         {
           "bucket": "unattributed:main",
@@ -319,6 +330,17 @@
       "cost_coverage_safe_since": "\u003ctime\u003e",
       "cost_coverage_start": "\u003ctime\u003e",
       "exploratory_cost_share": 0.02828694274722788,
+      "join_readiness": {
+        "ambiguous_repo_blind_matches": [],
+        "ambiguous_repo_blind_matches_total": 0,
+        "cost_only_repos": [],
+        "incompatible_repos": [],
+        "incompatible_repos_total": 0,
+        "issue_spend_without_same_developer_outcome": [],
+        "issue_spend_without_same_developer_outcome_total": 0,
+        "outcome_only_repos": [],
+        "unqualified_cost_share": 0
+      },
       "unattributed_buckets": [
         {
           "bucket": "unattributed:main",

@@ -37,15 +37,13 @@ TIER supports this with three shipped surfaces and nothing else:
 | Surface | What it gives the retro | Names anyone? |
 |---|---|---|
 | `GET /api/v1/scores` + the dashboard | The **levers** and work-type segments (`developer` mode only) | The levers do not; the same response and dashboard name every developer |
-| `GET /api/v1/scores/compare` (#277) | A before/after **delta** with a CI-honest `significant` flag | Not in team/division mode |
+| `GET /api/v1/scores/compare` (#277) | A before/after **delta** with an unvalidated non-overlap field; inference not established | Not in team/division mode |
 | Your team's own runbook | The **narrative**: what changed, why, what happened | Written by humans, not TIER |
 
 > **Who sees what.** `developer` mode is meant for a developer and their
 > manager, looking at the same numbers so the manager can coach. Today anyone
 > with read or dashboard access sees every developer's numbers; per-viewer
-> access is planned (#826). Those numbers must never be used for pay,
-> promotion, performance reviews, performance improvement plans, discipline or
-> dismissal. The levers below name nobody, but they are published only beside
+> access is planned (#826). TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The levers below name nobody, but they are published only beside
 > every developer's named row. See [Coaching, not appraisal](#coaching-not-appraisal).
 
 ---
@@ -83,9 +81,7 @@ because it was recorded on `main` or `master`.
 3. Compare **within a work type** (`work_types[]`), never across types. The
    pooled top-level `total` is back-compat only and is explicitly **not** a
    cross-type ranking.
-4. Agree **one** practice change to try -- e.g. "route routine refactors to the
-   cheaper model," or "start sessions from a cached project brief." One change,
-   so the next step can actually attribute the effect.
+4. Treat a move to a cheaper model as a hypothesis to investigate. Compare similar work over finished periods, record other changes (task mix, acceptance criteria, pricing and capture), and inspect acceptance and repair evidence beside cost. A before/after change in TIER cannot show that the model change caused the difference, and TIER does not credit merged work to a model, so it cannot say whether the cheaper model did the work as well.
 
 > **Honesty caveat.** Yield reflects task mix and context, not raw talent. A
 > senior on a legacy module can show a lower lever than a junior on greenfield.
@@ -138,12 +134,14 @@ curl -sS -H "Authorization: Bearer $TIER_READ_TOKEN" \
 
 - Each row carries `delta_tier`, `delta_weighted_points`,
   `delta_total_cost_usd`, and a `significant` flag.
-- `significant` is `true` **only** when the two 95% bootstrap TIER confidence
-  intervals do **not** overlap (and the row is `ranked` in both windows).
-- **Overlapping CIs, or a window below the ranking floor, means
-  `significant: false` -- the move is within sampling noise. Do not over-read
-  it.** A positive `delta_tier` with `significant: false` is "promising, keep
-  watching," not "it worked."
+- `significant` is a legacy raw non-overlap result, retained for compatibility.
+  It is true only for a developer present and above the floor in both windows
+  with disjoint bounds, and false for withheld bounds. Neither value establishes
+  an effect or a noise threshold. The API labels it unvalidated and the dashboard
+  says “inference not established”, without interval-derived colours.
+- Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage.
+- Treat a small difference as no evidence either way, and a large one as a prompt
+  to investigate, not a measured effect.
 - Watch the honest windowing skew too: a recent window B reads artificially low
   because cost books up front and outcomes land at merge time. See
   [docs/interpreting-the-number.md](interpreting-the-number.md) before trusting
@@ -193,8 +191,10 @@ runbook -- not into TIER, which has no field for it. A good entry is four lines:
   premium model for design and hard reasoning.
 - Signal watched: premium_model_share on /scores (developer mode);
   delta_total_cost_usd on /scores/compare (May vs June).
-- Result: premium share fell, delta_tier positive but significant:false after
-  one month -- directional, re-check next cycle.
+- Result: premium share fell and delta_tier was positive with significant:false
+  after one month. This does not establish that the model change caused the
+  difference or that the cheaper model did the work as well. Investigate task
+  mix, acceptance, repair evidence, pricing and capture before interpreting it.
 - Keep / drop: keep; revisit at the next levers retro.
 ```
 
@@ -209,12 +209,9 @@ do*.
 TIER coaches the **practice, not the person**. In `developer` mode a developer
 and their manager see the same numbers, with the same caveats. Use it to coach
 practice -- which model for which job, how to reuse context, starting work
-from an issue -- never to appraise. The rules below match
-[docs/legal-and-privacy.md](legal-and-privacy.md).
+from an issue.
 
-- **Never an input to a people decision.** No TIER number and no lever may be
-  used for pay, promotion, performance reviews, performance improvement plans,
-  discipline or dismissal -- not as the only input, and not as one of several.
+- TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.
 - **Talk about the habit, not the number.** A coaching conversation looks at
   the practice behind a number (cache reuse, which model for which job, spend
   with no issue attached), agrees one thing to try, and checks later whether
@@ -258,9 +255,9 @@ can run this workflow without ever naming an individual.
 | Do NOT | Do instead |
 |---|---|
 | Rank teammates against each other by TIER | Compare the **name-free levers** and copy the practice behind the better one |
-| Tie a TIER number, or any lever, to pay, promotion, a review, a performance improvement plan, discipline or dismissal | Use it to coach AI habits; keep it out of appraisal entirely |
+| Evaluate developers on TIER | TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. |
 | Put a developer's number in a review, or show it to anyone beyond the developer and their manager | Keep it between the developer and their manager (and a skip-level manager, if you use one); show the team only name-free numbers |
-| Read a `significant: false` (or a team-mode delta) as proof a change worked | Treat it as directional; re-check next cycle before claiming an effect |
+| Read a `significant: false` (or a team-mode delta) as proof a change worked | Treat it as an observation to investigate; inference is not established |
 | Compare yield across different work types | Compare **within** a `work_type` segment (#187) |
 | Trust a short, recent after-window at face value | Account for the windowing skew ([interpreting-the-number.md](interpreting-the-number.md)) |
 

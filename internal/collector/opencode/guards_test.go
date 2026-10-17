@@ -11,6 +11,7 @@ import (
 
 	"github.com/tiermetric/tier/internal/collector"
 	"github.com/tiermetric/tier/internal/store"
+	"github.com/tiermetric/tier/internal/tokenacct"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,7 +229,7 @@ func TestNegativeControl_CodexShapedTokensAreRejectedLoudly(t *testing.T) {
 // SHOULD be. Without this arm a future contributor could "strengthen" the check
 // into something that rejects ordinary no-reasoning turns.
 func TestAdditiveIdentityAcceptsWhereTheConventionsAGREE(t *testing.T) {
-	if err := checkAdditiveIdentity(usage{Total: 1000, Input: 800, Output: 200, TotalPresent: true}); err != nil {
+	if _, err := tokenacct.Opencode((usage{Total: 1000, Input: 800, Output: 200, TotalPresent: true}).rawUsage()); err != nil {
 		t.Errorf("a row with no reasoning satisfies BOTH conventions and must be accepted: %v", err)
 	}
 }
@@ -247,11 +248,11 @@ func TestAdditiveIdentityTable(t *testing.T) {
 		{"cache write NOT counted inside total", usage{Total: 135, Input: 100, Output: 20, Reasoning: 5, CacheRead: 10, CacheWrite: 15, TotalPresent: true}, "additive identity broken"},
 		{"total absent is unchecked here", usage{Input: 100, Output: 20}, ""},
 		{"negative count", usage{Total: 100, Input: -1, Output: 101, TotalPresent: true}, "negative token count"},
-		{"above the sanity ceiling", usage{Total: maxMessageTokens + 1, Input: maxMessageTokens + 1, TotalPresent: true}, "sanity ceiling"},
+		{"above the sanity ceiling", usage{Total: (1 << 29) + 1, Input: (1 << 29) + 1, TotalPresent: true}, "sanity ceiling"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkAdditiveIdentity(tc.u)
+			_, err := tokenacct.Opencode(tc.u.rawUsage())
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Errorf("want accepted, got: %v", err)

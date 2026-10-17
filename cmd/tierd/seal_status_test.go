@@ -18,6 +18,8 @@ import (
 	"github.com/tiermetric/tier/internal/store"
 )
 
+const dead = "http://127.0.0.1:1"
+
 // sealManifestServer is a fake tierd that answers 401 unless the request
 // carries `Authorization: Bearer tok`; its /api/v1/report_manifest answers
 // status with body, and its /api/v1/scores answers 200 with a price stamp.
@@ -221,8 +223,7 @@ func TestSealStatusCmd_StallUnknownUntilServerAnswers(t *testing.T) {
 			"--report-grace", grace.String()}, extra...)...)
 		return rc, out
 	}
-	dead := httptest.NewServer(http.NotFoundHandler())
-	dead.Close()
+	// A closed httptest port can be reused by another parallel test's server.
 	live := sealManifestServer(t, http.StatusOK, stallManifest(skipMonth(), "erase_raced")).URL
 	tok := []string{"--api-token", "tok"}
 	for _, tc := range []struct {
@@ -233,12 +234,12 @@ func TestSealStatusCmd_StallUnknownUntilServerAnswers(t *testing.T) {
 		want   string
 	}{
 		{"no server", "", nil, sealExitStallUnknown, "UNKNOWN (server not reached)"},
-		{"unreachable", dead.URL, tok, sealExitStallUnknown, "UNKNOWN (server not reached)"},
+		{"unreachable", dead, tok, sealExitStallUnknown, "UNKNOWN (server not reached)"},
 		{"server rejected by doctorServerBase", "http://example.invalid", []string{"--api-token", "x"}, sealExitStallUnknown, "UNKNOWN (server not reached); --server:"},
 		{"token file missing", live, []string{"--api-token", "@" + filepath.Join(t.TempDir(), "nonexistent")}, sealExitStallUnknown, "UNKNOWN (server not reached); --api-token:"},
 		{"token refused", live, []string{"--api-token", "wrong"}, sealExitStallUnknown, "UNKNOWN (the server refused the API token (GET /api/v1/report_manifest returned 401))"},
 		{"server names none", sealManifestServer(t, http.StatusOK, stallManifest("", "")).URL, tok, sealExitNotStalled, "none: the server names no stalled month"},
-		{"server names it", live, tok, sealExitStalled, `"erase_raced" (an erasure raced every attempt), as the server reported it`},
+		{"server names it", live, tok, sealExitStalled, `"erase_raced" (a seal epoch change raced every attempt), as the server reported it`},
 		{"server names another", sealManifestServer(t, http.StatusOK, stallManifest("2020-01", "erase_raced")).URL, tok, sealExitStallUnknown, "UNKNOWN (the server names"},
 		{"hostile stalled_period", sealManifestServer(t, http.StatusOK, stallManifest("2020-01\n  tierd seal --skip 2020-01 --reason x", "x")).URL, tok, sealExitStallUnknown, `UNKNOWN (the server names "2020-01 `},
 		{"developer-mode server", sealManifestServer(t, http.StatusOK, `{"manifest_schema":"tiermanifest1"}`).URL, tok, sealExitStallUnknown, "UNKNOWN (the server serves no sealed months"},
@@ -268,8 +269,6 @@ func TestSealStatusCmd_StallUnknownUntilServerAnswers(t *testing.T) {
 // condition 7).
 func TestSealStatusCmd_NothingSealable(t *testing.T) {
 	path := armedSealTestDB(t)
-	dead := httptest.NewServer(http.NotFoundHandler())
-	dead.Close()
 	for _, tc := range []struct {
 		name, server string
 		rc           int
@@ -279,7 +278,7 @@ func TestSealStatusCmd_NothingSealable(t *testing.T) {
 		{"server names none", sealManifestServer(t, http.StatusOK, stallManifest("", "")).URL, sealExitNotStalled, "none: no owed month is sealable yet, and the server names no stalled month"},
 		{"server names a stall", sealManifestServer(t, http.StatusOK, stallManifest(skipMonth(), "clock_behind")).URL, sealExitStallUnknown,
 			"UNKNOWN (the server names \"" + skipMonth() + "\", but this database shows no owed month sealable yet"},
-		{"unreachable", dead.URL, sealExitStallUnknown, "UNKNOWN (server not reached)"},
+		{"unreachable", dead, sealExitStallUnknown, "UNKNOWN (server not reached)"},
 	} {
 		args := []string{"--status", "--aggregation", "team", "--db", path, "--report-grace", "2400h"}
 		if tc.server != "" {
@@ -422,7 +421,7 @@ func TestSealStatusCmd_Refusals(t *testing.T) {
 		{"--status", "--skip", skipMonth()},
 		{"--status", "--reason", "x"},
 		{"--status", "--yes"},
-		{"--arm", "earliest", "--server", "http://127.0.0.1:1"},
+		{"--arm", "earliest", "--server", dead},
 		{"--status", "--aggregation", "developer"},
 	} {
 		if rc, _, _ := runSeal(t, "", append(args, "--db", path)...); rc != sealExitRefused {

@@ -91,11 +91,7 @@ this month can be compared with last month.</li>
 <p>Compare a team with its own history, not with other teams. The kind of work a
 team takes on moves the number, and the number cannot tell the kind of work
 apart from the skill of the people doing it.</p>
-<p><strong>What it is for.</strong> TIER is built to coach the practice, not the person. It
-shows where AI spend turned into finished work and where it did not, so a team
-can change how it works. It is not for pay, promotion or performance reviews.
-That is a rule for the people who use TIER. The software cannot enforce it.
-Points follow the size of the finished work, not how hard it was: someone who
+<p><strong>What it is for.</strong> TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is <strong>grade the work, not the worker</strong>, by policy, not by mechanism. Points follow the size of the finished work, not how hard it was: someone who
 spends a lot of AI effort on a small fix to a hard problem scores lower than
 someone making routine changes of the same size. A low number describes the
 work, not the developer&#39;s ability.</p>
@@ -130,14 +126,10 @@ reading. Spend is recorded when it happens, but work only counts when it
 merges, which comes later. So a period that ended very recently reads too low,
 and a period that starts before TIER began recording spend reads too high.
 Layer 2 explains both.</p>
-<p><strong>A real example.</strong> On TIER&#39;s own repository, over the 30 days to 2026-07-21,
-TIER measured <strong>221</strong> outcome points per $1,000 across 152 merged pieces of
-work. In the same period, <strong>72.1%</strong> of the spend could not be linked to a
-specific piece of work. (These are the figures the project&#39;s
-<a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">README</a> publishes.) &#34;Could not be linked&#34; is not the same as
-&#34;wasted&#34;. The unlinked spend is still counted in the bottom of the fraction.
-What it lacks is a label saying which task it went to.</p>
-<p><strong>Try it.</strong> Install TIER with Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories)
+<p><strong>Historical self-measurement; original inputs and run settings are not publicly reproducible.</strong> The maintainer reported <strong>221</strong> points per $1,000 across 152 merged PRs, trailing 30 days to 2026-07-21, and <strong>72.1%</strong> of spend unlinked. It was computed from backfilled history; no quality events were recorded for it, so it is size-weighted only. It illustrates the dashboard, not independent validation. Unlinked spend remains in the denominator.</p>
+<p>The maintainer has exercised TIER&#39;s CI and revert rules in manual test runs; the project&#39;s automated webhook tests exercise the same rules. The inspected historical 221 figure has no recorded quality-event receipt.</p>
+<p>Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for the subscription routes used here. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated and TIER scores read high. If Claude&#39;s logs undercount more than Codex&#39;s, Claude looks relatively cheaper.</p>
+<p><strong>Try it.</strong> Install TIER with Go 1.27.2 or newer
 (<code>go install github.com/tiermetric/tier/cmd/tierd@latest</code>), or download a
 release; <a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a> covers both. Then run
 <code>tierd demo</code> and open <code>http://127.0.0.1:8080</code> in a browser. The demo fills the
@@ -277,10 +269,7 @@ same five weights.</p>
 <p>The weights are <strong>locked</strong>. You can rename the labels in the config file, but
 TIER refuses any weight not on this scale. The lock keeps your own history
 comparable: a weight change would silently rescale every earlier period. Fixed
-weights are also one precondition for ever comparing two installations, but
-only one. Both would also need the same price-table version, the same version
-of the scoring rules, and the same labelling habits. Until you have all of
-that, compare a team with its own history.</p>
+weights do not establish shared calibration; cross-installation comparison is not supported; compare a team with its own history.</p>
 <p>Each pull request&#39;s weight is then multiplied by a <strong>quality multiplier</strong>
 between 0.1 and 1.0 when it comes from GitHub (an outcome sent through the
 outcomes API carries the quality its sender set, from 0 to 1). It is 1.0
@@ -291,7 +280,7 @@ hours lowers it to 0.7, unless a re-run of the same check soon passes. A revert
 within 60 days lowers it to 0.8 when the revert was a business decision, or to
 0.1 when it was a code problem. TIER tells the two apart from keywords in the
 revert&#39;s human-written commit message, and treats a revert as a code problem
-unless the message gives only business reasons. The worst of these wins. Failed checks <em>before</em> the merge do not count. A revert
+unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.0 the matcher requires the recorded merge SHA and default branch, but enforces no lower event-time bound; a matching failure timestamped before merge can count. A revert
 can arrive weeks after the merge, so a past period&#39;s score can still move. The
 numerator is <code>Σ(weight × quality)</code>.</p>
 <h3 id="three-things-that-will-bite-you">Three things that will bite you</h3>
@@ -358,7 +347,7 @@ today, read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> along
 <a href="quickstart.html" rel="nofollow">quickstart.md</a> with its full output.</p>
 <ol>
 <li>
-<p><strong>Install.</strong> Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories), or a release download:
+<p><strong>Install.</strong> Go 1.27.2 or newer, or a release download:
 <a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a>.</p>
 </li>
 <li>

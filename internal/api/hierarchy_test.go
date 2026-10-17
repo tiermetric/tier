@@ -285,9 +285,20 @@ func TestBulkHierarchy_CanonicalizesDevelopers(t *testing.T) {
 }
 
 // TestEndMembership_ValidationAndCanonicalization covers the period-close
-// endpoint: required org, YYYY-MM period validation, canonicalization, and the
-// happy 200 that echoes the resolved developer.
+// endpoint: reserved developer rejection, required org, YYYY-MM period validation,
+// canonicalization, and the happy 200 that echoes the resolved developer.
 func TestEndMembership_ValidationAndCanonicalization(t *testing.T) {
+	t.Run("reserved developer", func(t *testing.T) {
+		h, _ := newTestHandler(t)
+		code, body := doRequest(t, h, http.MethodPost, "/api/v1/period_membership/unattributed/end",
+			map[string]any{"org": "acme", "period_end": "2026-05"})
+		if code != http.StatusBadRequest {
+			t.Errorf("reserved developer: status = %d, want 400; body = %s", code, body)
+		}
+		if !strings.Contains(string(body), "reserved") {
+			t.Errorf("reserved developer: body = %s, want reserved error", body)
+		}
+	})
 	t.Run("missing org", func(t *testing.T) {
 		h, _ := newTestHandler(t)
 		code, _ := doRequest(t, h, http.MethodPost, "/api/v1/period_membership/alice/end",

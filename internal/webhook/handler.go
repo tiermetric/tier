@@ -34,15 +34,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tiermetric/tier/internal/corrects"
 	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/prderive"
@@ -57,9 +59,11 @@ type Store interface {
 	// removes its merge commit from the push-capture ledger (#849): a push
 	// outcome is deleted only when that commit was the last one it held, and is
 	// otherwise re-owned to its earliest remaining commit. inserted=false means
-	// the merge_commit_sha was already recorded (a redelivery) and nothing was
-	// written. May return store.ErrWriteLockUnavailable (answered with a 503).
+	// the merge_commit_sha was already recorded (a redelivery); missing correction
+	// links are still filled. May return store.ErrWriteLockUnavailable (503).
 	RecordPROutcome(ctx context.Context, o store.Outcome) (inserted bool, err error)
+	RecordCorrectionDeclaration(context.Context, store.Outcome, corrects.Declaration, string, string) (int64, error)
+	ExcludePROutcome(ctx context.Context, o store.Outcome, evidence, actor string) error
 	// RecordPushCommit folds one captured direct commit into its (repo, issue,
 	// UTC day) push outcome (#196) and records the commit in the ledger (#849),
 	// in one transaction. A commit that is a stored PR's merge commit, or that
@@ -70,12 +74,14 @@ type Store interface {
 	// store.ErrWriteLockUnavailable.
 	RecordPushCommit(ctx context.Context, o store.Outcome, day, commitSHA string, pushedAt time.Time) (store.PushCommitStatus, error)
 	OutcomeByMergeCommit(ctx context.Context, sha string) (store.Outcome, bool, error)
-	// LatestOutcomeByIssue resolves the revert target within a repository (#231).
-	// repo may be repoid.Unqualified; the store's match is tolerant.
-	LatestOutcomeByIssue(ctx context.Context, repo, issueID string) (store.Outcome, bool, error)
+	// RevertIssueCandidates returns qualified candidates in the inclusive 60-day
+	// occurrence window. Only a single candidate is a target; legacyOnly is
+	// diagnostic and never authorises a penalty (#1228, #1195).
+	RevertIssueCandidates(ctx context.Context, repo, issueID string, since, until time.Time) ([]store.Outcome, bool, error)
 	// AppendQualityEvent appends one quality_events row, idempotent on the
 	// (outcome_id, event_type, source_ref) unique key (#134). inserted=false
-	// means a replay hit an existing row.
+	// means a replay hit an existing row, or an ambiguous marker's outcome
+	// no longer belongs to the developer (for example, after erasure).
 	AppendQualityEvent(ctx context.Context, e store.QualityEvent) (inserted bool, err error)
 	// QualityEventsForOutcome returns an outcome's event set for Resolve (#134).
 	QualityEventsForOutcome(ctx context.Context, outcomeID int64) ([]store.QualityEvent, error)
@@ -103,6 +109,20 @@ type Store interface {
 // processed CI signal.
 func persistedEvent(event string) bool {
 	return event == "pull_request" || event == "push" || event == "workflow_run"
+}
+
+// eventLabel maps the unauthenticated X-GitHub-Event header onto a constant, so
+// a logged or counted label never carries caller-supplied bytes.
+func eventLabel(event string) string {
+	switch event {
+	case "pull_request":
+		return "pull_request"
+	case "push":
+		return "push"
+	case "workflow_run":
+		return "workflow_run"
+	}
+	return "other"
 }
 
 // PushUnattributedCounter is the metric bumped once per direct commit to the
@@ -153,6 +173,18 @@ func WithPushMissingPushedAtCounter(c PushUnattributedCounter) Option {
 	}
 }
 
+// WithRevertAmbiguousCounter counts unresolved revert checks by bounded reason.
+// Delivery replays may increment it again; durable counts use DISTINCT source_ref.
+func WithRevertAmbiguousCounter(c PushUnattributedCounter) Option {
+	return func(h *Handler) { h.revertAmbiguous = c }
+}
+
+// WithOversizedCounter counts rejected bodies by an allowlisted, unauthenticated
+// event header. Unknown event names share the "other" label.
+func WithOversizedCounter(c PushUnattributedCounter) Option {
+	return func(h *Handler) { h.oversized = c }
+}
+
 // WithGeneratedPaths overrides the built-in generated/vendored deny-list used to
 // exclude no-op churn from push capture (#240, config outcomes.generated_paths).
 // cmd/tierd passes the resolved config value: a non-nil slice (including an explicit
@@ -189,9 +221,15 @@ type Handler struct {
 	secret     string // HMAC-SHA256 secret; empty means fail-closed (#60)
 	logger     *slog.Logger
 	deliveries *deliverySet
+	oversized  PushUnattributedCounter
+	// Held from before a push grows beyond 1 MiB through authentication,
+	// decoding and persistence. Contention fails immediately rather than queuing
+	// unauthenticated large bodies in memory.
+	largeBody chan struct{}
 	// pushCapture gates push-to-default-branch outcome capture (#196). When false
 	// (the default), handlePush processes reverts ONLY, exactly as pre-#196.
-	pushCapture bool
+	revertAmbiguous PushUnattributedCounter
+	pushCapture     bool
 	// pushUnattributed counts direct commits dropped for lack of a resolvable issue
 	// id (#196). nil is allowed — the drop is still logged.
 	pushUnattributed PushUnattributedCounter
@@ -252,7 +290,7 @@ func New(s Store, secret string, logger *slog.Logger, opts ...Option) *Handler {
 	if secret == "" {
 		logger.Warn("TIER_WEBHOOK_SECRET is not set — webhook is fail-closed: every request will be rejected (#60)")
 	}
-	h := &Handler{store: s, secret: secret, logger: logger, deliveries: newDeliverySet(deliveryWindow), generatedPaths: defaultGeneratedPaths}
+	h := &Handler{store: s, secret: secret, logger: logger, deliveries: newDeliverySet(deliveryWindow), generatedPaths: defaultGeneratedPaths, largeBody: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -273,9 +311,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhook secret not configured", http.StatusForbidden)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
+	event := r.Header.Get("X-GitHub-Event")
+	body, release, err := h.readBody(w, r, event)
+	if release != nil {
+		defer release()
+	}
 	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
+		var overflow *http.MaxBytesError
+		var timeout net.Error
+		label := eventLabel(event)
+		switch {
+		case errors.As(err, &overflow):
+			if h.oversized != nil {
+				h.oversized.Inc(label)
+			}
+			h.logger.Error("oversized webhook body; headers are unauthenticated", "event", label,
+				"delivery", logSafeStr(r.Header.Get("X-GitHub-Delivery")), "size_class", fmt.Sprintf(">%d_bytes", overflow.Limit))
+			http.Error(w, "webhook body too large", http.StatusRequestEntityTooLarge)
+		case errors.Is(err, errLargeBodyBusy):
+			h.logger.Warn("large webhook reader busy; manually redeliver this delivery; headers are unauthenticated",
+				"event", label, "delivery", logSafeStr(r.Header.Get("X-GitHub-Delivery")))
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "large webhook reader busy", http.StatusServiceUnavailable)
+		case errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+			h.logger.Warn("webhook body read deadline expired; manually redeliver this delivery; headers are unauthenticated",
+				"event", label, "delivery", logSafeStr(r.Header.Get("X-GitHub-Delivery")))
+			http.Error(w, "read error", http.StatusBadRequest)
+		default:
+			http.Error(w, "read error", http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -285,7 +349,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	event := r.Header.Get("X-GitHub-Event")
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 
 	// Both are HTTP headers, so neither is covered by the body HMAC. deliveryID is
@@ -488,10 +551,19 @@ type prPayload struct {
 		Body           string          `json:"body"`
 		Merged         bool            `json:"merged"`
 		MergedAt       json.RawMessage `json:"merged_at"`
+		CreatedAt      string          `json:"created_at"`
 		MergeCommitSHA string          `json:"merge_commit_sha"`
 		Head           struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
 		} `json:"head"`
+		Base struct {
+			Repo struct {
+				DefaultBranch string `json:"default_branch"`
+			} `json:"repo"`
+		} `json:"base"`
 		User struct {
 			Login string `json:"login"`
 			// Type is the GitHub account type ("User", "Bot", ...). Stored on the
@@ -501,15 +573,16 @@ type prPayload struct {
 			Type string `json:"type"`
 		} `json:"user"`
 		Labels       []prLabel `json:"labels"`
-		Additions    int       `json:"additions"`
-		Deletions    int       `json:"deletions"`
-		ChangedFiles int       `json:"changed_files"`
+		Additions    *int      `json:"additions"`
+		Deletions    *int      `json:"deletions"`
+		ChangedFiles *int      `json:"changed_files"`
 	} `json:"pull_request"`
 	// Repository.FullName ("Owner/Repo") qualifies the issue id (#231). GitHub sends
 	// it on every delivery; it was simply never parsed before. Canonicalized through
 	// repoid so it agrees byte-for-byte with the collector's remote.origin.url.
 	Repository struct {
-		FullName string `json:"full_name"`
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repository"`
 }
 
@@ -529,6 +602,49 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 	}
 	if p.Action != "closed" || !p.PullRequest.Merged {
 		return nil
+	}
+
+	// Use the merge time for reporting and observation windows even on a late
+	// delivery. Missing, malformed, zero or future times fall back to receipt.
+	outcomeTS := time.Now().UTC()
+	var mergeEvidence *time.Time
+	var mergedAt string
+	if json.Unmarshal(p.PullRequest.MergedAt, &mergedAt) == nil && mergedAtRFC3339RE.MatchString(mergedAt) {
+		if ts, err := time.Parse(time.RFC3339, mergedAt); err == nil && !ts.IsZero() && !ts.After(outcomeTS) {
+			outcomeTS = ts.UTC()
+			mergeEvidence = &outcomeTS
+		}
+	}
+	// Capture structured evidence before attribution or revert early returns.
+	// Keep occurrence evidence nullable; receipt time is only the recording time.
+	evidenceOutcome := store.Outcome{
+		Developer: p.PullRequest.User.Login, Repo: canonicalRepo(p.Repository.FullName),
+		PRNumber: p.PullRequest.Number, MergeCommitSHA: p.PullRequest.MergeCommitSHA,
+		MergedAt: mergeEvidence,
+	}
+	evidenceOutcome.SetDiffStats(p.PullRequest.Additions, p.PullRequest.Deletions, p.PullRequest.ChangedFiles)
+	if ts, err := time.Parse(time.RFC3339, p.PullRequest.CreatedAt); err == nil && !ts.IsZero() && !ts.After(outcomeTS) {
+		evidenceOutcome.CreatedAt = &ts
+	}
+	if evidenceOutcome.PRNumber > 0 && evidenceOutcome.MergeCommitSHA != "" && evidenceOutcome.Repo != repoid.Unqualified {
+		if _, err := h.store.RecordCorrectionDeclaration(ctx, evidenceOutcome, corrects.Parse(p.PullRequest.Body), "", "github-webhook:merge-delivery"); err != nil {
+			if !errors.Is(err, store.ErrCorrectionDeclarationIgnored) {
+				return err
+			}
+			h.logger.Info("changed correction declaration ignored; first evidence retained", "pr", logSafeStr(fmt.Sprint(p.PullRequest.Number)))
+		}
+	}
+
+	if evidence := prderive.RevertEvidence(p.PullRequest.Head.Ref, p.PullRequest.Title); evidence != "" {
+		if p.PullRequest.Number <= 0 || p.PullRequest.MergeCommitSHA == "" {
+			h.logger.Warn("revert PR has no merge identity; exclusion not recorded", "pr", p.PullRequest.Number)
+			return nil
+		}
+		return h.store.ExcludePROutcome(ctx, store.Outcome{
+			Developer: p.PullRequest.User.Login, Repo: canonicalRepo(p.Repository.FullName),
+			PRNumber: p.PullRequest.Number, MergeCommitSHA: p.PullRequest.MergeCommitSHA,
+			Timestamp: outcomeTS, AuthorType: p.PullRequest.User.Type,
+		}, evidence, store.OutcomeSourceGitHubWebhook)
 	}
 
 	issueID := issueref.FromBranchOrBody(p.PullRequest.Head.Ref, p.PullRequest.Body)
@@ -584,8 +700,6 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 	// names is extracted ONCE and fed to both derivations (#301): the shared prderive
 	// helpers take []string, so this avoids re-walking the label slice per signal.
 	names := labelNames(p.PullRequest.Labels)
-	weight, weightSource := store.ResolveWeight(prderive.SizeWeight(names, h.sizeLabels),
-		p.PullRequest.Additions, p.PullRequest.Deletions, p.PullRequest.ChangedFiles)
 
 	// Work-type category from the PR labels (#187): a security / incident / research
 	// PR is scored WITHIN its category, not against feature work.
@@ -605,37 +719,37 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	// Use the merge time for reporting and observation windows even on a late
-	// delivery. Missing, malformed, zero or future times fall back to receipt.
-	outcomeTS := time.Now().UTC()
-	var mergedAt string
-	if json.Unmarshal(p.PullRequest.MergedAt, &mergedAt) == nil && mergedAtRFC3339RE.MatchString(mergedAt) {
-		if ts, err := time.Parse(time.RFC3339, mergedAt); err == nil && !ts.IsZero() && !ts.After(outcomeTS) {
-			outcomeTS = ts.UTC()
-		}
-	}
-
 	o := store.Outcome{
 		Developer:      p.PullRequest.User.Login,
 		IssueID:        issueID,
 		PRNumber:       p.PullRequest.Number,
-		Weight:         weight,
-		WeightSource:   weightSource,
 		Quality:        1.0,
 		MergeCommitSHA: p.PullRequest.MergeCommitSHA,
-		Additions:      p.PullRequest.Additions,
-		Deletions:      p.PullRequest.Deletions,
-		ChangedFiles:   p.PullRequest.ChangedFiles,
 		WorkType:       workType,
 		WorkTypeSource: workTypeSource,
 		Repo:           canonicalRepo(p.Repository.FullName),
 		AuthorType:     p.PullRequest.User.Type,
 		Timestamp:      outcomeTS,
 	}
+	o.SetDiffStats(p.PullRequest.Additions, p.PullRequest.Deletions, p.PullRequest.ChangedFiles)
+	o.Weight, o.WeightSource = store.ResolveWeight(prderive.SizeWeight(names, h.sizeLabels), o.Additions, o.Deletions, o.ChangedFiles)
+	defaultBranch := p.PullRequest.Base.Repo.DefaultBranch
+	if defaultBranch == "" {
+		defaultBranch = p.Repository.DefaultBranch
+	}
+	if strings.EqualFold(p.PullRequest.Head.Repo.FullName, o.Repo) &&
+		strings.TrimPrefix(p.PullRequest.Head.Ref, "refs/heads/") != defaultBranch {
+		o.HeadBranchHash = issueref.BranchHash(o.Repo, p.PullRequest.Head.Ref)
+	}
+	o.MergedAt = mergeEvidence
+	if ts, err := time.Parse(time.RFC3339, p.PullRequest.CreatedAt); err == nil && !ts.IsZero() && !ts.After(outcomeTS) {
+		o.CreatedAt = &ts
+	}
 	// Durable replay guard (#60) and push reconciliation (#849), in ONE store
 	// transaction. The HMAC covers only the body, so a captured request can be
 	// replayed with a fresh X-GitHub-Delivery header past the in-memory dedup;
-	// the merge_commit_sha unique index makes that replay write nothing. The
+	// the merge_commit_sha unique index prevents duplicate outcome credit, while
+	// missing correction links are still filled. The
 	// same transaction removes the merge commit from the push ledger, so a
 	// squash merge counts once whichever of its push and pull_request events
 	// arrives first — and two concurrent deliveries cannot both insert.
@@ -1167,7 +1281,8 @@ func parsePushedAt(raw json.RawMessage) (time.Time, bool) {
 	return time.Unix(secs, 0).UTC(), true
 }
 
-// revertLineRE matches the first line of revert commits:
+// revertLineRE matches the commit subject (gitCommitSubject, git's %s:
+// leading blank lines skipped, first paragraph folded):
 //
 //	Revert "feat: do something"
 //	Revert feat: do something
@@ -1216,12 +1331,13 @@ func (p pushPayload) onDefaultBranch() bool {
 //     merge_commit_sha → apply the penalty to the ORIGINAL PR's author +
 //     issue. Most reliable: git revert's auto-generated message always
 //     includes the footer, and the SHA is unambiguous.
-//  2. issueref.FromCommitSubject on git's %s subject → look up the latest
-//     outcome for that issue → apply the penalty to its author. Covers
-//     human-authored reverts with a close directive or tracker key in the
-//     subject; bare #N mentions and body references never select an outcome.
-//  3. Neither succeeded — emit slog.Info with the revert commit hash so the
-//     gap is at least discoverable. Quality stays at 1.0.
+//  2. A subject issue reference resolves only when exactly one qualified
+//     same-repository outcome falls in [eventTS-60d, eventTS]. An unresolved
+//     footer never falls through. Sibling commits in a PR merge push use only
+//     the footer, because their quoted subjects can name unrelated shipped work.
+//  3. Unresolved checks warn and increment tier_revert_ambiguous_total. An
+//     ambiguous issue writes revert_ambiguous on every qualified candidate;
+//     this is unknown status, never evidence or a quality floor.
 //
 // The reverter's username (c.Author.Username) is NEVER used as the penalty
 // target. The developer who shipped the bug bears the quality hit, not the
@@ -1254,9 +1370,16 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		return nil
 	}
 	var lastErr error
+	prMergeSeen := false
 	for _, c := range p.Commits {
-		firstLine := strings.SplitN(c.Message, "\n", 2)[0]
-		if !revertLineRE.MatchString(firstLine) {
+		if prMergeRE.MatchString(gitCommitSubject(c.Message)) {
+			prMergeSeen = true
+			break
+		}
+	}
+	for _, c := range p.Commits {
+		subject := gitCommitSubject(c.Message)
+		if !revertLineRE.MatchString(subject) {
 			continue
 		}
 
@@ -1264,10 +1387,11 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		var found bool
 
 		// Tier 1: footer → SHA lookup. Most reliable.
-		if m := revertsCommitRE.FindStringSubmatch(c.Message); m != nil {
+		footer := revertsCommitRE.FindStringSubmatch(c.Message)
+		if m := footer; m != nil {
 			o, ok, err := h.store.OutcomeByMergeCommit(ctx, m[1])
 			if err != nil {
-				h.logger.Error("lookup outcome by merge commit", "err", err, "sha", m[1])
+				h.logger.Error("lookup outcome by merge commit", "err", err, "sha", logSafeStr(m[1]))
 				lastErr = err
 				continue
 			}
@@ -1277,45 +1401,65 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 			}
 		}
 
-		// Tier 2: issue id in the git subject → latest-outcome lookup.
-		// Only attempted when tier-1 didn't resolve; the SHA lookup is
-		// strictly more precise (one merge commit ↔ one outcome).
-		if !found {
-			if issueID := issueref.FromCommitSubject(gitCommitSubject(c.Message)); issueID != "" {
-				// #231: scope the lookup to THIS repository. Before, a revert of repo B's
-				// issue #42 applied the quality penalty to repo A's issue #42. The store's
-				// match is tolerant, so pre-#231 (sentinel) outcomes are still reachable.
-				o, ok, err := h.store.LatestOutcomeByIssue(ctx, canonicalRepo(p.Repository.FullName), issueID)
-				if err != nil {
-					h.logger.Error("lookup outcome by issue", "err", err, "issue", issueID)
-					lastErr = err
-					continue
-				}
-				if ok {
-					origin = o
-					found = true
-				}
-			}
+		eventTS := c.Timestamp
+		if eventTS.IsZero() {
+			eventTS = time.Now().UTC()
 		}
 
-		// Tier 3: nothing resolved. Log so an operator who notices "this PR
-		// was reverted but the score didn't change" has something to grep.
+		if footer != nil && !found {
+			h.warnRevertUnresolved(c.ID, subject, p.Repository.FullName, c.Author.Username, "footer_unresolved")
+			continue // A precise but unknown SHA never permits an issue guess.
+		}
+
 		if !found {
-			h.logger.Info("revert detected but no issue id derivable",
-				"commit", logSafeStr(c.ID),
-				"subject", logSafeStr(firstLine),
-				"author", logSafeStr(c.Author.Username),
-			)
-			continue
+			issueID := issueref.FromCommitSubject(subject)
+			reason := "no_candidate"
+			if prMergeSeen {
+				reason = "merge_push"
+			} else if issueID != "" {
+				candidates, legacyOnly, err := h.store.RevertIssueCandidates(ctx, canonicalRepo(p.Repository.FullName), issueID, eventTS.Add(-revertObservationWindow), eventTS)
+				if err != nil {
+					lastErr = fmt.Errorf("lookup revert candidates: %w", err)
+					continue
+				}
+				if len(candidates) == 1 {
+					origin, found = candidates[0], true
+					// Erasure cannot turn an already unresolved revert into a penalty.
+					// The surviving candidate retains the original decision's event row.
+					events, err := h.store.QualityEventsForOutcome(ctx, origin.ID)
+					if err != nil {
+						lastErr = fmt.Errorf("read prior revert decision: %w", err)
+						continue
+					}
+					for _, event := range events {
+						if event.EventType == quality.EventRevertAmbiguous && event.SourceRef == c.ID {
+							found, reason = false, "ambiguous"
+							break
+						}
+					}
+				} else if len(candidates) > 1 {
+					reason = "ambiguous"
+					for _, candidate := range candidates {
+						// Do not re-resolve or mutate existing quality: an unresolved check
+						// neither adds a penalty nor repairs an old one (no historical backfill).
+						_, err := h.store.AppendQualityEvent(ctx, store.QualityEvent{OutcomeID: candidate.ID, Developer: candidate.Developer, IssueID: candidate.IssueID, EventType: quality.EventRevertAmbiguous, SourceRef: c.ID, EventTS: eventTS, Reason: reason})
+						if err != nil {
+							lastErr = fmt.Errorf("append ambiguous revert: %w", err)
+						}
+					}
+				} else if legacyOnly {
+					reason = "legacy_only"
+				}
+			}
+			if !found {
+				h.warnRevertUnresolved(c.ID, subject, p.Repository.FullName, c.Author.Username, reason)
+				continue
+			}
 		}
 
 		// 60d observation window (spec §3 Event 4): a revert landing more than
 		// 60 days after merge is treated as maintenance / a strategic decision,
 		// not a quality signal against the original author.
-		eventTS := c.Timestamp
-		if eventTS.IsZero() {
-			eventTS = time.Now().UTC()
-		}
 		if eventTS.After(origin.Timestamp.Add(revertObservationWindow)) {
 			h.logger.Debug("revert outside 60d observation window, ignoring",
 				"issue", logSafeStr(origin.IssueID), "commit", logSafeStr(c.ID), "merged_at", origin.Timestamp, "event_ts", eventTS)
@@ -1344,6 +1488,13 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 	return lastErr
 }
 
+func (h *Handler) warnRevertUnresolved(commit, subject, repo, author, reason string) {
+	h.logger.Warn("revert detected but no outcome resolvable", "commit", logsafe.Str(commit), "subject", logsafe.Str(subject), "repo", logsafe.Str(repo), "author", logsafe.Str(author), "reason", reason)
+	if h.revertAmbiguous != nil {
+		h.revertAmbiguous.Inc(reason)
+	}
+}
+
 // capturePushOutcomes records outcomes for qualifying direct commits to the
 // DEFAULT branch (#196, RULING B). It is the trunk-based-team capture path: teams
 // that commit straight to main behind feature flags never fire a pull_request
@@ -1352,8 +1503,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 //
 //   - Only the default branch. A push to any other ref returns early: work on a
 //     feature branch is captured (if at all) when its PR merges via the PR path.
-//   - Skip revert commits — the revert path already degrades the ORIGINAL outcome;
-//     a revert is not new productive work and must not earn its own 0.5.
+//   - Skip revert commits — revert handling runs above; a revert is not new
+//     productive work and must not earn its own 0.5.
 //   - Skip 2-parent merge commits (constraint #2) — integration commits, handled
 //     via the PR webhook (see mergeCommitRE for the payload-has-no-parents caveat).
 //   - Squash double-fire dedup (constraint #1, made order-independent by #849):
@@ -1364,7 +1515,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 //   - A commit with no id cannot be deduplicated and is unattributed.
 //   - Issue id from the commit subject via issueref.FromCommitSubject (#1017,
 //     #1069): close directives, then tracker keys; never a bare #N or the body.
-//     A commit with no resolvable issue (or no GitHub author login to score) is
+//     A commit with no resolvable issue (or no GitHub author login to score, or
+//     a reserved pseudo-developer login (#619)) is
 //     UNATTRIBUTED and must be observable: logged AND counted, never silently dropped.
 //   - Aggregation grain (RULING B): one 0.5-weight outcome per (issue_id, UTC day)
 //     via the idempotent store.RecordPushCommit — NOT 0.5×N-commits (that re-opens the
@@ -1373,9 +1525,10 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 // QUALITY MAPPING GAP (constraint #7, documented per the issue): #134 CI signals
 // (workflow_run) resolve their target outcome by merge_commit_sha, which push
 // outcomes leave NULL, so CI pass/fail floors do NOT reach a push-captured outcome.
-// Revert degradation still applies via the issue-id tier (LatestOutcomeByIssue now
-// returns push outcomes). Closing the CI gap is deferred with the Option C batch
-// enrichment; see docs/how-it-works.md.
+// Standard git revert footers also cannot resolve push outcomes, and an
+// unresolved footer is terminal. Only a footerless revert can reach a push
+// outcome through the exactly-one issue tier. Closing the SHA mapping gap is
+// deferred with the Option C batch enrichment; see docs/how-it-works.md.
 func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error {
 	// Defence in depth: handlePush already gates on the default branch.
 	if !p.onDefaultBranch() {
@@ -1386,15 +1539,15 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 	var captured, unordered int
 	var prMergeSeen bool
 	for _, c := range p.Commits {
-		firstLine := strings.SplitN(c.Message, "\n", 2)[0]
+		subject := gitCommitSubject(c.Message)
 
 		// Reverts are handled by the revert path above; never capture one.
-		if revertLineRE.MatchString(firstLine) {
+		if revertLineRE.MatchString(subject) {
 			continue
 		}
 		// Skip 2-parent merge commits (constraint #2).
-		if mergeCommitRE.MatchString(firstLine) {
-			if prMergeRE.MatchString(firstLine) {
+		if mergeCommitRE.MatchString(subject) {
+			if prMergeRE.MatchString(subject) {
 				prMergeSeen = true
 			}
 			continue
@@ -1420,18 +1573,19 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 		// Match the collector's git %s subject-only rule (#1017): close directives and
 		// tracker keys attribute; a bare #N does not. No branch is consulted:
 		// the push is to the default branch (main/master), which issueref ignores.
-		subject := gitCommitSubject(c.Message)
 		issueID := issueref.FromCommitSubject(subject)
-		if issueID == "" || c.Author.Username == "" || !store.ValidPushCommitID(c.ID) {
+		if issueID == "" || c.Author.Username == "" || store.ResemblesUnattributed(c.Author.Username) || !store.ValidPushCommitID(c.ID) {
 			// Unattributed direct commit — MUST be observable (log + counter), never
-			// a silent drop. Three distinct causes: no issue id in the subject, no
-			// GitHub author login to score the outcome to, or no usable commit id
-			// for the ledger to deduplicate on (#849).
+			// a silent drop: no issue id in the subject, no GitHub author login,
+			// a reserved pseudo-developer login (#619), or no usable commit id for
+			// the ledger to deduplicate on (#849).
 			reason := "no resolvable issue id"
 			switch {
 			case issueID == "":
 			case c.Author.Username == "":
 				reason = "no GitHub author login"
+			case store.ResemblesUnattributed(c.Author.Username):
+				reason = "author login is reserved for the unattributed pseudo-developer (#619)"
 			default:
 				reason = "no usable commit id"
 			}

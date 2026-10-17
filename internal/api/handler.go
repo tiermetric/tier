@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"runtime"
 	"runtime/debug"
@@ -42,10 +43,10 @@ type Store interface {
 	// the global minimum can still predate one source entirely.
 	SourceCoverageStart(ctx context.Context, scope store.RepoScope) (map[string]time.Time, error)
 	InsertTokenEvent(ctx context.Context, e store.TokenEvent) error
-	// InsertTokenEvents is the single-transaction bulk insert behind
-	// POST /api/v1/events (#126); same MAX-on-conflict UPSERT per row as
-	// InsertTokenEvent, so replayed batches are no-ops.
-	InsertTokenEvents(ctx context.Context, events []store.TokenEvent) error
+	// InsertTokenEventsWithResult is the single-transaction bulk insert behind
+	// POST /api/v1/events (#126); same coherent original-basis promotion per row as
+	// InsertTokenEvent, reporting cross-developer key collisions (#1144).
+	InsertTokenEventsWithResult(ctx context.Context, events []store.TokenEvent) (store.TokenEventsInsertResult, error)
 	// InsertManualCostEvent is InsertTokenEvent for the manual-import surface
 	// (POST /api/v1/costs), except that a keyed post never writes to a row that
 	// already owns its key: it returns store.ErrCostConflict on a DIFFERENT
@@ -168,7 +169,7 @@ type Store interface {
 	ReportDigests(ctx context.Context, since, until time.Time, scope store.RepoScope) (events, outcomes store.Digest, err error)
 	// DistinctPriceVersionsWindow returns the ascending distinct price_table
 	// versions that priced token_events in [since, until) (#293). Feeds the
-	// mixed-version data_quality WARN on /scores: cost_micro is immutable per row
+	// mixed-version data_quality WARN on /scores: promotions retain the original row pricing basis
 	// (#233), so a window can span multiple versions while the response stamps a
 	// single active price_table.version — this read surfaces the mix. A zero `until`
 	// is open-ended; an empty window returns nil.
@@ -182,7 +183,7 @@ type Store interface {
 	// order of scoring.ComputeDeveloper's float point-sum AND the index domain of
 	// the fixed-seed bootstrap CI (scoring.BootstrapCI draws `k := rng.IntN(n)`).
 	// A permuted slice therefore moves ci_low/ci_high by far more than a rounding
-	// artifact, and /scores/compare's `significant` is a CI-overlap test over the
+	// artifact, and /scores/compare's legacy `significant` is raw non-overlap of the
 	// same numbers — so an unordered implementation flips a published boolean.
 	// That is measured, not reasoned:
 	// TestScoresCompare_SignificanceFlipsOnRowOrder drives two stores holding the
@@ -275,7 +276,8 @@ type Store interface {
 	// resolves id through the alias map (single-hop), then deletes every row for
 	// the resolved identifier set across all developer-PII tables and the
 	// developer_alias rows themselves in one transaction, returning per-table
-	// deleted-row counts. All-zero counts mean nothing matched (idempotent).
+	// affected-row counts, including retained correction rows scrubbed of personal
+	// data. All-zero counts mean nothing matched (idempotent).
 	EraseDeveloper(ctx context.Context, id string) (map[string]int64, error)
 	// ExportDeveloper is the GDPR Art. 15 access artifact (#184): every stored row
 	// for the resolved identifier set, grouped by table. Empty (RowCount()==0)
@@ -291,7 +293,7 @@ type Store interface {
 	// ReadSnapshot runs fn with one read transaction; a seal computes its whole
 	// period inside it (#913). GET /scores, GET /scores/compare and
 	// GET /report_manifest compose their store reads inside one snapshot
-	// (audit S03/S04). GET /scores/{developer} does not yet do so.
+	// (audit S03/S04). Stored-policy developer detail also uses one snapshot.
 	ReadSnapshot(ctx context.Context, fn func(*store.Snapshot) error) error
 	LatestSealedPeriod(ctx context.Context, periodSize string) (start time.Time, ok bool, err error)
 	// SealedGap, LatestSealedGap and RecordSealedGap are the permanent seal gaps
@@ -338,9 +340,13 @@ type Store interface {
 // WatcherState and registers it into the health Registry (#48), so the
 // Handler holds no per-subsystem health pointer at all — only the Registry.
 type Handler struct {
-	store    Store
-	logger   *slog.Logger
-	apiToken string
+	engineEnablement map[string]string
+	store            Store
+	logger           *slog.Logger
+	apiToken         string
+
+	scoringPolicy       scoring.ScoringPolicy
+	storedScoringPolicy bool
 
 	// beforeWindowAssembly is a per-handler test hook at the boundary between
 	// snapshot reads and CPU-only response assembly, including bootstrap CIs.
@@ -366,6 +372,8 @@ type Handler struct {
 	// is refused there. Like readToken it has no effect without apiToken and
 	// never relaxes the bind rule. Set once before serving via SetMetricsToken.
 	metricsToken string
+	// ingestToken opens only POST /api/v1/events; configured before Register (#1144).
+	ingestToken string
 	// subsystems is the extensible health Registry (#48) — the ONLY health
 	// state the handler holds. The watcher registers here at New (so /healthz's
 	// legacy top-level `watcher` block is derived from subsystems["watcher"]);
@@ -473,6 +481,21 @@ type Option func(*Handler)
 // relying on the Go toolchain's VCS stamps: see Handler.buildCommit for why the
 // container has none.
 func WithCommit(commit string) Option { return func(h *Handler) { h.buildCommit = commit } }
+
+// WithCaptureEngines describes current local capture configuration, never an
+// inference from observed rows. Remote shippers remain unknown.
+func WithCaptureEngines(enabled map[string]bool) Option {
+	return func(h *Handler) {
+		h.engineEnablement = make(map[string]string, len(enabled))
+		for engine, on := range enabled {
+			state := "disabled"
+			if on {
+				state = "enabled"
+			}
+			h.engineEnablement[engine] = state
+		}
+	}
+}
 
 // WithPolledProviders names the providers whose org usage poller this process
 // actually starts (#854). The caller passes only pollers it starts, never ones a
@@ -603,11 +626,11 @@ type routeMux interface {
 }
 
 // registerWriteRoutes mounts the write/ingest + admin routes, all requireAuth
-// (write scope): they 401 without a token and 403 for the read-only viewer token
-// (#59, #190). These are the routes RegisterReadOnly deliberately omits.
+// (write scope), except POST /events accepts ingest scope too (#1144).
+// These are the routes RegisterReadOnly deliberately omits.
 func (h *Handler) registerWriteRoutes(mux routeMux) {
 	mux.HandleFunc("POST /api/v1/costs", h.requireAuth(h.handlePostCosts))
-	mux.HandleFunc("POST /api/v1/events", h.requireAuth(h.handlePostEvents))
+	mux.HandleFunc("POST /api/v1/events", h.requireIngest(h.handlePostEvents))
 	mux.HandleFunc("POST /api/v1/outcomes", h.requireAuth(h.handlePostOutcome))
 	mux.HandleFunc("POST /api/v1/actual_spend", h.requireAuth(h.handlePostActualSpend))
 	mux.HandleFunc("POST /api/v1/org_actual_spend", h.requireAuth(h.handlePostOrgActualSpend))
@@ -646,6 +669,7 @@ func (h *Handler) registerWriteRoutes(mux routeMux) {
 	// the per-handler comments for why they are deliberately NOT suppressed there.
 	mux.HandleFunc("DELETE /api/v1/developer/{id}", h.requireAuth(h.handleEraseDeveloper))
 	mux.HandleFunc("GET /api/v1/developer/{id}/export", h.requireAuth(h.handleExportDeveloper))
+	mux.HandleFunc("GET /api/v1/corrections/{kind}", h.requireAuth(h.handleGetCorrectionEvidence))
 }
 
 // registerReadRoutes mounts the read (requireRead, #190) + open health/probe
@@ -653,9 +677,12 @@ func (h *Handler) registerWriteRoutes(mux routeMux) {
 // surface RegisterReadOnly exposes. Shared by Register and RegisterReadOnly so the
 // two can never drift.
 func (h *Handler) registerReadRoutes(mux routeMux) {
+	mux.HandleFunc("GET /api/v1/diagnostics/captured-dollars", h.requireRead(h.handleCapturedDollars))
 	mux.HandleFunc("GET /api/v1/scores", h.requireRead(h.handleGetScores))
+	// Per-issue reconciliation is a separate developer-only read surface (#1273).
+	mux.HandleFunc("GET /api/v1/issues", h.requireRead(h.handleGetIssueScores))
 	// Before/after period comparison (#277): two half-open windows in, per-row
-	// deltas + CI-overlap significance out. READ-scoped (requireRead, #190) and
+	// deltas + an unvalidated raw bounds-non-overlap flag out. READ-scoped (requireRead, #190) and
 	// under the SAME anonymized k-anon guard as /scores — see handleGetScoresCompare.
 	// The static "compare" path is more specific than the "{developer}" wildcard
 	// below, so ServeMux (Go 1.22+ precedence) routes it here, never to the
@@ -677,6 +704,8 @@ func (h *Handler) registerReadRoutes(mux routeMux) {
 	// suppressed there.
 	mux.HandleFunc("GET /api/v1/events", h.requireRead(h.handleGetEvents))
 	mux.HandleFunc("GET /api/v1/outcomes", h.requireRead(h.handleGetOutcomes))
+	mux.HandleFunc("GET /api/v1/correction_diagnostics", h.requireRead(h.handleCorrectionDiagnostics))
+	mux.HandleFunc("GET /api/v1/repair_spend", h.requireRead(h.handleRepairSpend))
 	// Bulk export of the quality audit chain (#242): the append-only quality_events
 	// signal log and quality_history transition log that make an outcome's multiplier
 	// re-derivable (quality == last new_quality). Same pagination/CSV/READ-scope
@@ -788,6 +817,10 @@ func (h *Handler) SetReadToken(token string) { h.readToken = token }
 // caller to pass a distinct value, as SetReadToken does.
 func (h *Handler) SetMetricsToken(token string) { h.metricsToken = token }
 
+// SetIngestToken wires the upload-only credential (#1144). Call before Register
+// with a token distinct from the write, read and metrics tokens.
+func (h *Handler) SetIngestToken(token string) { h.ingestToken = token }
+
 // SetAggregation wires the reporting mode and k-anonymity floor (#185). Call
 // before Register; the zero value (scoring.AggregationDeveloper, k unused) is the
 // default so an unset Handler names developers exactly as before. In
@@ -813,11 +846,12 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 // strings.EqualFold against this constant.
 const authBearerPrefix = "bearer "
 
-// authScope is the credential a presented token matched (#190, #944).
+// authScope is the credential a presented token matched (#190, #944, #1144).
 type authScope int
 
 const (
 	scopeNone    authScope = iota // no valid token presented
+	scopeIngest                   // matched the upload-only ingest token (#1144)
 	scopeMetrics                  // matched the scrape-only metrics token (#944)
 	scopeRead                     // matched the read-only viewer token (#190)
 	scopeWrite                    // matched the write/admin apiToken
@@ -838,10 +872,11 @@ func scopes(s ...authScope) scopeSet {
 
 func (set scopeSet) has(a authScope) bool { return set&(1<<a) != 0 }
 
-// The accepted sets. scopeMetrics appears only in the /metrics sets, so the
-// metrics token opens nothing but GET /metrics (#944).
+// The accepted sets. scopeMetrics appears only in the /metrics sets (#944);
+// scopeIngest appears only in the POST /events set (#1144).
 var (
 	writeScopes             = scopes(scopeWrite)
+	ingestScopes            = scopes(scopeIngest, scopeWrite)
 	readScopes              = scopes(scopeRead, scopeWrite)
 	metricsScopes           = scopes(scopeMetrics, scopeRead, scopeWrite)
 	anonymisedMetricsScopes = scopes(scopeMetrics, scopeWrite)
@@ -866,14 +901,23 @@ func bearerCandidate(r *http.Request) []byte {
 // and does NOT count against the brute-force limiter. When h.apiToken is empty,
 // the wrapper is transparent (auth disabled; New logs a warning in that mode).
 func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	// Inside the auth check, so an unauthenticated caller still gets 401/403.
+	return h.requireWriteScopes(next, writeScopes)
+}
+
+// requireIngest accepts the ingest or admin token on POST /api/v1/events only.
+func (h *Handler) requireIngest(next http.HandlerFunc) http.HandlerFunc {
+	return h.requireWriteScopes(next, ingestScopes)
+}
+
+func (h *Handler) requireWriteScopes(next http.HandlerFunc, accepted scopeSet) http.HandlerFunc {
+	// Content-type validation stays inside auth so invalid credentials get 401/403.
 	next = requireJSON(next)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.apiToken == "" {
 			next(w, r)
 			return
 		}
-		if !h.authorize(w, r, bearerCandidate(r), writeScopes, "invalid token") {
+		if !h.authorize(w, r, bearerCandidate(r), accepted, "invalid token") {
 			return
 		}
 		next(w, r)
@@ -889,6 +933,9 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // synthetic read-only demo, #476).
 func (h *Handler) requireRead(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Constant policy also covers CSV/array views and old sealed bytes without
+		// exposing a private window's population or changing its stored body.
+		w.Header().Set("X-TIER-Aggregate-Pricing", store.AggregatePricingPolicyNotice)
 		if h.apiToken == "" {
 			next(w, r)
 			return
@@ -924,9 +971,9 @@ func (h *Handler) requireMetrics(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// classify reports which configured secret candidate matches (#190, #944). It
+// classify reports which configured secret candidate matches (#190, #944, #1144). It
 // ALWAYS runs a full constant-time compare against the write secret, and against
-// the read and metrics secrets whenever they are configured, so the result
+// the read, metrics and ingest secrets whenever they are configured, so the result
 // carries no data-dependent timing signal about any token's bytes. The `!= ""`
 // short-circuits are on static config (not attacker-controlled input), so they
 // leak nothing. cmd/tierd refuses to start with any two tokens equal; if two
@@ -934,6 +981,7 @@ func (h *Handler) requireMetrics(next http.HandlerFunc) http.HandlerFunc {
 func (h *Handler) classify(candidate []byte) authScope {
 	writeMatch := constantTimeTokenCheck([]byte(h.apiToken), candidate)
 	readMatch := h.readToken != "" && constantTimeTokenCheck([]byte(h.readToken), candidate)
+	ingestMatch := h.ingestToken != "" && constantTimeTokenCheck([]byte(h.ingestToken), candidate)
 	metricsMatch := h.metricsToken != "" && constantTimeTokenCheck([]byte(h.metricsToken), candidate)
 	switch {
 	case writeMatch:
@@ -942,6 +990,8 @@ func (h *Handler) classify(candidate []byte) authScope {
 		return scopeRead
 	case metricsMatch:
 		return scopeMetrics
+	case ingestMatch:
+		return scopeIngest
 	default:
 		return scopeNone
 	}
@@ -950,13 +1000,14 @@ func (h *Handler) classify(candidate []byte) authScope {
 // Wrong-scope 403 bodies. They name a credential class and a flag, never a
 // token value.
 const (
+	errIngestTokenForbidden  = "ingest token is not authorized for this endpoint: it opens POST /api/v1/events only"
 	errReadTokenForbidden    = "read-only token is not authorized for this endpoint"
 	errMetricsTokenForbidden = "metrics token is not authorized for this endpoint: it opens GET /metrics only"
 	errReadTokenMetrics      = "the read token cannot scrape /metrics in team or division aggregation mode (#944): scrape with the token set by --metrics-token (TIER_METRICS_TOKEN)"
 )
 
 // authorize runs the shared per-IP failed-auth lockout (#36) and the
-// constant-time scope check for requireAuth, requireRead, requireMetrics
+// constant-time scope check for requireAuth, requireIngest, requireRead, requireMetrics
 // (Bearer) and ProxyAuth (X-Tier-Token). They validate the same secrets, so they
 // share one limiter keyed by client IP; gating only one surface would leave the
 // others an unthrottled brute-force oracle. candidate is the raw token the caller
@@ -974,10 +1025,12 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, candidate []
 		writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts; retry later")
 		return false
 	}
-	// Three outcomes, three limiter dispositions:
+	// Four outcomes, three limiter dispositions:
 	//   - no valid token → failure: record it and 401. This case MUST come
 	//     first so an absent / invalid token never reaches the accepted check.
-	//   - a valid token the route accepts → success: clear the IP's failure
+	//   - an accepted ingest token → success and limiter-NEUTRAL: it must not
+	//     clear failures from surrounding admin-token guesses.
+	//   - another valid token the route accepts → success: clear the IP's failure
 	//     counter (the #36 don't-punish-a-fat-fingered-operator behavior).
 	//   - a valid token the route does NOT accept → 403 and limiter-NEUTRAL: a
 	//     valid credential is not a brute-force attempt, so it is not a failure;
@@ -989,8 +1042,13 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, candidate []
 		writeError(w, http.StatusUnauthorized, unauthMsg)
 		return false
 	case accepted.has(got):
-		h.limiter.recordSuccess(ip)
+		if got != scopeIngest {
+			h.limiter.recordSuccess(ip)
+		}
 		return true
+	case got == scopeIngest:
+		writeError(w, http.StatusForbidden, errIngestTokenForbidden)
+		return false
 	case got == scopeMetrics:
 		writeError(w, http.StatusForbidden, errMetricsTokenForbidden)
 		return false
@@ -2079,12 +2137,12 @@ type versionPriceTableJSON struct {
 
 // rubricJSON stamps which canonical NORMATIVE-rubric version produced the
 // weighted-point figures in this response (#239) — the weight-rubric analogue of
-// priceTableJSON. Always present, read from scoring.RubricVersion. It is
+// priceTableJSON. Always present, read from h.rubricVersion(). It is
 // PROVENANCE: a matched rubric.version (with a matched price_table.version) is a
 // NECESSARY condition for comparing a weighted point / TIER / cost_per_point
 // across responses, and it makes a change to the rubric DEFINITION detectable
 // over time. It is not SUFFICIENT for a cross-org comparison: two orgs on the
-// same binary stamp the same version however generously each labels, so matched
+// same scoring policy stamp the same version however generously each labels, so matched
 // versions must be paired with the shared normative calibration (and matched
 // outcomes.size_labels). See docs/rubric.md for the "what you may / may not
 // compare" rules.
@@ -2093,6 +2151,9 @@ type rubricJSON struct {
 }
 
 type scoresResponse struct {
+	CorrectionDiagnostics any                          `json:"correction_diagnostics,omitempty"`
+	CorrectionPolicy      *scoring.CorrectionRuleStamp `json:"correction_policy,omitempty"`
+
 	Since string `json:"since"`
 	// Aggregation names the ANONYMIZED grouping level whose rows populate Teams
 	// (#270): "team" (#185) or "division". It is the discriminator that tells a
@@ -2106,7 +2167,7 @@ type scoresResponse struct {
 	// (#233) — always present, read from the server's active table.
 	PriceTable priceTableJSON `json:"price_table"`
 	// Rubric stamps the canonical weight-rubric version (#239) — always present,
-	// read from scoring.RubricVersion — so a consumer can verify a comparison holds
+	// read from h.rubricVersion() — so a consumer can verify a comparison holds
 	// the weight rubric constant, exactly as PriceTable pins the dollars. It is a
 	// provenance stamp against rubric-DEFINITION drift over time; the cross-org
 	// generosity guard is the shared NORMATIVE rubric (docs/rubric.md), not this
@@ -2189,9 +2250,10 @@ type scoresResponse struct {
 // without inventing an allocation; the sidecar is deliberately left at the pooled
 // top level.
 type workTypeSegmentJSON struct {
-	WorkType   string               `json:"work_type"`
-	Developers []developerScoreJSON `json:"developers,omitempty"`
-	Total      *teamScoreJSON       `json:"total,omitempty"`
+	CorrectionDiagnostics any                  `json:"correction_diagnostics,omitempty"`
+	WorkType              string               `json:"work_type"`
+	Developers            []developerScoreJSON `json:"developers,omitempty"`
+	Total                 *teamScoreJSON       `json:"total,omitempty"`
 }
 
 // segmentReconciliationJSON accounts for ALL of the window's spend against the
@@ -2211,11 +2273,9 @@ type workTypeSegmentJSON struct {
 // Developer mode only: an anonymised mode publishes no segments to reconcile and
 // no second breakdown of the window's cost (#864).
 //
-// SCOPE: this ships the DATA. internal/dashboard does not render it yet, so the
-// segmented panel a reader actually looks at still shows only attributed cost. That
-// is a real gap in the user-facing story and belongs in its own issue (it needs a
-// UI/UX pass, not a handler change); nothing here should be read as claiming the
-// dashboard surfaces the gap today.
+// SCOPE: the dashboard shows the pooled figures and the segment cost caveat under
+// each developer-mode work-type panel, including on filtered responses. If the
+// total is unavailable, the panel retains the caveat and reports that absence.
 type segmentReconciliationJSON struct {
 	// Developers carries one row per developer with spend in the window, sorted by
 	// name.
@@ -2327,6 +2387,8 @@ type developerCostReconciliationJSON struct {
 // only the zero-token outcomes; it is a struct (not an inline slice) so future
 // data-quality signals can be added without another top-level key.
 type dataQualityJSON struct {
+	JoinReadiness    *joinReadinessJSON                `json:"join_readiness,omitempty"`
+	AggregatePricing *store.AggregatePricingDisclosure `json:"aggregate_pricing,omitempty"`
 	// ZeroTokenOutcomes lists the flagged (developer, issue) pairs in
 	// per-developer mode. It is omitempty because team-aggregation mode (#185)
 	// suppresses it entirely — the per-developer/issue identities would defeat
@@ -2661,6 +2723,8 @@ func newCostCompositionJSON(c store.CostComposition) *costCompositionJSON {
 }
 
 type developerScoreJSON struct {
+	OutcomeN *int `json:"outcome_n,omitempty"`
+
 	Developer       string  `json:"developer"`
 	TIER            float64 `json:"tier"`
 	WeightedPoints  float64 `json:"weighted_points"`
@@ -2827,7 +2891,7 @@ func newTeamScoreJSON(ts scoring.TeamScore) teamScoreJSON {
 // mapper for the two developer build sites (the pooled list and the per-work_type
 // segment). The single-developer detail endpoint uses a different response struct
 // and is intentionally not routed through here.
-func newDeveloperScoreJSON(s scoring.DeveloperScore, ciLow, ciHigh float64) developerScoreJSON {
+func newDeveloperScoreJSON(s scoring.DeveloperScore, ciLow, ciHigh float64, projected bool) developerScoreJSON {
 	cppLow, cppHigh := scoring.CostPerPointCI(ciLow, ciHigh)
 	return developerScoreJSON{
 		Developer:          s.Developer,
@@ -2839,6 +2903,7 @@ func newDeveloperScoreJSON(s scoring.DeveloperScore, ciLow, ciHigh float64) deve
 		CoveragePercent:    s.CoveragePercent,
 		CostPerPoint:       costPerPointOrNull(s.WeightedPoints, s.CostPerPoint),
 		SampleN:            s.SampleN,
+		OutcomeN:           rawOutcomeN(s, projected),
 		CILow:              ciLow,
 		CIHigh:             ciHigh,
 		CostPerPointCILow:  cppLow,
@@ -2887,6 +2952,42 @@ const (
 // the per-issue costs are summed from the same rows as the developer total, so their
 // sum never exceeds it.
 func jointCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.JoinIndex, totalCostUSD float64) (contribs, costs []float64, fixedCostUSD float64) {
+	contribs, costs, _, fixedCostUSD = projectedCIInputs(dev, outcomes, costIndex, totalCostUSD)
+	return
+}
+func projectedCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.JoinIndex, totalCostUSD float64) (contribs, costs []float64, fixedPoints, fixedCostUSD float64) {
+	// Projected resampling uses a canonical pair order, independently of insertion
+	// or partition order. Keep the legacy draw domain byte-identical when off.
+	projected := false
+	for _, o := range outcomes {
+		projected = projected || o.Correction != nil
+	}
+	if projected {
+		outcomes = append([]scoring.Outcome(nil), outcomes...)
+		sort.Slice(outcomes, func(i, j int) bool {
+			a, b := outcomes[i], outcomes[j]
+			if a.Repo != b.Repo {
+				return a.Repo < b.Repo
+			}
+			if a.IssueID != b.IssueID {
+				return a.IssueID < b.IssueID
+			}
+			if a.WorkType != b.WorkType {
+				return a.WorkType < b.WorkType
+			}
+			if a.Points() != b.Points() {
+				return a.Points() < b.Points()
+			}
+			if a.RankingEligible() != b.RankingEligible() {
+				return !a.RankingEligible()
+			}
+			if a.Weight != b.Weight {
+				return a.Weight < b.Weight
+			}
+			return a.Quality < b.Quality
+		})
+	}
+
 	contribs = make([]float64, len(outcomes))
 	costs = make([]float64, len(outcomes))
 	// Outcomes per (developer, repo, issue) so a shared issue's cost is split evenly.
@@ -2896,7 +2997,7 @@ func jointCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.JoinI
 	}
 	var attributed float64
 	for i, o := range outcomes {
-		contribs[i] = o.Weight * o.Quality
+		contribs[i] = o.Points()
 		n := perIssue[store.DevIssue{Developer: dev, Repo: o.Repo, IssueID: o.IssueID}]
 		if n == 0 {
 			continue
@@ -2923,7 +3024,17 @@ func jointCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.JoinI
 	if fixedCostUSD < 0 {
 		fixedCostUSD = 0 // float slack only; the scale above already caps attributed at total
 	}
-	return contribs, costs, fixedCostUSD
+	eligiblePoints, eligibleCosts := make([]float64, 0, len(outcomes)), make([]float64, 0, len(outcomes))
+	for i, o := range outcomes {
+		if o.RankingEligible() {
+			eligiblePoints = append(eligiblePoints, contribs[i])
+			eligibleCosts = append(eligibleCosts, costs[i])
+		} else {
+			fixedPoints += contribs[i]
+			fixedCostUSD += costs[i]
+		}
+	}
+	return eligiblePoints, eligibleCosts, fixedPoints, fixedCostUSD
 }
 
 // developerWindowCI returns the 95% percentile-bootstrap TIER interval for one
@@ -2940,9 +3051,9 @@ func developerWindowCI(byDev map[string][]scoring.Outcome, costIndex store.JoinI
 	if !s.Ranked {
 		return 0, 0
 	}
-	contribs, costs, fixedCost := jointCIInputs(s.Developer, byDev[s.Developer], costIndex, s.TotalCostUSD)
+	contribs, costs, fixedPoints, fixedCost := projectedCIInputs(s.Developer, byDev[s.Developer], costIndex, s.TotalCostUSD)
 	rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
-	return scoring.BootstrapCI(contribs, costs, fixedCost, scoring.DefaultBootstrapSamples, rng)
+	return scoring.BootstrapCIWithFixedPoints(contribs, costs, fixedPoints, fixedCost, scoring.DefaultBootstrapSamples, rng)
 }
 
 // windowScores is the canonicalized, joined result of one [since, until) window
@@ -2957,12 +3068,16 @@ func developerWindowCI(byDev map[string][]scoring.Outcome, costIndex store.JoinI
 // per-window data-quality block on BOTH endpoints. It never leaves the api
 // package — no field is serialized directly.
 type windowScores struct {
-	devScores   []scoring.DeveloperScore
-	byDev       map[string][]scoring.Outcome
-	costDevs    map[string]bool
-	outcomes    []store.Outcome
-	canon       func(string) string
-	canonTokens map[store.DevIssue]int64
+	policy          scoring.ScoringPolicy
+	projectedPolicy bool
+
+	aggregatePricing store.AggregatePricingDisclosure
+	devScores        []scoring.DeveloperScore
+	byDev            map[string][]scoring.Outcome
+	costDevs         map[string]bool
+	outcomes         []store.Outcome
+	canon            func(string) string
+	canonTokens      map[store.DevIssue]int64
 	// issueCostIndex is the canonicalized per-(developer, repo, issue) list-price
 	// cost, the per-outcome denominator the joint bootstrap CI resamples (#495).
 	// Shared here so /scores and /scores/compare derive the SAME interval.
@@ -3066,6 +3181,13 @@ type windowReader interface {
 // control-arm tests assert on response FIELDS precisely so an unthreaded read shows
 // up as a field that stayed fleet-wide.
 func (h *Handler) loadWindow(ctx context.Context, r windowReader, since, until time.Time, scope store.RepoScope) (windowScores, error) {
+	policy, err := h.policyForReader(ctx, r)
+	if err != nil {
+		return windowScores{}, err
+	}
+	if _, err := policy.Stamp(); err != nil {
+		return windowScores{}, err
+	}
 	costs, err := r.DeveloperCostsWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query costs: %w", err)
@@ -3099,12 +3221,21 @@ func (h *Handler) loadWindow(ctx context.Context, r windowReader, since, until t
 		}
 	}
 	// Mixed-version signal (#293): the DISTINCT price_table versions that priced
-	// token_events in this window. cost_micro is immutable per row (#233), so a
+	// token_events in this window. promotions retain the original row pricing basis (#233), so a
 	// window legitimately spans versions while the response stamps a single active
 	// price_table.version; this read surfaces the mix for the data-quality block.
 	priceVersions, err := r.DistinctPriceVersionsWindow(ctx, since, until, scope)
 	if err != nil {
 		return windowScores{}, fmt.Errorf("query price versions: %w", err)
+	}
+	var aggregatePricing store.AggregatePricingDisclosure
+	if pricing, ok := r.(interface {
+		AggregatePricingWindow(context.Context, time.Time, time.Time, store.RepoScope) (store.AggregatePricingDisclosure, error)
+	}); ok {
+		aggregatePricing, err = pricing.AggregatePricingWindow(ctx, since, until, scope)
+		if err != nil {
+			return windowScores{}, fmt.Errorf("query aggregate pricing: %w", err)
+		}
 	}
 	// Alias map (#125): resolve each raw identifier (OS username on cost rows,
 	// GitHub login on outcome rows) to its canonical developer BEFORE joining. One
@@ -3193,13 +3324,9 @@ func (h *Handler) loadWindow(ctx context.Context, r windowReader, since, until t
 			joinedOutcomes++
 		}
 		zeroToken := tokens < scoring.MinAttributableTokens
-		so := scoring.Outcome{
-			Developer: dev,
-			IssueID:   o.IssueID,
-			Repo:      o.Repo,
-			Weight:    o.Weight,
-			Quality:   o.Quality,
-			ZeroToken: zeroToken,
+		so, err := scoringOutcomeFor(policy, o, dev, zeroToken)
+		if err != nil {
+			return windowScores{}, err
 		}
 		scoredOutcomes = append(scoredOutcomes, so)
 		byDev[dev] = append(byDev[dev], so)
@@ -3264,6 +3391,8 @@ func (h *Handler) loadWindow(ctx context.Context, r windowReader, since, until t
 	}
 
 	return windowScores{
+		policy:            policy,
+		projectedPolicy:   policy.Event3,
 		devScores:         devScores,
 		byDev:             byDev,
 		costDevs:          costDevs,
@@ -3276,6 +3405,7 @@ func (h *Handler) loadWindow(ctx context.Context, r windowReader, since, until t
 		joinedOutcomes:    joinedOutcomes,
 		zeroTokenOutcomes: zeroTokenOutcomes,
 		priceVersions:     priceVersions,
+		aggregatePricing:  aggregatePricing,
 		scoredOutcomes:    scoredOutcomes,
 		since:             since,
 		until:             until,
@@ -3326,6 +3456,22 @@ func dataQualityBlock(mode scoring.AggregationMode, zeroTokenOutcomes []zeroToke
 			dq.AttributionCoverage = "not_shown"
 		}
 	}
+	return dq
+}
+
+// withAggregatePricing keeps provider aggregate uncertainty beside the score.
+// Anonymous modes carry a constant policy notice, never window population or
+// spend differences (including pseudo-developer poller remainders).
+func withAggregatePricing(dq *dataQualityJSON, info store.AggregatePricingDisclosure, mode scoring.AggregationMode) *dataQualityJSON {
+	if mode.Anonymized() {
+		info = store.AggregatePricingDisclosure{Cutover: store.AggregatePricingCutover, ApproximationNotice: store.AnonymousAggregateNotice, CeilingStatus: "not_shown"}
+	} else if info.ApproximateRows+info.HistoricalRows == 0 {
+		return dq
+	}
+	if dq == nil {
+		dq = &dataQualityJSON{}
+	}
+	dq.AggregatePricing = &info
 	return dq
 }
 
@@ -3394,6 +3540,7 @@ func withCostHorizon(dq *dataQualityJSON, since, horizon time.Time, hasHorizon b
 }
 
 func (h *Handler) handleGetScores(w http.ResponseWriter, r *http.Request) {
+	setInferenceHeaders(w.Header())
 	if h.sealedRead() {
 		h.serveSealedScores(w, r)
 		return
@@ -3504,6 +3651,7 @@ func (h *Handler) scoresForWindow(ctx context.Context, r windowReader, q scoresQ
 // scoresWindowData owns all inputs needed to assemble a scores response. It
 // retains no reader: live requests can release their snapshot after loading it.
 type scoresWindowData struct {
+	corrections         any
 	win                 windowScores
 	costComposition     store.CostComposition
 	unattributedBuckets []store.UnattributedBucketCost
@@ -3529,6 +3677,10 @@ func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scores
 	}
 	if h.aggregation.Anonymized() {
 		win = withoutPseudoDevelopers(win)
+	}
+	corrections, err := h.correctionDisputes(ctx, r, win.policy, since, until, scope)
+	if err != nil {
+		return scoresWindowData{}, err
 	}
 
 	// The work-type segmentation (#187), cost-composition sidecar (#234), and
@@ -3592,7 +3744,8 @@ func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scores
 			return scoresWindowData{}, err
 		}
 	}
-	data := scoresWindowData{win: win, costComposition: costComposition, unattributedBuckets: unattributedBuckets}
+	data := scoresWindowData{corrections: corrections, win: win, costComposition: costComposition, unattributedBuckets: unattributedBuckets}
+
 	if h.aggregation.Anonymized() {
 		label, err := h.groupLabelFunc()
 		if err != nil {
@@ -3722,9 +3875,11 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	census := data.census
 	activePrices := store.ActivePriceTableInfo()
 	resp := scoresResponse{
-		Since:      since.Format("2006-01-02"),
-		PriceTable: priceTableStamp(activePrices),
-		Rubric:     rubricJSON{Version: scoring.RubricVersion},
+		CorrectionDiagnostics: data.corrections,
+		Since:                 since.Format("2006-01-02"),
+		PriceTable:            priceTableStamp(activePrices),
+		Rubric:                rubricJSON{Version: rubricVersionFor(data.win.policy)},
+		CorrectionPolicy:      correctionStampFor(data.win.policy),
 	}
 	if h.aggregation.Anonymized() {
 		// Anonymized mode — team (#185) or division (#270): NEVER emit an individual
@@ -3767,7 +3922,7 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 			// CI via the shared derivation so /scores and /scores/compare never
 			// diverge on a developer's interval (#277); (0,0) for an unranked row.
 			ciLow, ciHigh := developerWindowCI(win.byDev, win.issueCostIndex, s)
-			row := newDeveloperScoreJSON(s, ciLow, ciHigh)
+			row := newDeveloperScoreJSON(s, ciLow, ciHigh, data.win.policy.Event3)
 			// Per-developer exploratory-overhead share (#refocus, Option B): main-branch
 			// no-issue micros / this developer's total window micros. Keyed on the same
 			// canonical identity as the score row and the folded maps.
@@ -3789,7 +3944,7 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	// window with nothing in it. Only a store with no captured cost at all omits it.
 	resp.DataQuality = dataQualityBlock(h.aggregation, win.zeroTokenOutcomes, win.priceVersions, win.hasSpend())
 
-	resp.DataQuality = withCostHorizon(resp.DataQuality, since, data.horizon, data.hasHorizon, data.perSource)
+	resp.DataQuality = withAggregatePricing(withCostHorizon(resp.DataQuality, since, data.horizon, data.hasHorizon, data.perSource), data.win.aggregatePricing, h.aggregation)
 
 	// A sealed body (#913) carries attribution_coverage "not_shown" even for a
 	// month with no spend (#956 ruling A: an anonymised mode always reports it),
@@ -3817,6 +3972,10 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 			resp.DataQuality = &dataQualityJSON{}
 		}
 		return resp.DataQuality
+	}
+
+	if !h.aggregation.Anonymized() && (len(win.issueCosts) > 0 || len(win.outcomes) > 0) {
+		attachDataQuality().JoinReadiness = buildJoinReadiness(win)
 	}
 
 	// #593: declare the suppression. Attached unconditionally when it happened — this
@@ -3971,7 +4130,10 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	// route back.
 	var segments []workTypeSegmentJSON
 	if !h.aggregation.Anonymized() {
-		segments = h.buildWorkTypeSegments(win.outcomes, win.canon, win.canonTokens, issueCosts, workTypeFilter)
+		segments = h.buildWorkTypeSegments(win.scoredOutcomes, win.canon, issueCosts, workTypeFilter, win.policy)
+		for i := range segments {
+			segments[i].CorrectionDiagnostics = data.corrections
+		}
 		// Segment reconciliation (#466): account for EVERY dollar of the window against
 		// the segments just built, so the spend they structurally cannot categorize is
 		// reported instead of silently dropped. Built from win.outcomes — the UNFILTERED
@@ -4065,11 +4227,11 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 // that single type; a type with no outcomes yields a segment with no rows so a
 // filtered request still gets a well-formed (empty) answer.
 func (h *Handler) buildWorkTypeSegments(
-	outcomes []store.Outcome,
+	outcomes []scoring.Outcome,
 	canon func(string) string,
-	canonTokens map[store.DevIssue]int64,
 	issueCosts []store.DevIssueCost,
 	filter string,
+	policy scoring.ScoringPolicy,
 ) []workTypeSegmentJSON {
 	// Canonicalize per-(developer, repo, issue) cost so it joins to the canonical
 	// outcome identity exactly as the pooled path canonicalizes DeveloperCosts (#125).
@@ -4084,7 +4246,6 @@ func (h *Handler) buildWorkTypeSegments(
 	}
 	totalIndex := store.BuildJoinIndex(issueTotalMicro)
 	realtimeIndex := store.BuildJoinIndex(issueRealtimeMicro)
-	tokenIndex := store.BuildJoinIndex(canonTokens)
 
 	// Partition outcomes: work_type -> canonical developer -> scoring outcomes, plus
 	// the DISTINCT issue set per (type, developer) so the same issue's cost is charged
@@ -4098,21 +4259,13 @@ func (h *Handler) buildWorkTypeSegments(
 		if wt == "" {
 			wt = store.WorkTypeFeature // defensive: AllOutcomesSince COALESCEs, but never trust an empty category
 		}
-		dev := canon(o.Developer)
-		zeroToken := tokenIndex.Sum(dev, o.Repo, o.IssueID) < scoring.MinAttributableTokens
+		dev := o.Developer
 		if segByDev[wt] == nil {
 			segByDev[wt] = map[string][]scoring.Outcome{}
 			segIssues[wt] = map[string]map[store.DevIssue]bool{}
 		}
-		segByDev[wt][dev] = append(segByDev[wt][dev], scoring.Outcome{
-			Developer: dev,
-			IssueID:   o.IssueID,
-			Repo:      o.Repo,
-			WorkType:  wt,
-			Weight:    o.Weight,
-			Quality:   o.Quality,
-			ZeroToken: zeroToken,
-		})
+		// Partition the already-validated projection; never resolve inside a segment.
+		segByDev[wt][dev] = append(segByDev[wt][dev], o)
 		if segIssues[wt][dev] == nil {
 			segIssues[wt][dev] = map[store.DevIssue]bool{}
 		}
@@ -4166,11 +4319,11 @@ func (h *Handler) buildWorkTypeSegments(
 				// Segment-scoped joint CI (#495): the segment's own per-issue cost
 				// index (totalIndex) and TotalCostUSD, so the fixed remainder is this
 				// work-type's non-outcome cost.
-				contribs, costs, fixedCost := jointCIInputs(s.Developer, devMap[s.Developer], totalIndex, s.TotalCostUSD)
+				contribs, costs, fixedPoints, fixedCost := projectedCIInputs(s.Developer, devMap[s.Developer], totalIndex, s.TotalCostUSD)
 				rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
-				ciLow, ciHigh = scoring.BootstrapCI(contribs, costs, fixedCost, scoring.DefaultBootstrapSamples, rng)
+				ciLow, ciHigh = scoring.BootstrapCIWithFixedPoints(contribs, costs, fixedPoints, fixedCost, scoring.DefaultBootstrapSamples, rng)
 			}
-			seg.Developers = append(seg.Developers, newDeveloperScoreJSON(s, ciLow, ciHigh))
+			seg.Developers = append(seg.Developers, newDeveloperScoreJSON(s, ciLow, ciHigh, policy.Event3))
 		}
 		if len(devScores) > 0 {
 			total := newTeamScoreJSON(scoring.RollupTeam("", devScores))
@@ -4504,6 +4657,9 @@ func buildSegmentReconciliation(
 // --- GET /api/v1/scores/{developer} ---
 
 type developerDetailResponse struct {
+	CorrectionPolicy *scoring.CorrectionRuleStamp `json:"correction_policy,omitempty"`
+	OutcomeN         *int                         `json:"outcome_n,omitempty"`
+
 	Developer       string  `json:"developer"`
 	TIER            float64 `json:"tier"`
 	WeightedPoints  float64 `json:"weighted_points"`
@@ -4559,6 +4715,8 @@ type developerDetailResponse struct {
 }
 
 type issueDetailJSON struct {
+	Projection *store.OutcomeProjection `json:"projection,omitempty"`
+
 	IssueID  string  `json:"issue_id"`
 	Weight   float64 `json:"weight"`
 	Quality  float64 `json:"quality"`
@@ -4571,6 +4729,7 @@ type issueDetailJSON struct {
 }
 
 func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request) {
+	setInferenceHeaders(w.Header())
 	// Any anonymized mode (team #185, division #270): the per-developer detail
 	// endpoint names one individual by construction, so it is BLANKET-rejected
 	// here — the same 404 for every {developer} path value, returned BEFORE any
@@ -4584,6 +4743,11 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "per-developer score detail is disabled in "+h.aggregation.String()+"-aggregation mode (#185, #270)")
 		return
 	}
+	if _, err := h.scoringPolicy.Stamp(); err != nil {
+		writeError(w, http.StatusInternalServerError, "Event 3 policy unresolved")
+		return
+	}
+
 	// Strict parameter allowlist + ?repo scope (#590), same posture and same reasons
 	// as /scores. The issue names this endpoint explicitly: a per-developer figure
 	// that silently spans every repository is the same defect at a finer grain, and
@@ -4608,9 +4772,41 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if !h.storedScoringPolicy {
+		h.developerScoreWindow(w, r, since, until, scope, h.store, h.scoringPolicy)
+		return
+	}
+	buffered := httptest.NewRecorder()
+	err = h.store.ReadSnapshot(r.Context(), func(snap *store.Snapshot) error {
+		policy, err := h.policyForReader(r.Context(), snap)
+		if err != nil {
+			return err
+		}
+		if _, err = policy.Stamp(); err != nil {
+			return err
+		}
+		h.developerScoreWindow(buffered, r, since, until, scope, snap, policy)
+		return nil
+	})
+	if err != nil {
+		message := "db error"
+		if errors.Is(err, store.ErrCorrectionPolicyUnresolved) {
+			message = "Event 3 policy unresolved"
+		}
+		h.logger.Error("developer score snapshot", "err", err)
+		writeError(w, http.StatusInternalServerError, message)
+		return
+	}
+	for key, values := range buffered.Header() {
+		w.Header()[key] = values
+	}
+	w.WriteHeader(buffered.Code)
+	_, _ = w.Write(buffered.Body.Bytes())
+}
+func (h *Handler) developerScoreWindow(w http.ResponseWriter, r *http.Request, since, until time.Time, scope store.RepoScope, reader windowReader, policy scoring.ScoringPolicy) {
 	// Canonicalize the path value through the alias map (#125): a request for the
 	// raw GitHub login resolves to the same canonical row /scores builds.
-	aliases, err := h.store.DeveloperAliases(r.Context())
+	aliases, err := reader.DeveloperAliases(r.Context())
 	if err != nil {
 		h.logger.Error("query developer_alias", "err", err)
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -4626,12 +4822,12 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Outcomes: the SQL-side DeveloperOutcomes(developer=?) filter cannot see
 	// aliases, so pull all outcomes in the window and filter by canonical id.
-	outcomes, err := h.store.AllOutcomesWindow(r.Context(), since, until, scope)
+	outcomes, err := reader.AllOutcomesWindow(r.Context(), since, until, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	costs, err := h.store.DeveloperCostsWindow(r.Context(), since, until, scope)
+	costs, err := reader.DeveloperCostsWindow(r.Context(), since, until, scope)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
@@ -4660,7 +4856,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	// suppression is DECLARED on the wire below rather than left to be inferred.
 	var actualPaid float64
 	if scope.IsFleetWide() {
-		spendAll, err := h.store.ActualSpendAllWindow(r.Context(), since, until)
+		spendAll, err := reader.ActualSpendAllWindow(r.Context(), since, until)
 		if err != nil {
 			// target is canon(r.PathValue("developer")): a URL path segment is percent-
 			// decoded, so it is client-controlled and CRLF-injectable, and is never
@@ -4689,7 +4885,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	// Keep the same outcome population as /scores when choosing the freshest
 	// window for a reused (repo, issue). Filtering to this developer first would
 	// let their older tokens clear the detail flag while the list flags it.
-	tokenTotals, err := h.store.OutcomeTokenTotals(r.Context(), outcomes, scope)
+	tokenTotals, err := reader.OutcomeTokenTotals(r.Context(), outcomes, scope)
 	if err != nil {
 		// target is the same client-controlled path value; sanitize via logsafe (#321).
 		h.logger.Error("query token totals for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
@@ -4714,7 +4910,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 
 	// Per-(developer, repo, issue) cost for the target's joint bootstrap CI (#495),
 	// same window and alias canonicalization as the tripwire above.
-	detailIssueCosts, err := h.store.DeveloperIssueCostsWindow(r.Context(), since, until, scope)
+	detailIssueCosts, err := reader.DeveloperIssueCostsWindow(r.Context(), since, until, scope)
 	if err != nil {
 		h.logger.Error("query issue costs for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -4730,17 +4926,19 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	var issues []issueDetailJSON
 	for _, o := range targetOutcomes {
 		zeroToken := tokenIndex.Sum(target, o.Repo, o.IssueID) < scoring.MinAttributableTokens
-		sOutcomes = append(sOutcomes, scoring.Outcome{
-			Developer: target, IssueID: o.IssueID, Repo: o.Repo,
-			Weight: o.Weight, Quality: o.Quality,
-			ZeroToken: zeroToken,
-		})
+		so, err := scoringOutcomeFor(policy, o, target, zeroToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Event 3 projection unresolved")
+			return
+		}
+		sOutcomes = append(sOutcomes, so)
 		issues = append(issues, issueDetailJSON{
-			IssueID:   o.IssueID,
-			Weight:    o.Weight,
-			Quality:   o.Quality,
-			PRNumber:  o.PRNumber,
-			ZeroToken: zeroToken,
+			Projection: detailProjectionFor(policy, o),
+			IssueID:    o.IssueID,
+			Weight:     o.Weight,
+			Quality:    o.Quality,
+			PRNumber:   o.PRNumber,
+			ZeroToken:  zeroToken,
 		})
 	}
 
@@ -4750,18 +4948,19 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 	// keeps repeated fetches reproducible (see bootstrapSeed1/2).
 	var ciLow, ciHigh float64
 	if s.Ranked {
-		ciContribs, ciCosts, ciFixed := jointCIInputs(target, sOutcomes, detailCostIndex, s.TotalCostUSD)
+		ciContribs, ciCosts, ciPoints, ciFixed := projectedCIInputs(target, sOutcomes, detailCostIndex, s.TotalCostUSD)
 		rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
-		ciLow, ciHigh = scoring.BootstrapCI(ciContribs, ciCosts, ciFixed, scoring.DefaultBootstrapSamples, rng)
+		ciLow, ciHigh = scoring.BootstrapCIWithFixedPoints(ciContribs, ciCosts, ciPoints, ciFixed, scoring.DefaultBootstrapSamples, rng)
 	}
 	cppLow, cppHigh := scoring.CostPerPointCI(ciLow, ciHigh)
-	disc, err := h.buildScopeDisclosure(r.Context(), h.store, since, until, scope)
+	disc, err := h.buildScopeDisclosure(r.Context(), reader, since, until, scope)
 	if err != nil {
 		h.logger.Error("build scope disclosure for developer", "developer", logSafeStr(target), "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
 	writeJSON(w, http.StatusOK, developerDetailResponse{
+		CorrectionPolicy:   correctionStampFor(policy),
 		Developer:          s.Developer,
 		TIER:               s.TIER,
 		WeightedPoints:     s.WeightedPoints,
@@ -4771,6 +4970,7 @@ func (h *Handler) handleGetDeveloperScore(w http.ResponseWriter, r *http.Request
 		CoveragePercent:    s.CoveragePercent,
 		CostPerPoint:       costPerPointOrNull(s.WeightedPoints, s.CostPerPoint),
 		SampleN:            s.SampleN,
+		OutcomeN:           rawOutcomeN(s, policy.Event3),
 		CILow:              ciLow,
 		CIHigh:             ciHigh,
 		CostPerPointCILow:  cppLow,
@@ -4952,8 +5152,9 @@ func (h *Handler) handleGetDeveloperAliases(w http.ResponseWriter, r *http.Reque
 // --- GDPR Art. 15 (access) / Art. 17 (erasure) — #184 ---
 
 // eraseDeveloperResponse is the DELETE /developer/{id} body: per-table
-// deleted-row counts plus their sum, so an operator has an auditable receipt of
-// exactly what the erasure removed.
+// affected-row counts plus their sum under historical JSON names. Correction
+// counts include retained rows scrubbed; checkpoint and sealed-person counts
+// include tombstones. These are not physical row deletion counts.
 type eraseDeveloperResponse struct {
 	Deleted      map[string]int64 `json:"deleted"`
 	TotalDeleted int64            `json:"total_deleted"`
@@ -5413,15 +5614,16 @@ func parseSince(s string) (time.Time, error) {
 		// cost out of a cost metric, which is the one direction a spend number
 		// must never move on its own.
 		//
-		// 🔑 It lives HERE, in the one shared definition, rather than at the six
+		// 🔑 It lives HERE, in the one shared definition, rather than at the eight
 		// call sites. That makes "the manifest snapped but the scores did not" —
 		// two surfaces bounding different windows while publishing one identity —
-		// UNREPRESENTABLE, not merely guarded. The six call sites are
+		// UNREPRESENTABLE, not merely guarded. The eight call sites are
 		// handleGetScores, handleGetDeveloperScore, handleGetReportManifest,
-		// handleGetScoresCompare, handleGetOrgActualSpend and parseExportParams;
-		// ⚠️ the last is ONE call site serving FOUR routes (/events, /outcomes,
-		// /quality_events, /quality_history), so the endpoint count is NINE, not
-		// six — do not write "/export", there is no such route (the one route
+		// parseCompareWindow, handleGetOrgActualSpend, handleGetIssueScores,
+		// correctionWindow and parseExportParams;
+		// The last is one call site serving the four original bulk exports and
+		// four /corrections/{kind} exports, so it covers eight concrete routes.
+		// Do not write "/export", there is no such route (the one route
 		// with `export` in its name, /developer/{id}/export, does not call this).
 		// EXPLICIT bounds are untouched: parseWindowDate's layouts are zoneless
 		// and already land on midnight.

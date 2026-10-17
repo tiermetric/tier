@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// RevertObservationWindow is the inclusive merge-to-revert observation window.
+const RevertObservationWindow = 60 * 24 * time.Hour
+
 // schemaSealed is the sealed closed-period store (#913, #914 ruling A, #913-D1
 // ruling A). Open applies it after Phase 3; none of these tables is ever rebuilt,
 // so their triggers cannot be dropped by a later phase.
@@ -368,18 +371,26 @@ func tombstoneSealedPersons(ctx context.Context, tx *sql.Tx, ids []string, links
 
 // SealedReport is one sealed closed reporting period (#913).
 type SealedReport struct {
-	ID           int64
-	Level        string
-	PeriodSize   string
-	PeriodStart  time.Time
-	PeriodEnd    time.Time
-	K            int
-	ConfigDigest string
-	SealedAt     time.Time
-	Body         []byte
-	BodyDigest   string
-	ToolVersion  string
-	ToolCommit   string
+	ScoringPolicy         *string
+	CorrectionRuleVersion *string
+	RubricVersion         *int
+	CorrectionRevision    *int64
+	ID                    int64
+	Level                 string
+	PeriodSize            string
+	PeriodStart           time.Time
+	PeriodEnd             time.Time
+	K                     int
+	ConfigDigest          string
+	SealedAt              time.Time
+	// GraceNS and RevertWindowsOpen are nullable disclosure metadata. Legacy
+	// seals remain unknown; neither field changes body or configuration digests.
+	GraceNS           *int64
+	RevertWindowsOpen *bool
+	Body              []byte
+	BodyDigest        string
+	ToolVersion       string
+	ToolCommit        string
 }
 
 // SealedMeasures names sealed_rollup's has_<name> columns in measure order; it
@@ -401,7 +412,7 @@ var sealedRollupFoldCols = func() []string {
 type SealedRollup struct {
 	Label                                                    string
 	WeightedPoints, TotalCostUSD, ActualPaidUSD, RealtimeUSD float64
-	SampleN, FlaggedOutcomes                                 int
+	OutcomeN, SampleN, FlaggedOutcomes                       int
 	Has                                                      [len(SealedMeasures)]bool
 	Contributes                                              bool
 }
@@ -416,6 +427,10 @@ type SealedPersonKey struct {
 // SealCheck is what SealReport verifies inside its write transaction before a
 // new period commits.
 type SealCheck struct {
+	// LatestOutcomeAt comes from the same snapshot as the body. Zero means no
+	// outcomes; late arrivals after that snapshot must not invent an open window
+	// in a report that did not include them.
+	LatestOutcomeAt time.Time
 	// EraseEpoch is the erase epoch as the caller read it inside the same read
 	// snapshot as its window reads (anywhere in it); an erase or alias edit that
 	// snapshot cannot see refuses the seal with ErrSealEraseRaced.
@@ -530,8 +545,8 @@ var ErrSealEraseRaced = errors.New("an erase or alias edit committed while the p
 // closed and passed their grace.
 var ErrSealClockBehind = errors.New("server clock is earlier than a period already sealed")
 
-// EraseEpoch is the number of erasures and alias edits committed so far (#913);
-// it stores no id.
+// EraseEpoch is the seal invalidation epoch: erasure, alias, exclusion and
+// enabled scoring/projection changes advance it. It stores no identity.
 func (d *DB) EraseEpoch(ctx context.Context) (int64, error) { return eraseEpoch(ctx, d.db) }
 
 func (r reader) EraseEpoch(ctx context.Context) (int64, error) { return eraseEpoch(ctx, r.q) }
@@ -544,7 +559,7 @@ func eraseEpoch(ctx context.Context, q rowReader) (int64, error) {
 	return n, nil
 }
 
-// bumpEraseEpoch counts one erasure or alias edit, inside its transaction.
+// bumpEraseEpoch counts one erasure, alias edit or outcome exclusion, inside its transaction.
 func bumpEraseEpoch(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO erase_epoch (id, n) VALUES (1, 1)
 		ON CONFLICT (id) DO UPDATE SET n = n + 1`); err != nil {
@@ -557,7 +572,7 @@ func bumpEraseEpoch(ctx context.Context, tx *sql.Tx) error {
 // order and person keys in (label, measure, key) order.
 func sealedFoldInputs(ctx context.Context, q queryer, id int64) ([]SealedRollup, []SealedPersonKey, error) {
 	rows, err := q.QueryContext(ctx, `SELECT label, weighted_points, total_cost_usd, actual_paid_usd, realtime_usd,
-		sample_n, flagged_outcomes, `+strings.Join(sealedRollupFoldCols, ", ")+`
+		sample_n, flagged_outcomes, COALESCE(outcome_n,0), `+strings.Join(sealedRollupFoldCols, ", ")+`
 		FROM sealed_rollup WHERE report_id = ? ORDER BY label`, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read back sealed_rollup: %w", err)
@@ -566,7 +581,7 @@ func sealedFoldInputs(ctx context.Context, q queryer, id int64) ([]SealedRollup,
 	var rollups []SealedRollup
 	for rows.Next() {
 		var s SealedRollup
-		dst := []any{&s.Label, &s.WeightedPoints, &s.TotalCostUSD, &s.ActualPaidUSD, &s.RealtimeUSD, &s.SampleN, &s.FlaggedOutcomes}
+		dst := []any{&s.Label, &s.WeightedPoints, &s.TotalCostUSD, &s.ActualPaidUSD, &s.RealtimeUSD, &s.SampleN, &s.FlaggedOutcomes, &s.OutcomeN}
 		for i := range s.Has {
 			dst = append(dst, &s.Has[i])
 		}
@@ -654,13 +669,13 @@ func checkSealClock(ctx context.Context, tx *sql.Tx, now string) error {
 func sealTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 const sealedReportCols = `id, level, period_size, period_start, period_end, k, config_digest,
-	sealed_at, body, body_digest, tool_version, tool_commit`
+	sealed_at, body, body_digest, tool_version, tool_commit, grace_ns, revert_windows_open, scoring_policy, correction_rule_version, rubric_version, correction_revision`
 
 func scanSealedReport(row interface{ Scan(...any) error }) (SealedReport, error) {
 	var r SealedReport
 	var start, end, sealedAt string
 	if err := row.Scan(&r.ID, &r.Level, &r.PeriodSize, &start, &end, &r.K, &r.ConfigDigest,
-		&sealedAt, &r.Body, &r.BodyDigest, &r.ToolVersion, &r.ToolCommit); err != nil {
+		&sealedAt, &r.Body, &r.BodyDigest, &r.ToolVersion, &r.ToolCommit, &r.GraceNS, &r.RevertWindowsOpen, &r.ScoringPolicy, &r.CorrectionRuleVersion, &r.RubricVersion, &r.CorrectionRevision); err != nil {
 		return SealedReport{}, err
 	}
 	for _, p := range []struct {
@@ -800,18 +815,31 @@ func (d *DB) SealReport(ctx context.Context, r SealedReport, rollups []SealedRol
 			}
 		}
 	}
-	now := sealTime(d.clock())
+	sealedTime := d.clock().Truncate(time.Second)
+	now := sealTime(sealedTime)
 	if err := checkSealClock(ctx, tx, now); err != nil {
 		return SealedReport{}, false, err
 	}
 
+	// Evaluate at the actual insertion timestamp, using the body's snapshot.
+	if r.GraceNS != nil {
+		open := !check.LatestOutcomeAt.IsZero() && !sealedTime.After(check.LatestOutcomeAt.Add(RevertObservationWindow))
+		r.RevertWindowsOpen = &open
+	}
+
+	if epoch, err := eraseEpoch(ctx, tx); err != nil {
+		return SealedReport{}, false, err
+	} else if epoch != check.EraseEpoch {
+		return SealedReport{}, false, ErrSealEraseRaced
+	}
+
 	res, err := tx.ExecContext(ctx, `INSERT INTO sealed_report
 		(level, period_size, period_start, period_end, k, config_digest, sealed_at,
-		 body, body_digest, tool_version, tool_commit)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 body, body_digest, tool_version, tool_commit, grace_ns, revert_windows_open, scoring_policy, correction_rule_version, rubric_version, correction_revision)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (period_size, period_start) DO NOTHING`,
 		r.Level, r.PeriodSize, sealTime(r.PeriodStart), sealTime(r.PeriodEnd), r.K, r.ConfigDigest,
-		now, r.Body, r.BodyDigest, r.ToolVersion, r.ToolCommit)
+		now, r.Body, r.BodyDigest, r.ToolVersion, r.ToolCommit, r.GraceNS, r.RevertWindowsOpen, r.ScoringPolicy, r.CorrectionRuleVersion, r.RubricVersion, r.CorrectionRevision)
 	if err != nil {
 		return SealedReport{}, false, fmt.Errorf("insert sealed_report: %w", err)
 	}
@@ -833,12 +861,12 @@ func (d *DB) SealReport(ctx context.Context, r SealedReport, rollups []SealedRol
 			return SealedReport{}, false, err
 		}
 		for _, s := range rollups {
-			args := []any{id, s.Label, s.WeightedPoints, s.TotalCostUSD, s.ActualPaidUSD, s.RealtimeUSD, s.SampleN, s.FlaggedOutcomes}
+			args := []any{id, s.Label, s.WeightedPoints, s.TotalCostUSD, s.ActualPaidUSD, s.RealtimeUSD, s.SampleN, s.FlaggedOutcomes, s.OutcomeN}
 			for _, has := range s.Has {
 				args = append(args, has)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO sealed_rollup
-				(report_id, label, weighted_points, total_cost_usd, actual_paid_usd, realtime_usd, sample_n, flagged_outcomes, `+
+				(report_id, label, weighted_points, total_cost_usd, actual_paid_usd, realtime_usd, sample_n, flagged_outcomes, outcome_n, `+
 				strings.Join(sealedRollupFoldCols, ", ")+`) VALUES (?`+strings.Repeat(", ?", len(args))+`)`,
 				append(args, s.Contributes)...); err != nil {
 				return SealedReport{}, false, fmt.Errorf("insert sealed_rollup: %w", err)

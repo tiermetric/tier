@@ -77,9 +77,10 @@ which labels map onto the fixed <code>{0.5, 1, 3, 5, 8}</code> scale. Renaming a
 fine, but mapping a size to a <em>different</em> weight than rubric.md&#39;s calibration
 (e.g. everyday work as <code>l</code>/5 rather than <code>m</code>/3) is a <strong>local divergence the
 stamp cannot see</strong> — two deployments both stamp <code>rubric.version: 1</code> while
-scoring the same work differently. Cross-org <code>cost_per_point</code> comparison
-therefore requires matched <code>size_labels</code> on top of matched versions;
-same-org-over-time is unaffected because one deployment&#39;s config is stable.</p>
+scoring the same work differently. Cross-organisation <code>cost_per_point</code>
+comparison is not supported: matched versions and <code>size_labels</code> do not
+establish equivalence; same-organisation-over-time comparison is the supported
+reading because one deployment&#39;s config is stable.</p>
 </blockquote>
 <p>The <strong>weight</strong> of a merged PR is its size. TIER reads it from a GitHub label. The
 match is case-insensitive and accepts both the <code>size/</code> prefix and the bare form:</p>
@@ -125,9 +126,7 @@ effort ≤ 200   → 3
 effort ≤ 1000  → 5
 otherwise      → 8
 </code></pre>
-<p>The heuristic is a reasonable default, but explicit labels are more accurate and
-consistent — a two-line change to a critical path and a two-line typo fix get the
-same heuristic weight, which labels let you correct.</p>
+<p>Explicit labels let reviewers apply the rubric using context the diff heuristic lacks. TIER has not established that labels are more accurate or consistent; comparability depends on shared calibration.</p>
 <h2 id="issue-references--attribution">Issue references → attribution</h2>
 <p>Cost and outcomes are attributed to an <strong>issue id</strong> derived from the branch name
 or the PR/commit body. Accepted formats include:</p>
@@ -184,11 +183,16 @@ as <code>issue-N</code> in this collector path. The webhook push path now uses t
 commit-subject rule (#1069): only the git <code>%s</code> subject (first paragraph, folded)
 is read for attribution; the body is excluded.</p>
 <p><strong>Branch precedence:</strong> a tracker key (e.g. <code>TIER-99</code>) takes priority over a bare
-numeric segment when both appear in a branch.</p>
+numeric segment when both appear in a branch. The branch rule is looser than
+the table: TIER takes the first plain number segment anywhere in the branch name
+(split on <code>/</code>, <code>-</code> or <code>_</code>, with no leading zero), skipping a 1900–2099 year;
+<code>docs/guide-2026-10-14</code> reads as issue 10.</p>
+<p><strong>Issue-id misfiling.</strong> Pull-request points and captured spend do not depend on issue ids. Misfiling can merge or split direct-push credit (one 0.5 per issue per UTC day per repository) or change which outcome a footerless revert penalises, so headline TIER can move and per-issue rows can be wrong. See <a href="technical-reference.html#51-the-shared-key-is-the-issue-id" rel="nofollow">the measured rate and how to avoid it</a>.</p>
 <p><strong>PR-body precedence:</strong> <code>closes #N</code> (highest confidence) &gt; tracker key
 (<code>PROJ-123</code>) &gt; bare <code>#N</code> (lowest confidence). This lets a Jira/Linear shop that
 references a tracker key in the PR body — with a generic branch name — still get
-attribution, while an explicit <code>closes #N</code> always wins when present.</p>
+attribution; within the body, an explicit <code>closes #N</code> wins when present.
+A branch-derived ID takes precedence over the entire body.</p>
 <h3 id="the-year-guard-a-deliberate-tradeoff">The year guard (a deliberate tradeoff)</h3>
 <p>A <strong>bare</strong> 4-digit branch segment in the range <strong>1900–2099</strong> is treated as a
 calendar year, not an issue number, and is <strong>dropped</strong>:</p>
@@ -231,9 +235,10 @@ an issue.</li>
 <li><strong>PR outcome</strong> is skipped — a merged PR with no derivable issue records no
 outcome, so it contributes nothing to the TIER numerator.</li>
 </ul>
-<p>The fix is always the same: name branches <code>&lt;prefix&gt;/&lt;issue-number&gt;-&lt;slug&gt;</code> (for
-example <code>fix/127-webhook-guide</code>) and reference the issue in the PR body with
-<code>closes #&lt;n&gt;</code>.</p>
+<p>Name branches <code>&lt;prefix&gt;/&lt;issue-number&gt;-&lt;slug&gt;</code> (for example
+<code>fix/127-webhook-guide</code>) without tracker-shaped tokens elsewhere in the branch,
+and reference the issue in the PR body with <code>closes #&lt;n&gt;</code>; the body is only a
+fallback when the branch yields no ID.</p>
 <h2 id="multi-repo-organizations">Multi-repo organizations</h2>
 <p>A GitHub issue number is only unique <strong>within one repository</strong>. Repo A&#39;s issue #42
 and repo B&#39;s issue #42 are different work. TIER therefore stores a repository

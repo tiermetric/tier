@@ -191,7 +191,6 @@ func TestShippableSourceAnswersForEveryKnownSource(t *testing.T) {
 		SourceOpencode:       true,  // Opencode local SQLite session store (#719)
 		SourceMuse:           true,  // Muse Code local session logs (#895)
 		SourceProxy:          false, // captured server-side; a client cannot assert it
-		SourceCopilotAPI:     false, // org poller: daily aggregates, not per-call events
 		SourceAnthropicAdmin: false, // org poller
 		SourceOpenAIUsage:    false, // org poller
 	}
@@ -213,9 +212,11 @@ func TestShippableSourceAnswersForEveryKnownSource(t *testing.T) {
 		t.Errorf("ShippableSources() = %v, want %v", gotList, wantList)
 	}
 
-	// An unknown source is not shippable — the default arm, asserted rather
-	// than assumed.
-	if ShippableSource("some-future-collector") {
-		t.Error(`ShippableSource("some-future-collector") = true; an unenumerated source must never ship`)
+	// Unsupported and unknown sources remain rejected after removing the unused
+	// Copilot declaration. This preserves the shipping wire contract.
+	for _, source := range []string{"copilot-api", "some-future-collector"} {
+		if ShippableSource(source) {
+			t.Errorf("ShippableSource(%q) = true; an unenumerated source must never ship", source)
+		}
 	}
 }

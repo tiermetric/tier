@@ -1,44 +1,59 @@
 # TIER — Token Impact & Efficiency Ratio
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Go 1.26.9+](https://img.shields.io/badge/go-1.26.9%2B-00ADD8)
+![Go 1.27.2+](https://img.shields.io/badge/go-1.27.2%2B-00ADD8)
 ![Status: pre-v1](https://img.shields.io/badge/status-pre--v1-orange)
 
-**How much merged work your AI spend bought, per $1,000.**
+**Merged work per $1,000 of captured AI usage, priced at list rates: an observational ratio, not a causal estimate.**
 
-TIER measures the **yield** of AI-assisted engineering: quality-weighted
-outcomes per $1,000 of AI spend. The cost side is in US dollars, not tokens. The
-work side is in *outcome points*, not dollars: TIER does not put a money value on
-the work. It gives an engineering lead or a CFO one ratio to follow over time. It
-grades the work, not the worker: it shows a team where its AI spend produced
-merged work and where it didn't, so the team can change how it works.
-Per-developer rows exist (in `developer` mode, below) so that a developer, and a
-manager coaching them, can see which practices pay off. They are not for pay,
-promotion or performance reviews
-([docs/legal-and-privacy.md](docs/legal-and-privacy.md)). The repo also
-documents the ways this number can mislead:
+TIER measures size-weighted outcome points, adjusted for quality where TIER
+observes CI failures and reverts, per $1,000 of captured AI usage priced at list
+rates. The cost side is in US dollars, not tokens. The work side is in *outcome
+points*, not dollars: TIER does not put a money value on the work.
+It gives an engineering lead or a CFO one observational ratio to follow over
+time. Its positioning is **grade the work, not the worker**. That is a policy stance,
+not a mechanism that prevents evaluation.
+TIER is built for coaching, not for evaluating developers. Per-person figures
+are not accurate enough to judge an individual.
+Per-developer rows exist in `developer` mode for coaching conversations;
+[docs/legal-and-privacy.md](docs/legal-and-privacy.md) describes access limits.
+The repo also documents the ways this number can mislead:
 [failure-mode analysis](docs/adversarial-analysis.md).
 
 TIER does not detect whether a PR was written with AI. It counts every merged PR
 that carries an issue reference, and it counts all the AI spend it captured.
 
-> Measured on TIER's own repository, trailing 30 days to 2026-07-21: **221**
-> outcome points per $1,000 across 152 merged PRs, and **72.1%** of spend in that
-> window could not be linked to an issue.
+A merged PR contributes points only when TIER derives an issue reference from its branch or description. A merge without one records no outcome. Any AI cost captured for the work still counts. Holding captured spend and all other outcomes fixed, omitting an otherwise eligible PR cannot increase the numeric ratio; it can reduce it.
+
+Bot- and agent-produced changes can earn points even when their AI usage is not captured. Account type does not establish whether a change used AI, and missing usage can make the ratio read high.
+
+TIER reports captured spending by model; it does not assign merged outcomes to individual models or determine which model caused a result. Same-task comparisons appear in the separate Model Report, which measures model-and-tool combinations on declared tasks. Its benchmark points are not repository TIER.
+
+> Historical self-measurement; original inputs and run settings are not publicly reproducible.
+> The maintainer reported **221** size-weighted outcome points per $1,000 on
+> TIER's own repository, trailing 30 days to 2026-07-21, across 152 merged PRs,
+> with **72.1%** of spend unlinked to an issue. It was computed from backfilled
+> history; no quality events were recorded for it, so it is size-weighted only.
+
+The maintainer has exercised TIER's CI and revert rules in manual test runs; the project's automated webhook tests exercise the same rules. The inspected historical 221 figure has no recorded quality-event receipt.
+
+Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for subscriptions such as Claude Max seats. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated, TIER scores read high, and Claude looks relatively cheaper in cross-vendor comparisons.
 
 How to read that: one *outcome point* is one unit of `weight × quality` (defined
-below), so a clean medium-sized PR is worth 3 points. 221 points per $1,000 is
-the same as about $4.52 of list-price spend per point (1000 ÷ 221). The unlinked
-72.1% is still inside the cost: TIER divides by all the spend it captured in the
-window, whether or not it could be linked to an issue. This is a dated
-measurement of one repository, not a benchmark. TIER defines no "good" or "bad"
-value; compare a team with its own earlier windows
+below). Points are the project's size conventions, derived from labels or changed lines and files. They are not validated measures of difficulty, maintainability, customer value, engineering time or the contribution made by AI. The preserved 152-outcome snapshot averaged 4.7599 points per PR; all stored weights have `weight_source=git-heuristic`. These facts have not yet been established for the exact published window.
+The published rounded totals decompose to about 4.76 points per recorded PR and 46.5 recorded PRs per $1,000. The preserved snapshot's relationship to those historical inputs remains unverified.
+221 points per $1,000 is the same as about $4.52 of list-price spend per point
+(1000 ÷ 221), not money paid. The reported unlinked 72.1% remains in that
+historical denominator. This is reported history of one repository, not
+independent validation. TIER defines no "good" or "bad" value; compare a team
+with its own earlier windows under matched measurement definitions
 ([docs/interpreting-the-number.md](docs/interpreting-the-number.md)).
 
 **Complement, not replacement.** DORA, SPACE and DX Core 4 are existing
 frameworks for measuring software delivery and developer experience. TIER adds
-a measure of how much merged work each dollar of AI spend bought; the page
-linked below compares it with each of them. Run it *beside* your existing
+a measure of merged work per $1,000 of captured AI usage, priced at list rates:
+an observational ratio, not a causal estimate. The page linked below compares
+it with each of them. Run it *beside* your existing
 metrics framework, never fused into a single performance number. See
 [How TIER relates to DORA / SPACE / DX Core 4](docs/how-tier-relates.md).
 
@@ -60,18 +75,21 @@ TIER = Σ(weight × quality) / (list-price cost / $1000)
   words in the revert's commit message: words such as "product decision" or "no
   longer needed" with no words such as "bug" or "regression" give 0.8 (a
   business decision); anything else gives 0.1 (a code problem). The lowest
-  applicable value wins. The 48-hour and 60-day clocks start when the webhook
-  told TIER about the merge (for a backfilled PR, at GitHub's merge time). 1.0
+  applicable value wins. The 48-hour and 60-day clocks use GitHub's `merged_at`
+  for a PR; the webhook falls back to receipt time when that value is missing,
+  malformed, zero or future. 1.0
   means only that no penalty signal arrived: it is not a code review, and a repo
   with no CI never loses points for CI. These signals arrive through the GitHub
   webhook. A late one changes the pull request's own window, not the window the
-  signal arrives in: a September revert of an August merge lowers August's score
-  the next time it is read, so a report for a closed window can still change. `tierd backfill` records past PRs at 1.0 and does not
+  signal arrives in: an eligible recognised September revert of an August merge lowers August's
+  live score the next time it is read. Sealed monthly reports remain unchanged. `tierd backfill` records past PRs at 1.0 and does not
   rebuild their CI or revert history, so a score built only from backfilled PRs
   is size-weighted but not yet quality-weighted.
-- **list-price cost** — all the AI spend TIER captured for that developer (or
-  team) in the window, in US dollars, whether or not it could be linked to an
-  issue. It is priced from a versioned reference price table (list price, not
+- **list-price cost** — the eligible captured spend in the window, in US dollars,
+  whether or not it could be linked to an issue. Developer views include that
+  developer's captured spend. Group reports cover identified developers' captured
+  spend and exclude pseudo-developer spend, including poller remainders.
+  Repository scopes also exclude spend without a qualifying repository. It is priced from a versioned reference price table (list price, not
   your negotiated invoice). Each event keeps the price it was recorded at; a new
   table version changes past costs only if you run `tierd reprice`.
 
@@ -97,6 +115,8 @@ TIER also reports two supporting metrics:
   month; the org figure, less those, is split evenly across the org's other
   active members. Rendered as `—` until an entry exists.
 
+Capture completeness is unknown unless independently reconciled for the stated engines, routes, versions and reporting window. A healthy collector or a 100% Fidelity reading does not establish complete capture. See [capture and pricing limits](docs/technical-reference.md#32-pricing-list-prices-and-why).
+
 ---
 
 ## ⚠️ Status & scope
@@ -111,11 +131,13 @@ datastore, and no message bus.
 
 Run it for one team or one organization at a time.
 
+**Promotion scope.** This release is for solo or wholly trusted use: every read, ingest or admin credential holder and database owner must be trusted with all retained developer data. Use name-free team/division reports for shared use. Promotion of non-synthetic developer mode waits on #826's named-viewer, audit and retention controls. Ingest credentials are not identity-bound until #1145; a holder can submit another developer id, so the k-floor does not authenticate contributors. The synthetic demo remains exempt. These are deployment and promotion boundaries, not new enforcement shipped by this wording change.
+
 ---
 
 ## Prerequisites
 
-TIER builds from source. You need **Go 1.26.9+** (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories)
+TIER builds from source. You need **Go 1.27.2+**
 (the floor `go.mod` sets, for standard-library security fixes), **make**, and **git**. Some examples also use
 `openssl`, `curl`, Docker or cron. Clone
 the repo and build the `tierd` binary once:
@@ -177,8 +199,9 @@ request, and the proxy would pass anyone's request through to it. Bind tierd to
 
 ### The API token (`TIER_API_TOKEN`, `--api-token`)
 
-A password you make up. It protects the server. Once it is set, every write
-and every request through the optional reverse proxy (see
+A password you make up. It protects the server. Once it is set, writes
+need an admin credential (event uploads also accept the ingest token), and
+every request through the optional reverse proxy (see
 [Capturing tokens](#capturing-tokens)) needs it, and every score read needs it
 or the read-only token below. `serve` refuses to listen on a non-loopback
 address without one. Generate one and keep it in a file:
@@ -218,8 +241,9 @@ On a single-user machine, you do not need a token while everything runs on
 `127.0.0.1`: with no token, anyone who can reach that address can use every
 route, including erase. But every
 `tierd` command in a shell where `TIER_API_TOKEN` is exported uses it: `serve`
-then turns auth on, `ship` and `curl` must send the same token, and the
-dashboard asks for one. Export it in every terminal you use, or in none.
+then turns auth on, clients must send a credential with the appropriate scope,
+and the dashboard asks for a read or admin token. For `ship`, use the ingest
+token described below; the admin token also works.
 
 ### The read-only token (`TIER_READ_TOKEN`, `--read-token`) — optional
 
@@ -242,6 +266,25 @@ Then send each viewer the **value** (`cat ~/.tier/read-token`). The dashboard
 page itself loads without a token, but the numbers on it do not: when a viewer
 opens it, it asks for a token; they paste that value into the token box and
 click **Refresh**.
+
+### The ingest token (`TIER_INGEST_TOKEN`, `--ingest-token`) — recommended for shippers
+
+Since v0.6.0, the ingest token is the recommended credential for `tierd ship`
+(#1144). Generate a distinct credential for laptop shippers:
+
+```sh
+(umask 077; openssl rand -hex 32 > ~/.tier/ingest-token)
+export TIER_INGEST_TOKEN=@$HOME/.tier/ingest-token   # server: restart serve with this set
+# On each shipping laptop, provision that ingest-token file, then:
+tierd ship --server https://<your-server> --repo ~/src/app --api-token @$HOME/.tier/ingest-token
+```
+
+It opens only `POST /api/v1/events`. It must differ from the admin, read and
+metrics tokens; alone it does not enable auth or permit a non-loopback bind.
+The shipper's existing `--api-token` / `TIER_API_TOKEN` input carries this
+credential; the admin token still works. The server also accepts the config key
+`http.ingest_token`. See [security.md](docs/security.md#the-ingest-token-1144)
+for the remaining impersonation and pre-claim limits until #1145 (gated on #826).
 
 ### The metrics token (`TIER_METRICS_TOKEN`, `--metrics-token`) — optional
 
@@ -380,10 +423,11 @@ a given repository:
 
 Output shape (values will differ; `YYYY-MM-DD` is the start of the 90-day
 window, and the issue table is trimmed here to two rows, so they do not add up to
-the total):
+the total). This example uses v0.6.0 pricing (table v14, effective 2026-10-12,
+with 93 models):
 
 ```
-price table: embedded default (version 12, 2026-10-02, 91 models)
+price table: embedded default (version 14, 2026-10-12, 93 models)
 
 TIER Cost Attribution — since YYYY-MM-DD
 Source: Claude Code JSONL (real-time, per-request)
@@ -679,7 +723,7 @@ JSONL to the central server's `POST /api/v1/events`:
 ```sh
 tierd ship --server https://<your-server> --repo ~/src/app
 # e.g. every 15 minutes, as a crontab line:
-# */15 * * * * $HOME/go/bin/tierd ship --server https://<your-server> --repo $HOME/src/app --api-token @$HOME/.tier/api-token
+# */15 * * * * $HOME/go/bin/tierd ship --server https://<your-server> --repo $HOME/src/app --api-token @$HOME/.tier/ingest-token
 ```
 
 cron does not read your shell profile, so the crontab line cannot see
@@ -693,15 +737,23 @@ The key comes from the provider's message id, so a session that is both watched
 by `serve --watch-repo` and shipped is still stored once. `ship` exits non-zero
 when a run fails or recovers nothing, so a job runner that checks exit codes
 can flag a laptop that stopped shipping.
-It authenticates with the **server's** API token — the same value you gave
-`serve --api-token`. Set `TIER_API_TOKEN=@$HOME/.tier/api-token` on the laptop
-(or pass `--api-token @file`), and put your server's real address in place of
-`https://<your-server>` — both are described under
-[What you need before you start](#what-you-need-before-you-start). There is no
-separate ingest-only token: every laptop that ships, and every client that uses
-the proxy, holds the admin token, which can also erase data and can post spend
-under any developer's name. Hand it only to machines you trust
-([docs/security.md](docs/security.md)).
+The recommended credential is the **server's ingest token**, configured with
+`serve --ingest-token` / `TIER_INGEST_TOKEN` / `http.ingest_token` (#1144).
+On the laptop, set `TIER_API_TOKEN=@$HOME/.tier/ingest-token` or pass
+`ship --api-token @$HOME/.tier/ingest-token`. The shipper's flag name and Bearer
+wire contract stay the same; the admin token still works. The ingest token opens
+only `POST /api/v1/events`, with no read, outcome, erasure or proxy access.
+Provider proxies still require the admin token. See
+[the ingest-token identity limits](docs/security.md#the-ingest-token-1144): a
+holder can post under any developer id, rostered or not (no roster check), or
+pre-claim a teammate's key until per-developer binding (#1145, gated on #826).
+A holder who knows a key can replay it under the same developer with larger
+counts, raising that row's token counts and cost (recomputed at the row's original
+rates, #1231). Replaying a teammate's key this way raises that teammate's cost
+(the TIER denominator); keys are visible to read-token holders via
+`GET /api/v1/events` in developer mode.
+Cross-developer key collisions leave the original row unchanged and produce a
+warning with the rejected count; `ship` completes without retrying them.
 
 Add `--codex-rollout` to also forward Codex CLI spend from
 `~/.codex/sessions/**/rollout-*.jsonl` (off by default, mirroring
@@ -806,7 +858,7 @@ code and lockfiles count in full, so label a PR whose size they inflate.
 | branch | `<prefix>/<N>-<slug>` — trailing `-`/`_` optional; `N` has no leading zero | `feature/42-auth`, `feature/42` | `issue-42` |
 | branch | tracker key `[A-Z][A-Z0-9]+-<N>` | `fix/TIER-99-crash` | `TIER-99` |
 | PR body / commit | `closes #N`, `fixes #N`, `resolves #N` (case-insensitive) | `closes #42` | `issue-42` |
-| PR body / commit | whitespace-preceded `#N` | `see #42` | `issue-42` |
+| PR body | whitespace-preceded `#N` | `see #42` | `issue-42` |
 
 When both the branch and the PR body carry a reference, the branch wins. A PR
 that closes several issues still records one outcome: under the branch's issue,
@@ -978,7 +1030,7 @@ team-only vs per-developer deployment guidance (not legal advice).
 
 ## API reference
 
-All routes are served by `tierd serve`. The **Auth** column has four values:
+All routes are served by `tierd serve`. The **Auth** column uses the five categories below (including `ingest or admin` for event ingestion), plus `HMAC signature` for the GitHub webhook:
 
 - **admin** — requires the write API token (`--api-token` / `TIER_API_TOKEN`).
 - **read** — accepts the read-only viewer token (`--read-token` /
@@ -990,9 +1042,11 @@ All routes are served by `tierd serve`. The **Auth** column has four values:
 - **metrics** — accepts the metrics token (`--metrics-token` /
   `TIER_METRICS_TOKEN`) or the admin token, and, in `developer` mode only, the
   read-only token ([The metrics token](#the-metrics-token-tier_metrics_token---metrics-token--optional)).
+- **ingest** — accepts the ingest token (`--ingest-token` / `TIER_INGEST_TOKEN`)
+  or the admin token on `POST /api/v1/events` only.
 - **open** — no auth (status only, never spend data).
 
-Auth is enforced only when a token is configured; on a loopback dev bind with no
+Auth is enforced only when the admin token is configured; on a loopback dev bind with no
 token, all routes are reachable.
 
 Request and response bodies for every route are in
@@ -1003,7 +1057,7 @@ GitLab / Bitbucket CI recipe for `POST /outcomes` is in
 | Method & path | Purpose | Auth |
 |---|---|---|
 | `POST /api/v1/costs` | ingest a single token-cost event | admin |
-| `POST /api/v1/events` | bulk-ingest collector token events (used by `tierd ship`) | admin |
+| `POST /api/v1/events` | bulk-ingest collector token events (used by `tierd ship`) | ingest or admin |
 | `POST /api/v1/outcomes` | record a PR outcome (weight / quality) | admin |
 | `POST /api/v1/actual_spend` | post a finance-supplied per-developer invoice total | admin |
 | `POST /api/v1/org_actual_spend` | post an org-level invoice total | admin |
@@ -1011,6 +1065,8 @@ GitLab / Bitbucket CI recipe for `POST /outcomes` is in
 | `GET /api/v1/scores` | all developer scores | read |
 | `GET /api/v1/scores/{developer}` | one developer's score | read |
 | `GET /api/v1/scores/compare` | two-window comparison, k-anonymized in team/division mode | read |
+| `GET /api/v1/issues` | per-repository/issue cost, points and TIER lower bound; developer mode only | read |
+| `GET /api/v1/diagnostics/captured-dollars` | captured-dollar join-readiness diagnostics; developer mode only | read |
 | `GET /api/v1/report_manifest` | the identity of the report `/scores` returns for the same window: price-table digests, as-of watermarks (row ids and counts), content digests; window counts and digests withheld in team/division mode | read |
 | `GET /api/v1/events` | paginated bulk export of raw token events | read |
 | `GET /api/v1/outcomes` | paginated bulk export of raw outcomes | read |

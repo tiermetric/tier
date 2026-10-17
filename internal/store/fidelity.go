@@ -34,12 +34,15 @@ type DeveloperFidelitySignal struct {
 	// its event count over the 30d window — the capture-quality mix.
 	FidelityCounts map[string]int64
 	// TotalCostMicro30d is SUM(cost_micro) over the 30d window; UnknownCostMicro30d
-	// is the subset billed at the unknown-model pricing GUESS (a model with no exact
-	// price-table entry, #267). Their ratio is the per-developer unknown-model cost
-	// share — the "how much of this spend is priced at a rate we cannot audit"
-	// signal. Both are exact integer micro-dollars; the API converts to a ratio.
+	// is the subset with no exact host/model entry in the current table (#267).
+	// Their ratio preserves the existing current-lookup unknown-model cost share;
+	// it does not certify the original pricing basis of the stored dollars.
+	// Both are integer micro-dollars; the API converts to a ratio.
 	TotalCostMicro30d   int64
 	UnknownCostMicro30d int64
+	// PricingTokens30d is classified at read time, with legacy price versions
+	// counted as basis-unknown independently of the current-lookup dollar share.
+	PricingTokens30d PricingTokenCounts
 }
 
 // DeveloperFidelity returns one capture-fidelity summary per RAW token_events
@@ -125,25 +128,31 @@ func (d *DB) DeveloperFidelity(ctx context.Context, now time.Time) ([]DeveloperF
 		return nil, err
 	}
 
-	// Query 3: per (developer, host, model) cost over the 30d window. The
-	// unknown-model classification is a price-table property (#267) with no
+	// Query 3: per (developer, host, model, price_version, pricing_basis) cost and
+	// tokens over the 30d window. Version and basis must stay in the grain for the
+	// fail-closed token share: a current exact entry cannot certify an older,
+	// guessed, aggregate or unavailable basis. The separate unknown-model dollar
+	// classification is a price-table property (#267) with no
 	// persisted per-row flag, so it is decided in Go via modelIsExactHost — the same
 	// NOT-guessed test ComputeCostHost uses. The host MUST be part of the grain and
 	// the classification: an open-weights model priced at an audited host-qualified
 	// rate (#300) has no model-only entry, and grouping/classifying host-blind would
 	// miscount that audited spend as unknown, inflating the headline share.
 	if err := d.forEachRow(ctx,
-		`SELECT developer, host, model, SUM(cost_micro)
+		`SELECT developer, host, model, price_version, COALESCE(pricing_basis,''), SUM(cost_micro),
+		        SUM(input_tok + output_tok + cache_read + cache_write_5m + cache_write_1h)
 		 FROM token_events
 		 WHERE ts >= ?
-		 GROUP BY developer, host, model`,
+		 GROUP BY developer, host, model, price_version, COALESCE(pricing_basis,'')`,
 		func(scan func(...any) error) error {
-			var dev, host, model string
-			var cost int64
-			if err := scan(&dev, &host, &model, &cost); err != nil {
+			var dev, host, model, basis string
+			var version int
+			var cost, tokens int64
+			if err := scan(&dev, &host, &model, &version, &basis, &cost, &tokens); err != nil {
 				return err
 			}
 			s := get(dev)
+			s.PricingTokens30d.Add(host, model, version, basis, tokens)
 			s.TotalCostMicro30d += cost
 			if !modelIsExactHost(host, model) {
 				s.UnknownCostMicro30d += cost

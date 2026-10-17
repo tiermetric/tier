@@ -324,7 +324,7 @@ func TestCanonicalHistory_BackfillFromCurrentAliases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantNotice := map[int]string{1: UpgradeNoticeV975 + "\n" + UpgradeNoticeSealedGap + "\n" + UpgradeNoticeSourceWatermark, 2: ""}[open]
+		wantNotice := map[int]string{1: UpgradeNoticeV975 + "\n" + UpgradeNoticeSealedGap + "\n" + UpgradeNoticeSourceWatermark + "\n" + UpgradeNoticeOutcomeExclusions + "\n" + UpgradeNoticeCorrections + "\n" + UpgradeNoticePricingObservations + "\n" + UpgradeNoticeCorrectionProjection, 2: ""}[open]
 		if n := db.UpgradeNotice(); n != wantNotice {
 			t.Errorf("open %d: UpgradeNotice = %q, want %q", open, n, wantNotice)
 		}

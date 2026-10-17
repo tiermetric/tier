@@ -201,6 +201,7 @@ type streamParser interface {
 // message_start carries the authoritative id, model, and input/cache counts.
 // message_delta carries the cumulative output_tokens — take the LAST one.
 type anthropicStreamParser struct {
+	nestedTTL                                            bool
 	id, model                                            string
 	input, output, cacheRead, cacheWrite5m, cacheWrite1h int
 }
@@ -235,7 +236,8 @@ func (a *anthropicStreamParser) OnEvent(eventType string, data []byte) {
 		// TTL split: nested object wins; legacy stream (no nested object)
 		// buckets the rolled-up field as 5m, matching the JSONL parser's
 		// fallback policy.
-		if ms.Message.Usage.CacheCreation != nil {
+		a.nestedTTL = ms.Message.Usage.CacheCreation != nil
+		if a.nestedTTL {
 			a.cacheWrite5m = ms.Message.Usage.CacheCreation.Ephemeral5m
 			a.cacheWrite1h = ms.Message.Usage.CacheCreation.Ephemeral1h
 		} else {
@@ -280,20 +282,21 @@ func (a *anthropicStreamParser) Finalise(developer, issueID, host string) *colle
 		CacheWrite1h: a.cacheWrite1h,
 	})
 	return &collector.TokenEvent{
-		Developer:      developer,
-		IssueID:        issueID,
-		Model:          a.model,
-		InputTok:       a.input,
-		OutputTok:      a.output,
-		CacheRead:      a.cacheRead,
-		CacheWrite5m:   a.cacheWrite5m,
-		CacheWrite1h:   a.cacheWrite1h,
-		CostMicro:      cost,
-		Fidelity:       collector.FidelityRealtime,
-		IdempotencyKey: idempotencyKeyForProxy(ProviderAnthropic, a.id),
-		Host:           host,
-		BillingMode:    billingMode,
-		Timestamp:      time.Now().UTC(),
+		CacheWriteEvidence: collector.CacheWriteProvenance(a.nestedTTL),
+		Developer:          developer,
+		IssueID:            issueID,
+		Model:              a.model,
+		InputTok:           a.input,
+		OutputTok:          a.output,
+		CacheRead:          a.cacheRead,
+		CacheWrite5m:       a.cacheWrite5m,
+		CacheWrite1h:       a.cacheWrite1h,
+		CostMicro:          cost,
+		Fidelity:           collector.FidelityRealtime,
+		IdempotencyKey:     idempotencyKeyForProxy(ProviderAnthropic, a.id),
+		Host:               host,
+		BillingMode:        billingMode,
+		Timestamp:          time.Now().UTC(),
 	}
 }
 

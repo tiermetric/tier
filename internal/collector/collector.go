@@ -1,6 +1,6 @@
 // Package collector defines the Collector interface and shared types for all
 // token-event data sources: local JSONL files, the reverse proxy, and external
-// API adapters (Copilot, Anthropic Admin).
+// API adapters (Anthropic Admin, OpenAI Usage).
 package collector
 
 import (
@@ -24,7 +24,6 @@ import (
 const (
 	SourceJSONL          = "jsonl"           // Claude Code local session files
 	SourceProxy          = "proxy"           // TIER reverse proxy (real-time)
-	SourceCopilotAPI     = "copilot-api"     // GitHub Copilot Usage Metrics API
 	SourceAnthropicAdmin = "anthropic-admin" // Anthropic Admin usage report API
 	SourceOpenAIUsage    = "openai-usage"    // OpenAI org Usage/Costs API poller (#139)
 	// SourceCodexRollout is the Codex CLI's local rollout logs
@@ -76,7 +75,6 @@ const (
 var allSources = []string{
 	SourceJSONL,
 	SourceProxy,
-	SourceCopilotAPI,
 	SourceAnthropicAdmin,
 	SourceOpenAIUsage,
 	SourceCodexRollout,
@@ -98,16 +96,16 @@ func AllSources() []string { return slices.Clone(allSources) }
 //   - SourceProxy is captured server-side by the receiving tierd itself. A
 //     client claiming source=proxy would be asserting something only the server
 //     can know.
-//   - The org-level pollers (SourceCopilotAPI, SourceAnthropicAdmin,
-//     SourceOpenAIUsage) emit daily AGGREGATES, not per-call events. Admitting
+//   - The org-level pollers (SourceAnthropicAdmin, SourceOpenAIUsage)
+//     emit daily AGGREGATES, not per-call events. Admitting
 //     them here would double-count against the same org's poller rows and mix
 //     fidelities inside one endpoint; manual imports belong on /api/v1/costs.
 //
 // SourceCodexRollout ships for exactly the reason SourceJSONL does: it is read
-// from local session files at per-call granularity (#464), it is the ONLY path
-// that captures Codex spend (#463), and while it was rejected here, Codex work
-// arrived at a central tierd with its outcomes counted but its cost missing —
-// i.e. it read as FREE and silently inflated TIER (#492).
+// from local session files at per-call granularity (#464), it is the supported,
+// verified path that captures Codex spend (#463), and while it was rejected here,
+// Codex work arrived at a central tierd with its outcomes counted but its cost
+// missing — i.e. it read as FREE and silently inflated TIER (#492).
 //
 // SourceOpencode ships for the same reason again (#719), and the #492 argument
 // applies to it verbatim: Opencode work produces outcomes (commits, merged PRs)
@@ -300,22 +298,28 @@ func bucketForBranch(branch string) string {
 // driving requirement yet). Both write fields are 0. For other providers: all
 // three cache fields are 0 today.
 type TokenEvent struct {
-	Developer      string
-	IssueID        string // extracted from branch name, header, or env var
-	Model          string // raw model string from the provider response
-	InputTok       int
-	OutputTok      int
-	CacheRead      int    // cache hits — Anthropic cache_read_input_tokens / OpenAI cached_tokens
-	CacheWrite5m   int    // 5-minute cache writes (Anthropic ephemeral_5m_input_tokens)
-	CacheWrite1h   int    // 1-hour cache writes (Anthropic ephemeral_1h_input_tokens)
-	CostMicro      int64  // integer micro-dollars from the Reference Price Table (#69)
-	Source         string // one of the Source* constants
-	Fidelity       string // one of the Fidelity* constants
-	IdempotencyKey string // see IdempotencyKey() — empty allowed for legacy/unkeyed
+	CacheWriteEvidence string // nested | legacy | empty when the raw shape was not observed
+	PricingBasis       string // aggregate_approx for a provider daily remainder
+	Developer          string
+	IssueID            string // extracted from branch name, header, or env var
+	Model              string // raw model string from the provider response
+	InputTok           int
+	OutputTok          int
+	CacheRead          int    // cache hits — Anthropic cache_read_input_tokens / OpenAI cached_tokens
+	CacheWrite5m       int    // 5-minute cache writes (Anthropic ephemeral_5m_input_tokens)
+	CacheWrite1h       int    // 1-hour cache writes (Anthropic ephemeral_1h_input_tokens)
+	CostMicro          int64  // integer micro-dollars from the Reference Price Table (#69)
+	Source             string // one of the Source* constants
+	Fidelity           string // one of the Fidelity* constants
+	IdempotencyKey     string // see IdempotencyKey() — empty allowed for legacy/unkeyed
 	// Repo is the canonical "owner/repo" this cost was spent in (#231), or
 	// repoid.Unqualified when the producer cannot determine it (the proxy, the
 	// org-level admin pollers). Empty is normalized to the sentinel at insert.
 	Repo string
+	// PRNumber is a bare commit-subject PR reference; nil means none was recorded.
+	PRNumber *int
+	// BranchHash is a pseudonymised repository/branch key; never the raw name.
+	BranchHash *string
 	// SessionID is the opaque upstream session identity this event belongs to
 	// (#238) — the JSONL path stamps the Claude Code `sessionId`. It is the
 	// grouping key behind the token-waste signatures (context bloat: per-message
@@ -520,4 +524,12 @@ type IngesterFunc func(ctx context.Context, ev TokenEvent) error
 // Ingest implements Ingester.
 func (f IngesterFunc) Ingest(ctx context.Context, ev TokenEvent) error {
 	return f(ctx, ev)
+}
+
+// CacheWriteProvenance records the observed wire shape, never an inference from source.
+func CacheWriteProvenance(nested bool) string {
+	if nested {
+		return "nested"
+	}
+	return "legacy"
 }

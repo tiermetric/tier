@@ -5,7 +5,7 @@
 # base — no libc, no shell, no package manager.
 
 # --- build stage ---
-# golang:1.26.9 satisfies go.mod's `go 1.26.9`. This build stage is what links the
+# golang:1.27.2 satisfies go.mod's `go 1.27.2`. This build stage is what links the
 # stdlib into the static binary, so a LOCAL govulncheck pass does NOT make the
 # shipped artifact clean.
 #
@@ -24,13 +24,14 @@
 # advisories govulncheck reported against go1.26.6 — GO-2026-6617 (HTTP/2 HPACK
 # encoder race crash), -6613, -6612, -6611, -6610, -6605, -6603 (net/http),
 # -6608 (net/textproto), -6607 (crypto/tls); all fixed in 1.26.9.
-# Measured 2026-10-08: `crane digest golang:1.26.9` ->
-# sha256:f1f0bcc2c524a3ced375fcb4d1ecb7aa371aa7070e112599aaca45cc02d0101b;
-# `crane config --platform linux/amd64 golang:1.26.9` and
-# `crane config --platform linux/arm64 golang:1.26.9` both report GOLANG_VERSION=1.26.9.
-# Neither raise retroactively fixes an already-published image:
-# ghcr.io/tiermetric/tierd:latest (0.4.1, built with go1.26.6) carries the nine
-# advisories above until v0.5.2 is rebuilt and released (#683).
+# Raised 1.26.9 -> 1.27.2 after v0.5.2 (#1140), in lockstep with the module floors.
+# Measured 2026-10-09: `crane digest golang:1.27.2` ->
+# sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c;
+# `crane config --platform linux/amd64 golang:1.27.2` and
+# `crane config --platform linux/arm64 golang:1.27.2` both report GOLANG_VERSION=1.27.2.
+# A toolchain raise does not retroactively fix an already-published image:
+# Measured 2026-10-08: ghcr.io/tiermetric/tierd:latest (0.4.1, go1.26.6)
+# carried those nine advisories; rebuilding and releasing v0.5.2 fixed it (#683).
 # 1.26.5 was the earlier GO-2026-5856 fix (crypto/tls ECH
 # privacy leak). Digest-pinned (mandatory — admission control rejects
 # non-digest-pinned refs in staging/prod).
@@ -39,7 +40,7 @@
 #   RESOLVE (once, to obtain a candidate):  crane digest golang:<tag>
 #   VERIFY  (always, before committing it): docker run --rm golang@sha256:<d> go version
 # ⚠️ Docker official-image tags are re-pushed when their base OS updates, so
-# `crane digest golang:1.26.9` may stop matching the digest below at any time.
+# `crane digest golang:1.27.2` may stop matching the digest below at any time.
 # (Measured 2026-08-22: `crane digest golang:1.26.5` already returns 705e964a…,
 # NOT the 079e5980… this line pinned before 2026-08-22; both are genuine 1.26.5,
 # verified by running them.) A match is definitive; only a MISMATCH is ambiguous,
@@ -56,10 +57,10 @@
 # ⚠️ And note the limit of the verification above: `go version` proves the
 # TOOLCHAIN, which is all this stage contributes. It cannot see base-OS content,
 # so it is not a general "this digest is fine" check.
-# Verified 2026-10-08: `docker run --rm --platform linux/amd64|linux/arm64 golang@sha256:f1f0bcc2… go version`
-# -> go1.26.9 on both; the pin is the multi-platform index digest, which also covers
+# Verified 2026-10-09: `docker run --rm --platform linux/amd64|linux/arm64 golang@sha256:5bc7f572… go version`
+# -> go1.27.2 on both; the pin is the multi-platform index digest, which also covers
 # the linux/amd64 the release lane builds.
-FROM golang:1.26.9@sha256:f1f0bcc2c524a3ced375fcb4d1ecb7aa371aa7070e112599aaca45cc02d0101b AS build
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS build
 WORKDIR /src
 
 # Module cache layer — only re-downloads when go.mod/go.sum change.

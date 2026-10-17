@@ -150,7 +150,7 @@ type sealFailure struct {
 // sealFailures are the categories in match order; a code is never reassigned.
 var sealFailures = []sealFailure{
 	{"write_lock_busy", "the database write lock was busy", true, []error{store.ErrWriteLockUnavailable}},
-	{"erase_raced", "an erasure raced every attempt", true, []error{store.ErrSealEraseRaced}},
+	{"erase_raced", "a seal epoch change raced every attempt", true, []error{store.ErrSealEraseRaced}},
 	{"clock_behind", "the server clock is behind the newest seal", true, []error{store.ErrSealClockBehind}},
 	{store.SealGapRefoldMismatch, "its stored inputs did not refold to its body", false, []error{errSealRefoldMismatch}},
 	{store.SealGapFloorMoved, "the earliest sealable month moved", true, []error{errSealFloorMoved, store.ErrSealBeforeFloor}},
@@ -277,11 +277,13 @@ func (s *sealer) sealOnce(ctx context.Context, p, want Period, first bool) ([]by
 	}
 	start, end := p.Bounds()
 	var (
-		epoch  int64
-		stored *store.SealedReport
-		floor  Period
-		resp   scoresResponse
-		inputs []scoring.LabelInput
+		policy        store.CorrectionPolicyState
+		latestOutcome time.Time
+		epoch         int64
+		stored        *store.SealedReport
+		floor         Period
+		resp          scoresResponse
+		inputs        []scoring.LabelInput
 	)
 	// Every read below is one snapshot, so the body, its fold inputs and the
 	// floor describe one database state.
@@ -304,6 +306,11 @@ func (s *sealer) sealOnce(ctx context.Context, p, want Period, first bool) ([]by
 		if !errors.Is(err, store.ErrSealedReportNotFound) {
 			return err
 		}
+		policy, err = snap.CorrectionScoringPolicy(ctx)
+		if err != nil {
+			return err
+		}
+
 		if floor, err = s.sealable(ctx, snap, p); err != nil {
 			return err
 		}
@@ -313,8 +320,23 @@ func (s *sealer) sealOnce(ctx context.Context, p, want Period, first bool) ([]by
 		if err := s.gate(ctx, snap, p); err != nil {
 			return err
 		}
-		resp, inputs, err = h.scoresForWindow(ctx, snap, scoresQuery{since: start, until: end, scope: store.FleetWide, reportUnjoined: true}, true)
-		return err
+		resp, inputs, err = h.scoresForWindow(ctx, correctionPolicySnapshot{Snapshot: snap, policy: policy}, scoresQuery{since: start, until: end, scope: store.FleetWide, reportUnjoined: true}, true)
+		if err != nil {
+			return err
+		}
+		if resp.Rubric.Version != policy.RubricVersion {
+			return errors.New("sealed body and stored scoring policy disagree")
+		}
+		outcomes, err := snap.AllOutcomesWindow(ctx, start, end, store.FleetWide)
+		if err != nil {
+			return err
+		}
+		for _, o := range outcomes {
+			if o.Timestamp.After(latestOutcome) {
+				latestOutcome = o.Timestamp
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, time.Time{}, false, err
@@ -343,12 +365,18 @@ func (s *sealer) sealOnce(ctx context.Context, p, want Period, first bool) ([]by
 	if s.dryRun {
 		return nil, time.Time{}, false, errSealDryRun
 	}
+	graceNS := int64(s.cfg.grace)
+	policyName := "legacy"
+	if policy.Enabled {
+		policyName = "event3"
+	}
 	sealed, won, err := h.store.SealReport(ctx, store.SealedReport{
+		ScoringPolicy: &policyName, CorrectionRuleVersion: &policy.RuleVersion, RubricVersion: &policy.RubricVersion, CorrectionRevision: &policy.Revision,
 		Level: h.aggregation.String(), PeriodSize: p.Kind.String(), PeriodStart: start, PeriodEnd: end,
 		K: k, ConfigDigest: sealConfigDigest(sealFoldRule, h.aggregation, p.Kind, k),
 		Body: body, BodyDigest: "sha256:" + hex.EncodeToString(digest[:]),
-		ToolVersion: build.Version, ToolCommit: build.Commit,
-	}, rollups, persons, store.SealCheck{EraseEpoch: epoch, Refold: refold, Floor: floor.Start, First: first,
+		ToolVersion: build.Version, ToolCommit: build.Commit, GraceNS: &graceNS,
+	}, rollups, persons, store.SealCheck{LatestOutcomeAt: latestOutcome, EraseEpoch: epoch, Refold: refold, Floor: floor.Start, First: first,
 		Sources: func(ctx context.Context, snap *store.Snapshot) error { return s.gate(ctx, snap, p) }})
 	if err != nil {
 		return nil, time.Time{}, false, fmt.Errorf("seal period %s: %w", p, err)
@@ -849,7 +877,7 @@ func sealedInputs(inputs []scoring.LabelInput) ([]store.SealedRollup, []store.Se
 		rollups = append(rollups, store.SealedRollup{
 			Label: in.Label, WeightedPoints: in.Sums.WeightedPoints, TotalCostUSD: in.Sums.TotalCostUSD,
 			ActualPaidUSD: in.Sums.ActualPaidUSD, RealtimeUSD: in.Sums.RealtimeUSD,
-			SampleN: in.Sums.SampleN, FlaggedOutcomes: in.Sums.FlaggedOutcomes,
+			OutcomeN: in.Sums.OutcomeN, SampleN: in.Sums.SampleN, FlaggedOutcomes: in.Sums.FlaggedOutcomes,
 			Has: in.Has, Contributes: in.Contributes,
 		})
 		for _, id := range in.People {
@@ -909,7 +937,7 @@ func foldInputsOf(rollups []store.SealedRollup, persons []store.SealedPersonKey)
 	for i, r := range rollups {
 		out[i] = scoring.LabelInput{Label: r.Label, Has: r.Has, Contributes: r.Contributes, Sums: scoring.RollupSums{
 			WeightedPoints: r.WeightedPoints, TotalCostUSD: r.TotalCostUSD, ActualPaidUSD: r.ActualPaidUSD,
-			RealtimeUSD: r.RealtimeUSD, SampleN: r.SampleN, FlaggedOutcomes: r.FlaggedOutcomes,
+			RealtimeUSD: r.RealtimeUSD, OutcomeN: r.OutcomeN, SampleN: r.SampleN, FlaggedOutcomes: r.FlaggedOutcomes,
 		}}
 		byLabel[r.Label] = &out[i]
 	}

@@ -176,8 +176,7 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 		);
 		-- Row 1: JSONL source, 1M cache_write. Old cost_usd = $15 (flat 1.0x
 		-- on cache_write at the legacy $15/M opus rate). Post-migration: 5m
-		-- bucket, recomputed at the corrected $5/M Opus 4.7 rate (#80) to
-		-- $6.25 (1M * $5/M * 1.25).
+		-- bucket; #1231 preserves the original $15 without selecting active rates.
 		INSERT INTO token_events (developer, issue_id, model, input_tok, output_tok,
 		    cache_read, cache_write, cost_usd, source, fidelity)
 		VALUES ('alice', 'issue-1', 'claude-opus-4-7', 0, 0, 0, 1000000, 15.0, 'jsonl', 'realtime');
@@ -186,16 +185,11 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 		    cache_read, cache_write, cost_usd, source, fidelity)
 		VALUES ('bob', 'issue-2', 'claude-sonnet-4', 100, 50, 0, 200, 99.99, 'api', 'realtime');
 		-- Row 3: JSONL source, cache_write = 0. The WHERE cache_write > 0
-		-- guard in the backfill must NOT touch cache_write_5m; cost recompute
-		-- still proceeds because the row is in a known source.
+		-- guard must not touch cache_write_5m. The original $1 cost stays unchanged.
 		INSERT INTO token_events (developer, issue_id, model, input_tok, output_tok,
 		    cache_read, cache_write, cost_usd, source, fidelity)
 		VALUES ('carol', 'issue-3', 'claude-sonnet-4', 100, 50, 0, 0, 1.0, 'jsonl', 'realtime');
-		-- Row 4: JSONL source, retired/unknown model. Recompute uses the
-		-- self-hosted-medium fallback ($0.50/M combined). 1M cache_write at
-		-- the fallback rate = $0.50; documents that an unknown model in a
-		-- known source DOES recompute (at the fallback rate, with the WARN
-		-- log fired exactly once per process via warnUnknownModel).
+		-- Row 4: unknown original rates. Preserve $999.99 without an active fallback.
 		INSERT INTO token_events (developer, issue_id, model, input_tok, output_tok,
 		    cache_read, cache_write, cost_usd, source, fidelity)
 		VALUES ('dave', 'issue-4', 'definitely-not-a-real-model', 0, 0, 0, 1000000, 999.99, 'jsonl', 'realtime');
@@ -241,8 +235,8 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 	if w5 != 1_000_000 || w1 != 0 {
 		t.Errorf("alice: cache_write_5m=%d cache_write_1h=%d, want 1_000_000/0", w5, w1)
 	}
-	if cost != 6_250_000 {
-		t.Errorf("alice cost_micro = %d, want 6_250_000 ($6.25, recomputed at 1.25x for 5m, $5/M Opus 4.7)", cost)
+	if cost != 15_000_000 {
+		t.Errorf("alice cost_micro = %d, want 15_000_000 ($15 original cost preserved; no automatic repricing)", cost)
 	}
 
 	// Row 2 (api): cache_write_5m = backfilled 200, cache_write_1h = 0, but
@@ -263,10 +257,7 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 		t.Errorf("bob cost_micro = %d, want 99_990_000 ($99.99 preserved; source=api not recomputed)", cost)
 	}
 
-	// Row 3 (carol, cache_write=0): cache_write_5m stays 0, cache_write_1h
-	// stays 0, cost_usd recomputed against the new ComputeCost (still uses
-	// claude-sonnet-4 at $3/M input + $15/M output for 100 input + 50 output
-	// = 0.0003 + 0.00075 = $0.00105).
+	// Row 3 (carol): unchanged zero cache vector and original $1 cost.
 	err = db.db.QueryRow(
 		`SELECT cache_write_5m, cache_write_1h, cost_micro FROM token_events WHERE developer = 'carol'`,
 	).Scan(&w5, &w1, &cost)
@@ -276,14 +267,11 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 	if w5 != 0 || w1 != 0 {
 		t.Errorf("carol: cache_write_5m=%d cache_write_1h=%d, want 0/0 (no backfill needed)", w5, w1)
 	}
-	if cost != 1_050 {
-		t.Errorf("carol cost_micro = %d, want 1_050 ($0.00105, recomputed from input+output)", cost)
+	if cost != 1_000_000 {
+		t.Errorf("carol cost_micro = %d, want 1_000_000 ($1 original cost preserved)", cost)
 	}
 
-	// Row 4 (dave, unknown model): backfill puts cache_write into 5m;
-	// recompute uses the self-hosted-medium fallback ($0.50/M combined),
-	// 1M cache_write_5m = $0.50. Documents the fallback behavior explicitly
-	// so a future change is forced to surface the intent.
+	// Row 4: unknown original rates must not fall back to today's table.
 	err = db.db.QueryRow(
 		`SELECT cache_write_5m, cache_write_1h, cost_micro FROM token_events WHERE developer = 'dave'`,
 	).Scan(&w5, &w1, &cost)
@@ -293,8 +281,8 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 	if w5 != 1_000_000 || w1 != 0 {
 		t.Errorf("dave: cache_write_5m=%d cache_write_1h=%d, want 1_000_000/0", w5, w1)
 	}
-	if cost != 500_000 {
-		t.Errorf("dave cost_micro = %d, want 500_000 ($0.50, unknown-model fallback rate)", cost)
+	if cost != 999_990_000 {
+		t.Errorf("dave cost_micro = %d, want 999_990_000 ($999.99 original cost preserved; no active fallback)", cost)
 	}
 
 	// Idempotency check: re-running Open() must be a no-op (no DROP attempted,
@@ -314,10 +302,10 @@ func TestOpen_MigratesCacheWriteSplit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-query alice: %v", err)
 	}
-	if cost != 6_250_000 {
-		t.Errorf("after re-Open: alice cost_micro = %d, want 6_250_000 ($6.25, idempotent recompute)", cost)
+	if cost != 15_000_000 {
+		t.Errorf("after re-Open: alice cost_micro = %d, want 15_000_000 ($15 preserved on reopen)", cost)
 	}
-	// Marker row must be present after the first successful recompute.
+	// Legacy marker and companion policy record retirement, not a reprice.
 	var markerName string
 	err = db2.db.QueryRow(
 		`SELECT name FROM tier_migrations WHERE name = ?`, migrationRecomputeCacheTTL,
@@ -544,7 +532,7 @@ func TestInsertOutcome_WeightProvenanceRoundTrip(t *testing.T) {
 		}
 	}
 
-	g1, ok1, e1 := db.LatestOutcomeByIssue(ctx, "", "issue-132")
+	g1, ok1, e1 := db.LatestOutcomeByIssue(ctx, "", "issue-132", want.Timestamp)
 	check("LatestOutcomeByIssue", g1, ok1, e1)
 	g2, ok2, e2 := db.OutcomeByMergeCommit(ctx, want.MergeCommitSHA)
 	check("OutcomeByMergeCommit", g2, ok2, e2)
@@ -575,7 +563,7 @@ func TestOutcome_LegacyRowDefaults(t *testing.T) {
 		t.Fatalf("raw legacy insert: %v", err)
 	}
 
-	got, ok, err := db.LatestOutcomeByIssue(ctx, "", "issue-legacy")
+	got, ok, err := db.LatestOutcomeByIssue(ctx, "", "issue-legacy", time.Now().UTC())
 	if err != nil || !ok {
 		t.Fatalf("LatestOutcomeByIssue: err=%v ok=%v", err, ok)
 	}

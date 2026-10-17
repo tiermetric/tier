@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -125,7 +124,12 @@ type reportManifestJSON struct {
 	// never stamp different subsets of the same struct.
 	PriceTable priceTableJSON `json:"price_table"`
 	// Rubric pins the weights, exactly as PriceTable pins the dollars (#239).
-	Rubric rubricJSON `json:"rubric"`
+	Rubric                rubricJSON                    `json:"rubric"`
+	ScoringPolicy         string                        `json:"scoring_policy"`
+	CorrectionRuleVersion string                        `json:"correction_rule_version"`
+	RubricVersion         int                           `json:"rubric_version"`
+	OutcomeCounts         *store.CorrectionReportCounts `json:"outcome_counts,omitempty"`
+	CorrectionsDigest     *store.CorrectionsDigest      `json:"corrections_digest,omitempty"`
 	// ToolVersion and Commit pin the BINARY. They are not redundant with the two
 	// above: Open()-time migrations rewrite token_events in place with no ledger
 	// row at all, so a binary upgrade is a report input that no watermark can see.
@@ -298,11 +302,20 @@ type reportManifestJSON struct {
 // floor that errs toward disclosure is worse than no window block. Refine it
 // with the real signal or not at all.
 //
-// The `ledgers` half stays in every mode: it is install-wide and window-
-// independent, so it carries no count of the caller's chosen population.
+// The install-wide ledgers stay in every mode, except the corrective
+// projection revision, which is withheld in anonymized modes (R9).
 type manifestWatermarksJSON struct {
-	Window  *store.WindowWatermarks `json:"window,omitempty"`
-	Ledgers store.LedgerWatermarks  `json:"ledgers"`
+	Window  *store.WindowWatermarks      `json:"window,omitempty"`
+	Ledgers manifestLedgerWatermarksJSON `json:"ledgers"`
+}
+
+// manifestLedgerWatermarksJSON preserves the store's ledger fields while
+// allowing the corrective revision to be withheld in anonymized modes (R9).
+// The explicit field shadows the embedded revision on the wire; nil means
+// withheld, while a pointer to zero remains an explicit developer-mode pin.
+type manifestLedgerWatermarksJSON struct {
+	store.LedgerWatermarks
+	CorrectionProjectionRevision *int64 `json:"correction_projection_revision,omitempty"`
 }
 
 // manifestDigestJSON is one window digest and the row count it covers.
@@ -315,7 +328,7 @@ type manifestWatermarksJSON struct {
 // a hash it cannot tell apart from a hash of nothing — the same class of defect
 // as the missing denominators this repo keeps rediscovering.
 type manifestDigestJSON struct {
-	// Value is "tierdig1:" + 64 hex characters. The SCHEME TAG is the rollback
+	// Value is "tierdig2:" + 64 hex characters. The SCHEME TAG is the rollback
 	// seam: a verifier holding a digest it cannot compute must be able to say
 	// NOT CHECKED rather than guess, exactly as ManifestSchema lets it refuse a
 	// tiermanifest2.
@@ -384,7 +397,7 @@ type manifestKAnonJSON struct {
 // scoped one). `digests_omitted` is the difference between "this server does not
 // publish digests" and "this server withheld them, here is why", and that
 // distinction is what #740 exists to preserve — it is not a list of two.
-const digestOmittedAnonymized = "withheld: events_digest.rows and outcomes_digest.rows are unfloored counts of work " +
+const digestOmittedAnonymized = "withheld: events_digest.rows, outcomes_digest.rows, corrections_digest.counts and outcome_counts are unfloored counts of work " +
 	"over a caller-chosen window, the same quantity watermarks.window carries (#593), so they are withheld in " +
 	"an anonymized aggregation mode. See kanon_suppressed."
 
@@ -463,7 +476,6 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 		Repo:        scope.String(),
 		Aggregation: h.aggregation.String(),
 		PriceTable:  priceTableStamp(store.ActivePriceTableInfo()),
-		Rubric:      rubricJSON{Version: scoring.RubricVersion},
 		ToolVersion: build.Version,
 		Commit:      build.Commit,
 	}
@@ -471,7 +483,15 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 		resp.Until = until.Format(time.RFC3339)
 	}
 	// 🔴 THE DIGESTS ARE EMITTED HERE AND NOWHERE ELSE, AND THE COST IS THE REASON.
-	// This is TWO FULL-WINDOW SCANS on a request path. Measured end to end by
+	// Event 3 U3 adds a corrective dependency closure, computed once per snapshot
+	// and reused across all six typed populations. BenchmarkReportManifestCorrections
+	// (Apple M5 Max, 2026-10-15, -benchtime=1x) measured that corrective pass at
+	// 89.17 ms/op, 9,918,600 B/op, 363,176 allocs/op. Its fixture has 20,000 token
+	// events, 2,000 outcomes/declarations/allocations, and 1,000 relations, audits
+	// and assessments. This single-iteration result is not a steady-state or
+	// end-to-end endpoint measurement; the historical figures below exclude it.
+	//
+	// The token/outcome digests are TWO FULL-WINDOW SCANS. Measured end to end by
 	// BenchmarkReportManifestWatermarks / BenchmarkReportManifestDigests — a PAIR,
 	// because the question is what happened to the ENDPOINT, not whether a digest
 	// is fast (Apple M5 Max, 20,000 in-window token_events + 2,000 outcomes,
@@ -481,14 +501,14 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 	//	ReportDigests, added      28.5  - 34.6 ms/op   12.15 MB   ~725,000 allocs
 	//
 	// ⇒ ~1.4 ms becomes ~30-36 ms, a ~20x increase, ~1.5 µs per token_events row,
-	// scaling LINEARLY with the window. That is not a rounding error; it is now the
-	// whole cost of this endpoint. It is affordable HERE because a manifest is
+	// scaling LINEARLY with the window. That was the dominant cost before U3's
+	// corrective pass above. It is affordable HERE because a manifest is
 	// fetched once per published report. ⛔ It would NOT be affordable on /scores,
 	// which already pays four full-window scans and is polled by the dashboard —
-	// do not lift this onto the scoring path, and do not add a third scan here
-	// without re-running that pair.
+	// do not lift this onto the scoring path. Any added scan needs a fresh
+	// benchmark with its actual evidence population.
 	//
-	// ⚠️ THE PAIR IS NOW A TRIO (#751). BenchmarkReportManifestExclusion measures
+	// #751 added a third benchmark. BenchmarkReportManifestExclusion measures
 	// the repo-blind exclusion read added below: 2.98-4.56 ms on the same fixture,
 	// interleaved with the two above rather than run after them. That instruction
 	// was followed, and it is what caught a first draft claiming ~0.3 ms.
@@ -555,6 +575,18 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 	// scoped, so nothing was excluded, and there is no honest figure to pin.
 	err = h.store.ReadSnapshot(r.Context(), func(snap *store.Snapshot) error {
 		var err error
+		policy, err := h.policyForReader(r.Context(), snap)
+		if err != nil {
+			return err
+		}
+		stamp, err := policy.Stamp()
+		if err != nil {
+			return err
+		}
+		resp.Rubric.Version = stamp.RubricVersion
+		resp.ScoringPolicy = stamp.Policy
+		resp.CorrectionRuleVersion = stamp.RuleVersion
+		resp.RubricVersion = stamp.RubricVersion
 		marks, err = snap.ReportWatermarks(r.Context(), since, until, scope)
 		if err != nil {
 			return fmt.Errorf("report watermarks: %w", err)
@@ -565,6 +597,16 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("report digests: %w", err)
 			}
 			setDigests(events, outcomes)
+			corrective, err := snap.CorrectionsDigest(r.Context(), since, until, scope)
+			if err != nil {
+				return fmt.Errorf("corrective digest: %w", err)
+			}
+			resp.CorrectionsDigest = &corrective
+			counts, err := snap.CorrectionReportCounts(r.Context(), since, until, scope, policy.Event3)
+			if err != nil {
+				return fmt.Errorf("outcome counts: %w", err)
+			}
+			resp.OutcomeCounts = &counts
 		}
 		if !scope.IsFleetWide() {
 			ex, err := snap.UnqualifiedExclusionWindow(r.Context(), since, until)
@@ -586,7 +628,10 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	resp.Watermarks.Ledgers = marks.Ledgers
+	resp.Watermarks.Ledgers.LedgerWatermarks = marks.Ledgers
+	if !anonymized {
+		resp.Watermarks.Ledgers.CorrectionProjectionRevision = &marks.Ledgers.CorrectionProjectionRevision
+	}
 
 	if h.aggregation.Anonymized() {
 		k := h.kAnonymity
@@ -613,7 +658,7 @@ func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request
 			WithheldDigests: resp.EventsDigest == nil,
 			KAnonymity:      h.kAnonymity,
 			Aggregation:     h.aggregation.String(),
-			Reason: "watermarks.window and the two window digests carry unfloored row counts over a " +
+			Reason: "watermarks.window, outcome_counts and all three digests carry unfloored row counts over a " +
 				"caller-chosen window; narrowing the window alone can shrink a cohort below the " +
 				"k-anonymity floor (#593), so they are withheld in an anonymized aggregation mode.",
 		}

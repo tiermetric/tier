@@ -361,8 +361,9 @@ func TestGetOutcomes_CSVColumnContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse CSV: %v", err)
 	}
-	if len(records) < 1 || strings.Join(records[0], ",") != strings.Join(outcomesCSVHeader, ",") {
-		t.Fatalf("outcomes CSV header = %v, want %v", records[0], outcomesCSVHeader)
+	legacyHeader := outcomesCSVHeader[:18] // Raw evidence and projection columns both require Event 3.
+	if len(records) < 1 || strings.Join(records[0], ",") != strings.Join(legacyHeader, ",") {
+		t.Fatalf("outcomes CSV header = %v, want %v", records[0], legacyHeader)
 	}
 	// The append-only contract is a statement about the PREFIX, not about which
 	// column happens to be last. Pin the historical prefix literally: any reorder,
@@ -386,14 +387,13 @@ func TestGetOutcomes_CSVColumnContract(t *testing.T) {
 			t.Errorf("outcomes CSV column %d = %q, want %q (append-only contract: never reorder or rename)", i, got[i], want)
 		}
 	}
-	// #242 appended push_day last; #231's repo is now the penultimate column.
-	// Both remain present and in append order — issue_id KEPT its position and
-	// meaning throughout.
-	if got[len(got)-1] != "push_day" {
-		t.Errorf("last outcomes CSV column = %q, want push_day (appended #242)", got[len(got)-1])
+	// #242 appended push_day; #1228 appended quality_status; Event 3 follows.
+	// All historical columns retain their positions and meanings.
+	if got[16] != "push_day" || got[17] != "quality_status" {
+		t.Errorf("outcomes CSV columns 16:18 = %v, want push_day, quality_status", got[16:18])
 	}
-	if got[len(got)-2] != "repo" {
-		t.Errorf("penultimate outcomes CSV column = %q, want repo (appended #231)", got[len(got)-2])
+	if got[15] != "repo" {
+		t.Errorf("outcomes CSV repo column = %q, want repo (appended #231)", got[15])
 	}
 }
 
@@ -531,5 +531,35 @@ func TestGetOutcomes_JSONWindow(t *testing.T) {
 	}
 	if len(resp.Outcomes) != 1 || resp.Outcomes[0].IssueID != "issue-1" {
 		t.Fatalf("expected one outcome row, got %+v", resp.Outcomes)
+	}
+}
+
+func TestGetEvents_CSVPricingColumns(t *testing.T) {
+	h, db := newTestHandler(t)
+	e := store.TokenEvent{Developer: "alice", IssueID: "1231", Model: "claude-sonnet-4", Source: "jsonl", InputTok: 100, CacheWrite5m: 1000, CacheWriteEvidence: "nested", TokenDerived: true, Timestamp: time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)}
+	e.CostMicro = store.ComputeCost(e.Model, store.CostUsage{Input: 100, CacheWrite5m: 1000})
+	if err := db.InsertTokenEvent(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := db.ListTokenEvents(t.Context(), e.Timestamp.Add(-time.Hour), e.Timestamp.Add(time.Hour), store.PageCursor{}, 10)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("stored=%v err=%v", stored, err)
+	}
+	rec := doExport(t, h, "/api/v1/events?since=2026-01-01", http.Header{"Accept": []string{"text/csv"}})
+	if rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	records, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || len(records[0]) != 24 || len(records[1]) != 24 {
+		t.Fatalf("CSV shape: %v", records)
+	}
+	if got := strings.Join(records[0][21:24], ","); got != "pricing_basis,rate_snapshot,cache_write_evidence" {
+		t.Fatalf("pricing headers=%s", got)
+	}
+	if records[1][21] != "token_derived" || records[1][22] == "" || records[1][22] != stored[0].RateSnapshot || records[1][23] != "nested" {
+		t.Fatalf("pricing values=%v", records[1][21:24])
 	}
 }

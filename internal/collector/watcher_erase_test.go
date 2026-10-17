@@ -564,7 +564,7 @@ func TestWatcher_StartupDeletesTombstoneOfGoneFileAndKeepsLiveOne(t *testing.T) 
 // store.CheckpointSessionIDKey out of this blob. Rename the field without a
 // matching key and both would silently find nothing.
 func TestCheckpointMetadataCarriesTheStoreSessionKey(t *testing.T) {
-	cp, err := checkpointFromState("/x/s.jsonl", parseState{inode: 1, headLen: 1, metadata: sessionMetadata{SessionID: "sess-key"}})
+	cp, err := checkpointFromState("/x/s.jsonl", parseState{inode: 1, headLen: 1, metadata: sessionMetadata{SessionID: "sess-key", CWD: "/stored/cwd"}})
 	if err != nil {
 		t.Fatalf("checkpointFromState: %v", err)
 	}
@@ -575,6 +575,10 @@ func TestCheckpointMetadataCarriesTheStoreSessionKey(t *testing.T) {
 	if got := blob[store.CheckpointSessionIDKey]; got != "sess-key" {
 		t.Errorf("metadata[%q] = %v, want the session id; metadata = %s", store.CheckpointSessionIDKey, got, cp.Metadata)
 	}
+	if got := blob[store.CheckpointCWDKey]; got != "/stored/cwd" {
+		t.Errorf("metadata[%q] = %v, want stored cwd", store.CheckpointCWDKey, got)
+	}
+
 }
 
 // TestWatcher_ByteIdenticalRewriteThroughRenameStaysErased: the erased

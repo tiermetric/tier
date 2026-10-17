@@ -19,6 +19,10 @@
 
 ---
 
+**Series breaks.** Before comparing periods, check the
+[score-series change register](score-series-changes.md) and apply its comparison
+rule; name the applicable changes or state that the definition history is unknown.
+
 ## The one-sentence version
 
 TIER's headline is
@@ -60,15 +64,18 @@ This is the crux, so it is worth stating exactly. The outcome's `ts` is **not**
 backdated to the cost window. It is a **point event stamped at close time**:
 
 - **PR-merge capture** (the `closes #N`-on-merge path, the common case):
-  `outcomes.ts` is set to `time.Now().UTC()` at the moment the merge webhook is
-  processed -- i.e. **merge / close time**
+  `outcomes.ts` uses the PR's valid, nonzero, non-future `merged_at` -- i.e.
+  **merge / close time** -- falling back to webhook receipt time only when
+  `merged_at` is missing, malformed, zero or future
   (`internal/webhook/handler.go`).
 - **Push-to-default-branch capture** (trunk-based teams, opt-in `#196`):
-  `outcomes.ts` is the **commit timestamp** of the qualifying push.
+  `outcomes.ts` is the **commit timestamp** of the qualifying push, falling back
+  to server time when the commit timestamp is missing or zero.
 - The `outcomes.ts` column itself defaults to SQLite `CURRENT_TIMESTAMP`, but
   every live capture path supplies the event instant explicitly.
 
-So the outcome is credited **all at once, at the close/commit instant** -- it is
+So the outcome is credited **all at once, at the close/commit instant** (or the
+fallback time above) -- it is
 **never spread back across the days when the cost was actually spent.** The cost
 for that same issue, by contrast, was dribbled in continuously over those
 earlier days. The numerator is a spike at the end; the denominator is a ramp

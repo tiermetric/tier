@@ -5,6 +5,117 @@ All notable changes to TIER are documented in this file. The format is based on
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it
 reaches v1.
 
+## Unreleased
+
+## 0.6.0 - 2026-10-17
+
+**ONE-WAY UPGRADE — upgrading from v0.5.2.** Before upgrading, run
+`mkdir -p ~/.tier/backups` and
+`tierd backup --db ~/.tier/tier.db --out ~/.tier/backups/tier-$(date +%F).db`
+(use the --db path you gave serve if it differs)
+with **either binary** (see [README backups](README.md#operations)). Backup
+runs no migrations with either binary. Check that the reported backup size is
+not ~4096 bytes. On first writable open by v0.6.0, the database moves from
+schema version 6 to 10, even with Event 3 scoring off. v0.5.2 refuses the upgraded
+database. These schema upgrades cannot be rolled back in place: to roll back,
+stop `tierd`, move `tier.db`, `tier.db-wal` and `tier.db-shm` aside, then copy the
+backup taken before upgrading to `tier.db` (use the `--db` path's name for the
+database and its `-wal`/`-shm` files). That backup does not
+contain data recorded after the upgrade; re-running the shipper recovers only
+what local session files still hold.
+
+### Highlights
+
+- Event 3 corrective-work accounting, operator opt-in and off by default, with
+  audited corrections, projected readers, evidence pins and report verification.
+- Scoped ingest token for `tierd ship`, accepted only on `POST /api/v1/events`
+  (#1144).
+- Price table v14, including Haiku 5.5 and gpt-6.1-sol from v13 and the revised
+  Sonnet 5.5 cache-read rate; stored rows keep their original pricing.
+
+### Added
+
+- Event 3 (#1235) API compatibility contract for U1/U2: explicit default-off
+  scoring policy, raw `outcome_n` versus eligible `sample_n`, audited operator
+  correction commands, projected score/detail/segment/compare/bootstrap readers,
+  append-only outcome export columns and read-scoped corrective evidence exports.
+  Actor/role claims are self-asserted; anonymized modes suppress identifying data.
+- Event 3 U3 (#1235): `tierdig2` corrective evidence and complete chain dependency
+  pins, policy/rule/rubric and raw/eligible counts in `tiermanifest1`, and corrective
+  audit/projection revision watermarks. Report verification replays the pinned
+  policy, checks both rubric versions and preserves clean `tierdig1` verification.
+  Digest and verifier ship together. Scoring stays off by default; the release
+  as a whole upgrades the database from schema version 6 to 10.
+
+- Scoped `serve --ingest-token` / `TIER_INGEST_TOKEN` / `http.ingest_token` for
+  `tierd ship`: Bearer accepted only on `POST /api/v1/events`; admin tokens still
+  work. Same secret precedence, `@file`, constant-time checks and lockout (#1144).
+
+- `tierd outcomes exclude-reverts` discovers existing revert outcomes in a dry run
+  and applies an operator-approved exclusion plan (#1277; PR #1278).
+- Developer-mode per-issue report via `GET /api/v1/issues` and `tierd issues`: attributed
+  cost, points and TIER per repository/issue, labelled as a lower bound (#1273; PR #1275).
+- Join readiness in developer-mode `data_quality` and `tierd doctor`, plus the developer-mode
+  `GET /api/v1/diagnostics/captured-dollars` route (#972; PR #1279).
+- Token events carry `pr_number` and a pseudonymised branch hash; the server fills
+  previously unlinked rows from PR or branch evidence without overwriting an assigned
+  issue (#1074; PRs #1183, #1187).
+- Segment reconciliation is rendered beside the developer dashboard's work-type
+  panels, including captured spend with no accepted outcomes (#1281; PR #1284).
+- [Score-series change register](docs/score-series-changes.md) and comparison rule:
+  label comparisons across measurement-definition changes (#1280; PR #1283).
+
+### Changed
+
+- Recognised revert PRs earn no positive credit; audited exclusions reconcile
+  push credit (#1229; PR #1239).
+- Revert issue fallback requires exactly one same-repository outcome in the preceding 60 days;
+  ambiguous candidates get durable `revert_ambiguous` markers without a new penalty (#1228; PR #1261).
+- Direct-push capture skips reserved unattributed author logins and reports them
+  through the skip log and counter (#1191; PR #1192).
+- Push revert and merge classification uses the same git subject as attribution,
+  skipping leading blank lines (#1193; PR #1194).
+- Footerless revert issue lookups exclude outcomes dated after the revert
+  (#1195; PR #1199).
+- Insert-time PR attribution preserves sealed reports' 14-day input bands
+  (#1200; PR #1201).
+- Token-count promotions retain the original pricing basis; `tierd doctor cost-consistency`
+  diagnoses inconsistencies and offers explicit original-basis repair (#1231; PR #1258).
+- New poll days price provider daily remainders as base-rate `aggregate_approx` approximations;
+  existing days retain their first pricing rule (#1232; PR #1258).
+- Withdraw unvalidated dashboard verdict labels; seal disclosures warn that the default
+  14-day grace can leave 60-day revert windows open (#1233; PR #1259).
+
+- Assessment wording corrections (#1234): qualify captured-usage and historical
+  self-measurement claims, distinguish release behavior from current source,
+  document pricing and inference limits, and use the project's coaching stance.
+  These corrections change no scoring rules or sealed report bytes.
+
+- 🔴 **BUILD REQUIREMENT: Go 1.27.2+ (#1140).** `GOTOOLCHAIN=local` refuses an
+  older toolchain. Both module floors, the Docker builder, release setup, and
+  documented build requirements move together after v0.5.2. Go 1.27.0–1.27.1
+  carry the nine standard-library advisories fixed in Go 1.27.2.
+- Update both modules to their latest stable direct dependencies: YAML v3.0.5,
+  SQLite v1.60.1, and docgen goldmark v1.8.6, plus indirect dependency updates
+  including docgen x/net v0.61.0 (#1140).
+- **Price table v13 and v14 (#1202, #1206).** v13 adds Claude Haiku 5.5 ($0.10/$0.50 per
+  million through 100K prompt tokens, $0.50/$2.50 above) and gpt-6.1-sol ($2/$10, cached
+  input $0.10). v14 lowers Claude Sonnet 5.5 cache reads from $0.20 to $0.10 per million
+  (0.05×), the rate on Anthropic's pricing page read 2026-10-12; the page read 2026-10-02
+  listed $0.20. Rows already stored keep the cost they were priced at. To re-price them, run
+  `tierd reprice --db <path> --from-version 12` (a dry run that prints what would change),
+  then the same command with `--commit`; 12 covers rows captured under v12 or v13, including
+  Haiku 5.5 and gpt-6.1-sol rows priced by the fallback before their rows existed.
+
+### Security
+
+- Reject cross-developer idempotency upserts without changing the original row;
+  report `rejected_cross_developer`, WARN server-side, and warn in the shipper
+  without failing or retrying. Refuse duplicate ingest credentials and retain
+  the admin-token requirement for non-loopback binds. No migration or change
+  to global idempotency. Document remaining impersonation/k-anonymity padding
+  and pre-claim suppression limits until #1145 (gated on #826) (#1144).
+
 ## 0.5.2 - 2026-10-09
 
 TIER 0.5.2 — public launch

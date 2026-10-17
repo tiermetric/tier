@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	_ "modernc.org/sqlite"
 )
@@ -60,6 +61,31 @@ func InspectIdentities(ctx context.Context, path string) (Identities, error) {
 	if err != nil {
 		return Identities{}, fmt.Errorf("read developers: %w", err)
 	}
+	// Observation audits can outlive a token row during explicit repairs or
+	// manual file inspection. Include their owners without refusing older schemas.
+	var audits int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pricing_observation_audit'`).Scan(&audits); err != nil {
+		return Identities{}, err
+	}
+	if audits > 0 {
+		owners, err := distinctStrings(ctx, db, `SELECT developer FROM pricing_observation_audit`)
+		if err != nil {
+			return Identities{}, err
+		}
+		for _, owner := range owners {
+			found := false
+			for _, dev := range developers {
+				if dev == owner {
+					found = true
+					break
+				}
+			}
+			if !found {
+				developers = append(developers, owner)
+			}
+		}
+	}
+	slices.Sort(developers)
 	// org is nullable on org_hierarchy (a developer may be seeded without an org),
 	// so skip NULLs to keep the scan into a plain string valid; org on
 	// period_membership and org_actual_spend is NOT NULL.
@@ -112,8 +138,10 @@ func PopulatedTablesOutside(ctx context.Context, path string, allow []string) ([
 	// refuse to recreate any demo database at all. That is a fail-CLOSED
 	// regression (it over-refuses, never over-deletes), which is why it surfaced
 	// as a test failure rather than data loss; it is still wrong.
-	// install_secret (#913) is the same case: Open writes its one row.
-	allowed := map[string]bool{"tier_migrations": true, "price_table_registry": true, "install_secret": true}
+	// install_secret (#913) and the identifier-free correction cutover (#1235)
+	// and correction_policy are the same case: Open writes their identifier-free bookkeeping rows.
+	// Rate snapshots contain pricing metadata only; observations remain protected.
+	allowed := map[string]bool{"tier_migrations": true, "price_table_registry": true, "install_secret": true, "correction_stats_cutover": true, "correction_policy": true, "pricing_rate_snapshots": true}
 	for _, t := range allow {
 		allowed[t] = true
 	}

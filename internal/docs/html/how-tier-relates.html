@@ -85,8 +85,7 @@ a clean merge, reduced when the work is later reverted or fails CI (floors
 versioned reference price table (list price, not your negotiated invoice).</li>
 </ul>
 <p>So TIER answers exactly one question: <strong>&#34;How much shipped outcome did we get per
-$1,000 of AI compute?&#34;</strong> Two sidecars travel with it — <strong>Coverage %</strong> (the share
-of that cost we actually measured vs. inferred, the trust line on the number)
+$1,000 of AI compute?&#34;</strong> Two sidecars travel with it — <strong>Coverage %</strong> (how the captured spend was recorded, per-request vs daily/estimated; not how much spend TIER missed)
 and <strong>Spend Leverage</strong> (list price ÷ your actual invoice, a CFO discount signal).
 Neither changes what TIER <em>is</em>: a trailing efficiency diagnostic on the AI-cost
 axis.</p>
@@ -263,15 +262,7 @@ harmful one. The third is the specific Goodhart failure the project&#39;s
 adversarial analysis warns about.</p>
 <ol>
 <li>
-<p><strong>TIER in any people decision.</strong> Do not use TIER in performance reviews,
-promotion, pay, performance improvement plans, discipline or dismissal —
-not as the only input, and not as one of several. Do not put it in a
-stack-rank or a compensation formula. TIER measures the dollar efficiency
-of AI spend on merged work. It is blind to difficulty, collaboration,
-mentoring, on-call, design, and everything else that makes an engineer
-valuable, and tying it to a person&#39;s evaluation rewards exactly the wrong
-behaviors (cheap, high-label-weight, low-difficulty work). Use it to coach
-how people work with AI.</p>
+<p><strong>Evaluating developers on TIER.</strong> TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER is blind to difficulty, collaboration, mentoring, on-call and design, so its per-person figures do not establish individual value. Its positioning remains <strong>grade the work, not the worker</strong>, by policy rather than by mechanism.</p>
 </li>
 <li>
 <p><strong>Cross-cohort leaderboards.</strong> Do not rank developers, teams, or
@@ -290,8 +281,7 @@ target, it ceases to be a good measure.</em> Fusing TIER into a performance scor
 makes it a target, and the gaming paths are obvious and cheap: inflate PR
 <code>size/*</code> labels to raise the numerator; avoid hard-but-small work that weighs
 little; or — worst of all — move AI usage onto tools TIER cannot capture,
-which lowers measured cost, inflates the ratio, <em>and</em> silently craters
-Coverage %, destroying the very trust line that made the number worth reading.
+which lowers measured cost and inflates the ratio, while Coverage % stays at 100%; only the zero-token tripwire surfaces it.
 Keep TIER standalone and paired with its Coverage % so it stays diagnostic.</p>
 </li>
 </ol>
@@ -301,8 +291,7 @@ Keep TIER standalone and paired with its Coverage % so it stays diagnostic.</p>
 <p>TIER is a trailing efficiency diagnostic on the AI-cost axis — an axis DORA,
 SPACE, and DX Core 4 do not measure. Run it <em>beside</em> your framework as a
 complement. Use it to coach the practice, not the person. Never fuse it into a
-single performance number, never rank people or cohorts on it, and never use
-it in a performance review.</p>
+single performance number or rank people or cohorts on it. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</p>
 </blockquote>
 <p>See <a href="how-it-works.html" rel="nofollow">How TIER Works Today</a> for the full measurement model and
 its grounding in the code.</p>

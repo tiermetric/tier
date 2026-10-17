@@ -42,8 +42,8 @@ func seedQualityOutcome(t *testing.T, db *store.DB, dev, issue, sha string) int6
 	return o.ID
 }
 
-// TestGetOutcomes_CSVIncludesPushDay proves push_day is the appended (#242) LAST
-// CSV column, carries the UTC day for a push row, and is "" for a PR row.
+// TestGetOutcomes_CSVIncludesPushDay proves push_day keeps its appended (#242)
+// position, carries the UTC day for a push row, and is "" for a PR row.
 func TestGetOutcomes_CSVIncludesPushDay(t *testing.T) {
 	h, db := newTestHandler(t)
 	seedPushOutcome(t, db, "alice", "issue-push", "acme/app", "2026-05-04",
@@ -60,9 +60,9 @@ func TestGetOutcomes_CSVIncludesPushDay(t *testing.T) {
 		t.Fatalf("parse CSV: %v", err)
 	}
 	hdr := records[0]
-	// push_day is appended, so it MUST be the last column.
-	if hdr[len(hdr)-1] != "push_day" {
-		t.Errorf("last outcomes CSV column = %q, want push_day (appended #242)", hdr[len(hdr)-1])
+	// The historical push_day position stays fixed as new columns are appended.
+	if hdr[16] != "push_day" {
+		t.Errorf("last outcomes CSV column = %q, want push_day (appended #242)", hdr[16])
 	}
 	col := func(row []string, name string) string {
 		for i, c := range hdr {

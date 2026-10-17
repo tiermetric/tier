@@ -111,7 +111,7 @@ func TestLatestOutcomeByIssue_ScopedToRepo(t *testing.T) {
 
 	// bob's row is NEWER. Pre-#231, ORDER BY id DESC handed it back for any lookup
 	// of issue-42 — so a revert in acme/app would have penalised bob.
-	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-42")
+	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-42", ts.Add(time.Second))
 	if err != nil || !ok {
 		t.Fatalf("lookup acme/app: ok=%v err=%v", ok, err)
 	}
@@ -119,7 +119,7 @@ func TestLatestOutcomeByIssue_ScopedToRepo(t *testing.T) {
 		t.Fatalf("acme/app revert resolved to %s/%s — the penalty would land on the wrong repo", got.Repo, got.Developer)
 	}
 
-	got, ok, err = db.LatestOutcomeByIssue(ctx, "acme/web", "issue-42")
+	got, ok, err = db.LatestOutcomeByIssue(ctx, "acme/web", "issue-42", ts.Add(time.Second))
 	if err != nil || !ok {
 		t.Fatalf("lookup acme/web: ok=%v err=%v", ok, err)
 	}
@@ -145,7 +145,7 @@ func TestLatestOutcomeByIssue_TolerantTowardLegacyRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-9")
+	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-9", ts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestLatestOutcomeByIssue_ExactRepoBeatsSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-5")
+	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-5", ts.Add(time.Second))
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
@@ -215,7 +215,7 @@ func TestLatestOutcomeByIssue_SameRepoRecencyIsInsertionOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-9")
+	got, ok, err := db.LatestOutcomeByIssue(ctx, "acme/app", "issue-9", now.Add(time.Hour))
 	if err != nil || !ok {
 		t.Fatalf("lookup: ok=%v err=%v", ok, err)
 	}

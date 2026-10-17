@@ -147,7 +147,7 @@ func serveAnonymizedJSON(t *testing.T, dbPath, target string) []byte {
 	return serveJSONAs(t, dbPath, target, scoring.AggregationTeam, scoring.DefaultKAnonymity)
 }
 
-func serveJSONAs(t *testing.T, dbPath, target string, mode scoring.AggregationMode, k int) []byte {
+func serveJSONAs(t *testing.T, dbPath, target string, mode scoring.AggregationMode, k int, opts ...api.Option) []byte {
 	t.Helper()
 	db, err := store.Open(dbPath)
 	if err != nil {
@@ -158,7 +158,7 @@ func serveJSONAs(t *testing.T, dbPath, target string, mode scoring.AggregationMo
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// WithUnsealedRecompute: an anonymised live-window manifest, as a tierd
 	// before #913's sealed months served it, is what verify-report still reads.
-	h := api.New(db, logger, "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit), api.WithUnsealedRecompute())
+	h := api.New(db, logger, "", nil, version, api.RateLimitConfig{}, append([]api.Option{api.WithCommit(commit), api.WithUnsealedRecompute()}, opts...)...)
 	if mode.Anonymized() {
 		h.SetAggregation(mode, k)
 	}
@@ -192,12 +192,12 @@ func serveJSONAs(t *testing.T, dbPath, target string, mode scoring.AggregationMo
 // #715 pins the INPUTS and stops, and the maintainer's ask has a third clause ("and it
 // came up with THESE numbers"). An operator does the same two-request merge; the
 // command's usage text says so.
-func serveFixtureManifest(t *testing.T, f verifyFixture, query string) verifyFixture {
+func serveFixtureManifest(t *testing.T, f verifyFixture, query string, opts ...api.Option) verifyFixture {
 	t.Helper()
 	f.manifestPath = filepath.Join(filepath.Dir(f.dbPath), "manifest.json")
 
-	manifestBytes := serveJSON(t, f.dbPath, "/api/v1/report_manifest?"+query)
-	scores := serveJSON(t, f.dbPath, "/api/v1/scores?"+query)
+	manifestBytes := serveJSONAs(t, f.dbPath, "/api/v1/report_manifest?"+query, scoring.AggregationDeveloper, 0, opts...)
+	scores := serveJSONAs(t, f.dbPath, "/api/v1/scores?"+query, scoring.AggregationDeveloper, 0, opts...)
 
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(manifestBytes, &doc); err != nil {
@@ -299,7 +299,7 @@ func dimLine(t *testing.T, report, dim string) (status, detail string) {
 		// renders as UNKNOWN, and a failure that NAMES it ("status = UNKNOWN, want
 		// CHANGED") says what happened, where "carries no recognised status token"
 		// only says the line could not be parsed.
-		for _, tok := range []string{"NOT CHECKED", "NOT PINNED", "UNCHANGED", "CHANGED", "DRIFTED", "UNKNOWN"} {
+		for _, tok := range []string{"NOT CHECKED", "NOT PINNED", "UNCHANGED", "CHANGED", "DRIFTED", "INFO", "UNKNOWN"} {
 			if strings.HasPrefix(rest, tok) {
 				return tok, strings.TrimSpace(strings.TrimPrefix(rest, tok))
 			}
@@ -595,6 +595,7 @@ func TestVerifyReport_CannotCheckIsNeverADivergence(t *testing.T) {
 	// id sequence. Leaving them in would make this manifest one that pins the data
 	// after all, and the arm would be asserting the opposite of what it claims.
 	constantsOnly.EventsDigest, constantsOnly.OutcomesDigest = nil, nil
+	constantsOnly.CorrectionsDigest, constantsOnly.OutcomeCounts = nil, nil
 	constantsOnlyPath := filepath.Join(dir, "constants-only.json")
 	writeManifest(t, constantsOnlyPath, constantsOnly)
 
@@ -805,7 +806,7 @@ func TestVerifyReport_MissingWatermarkIsNotUnchanged(t *testing.T) {
 // fail it too.
 //
 // ⛔ THE `NOT CHECKED` ARM MUST STAY REACHABLE. It is the rollback seam for a
-// future tierdig2 — the same role the manifest_schema tag plays one level up —
+// future digest scheme — the same role the manifest_schema tag plays one level up —
 // and deleting it would make every archived manifest under an older scheme read
 // as a forgery rather than as unreadable.
 func TestVerifyReport_DigestHasThreeDistinctOutcomes(t *testing.T) {
@@ -861,7 +862,7 @@ func TestVerifyReport_DigestHasThreeDistinctOutcomes(t *testing.T) {
 	t.Run("not checked: an unknown scheme is neither agreement nor divergence", func(t *testing.T) {
 		f := newVerifyFixture(t)
 		m := readFixtureManifest(t, f.manifestPath)
-		m.EventsDigest = &manifestDigest{Value: "tierdig2:" + strings.Repeat("cd", 32), Rows: 3}
+		m.EventsDigest = &manifestDigest{Value: "tierdig999:" + strings.Repeat("cd", 32), Rows: 3}
 		m.OutcomesDigest = nil
 		path := filepath.Join(filepath.Dir(f.manifestPath), "future-digest.json")
 		writeManifest(t, path, m)
@@ -1991,4 +1992,13 @@ func TestVerifyReport_LedgerElsewhereIsNotADivergence(t *testing.T) {
 			t.Errorf("an input moved while the numbers held, and the headline did not say so:\n%s", out)
 		}
 	})
+}
+
+func TestVerifyReport_CaptureEngineDiagnosticsReproduce(t *testing.T) {
+	f := serveFixtureManifest(t, seedVerifyDB(t), "since="+verifyWindowSince+"&until="+verifyWindowUntil,
+		api.WithCaptureEngines(map[string]bool{"claude-code": true}))
+	code, out, errb := runVerify(t, f.manifestPath, "--db", f.dbPath)
+	if code != rcReproduced {
+		t.Fatalf("rc=%d, want rcReproduced; stdout=%s stderr=%s", code, out, errb)
+	}
 }

@@ -1,6 +1,6 @@
 # RPT-2026: Complete Reference Price Table
 ## TIER Framework — Token Impact & Efficiency Ratio
-**Narrative companion to `internal/store/prices.yaml`** — describing table `version: 12`, `effective_date: 2026-10-02`.
+**Narrative companion to `internal/store/prices.yaml`** — describing the table embedded in TIER v0.6.0, `version: 14`, `effective_date: 2026-10-12`, with 93 models.
 
 **Status:** Published reference. The authoritative, machine-readable table is `internal/store/prices.yaml`, which `tierd` embeds at build time and which this document describes. **Where the two disagree, the YAML is correct** — it is the single source of truth, and this page carries no independent version number precisely so the two cannot drift apart.
 
@@ -8,7 +8,7 @@
 
 **Purpose:** Comprehensive, research-verified reference pricing for every major AI model used in software development, effective for all TIER score calculations during calendar year 2026.
 
-**Data sourced:** Base rows captured March 26, 2026 from official provider pricing pages and verified third-party aggregators; subsequent revisions through `version: 12` (2026-10-02) added and re-verified individual rows — `version: 8` (#461) added the GPT-5.6 Codex family (`gpt-5.6-sol` $5/$30, `gpt-5.6-terra` $2.50/$15, `gpt-5.6-luna` $1/$6, OpenAI standard-tier list); `version: 9` added `claude-opus-5` at $5/$25, verified against the vendor catalog rather than inferred from the 4.x pattern; `version: 10` (#786) added `claude-fable-5-1`, `claude-mythos-5-1`, `claude-opus-5-5`, the GPT-6 family and the Z.ai GLM-5.3 rows under a new `zai` provider, and corrected `claude-sonnet-5` from $3/$15 to $2/$10; `version: 11` (#895) added Meta's Muse Spark models (`muse-spark-1.3`, `-1.2`, `-1.1` and the `-contributor` tier of 1.3 and 1.2) under a new `meta` provider, from Meta's own pricing page read 2026-09-27; `version: 12` (#1047) added `claude-sonnet-5-5` at $2/$10 with the standard Anthropic cache rates, from Anthropic's pricing page read 2026-10-02. Per the table's own versioning rule, `effective_date` stamps when the table was last revised **as a whole** — it is not a guarantee that every row was re-captured on that date.
+**Data sourced:** Base rows captured March 26, 2026 from official provider pricing pages and verified third-party aggregators; subsequent revisions through `version: 14` (2026-10-12) added and re-verified individual rows — `version: 8` (#461) added the GPT-5.6 Codex family (`gpt-5.6-sol` $5/$30, `gpt-5.6-terra` $2.50/$15, `gpt-5.6-luna` $1/$6, OpenAI standard-tier list); `version: 9` added `claude-opus-5` at $5/$25, verified against the vendor catalog rather than inferred from the 4.x pattern; `version: 10` (#786) added `claude-fable-5-1`, `claude-mythos-5-1`, `claude-opus-5-5`, the GPT-6 family and the Z.ai GLM-5.3 rows under a new `zai` provider, and corrected `claude-sonnet-5` from $3/$15 to $2/$10; `version: 11` (#895) added Meta's Muse Spark models (`muse-spark-1.3`, `-1.2`, `-1.1` and the `-contributor` tier of 1.3 and 1.2) under a new `meta` provider, from Meta's own pricing page read 2026-09-27; `version: 12` (#1047) added `claude-sonnet-5-5` at $2/$10 with the standard Anthropic cache rates, from Anthropic's pricing page read 2026-10-02; `version: 13` (#1202) added `claude-haiku-5-5` at $0.10/$0.50 through 100K prompt tokens and $0.50/$2.50 above, plus `gpt-6.1-sol` at $2/$10 with $0.10 cached input, on 2026-10-12; `version: 14` (#1206) changed only `claude-sonnet-5-5` cache reads to $0.10/M (0.05×), reflecting Anthropic's price change between the 2026-10-02 and 2026-10-12 reads. Per the table's own versioning rule, `effective_date` stamps when the table was last revised **as a whole** — it is not a guarantee that every row was re-captured on that date.
 
 ---
 
@@ -57,8 +57,9 @@ Primary workhorse models for day-to-day coding, code review, and feature impleme
 | `claude-sonnet-4.5` | Anthropic | 3.00 | 15.00 | 200K | Anthropic updated Sonnet. 1M beta at $6/$22.50. |
 | `claude-sonnet-4.6` | Anthropic | 3.00 | 15.00 | 1M | Anthropic latest Sonnet. Full 1M at standard rate. |
 | `claude-sonnet-5` | Anthropic | 2.00 | 10.00 | 1M | Anthropic current Sonnet. v7–v9 carried $3/$15; Anthropic made the $2/$10 introductory price standard and cancelled the 2026-09-01 increase, so v10 (#786) corrects it. |
-| `claude-sonnet-5-5` | Anthropic | 2.00 | 10.00 | 1M | Sonnet 5.5. Cache read $0.20 (0.1×); writes $2.50 (5m) / $4 (1h): the Anthropic defaults. Its own row: `NormalizeModel` does not collapse it onto `claude-sonnet-5`. v12 (#1047), Anthropic pricing page read 2026-10-02. |
+| `claude-sonnet-5-5` | Anthropic | 2.00 | 10.00 | 1M | Sonnet 5.5. Cache read $0.10 (0.05×); writes $2.50 (5m) / $4 (1h) inherit the Anthropic defaults. Its own row: `NormalizeModel` does not collapse it onto `claude-sonnet-5`. Added in v12 (#1047); v14 (#1206) updates cache reads from $0.20 (0.1×) after Anthropic's pricing page changed between the 2026-10-02 and 2026-10-12 reads. |
 | `gpt-6-sol` | OpenAI | 2.00 | 10.00 | — | GPT-6 standard. Cache read $0.20 (0.1×), cache write $2.50 (1.25×). v10 (#786). |
+| `gpt-6.1-sol` | OpenAI | 2.00 | 10.00 | — | OpenAI announcement: standard API prices; cached input $0.10 (0.05×), writes $2.50 (1.25×) are **INFERRED** from `gpt-6-sol`, since the announcement gives no write rate. Re-check OpenAI's pricing on 2026-11-21 (third parties call these rates promotional through that date); no time-based tier. v13 (#1202). |
 | `muse-spark-1.3`, `muse-spark-1.2`, `muse-spark-1.1` | Meta | 1.25 | 4.25 | — | Meta Muse Spark. Cached input $0.15 (0.12×); cache writes bill at the input rate (no published write rate); reasoning tokens are part of output. Priced per token at list, also on a Muse subscription (operator ruling, #895). Web search ($2.50 per 1,000 queries) is not a token charge and is not encoded. v11. |
 | `glm-5.3` | Z.ai | 1.40 | 4.40 | — | Z.ai GLM-5.3. Cache read $0.26; cache writes bill at the input rate (no published write rate). Priced per token at list, also on the coding plan (operator ruling, #786). v10. |
 | `gpt-4o` | OpenAI | 2.50 | 10.00 | 128K | OpenAI established workhorse. |
@@ -85,6 +86,7 @@ Cost-optimized models for high-volume tasks, simple code completions, test gener
 
 | `model_family` | Provider | Input $/M | Output $/M | Context | Notes |
 |----------------|----------|-----------|------------|---------|-------|
+| `claude-haiku-5-5` | Anthropic | 0.10 | 0.50 | 1M | Through 100K prompt tokens; >100K: $0.50/$2.50, encoded via the long-context tier. Cache read $0.01 through 100K, $0.05 above (0.1×); reads and writes inherit Anthropic defaults, per its [pricing](https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching) and [caching docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching). v13 (#1202). |
 | `claude-haiku-4.5` | Anthropic | 1.00 | 5.00 | 200K | Anthropic current small model. |
 | `claude-haiku-3.5` | Anthropic | 0.80 | 4.00 | 200K | Anthropic legacy small. Still widely used. |
 | `gpt-4o-mini` | OpenAI | 0.15 | 0.60 | 128K | OpenAI legacy cost-optimized. |
@@ -489,13 +491,15 @@ Per-model overrides in the current table:
 | deepseek-r1 | `cache_read_mult` | **0.0509×** | Absolute $0.028/M cache-hit ÷ $0.55/M input. |
 | claude-fable-5-1, claude-mythos-5-1 | `cache_read_mult` | **0.025×** | $0.25/M ÷ $10/M. Writes inherit the Anthropic defaults. |
 | claude-opus-5-5 | `cache_read_mult` | **0.05×** | $0.20/M ÷ $4/M. Writes inherit the Anthropic defaults. |
+| claude-sonnet-5-5 | `cache_read_mult` | **0.05×** | $0.10/M ÷ $2/M. Writes inherit the Anthropic defaults. v14 (#1206), pricing page read 2026-10-12. |
 | gpt-6-astra, gpt-6-sol, gpt-6-luna | `cache_read_mult` / `cache_write_5m_mult` / `cache_write_1h_mult` | **0.1×** / **1.25×** / **1.25×** | OpenAI publishes one write rate, so both write classes carry it. No OpenAI capture path fills a write bucket today. |
+| gpt-6.1-sol | `cache_read_mult` / `cache_write_5m_mult` / `cache_write_1h_mult` | **0.05×** / **1.25×** / **1.25×** | Cached input $0.10/M; both 1.25× write multipliers are **INFERRED** from `gpt-6-sol`. Re-check OpenAI's pricing on 2026-11-21 (third parties call these rates promotional through that date). |
 | glm-5.3 | `cache_read_mult` | **0.18571428571428572×** | $0.26/M ÷ $1.40/M, the nearest float64. |
 | glm-5.3-flash | `cache_read_mult` | **0.2×** | $0.03/M ÷ $0.15/M. |
 | muse-spark-1.3, muse-spark-1.2, muse-spark-1.1 | `cache_read_mult` | **0.12×** | $0.15/M ÷ $1.25/M. |
 | muse-spark-1.3-contributor, muse-spark-1.2-contributor | `cache_read_mult` | **0.02×** | $0.002/M ÷ $0.10/M. |
 
-Gemini's `cachedContentTokenCount` is a subset of `promptTokenCount` (carved out of Input, same shape as OpenAI's `cached_tokens`); `thoughtsTokenCount` is reasoning usage billed at the output rate and folded into Output (#122). The GPT-5.x entries **are in the shipped table** (`prices.yaml`, added in v5 per #135 and present through the current v12) and each carries an explicit `cache_read_mult: 0.10` — the 5-era discount differs from the 4-era 0.5× default (which the `gpt-4.x` / `o`-series rows inherit).
+Gemini's `cachedContentTokenCount` is a subset of `promptTokenCount` (carved out of Input, same shape as OpenAI's `cached_tokens`); `thoughtsTokenCount` is reasoning usage billed at the output rate and folded into Output (#122). The GPT-5.x entries **are in the v0.6.0 table** (`prices.yaml`, added in v5 per #135 and present through the current v14) and each carries an explicit `cache_read_mult: 0.10` — the 5-era discount differs from the 4-era 0.5× default (which the `gpt-4.x` / `o`-series rows inherit).
 
 Sources:
 - Anthropic: https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching (5m=1.25×, 1h=2.0×, hit=0.1×).
@@ -513,7 +517,7 @@ The 1h TTL premium pays off as a steady-state caching strategy when the cache is
 
 ## 8. Data Sources
 
-Base rows verified March 26, 2026, with later revisions through `version: 12` (2026-10-02), from the following authoritative sources:
+Base rows verified March 26, 2026, with later revisions through `version: 14` (2026-10-12), from the following authoritative sources:
 
 - [Anthropic Official Pricing](https://platform.claude.com/docs/en/about-claude/pricing)
 - [OpenAI Official Pricing](https://openai.com/api/pricing/) and [Developer Docs](https://developers.openai.com/api/docs/pricing)
@@ -527,6 +531,8 @@ Base rows verified March 26, 2026, with later revisions through `version: 12` (2
 - [PricePerToken.com](https://pricepertoken.com) (third-party aggregator, cross-verified)
 - [OpenRouter](https://openrouter.ai) (provider marketplace pricing)
 - [Z.ai model pages](https://docs.z.ai/guides/overview/pricing) (GLM-5.3 / GLM-5.3 Flash, v10)
+- [OpenAI GPT-6.1 Sol announcement](https://openai.com/index/introducing-gpt-6-1-sol/) (v13; standard API prices)
+- [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) (v13 Haiku 5.5 inherits the 0.1× read and 1.25×/2.0× write defaults; rates also listed on the official pricing page)
 - [Meta Muse Spark pricing](https://dev.meta.ai/docs/pricing-rate-limits) (Muse Spark 1.1–1.3 and Contributor tier, v11; the page is undated, read 2026-09-27)
 
 ---

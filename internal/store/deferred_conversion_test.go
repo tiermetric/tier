@@ -52,6 +52,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/tiermetric/tier/internal/corrects"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -102,7 +103,136 @@ type convertedSite struct {
 }
 
 func convertedSites() []convertedSite {
+	seedEnabledProjection := func(t *testing.T, db *DB) {
+		t.Helper()
+		projectionFixture(t, db, true)
+		if err := db.ConfigureCorrectionScoring(context.Background(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return []convertedSite{
+		{name: "ConfigureCorrectionScoring", bounded: false,
+			seed: func(t *testing.T, db *DB) {
+				projectionFixture(t, db, true)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_policy WHERE scoring_enabled=0 AND rubric_version=1 AND rule_version='legacy-v1'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations`, 0)
+			},
+			call: func(ctx context.Context, db *DB) error {
+				return db.ConfigureCorrectionScoring(ctx, true)
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_policy WHERE scoring_enabled=1 AND rubric_version=2 AND rule_version='event3-v2'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations WHERE rule_version='event3-v1' AND provisional=1`, 2)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations a JOIN outcomes o ON o.id=a.outcome_id WHERE o.pr_number=10 AND a.allocated_points='13/4'`, 1)
+			}},
+		{name: "InsertOutcome", bounded: false, seed: seedEnabledProjection,
+			call: func(ctx context.Context, db *DB) error {
+				inserted, err := db.InsertOutcome(ctx, Outcome{
+					Developer: "carol", Repo: "acme/app", IssueID: "issue-30", PRNumber: 30,
+					MergeCommitSHA: "census-insert", Weight: 3, Quality: 1,
+					Timestamp: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
+				})
+				if err == nil && !inserted {
+					return fmt.Errorf("InsertOutcome inserted nothing")
+				}
+				return err
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM outcomes WHERE merge_commit_sha='census-insert'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations a JOIN outcomes o ON o.id=a.outcome_id WHERE o.merge_commit_sha='census-insert' AND a.allocated_points='3/1'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations`, 3)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_policy WHERE scoring_enabled=1 AND rubric_version=2 AND rule_version='event3-v2'`, 1)
+			}},
+		{name: "UpsertPushOutcome", bounded: false, seed: seedEnabledProjection,
+			call: func(ctx context.Context, db *DB) error {
+				at := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+				inserted, err := db.UpsertPushOutcome(ctx, mkPush("census-push", "carol", at), "2026-10-02")
+				if err == nil && !inserted {
+					return fmt.Errorf("UpsertPushOutcome inserted nothing")
+				}
+				return err
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM outcomes WHERE issue_id='census-push' AND source='push' AND push_day='2026-10-02'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations a JOIN outcomes o ON o.id=a.outcome_id WHERE o.issue_id='census-push' AND a.allocated_points='1/2'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations`, 3)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_policy WHERE scoring_enabled=1 AND rubric_version=2 AND rule_version='event3-v2'`, 1)
+			}},
+		{name: "mutateCorrection", bounded: false,
+			seed: func(t *testing.T, db *DB) { projectionFixture(t, db, false) },
+			call: func(ctx context.Context, db *DB) error {
+				var relation int64
+				if err := db.db.QueryRowContext(ctx, `SELECT id FROM corrective_relations`).Scan(&relation); err != nil {
+					return err
+				}
+				return db.ConfirmCorrection(ctx, CorrectionCommand{
+					RelationID: relation, Revision: 1, Actor: "operator-login", Role: "operator",
+					Review: ptrReview(projectionReview()),
+				})
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM corrective_relations WHERE state='confirmed' AND revision=2`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_audit WHERE action='confirm' AND revision=2 AND actor='operator-login'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_assessments WHERE basis='reviewed' AND revision=2`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations WHERE rule_version='event3-v2' AND provisional=0`, 2)
+			}},
+		{name: "ReconcileCorrectionChain", bounded: false,
+			seed: func(t *testing.T, db *DB) { projectionFixture(t, db, true) },
+			call: func(ctx context.Context, db *DB) error {
+				var outcome int64
+				if err := db.db.QueryRowContext(ctx, `SELECT id FROM outcomes WHERE pr_number=20`).Scan(&outcome); err != nil {
+					return err
+				}
+				return db.ReconcileCorrectionChain(ctx, outcome)
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_allocations`, 2)
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_assessments WHERE basis='provisional'`, 1)
+			}},
+		{name: "RecordCorrectionAssessment", bounded: false,
+			seed: func(t *testing.T, db *DB) { projectionFixture(t, db, false) },
+			call: func(ctx context.Context, db *DB) error {
+				var relation int64
+				if err := db.db.QueryRowContext(ctx, `SELECT id FROM corrective_relations`).Scan(&relation); err != nil {
+					return err
+				}
+				return db.RecordCorrectionAssessment(ctx, relation, 1, projectionReview())
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM correction_assessments WHERE basis='reviewed'`, 1)
+			}},
+		{name: "InsertTokenEvent", bounded: false, seed: func(*testing.T, *DB) {}, call: func(ctx context.Context, db *DB) error { return db.InsertTokenEvent(ctx, basisEvent("bounded-single")) }, verify: func(t *testing.T, db *DB) {
+			assertCount(t, db, `SELECT COUNT(*) FROM token_events WHERE idempotency_key='bounded-single'`, 1)
+		}},
+		{name: "InsertTokenEventsWithResult", bounded: true, seed: func(*testing.T, *DB) {}, call: func(ctx context.Context, db *DB) error {
+			_, err := db.InsertTokenEventsWithResult(ctx, []TokenEvent{basisEvent("bounded-bulk")})
+			return err
+		}, verify: func(t *testing.T, db *DB) {
+			assertCount(t, db, `SELECT COUNT(*) FROM token_events WHERE idempotency_key='bounded-bulk'`, 1)
+		}},
+		{name: "RepairPricingBasis", bounded: false, seed: func(t *testing.T, db *DB) {
+			e := basisEvent("bounded-repair")
+			if err := db.InsertTokenEvent(t.Context(), e); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.db.Exec(`UPDATE token_events SET cost_micro=1 WHERE idempotency_key='bounded-repair'`); err != nil {
+				t.Fatal(err)
+			}
+		}, call: func(ctx context.Context, db *DB) error {
+			_, err := db.RepairPricingBasis(ctx, ActivePriceTableInfo().Version, true)
+			return err
+		}, verify: func(t *testing.T, db *DB) {
+			assertCount(t, db, `SELECT COUNT(*) FROM pricing_observation_audit WHERE kind='original_basis_repair'`, 1)
+		}},
+
+		{name: "RecordCorrectionDeclaration", bounded: false, seed: func(*testing.T, *DB) {},
+			call: func(ctx context.Context, db *DB) error {
+				_, err := db.RecordCorrectionDeclaration(ctx, Outcome{Repo: "acme/tier", PRNumber: 1235, MergeCommitSHA: "e3-child", Developer: "alice"}, corrects.Parse("Corrects: #1234"), "evidence", "test")
+				return err
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM corrective_relations WHERE child_developer='alice'`, 1)
+			}},
 		{
 			// #913: the first read after a period's grace lag seals it.
 			name:    "SealReport",
@@ -562,7 +692,6 @@ func TestConvertedSitesRejectADeferredRegression(t *testing.T) {
 	defer release()
 
 	// The pre-#668 shape, verbatim: DEFERRED begin, read, then write.
-	start := time.Now()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("deferred begin: %v", err)
@@ -576,6 +705,9 @@ func TestConvertedSitesRejectADeferredRegression(t *testing.T) {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM org_hierarchy`).Scan(&prevOrg); err != nil {
 		t.Fatalf("deferred read: %v", err)
 	}
+	// Time the write alone: the ceiling is about the read-to-write upgrade failing on
+	// contact, and timing the begin and read too made -race runs trip it (#1293).
+	start := time.Now()
 	_, werr := tx.ExecContext(ctx, `
 		INSERT INTO org_hierarchy (developer, team, division, org)
 		VALUES ('regression', 'core', 'platform', 'acme')
@@ -652,7 +784,7 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		// #598 / #346 / #610 — request-path writers converted before #668.
 		"UpsertDeveloperAlias": true, "EraseDeveloper": true,
 		// #913: sealing a closed period on its first read.
-		"SealReport": true,
+		"SealReport": true, "InsertTokenEventsWithResult": true,
 		// #913-D6: `tierd seal --skip` records a permanent gap.
 		"RecordSealedGap": true,
 		// #914: an alias delete appends membership rows; covered by
@@ -667,6 +799,23 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		"EndMembership":               true,
 	}
 	wantUnbounded := map[string]bool{
+		// #1235 U4: serve startup reads complete correction chains, writes their
+		// projections, then stamps and validates the policy in one transaction.
+		// UNBOUNDED: startup has no request deadline; convertedSites covers it.
+		"ConfigureCorrectionScoring": true,
+		// #1235 U4: formerly single-statement outcome writers now also read the
+		// enabled policy and correction components before writing projections
+		// and the resolved policy stamp. UNBOUNDED, like the existing outcome
+		// delivery writers below; convertedSites verifies both the new outcome
+		// and its enabled projection rather than exercising the default-off path.
+		"InsertOutcome": true, "UpsertPushOutcome": true,
+		// #1235 U2: local operator CLI lifecycle mutations read the revision,
+		// replay evidence and state before writing the disposition, review, audit
+		// and projection. UNBOUNDED: no HTTP caller; convertedSites covers it.
+		"mutateCorrection": true,
+		// #1235: webhook-delivery writer, tested by the contention table above.
+		"RecordCorrectionDeclaration": true,
+		"ReconcileCorrectionChain":    true, "RecordCorrectionAssessment": true,
 		// Open()-time migrations — never a request.
 		"backfillMembershipEndedReason":   true,
 		"dropActualSpendNonNegativeCheck": true, "migrateCacheWriteSplit": true,
@@ -678,7 +827,7 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		"SeedDemoMembershipBaseline": true,
 		"recomputeKnownSourceCosts":  true,
 		// Operator CLI commit paths.
-		"Reprice": true, "RepairRepo": true,
+		"Reprice": true, "RepairRepo": true, "InsertTokenEvent": true, "RepairPricingBasis": true,
 		// #668 background sites.
 		"ReconcileSubscriptionFee": true, "PostSubscriptionFeeIfUnposted": true,
 		"UpdateQuality": true,
@@ -688,6 +837,8 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		// cap would lose a merged PR's outcome that main's single-statement write
 		// waited the DSN's busy_timeout for.
 		"RecordPushCommit": true, "RecordPROutcome": true,
+		// Shared by insertion-time exclusions and approved historical apply.
+		"excludePROutcome": true,
 		// #863 — the webhook's quality write, UNBOUNDED for the same reason.
 		"UpdateQualityForOutcome": true,
 		// #673 — the two retention DELETEs in PruneWebhookPayloads share one
@@ -716,7 +867,20 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 	// snapshots), and no census can see a call that was never written. This
 	// catches the other half — a new caller arriving without its bound argument.
 	wantRead := map[string]bool{
-		"ExportDeveloper": true,
+		// #1235 U2: each outcome result combines its base rows with batched
+		// correction projections. Both must describe one snapshot. Window and
+		// developer reads are caller-bounded; ListOutcomes clamps the page size
+		// and projection queries use batches of at most 400 outcomes. Read-only,
+		// so these do not belong in convertedSites().
+		"AllOutcomesWindow": true, "DeveloperOutcomes": true, "ListOutcomes": true,
+		// #1235 U2: operator detail combines relation, assessment, component
+		// allocation and audit reads under one snapshot, each capped at 1001
+		// rows (rejecting more than 1000). Read-only; no writer contention arm.
+		"CorrectionDetail": true,
+		// Candidate cardinality and legacy diagnostics must share one snapshot.
+		// The LIMIT 2 probe bounds the common path; ambiguity reads the cohort.
+		"RevertIssueCandidates": true,
+		"ExportDeveloper":       true,
 		// #715. A multi-statement READ whose whole product is a claim about ONE
 		// INSTANT: six ledger positions that must describe a single database
 		// state, or the manifest stamps a moment that never happened. Classified
@@ -758,6 +922,9 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		// inside one snapshot, so a write landing mid-computation cannot tear the
 		// body the seal pins. NOT in convertedSites(): it is a read, not a
 		// read-then-write.
+		// #1235 U4: CorrectionScoringPolicy reuses this site to pair the policy
+		// stamp with its allocation-completeness check. Also a read-only snapshot,
+		// so it needs no writer contention arm or separate helper inventory entry.
 		"ReadSnapshot": true,
 	}
 
@@ -787,8 +954,10 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		}
 	}
 
-	// And every #668 site must be IN the table.
+	// And every #668 site and the U2/U4 writers must be IN the table.
 	for _, name := range []string{
+		"ConfigureCorrectionScoring", "InsertOutcome", "UpsertPushOutcome",
+		"mutateCorrection",
 		"UpsertHierarchiesWithResult", "EndMembership", "UpdateQualityForOutcome",
 		"ReconcileSubscriptionFee", "PostSubscriptionFeeIfUnposted", "UpdateQuality",
 	} {
@@ -800,7 +969,7 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("#668 converted %q but convertedSites() does not list it — that site has NO contention coverage and nothing else would have told you", name)
+			t.Errorf("converted %q but convertedSites() does not list it — that site has NO contention coverage and nothing else would have told you", name)
 		}
 	}
 }

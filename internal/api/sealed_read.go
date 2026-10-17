@@ -256,6 +256,12 @@ func (h *Handler) serveSealedScores(w http.ResponseWriter, r *http.Request) {
 		h.sealedReadFailed(w, p, err)
 		return
 	}
+	rep, err := h.store.SealedReport(r.Context(), p.Kind.String(), p.Start)
+	if err != nil {
+		h.sealedReadFailed(w, p, err)
+		return
+	}
+	sealDisclosureOf(rep).setHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(headerSealedPeriod, p.String())
 	w.Header().Set(headerSealedAt, sealedAt.UTC().Format(time.RFC3339))
@@ -305,7 +311,8 @@ type sealedManifestJSON struct {
 	Commit         string           `json:"commit,omitempty"`
 	// ConfigGap is present when the current config differs from the one this
 	// month was sealed under (#913-D1 ruling A): the month keeps its sealed config.
-	ConfigGap *sealedConfigGapJSON `json:"config_gap,omitempty"`
+	ConfigGap      *sealedConfigGapJSON `json:"config_gap,omitempty"`
+	SealDisclosure sealDisclosureJSON   `json:"seal_disclosure"`
 	SealStallJSON
 }
 
@@ -350,6 +357,7 @@ func (h *Handler) serveSealedManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := sealedManifestJSON{
+		SealDisclosure: sealDisclosureOf(rep),
 		ManifestSchema: SealedManifestSchema,
 		Period:         p.String(),
 		PeriodStart:    rep.PeriodStart.UTC().Format(time.RFC3339),

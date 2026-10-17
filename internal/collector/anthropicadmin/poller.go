@@ -24,12 +24,10 @@ const (
 	// which provider's org usage this poller records (#854).
 	Provider = provider
 
-	// settlementLag is how far in the past a day bucket's END must be before TIER
-	// ingests it. 24h: only once both the realtime capture and the provider's own
-	// aggregate have finalized is the remainder computed ONCE against a stable pair
-	// of totals. Ingesting an open day would fight the MAX-on-conflict upsert — a
-	// remainder that later SHRINKS (capture catching up) would be ignored, freezing
-	// the stale larger value (store insertTokenEventSQL).
+	// settlementLag waits 24h after the bucket ends before capturing its
+	// remainder. This allows delayed capture to arrive, but does not prove
+	// completeness. Completed poller rows are frozen on retry; later provider
+	// totals or capture cannot silently change their counts, cost or basis.
 	settlementLag = 24 * time.Hour
 
 	// DefaultPollInterval is used when config omits poll_interval. The config floor
@@ -287,6 +285,18 @@ func (p *Poller) buildRemainderEvents(ctx context.Context, buckets []usageBucket
 		if err != nil {
 			return nil, 0, false, fmt.Errorf("stored poll day %s: %w", day.Format("2006-01-02"), err)
 		}
+		// Pricing cutover is independent of the subtraction baseline. Existing
+		// days retain their pricing rule, while newly started days use base rates.
+		aggregate := len(stored) == 0
+		if policy, ok := p.store.(interface {
+			PollerUsesAggregatePricing(context.Context, time.Time, string) (bool, error)
+		}); ok {
+			aggregate, err = policy.PollerUsesAggregatePricing(ctx, day, collector.SourceAnthropicAdmin)
+			if err != nil {
+				return nil, 0, false, err
+			}
+		}
+
 		captured, err := p.store.CapturedTokensByDayModel(ctx, day, provider)
 		if err != nil {
 			return nil, 0, false, fmt.Errorf("captured tokens for %s: %w", day.Format("2006-01-02"), err)
@@ -330,41 +340,16 @@ func (p *Poller) buildRemainderEvents(ctx context.Context, buckets []usageBucket
 			if rem == (store.CostUsage{}) {
 				continue // fully captured already — nothing to add
 			}
-			// Host is deliberately left empty (the store normalizes it to the
-			// unknown sentinel): the org usage report bills the ACCOUNT and names
-			// no serving host, so claiming one would forge a host-qualified
-			// pricing key. The empty host prices identically to the old model-only
-			// ComputeCost, so this recovers the discarded billing_mode WITHOUT
-			// moving cost (#525).
-			//
-			// Scope note, MEASURED rather than assumed: every model reaching this
-			// point is an exact price-table hit — the ProviderOf check above
-			// `continue`s past anything unpriced, so the size-class fallback is
-			// UNREACHABLE from this producer and no row here can be a self-hosted
-			// guess. Today that means the resolved mode is always per_token, i.e.
-			// the same value the store's default produced by accident. What changes
-			// is that it is now DERIVED from the entry that actually priced the row
-			// instead of assumed.
-			//
-			// That reachability argument has a SECOND precondition worth stating,
-			// because prices.yaml is expected to grow: ComputeCostHost's model-only
-			// lookup is additionally gated on the normalized name containing no
-			// host separator, so "exact hit" also requires that no host-qualified
-			// `model@host` key ever carries THIS poller's provider. True today —
-			// every host-qualified row is provider: self-hosted, never anthropic —
-			// but a future `claude-…@somehost` row with provider: anthropic would
-			// falsify the word UNREACHABLE above.
-			//
-			// Why it is worth storing a value that does not change today:
-			// prices.yaml can declare an explicit billing_mode, and this producer
-			// now carries it through instead of overwriting it. (Every explicit one
-			// today is on a host-qualified row, set to per_token by #268 — those are
-			// unreachable from a host-blind caller. The first mode a bare model key
-			// could carry is subscription, for the Ollama Cloud / GLM rows that
-			// #113 anticipates and that are deliberately NOT seeded until #304
-			// lands.)
+			// Account aggregates have no serving-host evidence. Preserve the
+			// unknown host; the remainder is reconciled before pricing.
+			basis := store.PricingLegacyAggregate
 			cost, billingMode := store.ComputeCostHost("", agg.raw, rem)
+			if aggregate {
+				basis = store.PricingAggregateApprox
+				cost, billingMode = store.ComputeAggregateCostHost("", agg.raw, rem)
+			}
 			out = append(out, collector.TokenEvent{
+				PricingBasis: basis,
 				// Org aggregates cannot honestly be split per developer; an explicit
 				// "unattributed" row lands in the team denominator and is visible as
 				// its own row (an honest coverage gap) rather than corrupting the

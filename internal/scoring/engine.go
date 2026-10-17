@@ -56,6 +56,8 @@ const tierCostScaleUSD = 1000.0
 
 // Outcome is a single resolved issue or merged PR contribution.
 type Outcome struct {
+	Correction *CorrectionValues // nil preserves legacy arithmetic and eligibility
+
 	Developer string
 	IssueID   string
 	// Repo is the canonical "owner/repo" this outcome belongs to (#231), carried so
@@ -97,6 +99,8 @@ type Outcome struct {
 //     from the Reference Price Table (list) and ActualPaidUSD comes from the
 //     finance-supplied actual_spend ledger.
 type DeveloperScore struct {
+	OutcomeN int `json:",omitempty"` // raw activity, populated for projected scores
+
 	Developer      string
 	TIER           float64
 	WeightedPoints float64 // Σ(weight × quality)
@@ -135,9 +139,8 @@ type DeveloperScore struct {
 	// the flagged outcomes keep their full points.
 	FlaggedOutcomes int
 
-	// SampleN is the number of outcomes behind this score (#133). It is the
-	// evidence count the ranking floor gates on and the resample size the
-	// bootstrap CI draws.
+	// SampleN counts eligible ranking/bootstrap observations. Legacy counts every
+	// outcome; Event 3 counts only eligible growth. OutcomeN preserves raw activity.
 	SampleN int
 	// CILow and CIHigh are the 95% percentile-bootstrap interval bounds for TIER
 	// (#133). They are populated by the API layer via BootstrapCI (which needs a
@@ -213,9 +216,14 @@ type TeamScore struct {
 // SpendLeverage stays at 0 (rendered as "—" by the dashboard).
 func ComputeDeveloper(developer string, outcomes []Outcome, totalCostUSD, realtimeCostUSD, actualPaidUSD float64) DeveloperScore {
 	var points float64
-	var flagged int
+	var flagged, samples int
+	projected := false
 	for _, o := range outcomes {
-		points += o.Weight * o.Quality
+		points += o.Points()
+		if o.RankingEligible() {
+			samples++
+		}
+		projected = projected || o.Correction != nil
 		// A zero-token outcome still contributes its full points (#136): the
 		// number is never altered, only its ranking authority is revoked below.
 		if o.ZeroToken {
@@ -228,8 +236,11 @@ func ComputeDeveloper(developer string, outcomes []Outcome, totalCostUSD, realti
 		WeightedPoints:  points,
 		TotalCostUSD:    totalCostUSD,
 		ActualPaidUSD:   actualPaidUSD,
-		SampleN:         len(outcomes),
+		SampleN:         samples,
 		FlaggedOutcomes: flagged,
+	}
+	if projected {
+		score.OutcomeN = len(outcomes)
 	}
 	// Ranking gate: a row is ranked only with enough evidence behind it — both a
 	// minimum outcome count AND a minimum spend (#133) — AND no zero-token
@@ -282,8 +293,8 @@ type RollupSums struct {
 	WeightedPoints, TotalCostUSD, ActualPaidUSD float64 `json:"-"`
 	// RealtimeUSD is the sum of TotalCostUSD × CoveragePercent/100, coverage_pct's
 	// cost-weighted numerator.
-	RealtimeUSD              float64 `json:"-"`
-	SampleN, FlaggedOutcomes int     `json:"-"`
+	RealtimeUSD                        float64 `json:"-"`
+	OutcomeN, SampleN, FlaggedOutcomes int     `json:"-"`
 }
 
 func (s *RollupSums) add(d DeveloperScore) {
@@ -291,6 +302,7 @@ func (s *RollupSums) add(d DeveloperScore) {
 	s.TotalCostUSD += d.TotalCostUSD
 	s.ActualPaidUSD += d.ActualPaidUSD
 	s.RealtimeUSD += d.TotalCostUSD * (d.CoveragePercent / 100.0)
+	s.OutcomeN += d.OutcomeN
 	s.SampleN += d.SampleN
 	s.FlaggedOutcomes += d.FlaggedOutcomes
 }
@@ -300,6 +312,7 @@ func (s *RollupSums) merge(o RollupSums) {
 	s.TotalCostUSD += o.TotalCostUSD
 	s.ActualPaidUSD += o.ActualPaidUSD
 	s.RealtimeUSD += o.RealtimeUSD
+	s.OutcomeN += o.OutcomeN
 	s.SampleN += o.SampleN
 	s.FlaggedOutcomes += o.FlaggedOutcomes
 }
@@ -422,7 +435,7 @@ const OtherCohort = "other"
 // the anonymity would be illusory. A contributing id the caller's counting
 // predicate rejects (#853, #856) still does not count — floorCensusOf applies that.
 func (d DeveloperScore) contributes() bool {
-	return d.SampleN != 0 || d.WeightedPoints != 0 ||
+	return d.OutcomeN != 0 || d.SampleN != 0 || d.WeightedPoints != 0 ||
 		d.TotalCostUSD != 0 || d.ActualPaidUSD != 0
 }
 
@@ -435,7 +448,7 @@ func (d DeveloperScore) contributes() bool {
 // residualUnsafe still treats it as measured. The API's k-anonymity census uses
 // the same rule for which ids are active in a window (#856).
 func (d DeveloperScore) HasActivity() bool {
-	return d.SampleN != 0 || d.WeightedPoints != 0 || d.TotalCostUSD != 0
+	return d.OutcomeN != 0 || d.SampleN != 0 || d.WeightedPoints != 0 || d.TotalCostUSD != 0
 }
 
 // LabeledScore is one developer's score over the part of a window they spent
@@ -665,7 +678,7 @@ const (
 // carries reports which measures d carries a non-zero figure for.
 func (d DeveloperScore) carries() [numMeasures]bool {
 	var c [numMeasures]bool
-	c[measurePoints] = d.SampleN != 0 || d.WeightedPoints != 0
+	c[measurePoints] = d.OutcomeN != 0 || d.SampleN != 0 || d.WeightedPoints != 0
 	c[measureCost] = d.TotalCostUSD != 0
 	c[measureRealtime] = c[measureCost] && d.CoveragePercent != 0
 	c[measureNonRealtime] = c[measureCost] && d.CoveragePercent != 100
@@ -1075,9 +1088,16 @@ func FormatReport(scores []DeveloperScore, since string, mode AggregationMode) s
 	// report must not describe one gate two ways.
 	// %g, not %.0f: the dollar floor prints exactly, so a fractional constant is
 	// never rounded into a different threshold.
-	floorReason := fmt.Sprintf("n < %d outcomes, an outcome with < %d AI tokens in the %d days "+
+	observationLabel := "outcomes"
+	for _, s := range scores {
+		if s.OutcomeN > 0 {
+			observationLabel = "eligible growth outcomes"
+			break
+		}
+	}
+	floorReason := fmt.Sprintf("n < %d %s, an outcome with < %d AI tokens in the %d days "+
 		"before it merged, or < $%g cost",
-		MinRankedOutcomes, MinAttributableTokens, AttributableWindowDays, MinRankedCostUSD)
+		MinRankedOutcomes, observationLabel, MinAttributableTokens, AttributableWindowDays, MinRankedCostUSD)
 	// A one-character marker, not the phrase: the row is already 66 columns wide and
 	// the rule is 72, so the words live in the legend below the rows.
 	const floorMarker = "*"

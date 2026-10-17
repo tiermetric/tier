@@ -340,7 +340,7 @@ func printRepoSummary(summaries []repoSummary, extras []crossRepoSource) {
 func runShip(args []string) {
 	fs := flag.NewFlagSet("ship", flag.ExitOnError)
 	server := fs.String("server", "", "central tierd base URL, e.g. https://tier.example (required)")
-	apiToken := fs.String("api-token", "", "API token sent as Authorization: Bearer. When the flag is not given, TIER_API_TOKEN is used. Prefer TIER_API_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
+	apiToken := fs.String("api-token", "", "Server credential sent as Authorization: Bearer. The server's --ingest-token is recommended for shippers; its admin --api-token still works. When the flag is not given, TIER_API_TOKEN is used. Prefer TIER_API_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	var repos repeatableStringSlice
 	fs.Var(&repos, "repo", `git repo path whose Claude Code sessions to ship (repeatable; default ".")`)
 	var repoSlugs repeatableStringSlice
@@ -608,7 +608,7 @@ func runShip(args []string) {
 		os.Exit(1)
 	}
 
-	if shipRecoveredNothing(repoSummaries, client.Shipped()) && !*allowEmpty {
+	if shipRecoveredNothing(repoSummaries, client.Shipped()+client.RejectedCrossDeveloper()) && !*allowEmpty {
 		// #549 arm 3. This is the false-green this issue exists to close: a
 		// --repo pointing at the wrong checkout previously logged kept=0 at
 		// INFO and exited 0, so "ship reported success" and "ship recovered
@@ -649,12 +649,16 @@ func runShip(args []string) {
 	if !*museFlag {
 		omissionNote += " (Muse NOT included: pass --muse)"
 	}
-	if client.Shipped() == 0 {
+	if client.Shipped() == 0 && client.RejectedCrossDeveloper() == 0 {
 		fmt.Printf("No events shipped for the given repo(s) since %s%s.\n", since.Format("2006-01-02"), omissionNote)
 		return
 	}
-	fmt.Printf("Shipped %d events to %s (since %s)%s. Re-running is safe: the server dedups on idempotency keys.\n",
-		client.Shipped(), *server, since.Format("2006-01-02"), omissionNote)
+	rejectionNote := ""
+	if rejected := client.RejectedCrossDeveloper(); rejected > 0 {
+		rejectionNote = fmt.Sprintf(" (%d rejected as cross-developer)", rejected)
+	}
+	fmt.Printf("Shipped %d events%s to %s (since %s)%s. Re-running is safe: the server dedups on idempotency keys.\n",
+		client.Shipped(), rejectionNote, *server, since.Format("2006-01-02"), omissionNote)
 }
 
 // parseRepoSlugPairs parses repeatable `--repo-slug <path>=<owner/repo>` pairs (#231).

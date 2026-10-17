@@ -768,6 +768,11 @@ func TestWatermarks_CoverEveryLedgerInTheLiveSchema(t *testing.T) {
 	} {
 		for i := range rt.NumField() {
 			tag := rt.Field(i).Tag.Get("json")
+			// This is a monotonic state revision, not an append-only row sequence.
+			// TestCorrectionWatermarks_ProjectionRevision checks its stored source.
+			if tag == "correction_projection_revision" {
+				continue
+			}
 			prefix, kind := classify(tag)
 			switch kind {
 			case "max":
@@ -848,6 +853,7 @@ func TestWatermarks_CoverEveryLedgerInTheLiveSchema(t *testing.T) {
 	// the whole value of this pin is that skipping a ledger is a decision someone
 	// had to make on purpose.
 	deliberatelyUncovered := map[string]string{
+		"pricing_observation_audit": "diagnostic conflicts are not published in reports; promotions and repairs change counts/dollars covered by EventsDigest. Publishing pricing provenance requires a new manifest dimension",
 		"reprice_audit": "aggregate per-RUN ledger; reprice_row_audit is the per-ROW twin, written " +
 			"in the same transaction as every UPDATE, and it is covered",
 		"repo_repair_audit": "aggregate per-RUN ledger; repo_repair_row_audit is the per-ROW twin and is covered",

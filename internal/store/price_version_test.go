@@ -177,11 +177,11 @@ func TestTokenEvent_PriceVersionFirstWriterWins(t *testing.T) {
 	}
 }
 
-// TestTokenEvent_PriceVersionBackfillsLegacyRows proves the one-shot migration
-// stamps pre-#233 rows (price_version 0) with the currently-active table version —
-// honest, since that is the table they were last priced under. Simulated by writing
+// TestTokenEvent_PriceVersionPreservesUnknownLegacyRows proves the one-shot migration
+// now preserves pre-#233 rows at unknown version 0 (#1231), instead of
+// assigning today's version without original evidence. Simulated by writing
 // a row, zeroing its price_version and deleting the migration marker, then reopening.
-func TestTokenEvent_PriceVersionBackfillsLegacyRows(t *testing.T) {
+func TestTokenEvent_PriceVersionPreservesUnknownLegacyRows(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "backfill.db")
 	ctx := context.Background()
@@ -223,8 +223,8 @@ func TestTokenEvent_PriceVersionBackfillsLegacyRows(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
 	}
-	if want := ActivePriceTableInfo().Version; events[0].PriceVersion != want {
-		t.Errorf("PriceVersion = %d after backfill, want active version %d", events[0].PriceVersion, want)
+	if want := 0; events[0].PriceVersion != want {
+		t.Errorf("PriceVersion = %d after reopen, want unknown version %d", events[0].PriceVersion, want)
 	}
 }
 

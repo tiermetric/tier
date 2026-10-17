@@ -27,10 +27,11 @@ var exportColumnExclusions = map[string]map[string]string{
 
 // developerColumnExclusions is the explicit allowlist of tables that carry a
 // `developer` column yet are deliberately NOT in developerPIITables, keyed
-// table -> reason. It is EMPTY: measured, the tables with a developer column are
-// exactly the ones in developerPIITables. A table added with a developer column
-// and listed in neither place escapes both erase and export.
-var developerColumnExclusions = map[string]string{}
+// table -> reason. Correction declarations use endpoint-aware deletion and shared-text scrubbing. A table
+// added with a developer column and listed in neither place escapes erase/export.
+var developerColumnExclusions = map[string]string{
+	"correction_declarations": "endpoint-aware eraseSubjectCorrections/exportSubjectCorrections delete own declarations and scrub shared text; tested by TestCorrectionErase_ScrubsAllIdentifiersAndText and TestCorrectionDSAR_ExportsEitherEndpointAndAllText",
+}
 
 // exportedTables is every table the DSAR export discloses: the erasure/export
 // allowlist plus developer_alias, which developerPIITables' comment names as

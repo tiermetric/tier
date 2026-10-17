@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/tiermetric/tier/internal/qualityrule"
 )
 
 const (
@@ -27,15 +29,16 @@ const (
 	webhookPayloadRetentionDays = 90
 
 	// webhookPayloadMaxRows caps the raw-body audit trail by count: the oldest
-	// rows beyond this many are evicted. Worst case is ~50k x ~10 KB gz = ~500 MB;
-	// a typical single-tenant install stays at a few MB.
+	// rows beyond this many are evicted. At the 25 MiB request cap, 50k
+	// incompressible bodies can occupy ~1.2 TiB before gzip/database overhead;
+	// this is a row cap, not a byte cap.
 	webhookPayloadMaxRows = 50000
 
-	// maxWebhookBodyBytes bounds a single decompressed body when reading back a
-	// payload, so a corrupt or hostile gzip blob cannot exhaust memory. It is 2x
-	// the 1 MB webhook read limit in the handler — comfortably above any real
-	// GitHub body while still a hard ceiling.
-	maxWebhookBodyBytes = 2 << 20
+	// MaxWebhookBodyBytes is the push request cap and the decompression ceiling
+	// for retained payloads. Sharing it keeps accepted bodies readable while
+	// bounding corrupt or hostile gzip blobs. Other events are capped at 1 MiB
+	// by the handler. GitHub's separate provider cap is documented as 25 MB.
+	MaxWebhookBodyBytes = 25 << 20
 
 	// legacyUpdateQualityReason is the quality_history reason recorded by the
 	// issue-wide UpdateQuality path (the pre-P2-03 revert path). P2-03 writes the
@@ -53,6 +56,7 @@ var validQualityEventTypes = map[string]struct{}{
 	"ci_fail_flaky":    {},
 	"revert_quality":   {},
 	"revert_strategic": {},
+	"revert_ambiguous": {},
 }
 
 // WebhookPayload is a stored raw webhook delivery. Body holds the decompressed
@@ -79,6 +83,7 @@ type WebhookPayload struct {
 // written before #687 carry the two-component form and still parse — see
 // quality.CIKey for what that means for matching.
 type QualityEvent struct {
+	Reason     string // ambiguous diagnostic reason; empty for legacy/scoring events
 	ID         int64
 	OutcomeID  int64
 	Developer  string
@@ -87,6 +92,24 @@ type QualityEvent struct {
 	SourceRef  string
 	EventTS    time.Time
 	RecordedAt time.Time
+}
+
+// IsEvidence excludes unresolved and unknown event types by default.
+func (e QualityEvent) IsEvidence() bool { return qualityrule.IsEvidence(e.EventType) }
+
+// Status reports observation status, not the stored numeric quality.
+func (e QualityEvent) Status() string { return qualityrule.ObservationStatus(e.EventType) }
+
+// DistinctAmbiguousReverts counts checks rather than candidate rows (U32).
+// Use the same source_ref set across outcomes when measuring a cohort.
+func DistinctAmbiguousReverts(events []QualityEvent) int {
+	refs := make(map[string]struct{})
+	for _, e := range events {
+		if e.EventType == qualityrule.EventRevertAmbiguous {
+			refs[e.SourceRef] = struct{}{}
+		}
+	}
+	return len(refs)
 }
 
 // QualityTransition is one append-only quality_history row: a recorded
@@ -124,7 +147,7 @@ func gzipBytes(b []byte) ([]byte, error) {
 }
 
 // gunzipBytes decompresses a gzip blob produced by gzipBytes, bounded to
-// maxWebhookBodyBytes so a corrupt or oversized blob cannot exhaust memory.
+// MaxWebhookBodyBytes so a corrupt or oversized blob cannot exhaust memory.
 func gunzipBytes(gz []byte) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(gz))
 	if err != nil {
@@ -132,12 +155,12 @@ func gunzipBytes(gz []byte) ([]byte, error) {
 	}
 	defer func() { _ = zr.Close() }()
 	// +1 so an exactly-at-limit body is distinguishable from an over-limit one.
-	out, err := io.ReadAll(io.LimitReader(zr, maxWebhookBodyBytes+1))
+	out, err := io.ReadAll(io.LimitReader(zr, MaxWebhookBodyBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(out) > maxWebhookBodyBytes {
-		return nil, fmt.Errorf("webhook payload exceeds %d-byte decompression limit", maxWebhookBodyBytes)
+	if len(out) > MaxWebhookBodyBytes {
+		return nil, fmt.Errorf("webhook payload exceeds %d-byte decompression limit", MaxWebhookBodyBytes)
 	}
 	return out, nil
 }
@@ -272,6 +295,8 @@ func (d *DB) PruneWebhookPayloads(ctx context.Context) (int64, error) {
 // idempotent on the (outcome_id, event_type, source_ref) unique key: a replayed
 // webhook delivery inserts nothing and returns inserted=false, so P2-03 (#134)
 // can rely on this for replay-safe, event-derived quality.
+// Ambiguous markers also return inserted=false if the outcome no longer belongs
+// to the developer: the existence check and insert share one atomic SQL write.
 func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted bool, err error) {
 	if _, ok := validQualityEventTypes[e.EventType]; !ok {
 		return false, fmt.Errorf("AppendQualityEvent: unknown event_type %q", e.EventType)
@@ -287,10 +312,14 @@ func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted b
 	e.EventTS = normalizeTS(e.EventTS)
 	res, err := d.db.ExecContext(ctx, `
 		INSERT INTO quality_events
-		    (outcome_id, developer, issue_id, event_type, source_ref, event_ts)
-		VALUES (?, ?, ?, ?, ?, ?)
+		    (outcome_id, developer, issue_id, event_type, source_ref, event_ts, reason)
+		SELECT ?, ?, ?, ?, ?, ?, ?
+		WHERE ? <> 'revert_ambiguous' OR EXISTS (
+		    SELECT 1 FROM outcomes WHERE id = ? AND developer = ?
+		)
 		ON CONFLICT (outcome_id, event_type, source_ref) DO NOTHING`,
-		e.OutcomeID, e.Developer, e.IssueID, e.EventType, e.SourceRef, e.EventTS,
+		e.OutcomeID, e.Developer, e.IssueID, e.EventType, e.SourceRef, e.EventTS, e.Reason,
+		e.EventType, e.OutcomeID, e.Developer,
 	)
 	if err != nil {
 		return false, err
@@ -306,7 +335,7 @@ func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted b
 // first (by id). Used by P2-03 (#134) resolution and by audit reads.
 func (d *DB) QualityEventsForOutcome(ctx context.Context, outcomeID int64) ([]QualityEvent, error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at
+		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason
 		FROM quality_events
 		WHERE outcome_id = ?
 		ORDER BY id`,
@@ -320,7 +349,7 @@ func (d *DB) QualityEventsForOutcome(ctx context.Context, outcomeID int64) ([]Qu
 	for rows.Next() {
 		var e QualityEvent
 		if err := rows.Scan(&e.ID, &e.OutcomeID, &e.Developer, &e.IssueID,
-			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt); err != nil {
+			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt, &e.Reason); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

@@ -38,8 +38,6 @@ var inPollerBaselineBySource = map[string]bool{
 	// subtract its own prior output and converge to zero.
 	collector.SourceAnthropicAdmin: false,
 	collector.SourceOpenAIUsage:    false,
-	// Org-level daily aggregates, not per-call capture (no producer yet).
-	collector.SourceCopilotAPI: false,
 	// POST /api/v1/costs: reconciled invoice cost, not per-request capture
 	// (#854 tracks whether pollers should net these rows out).
 	"api": false,
@@ -50,6 +48,9 @@ var inPollerBaselineBySource = map[string]bool{
 // classification disagrees with what CapturedTokensByDayModel actually returns
 // for a row of that source.
 func TestPollerBaselineClassifiesEverySource(t *testing.T) {
+	// Legacy rows retain their existing baseline treatment even though no
+	// Copilot collector exists or is advertised in the source inventory.
+	assertInPollerBaseline(t, "copilot-api", false)
 	known := append(collector.AllSources(), "api")
 	for _, src := range known {
 		want, classified := inPollerBaselineBySource[src]

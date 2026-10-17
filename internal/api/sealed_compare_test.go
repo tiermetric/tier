@@ -177,7 +177,7 @@ func TestSealedCompare_NoSealerServesLiveOutput(t *testing.T) {
 			t.Fatalf("%s: %d %s, want a live 200", c.name, rec.Code, rec.Body)
 		}
 		for hdr := range rec.Header() {
-			if strings.HasPrefix(hdr, "Tier-") {
+			if strings.HasPrefix(hdr, "Tier-") && hdr != "Tier-Inference" && hdr != "Tier-Bounds-Status" && hdr != "Tier-Bounds-Note" {
 				t.Errorf("%s: the live compare carries the sealed header %s", c.name, hdr)
 			}
 		}

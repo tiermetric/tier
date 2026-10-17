@@ -248,6 +248,7 @@ type gitCommit struct {
 	Subject   string
 	Branches  []string // branch names from the decorate field
 	IssueID   string   // extracted from branch or commit message
+	PRNumber  *int
 }
 
 // Run implements Collector. It scans all JSONL session files in the Claude
@@ -1056,6 +1057,7 @@ func gitLog(ctx context.Context, repoPath string, since time.Time) ([]gitCommit,
 		if commit.IssueID == "" {
 			commit.IssueID = issueref.FromCommitSubject(commit.Subject)
 		}
+		commit.PRNumber = issueref.FromCommitSubjectPR(commit.Subject)
 		commits = append(commits, commit)
 	}
 	return commits, nil
@@ -1155,9 +1157,10 @@ func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, devel
 					branch, rule, foreign = a.Branch, a.Rule, a.Foreign
 				}
 			}
-			issueID := resolveMessageIssue(branch, msgTS, commitsByLeaf)
+			issueID, prNumber := resolveMessageAttribution(branch, msgTS, commitsByLeaf)
 			if foreign {
 				issueID, evRepo = UnattributedForeignRepo, repoid.Unqualified
+				prNumber = nil
 			}
 
 			model := m.model
@@ -1209,23 +1212,26 @@ func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, devel
 			}
 
 			events = append(events, TokenEvent{
-				Developer:       developer,
-				IssueID:         issueID,
-				Model:           model,
-				InputTok:        m.input,
-				OutputTok:       m.output,
-				CacheRead:       m.cacheRead,
-				CacheWrite5m:    m.cacheWrite5m,
-				CacheWrite1h:    m.cacheWrite1h,
-				CostMicro:       cost,
-				Source:          SourceJSONL,
-				Fidelity:        FidelityRealtime,
-				IdempotencyKey:  key,
-				Repo:            evRepo,
-				SessionID:       s.SessionID,
-				BillingMode:     billingMode,
-				AttributionRule: rule,
-				Timestamp:       ts,
+				CacheWriteEvidence: CacheWriteProvenance(m.nestedTTL),
+				Developer:          developer,
+				IssueID:            issueID,
+				Model:              model,
+				InputTok:           m.input,
+				OutputTok:          m.output,
+				CacheRead:          m.cacheRead,
+				CacheWrite5m:       m.cacheWrite5m,
+				CacheWrite1h:       m.cacheWrite1h,
+				CostMicro:          cost,
+				Source:             SourceJSONL,
+				Fidelity:           FidelityRealtime,
+				IdempotencyKey:     key,
+				Repo:               evRepo,
+				PRNumber:           prNumber,
+				BranchHash:         issueref.BranchHash(evRepo, branch),
+				SessionID:          s.SessionID,
+				BillingMode:        billingMode,
+				AttributionRule:    rule,
+				Timestamp:          ts,
 			})
 		}
 	}
@@ -1287,12 +1293,29 @@ func indexCommitsByLeaf(commits []gitCommit) map[string][]gitCommit {
 // parse (tierd score/doctor) always reflects the current commit set, which is why
 // the two can differ if commits arrive between ingests.
 func resolveMessageIssue(branch string, msgTS time.Time, commitsByLeaf map[string][]gitCommit) string {
+	issue, _ := resolveMessageAttribution(branch, msgTS, commitsByLeaf)
+	return issue
+}
+
+func resolveMessageAttribution(branch string, msgTS time.Time, commitsByLeaf map[string][]gitCommit) (string, *int) {
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	var prNumber *int
 	if !issueref.IsExploratoryBranch(branch) {
 		lo := msgTS.Add(-joinWindow)
 		hi := msgTS.Add(joinWindow)
 		for _, c := range commitsByLeaf[leafName(branch)] {
 			if c.Timestamp.Before(lo) || c.Timestamp.After(hi) {
 				continue
+			}
+			if prNumber == nil {
+				// PR numbers require the full branch identity used by BranchHash;
+				// issue attribution below retains its existing leaf-match semantics.
+				for _, b := range c.Branches {
+					if strings.TrimPrefix(b, "refs/heads/") == strings.TrimPrefix(branch, "refs/heads/") {
+						prNumber = c.PRNumber
+						break
+					}
+				}
 			}
 			if c.IssueID != "" {
 				issueBranches := 0
@@ -1306,16 +1329,16 @@ func resolveMessageIssue(branch string, msgTS time.Time, commitsByLeaf map[strin
 					}
 				}
 				if issueBranches > 1 && ownIssue != "" {
-					return ownIssue
+					return ownIssue, prNumber
 				}
-				return c.IssueID
+				return c.IssueID, prNumber
 			}
 		}
 		if id := issueref.FromBranch(branch); id != "" {
-			return id
+			return id, prNumber
 		}
 	}
-	return bucketForBranch(branch)
+	return bucketForBranch(branch), prNumber
 }
 
 // ProviderAnthropic is the provider tag JSONL uses when building cross-source

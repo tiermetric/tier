@@ -317,6 +317,8 @@ func positiveFinite(f float64) bool {
 // same present-vs-absent discipline the rest of this package uses, so a config that
 // omits it can't override an operator's --push-capture / TIER_PUSH_CAPTURE.
 type OutcomesConfig struct {
+	// Event3Scoring is default-off; only an explicit operator setting enables it.
+	Event3Scoring *bool `yaml:"event3_scoring,omitempty"`
 	// PushCapture mirrors --push-capture (env TIER_PUSH_CAPTURE): capture a
 	// qualifying direct commit to the default branch as a degraded (0.5,
 	// per-issue-per-UTC-day) outcome so trunk-based teams aren't scored ~0 (#196).
@@ -581,6 +583,9 @@ type HTTPConfig struct {
 	// and no other route. Same provisioning as read_token: CLI --metrics-token,
 	// the TIER_METRICS_TOKEN env var, and @/path/to/file. Absent → nil → unarmed.
 	MetricsToken *string `yaml:"metrics_token,omitempty"`
+	// IngestToken opens POST /api/v1/events only (#1144). Same provisioning as
+	// metrics_token: CLI --ingest-token, TIER_INGEST_TOKEN, and @/path/to/file.
+	IngestToken *string `yaml:"ingest_token,omitempty"`
 	// TrustedProxyCIDRs lists the reverse-proxy/TLS-terminator CIDRs whose
 	// X-Forwarded-For the failed-auth lockout may believe (#131). A slice, not a
 	// pointer: list-valued, and any --trusted-proxy-cidr on the CLI discards this

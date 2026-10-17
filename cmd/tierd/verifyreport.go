@@ -127,15 +127,15 @@ import (
 // never a divergence — we have no idea what the fields mean.
 const manifestSchemaTag = "tiermanifest1"
 
-// digestScheme is the ONLY window-digest scheme this binary can COMPUTE (#716).
+// digestScheme is the current window-digest scheme this binary emits (#716).
 //
 // 🔑 IT IS THE ROLLBACK SEAM FOR THE DIGESTS, exactly as manifestSchemaTag is for
-// the manifest as a whole. A manifest pinning a tierdig2 value is reported NOT
+// the manifest as a whole. A manifest pinning an unknown scheme is reported NOT
 // CHECKED — neither agreement nor divergence — because comparing two values from
 // two schemes is not a comparison at all. ⛔ That branch must stay REACHABLE: it
 // is what lets a future scheme land without every archived manifest reading as a
-// forgery. Before #740 it was the ONLY outcome, which is a different defect.
-const digestScheme = "tierdig1"
+// forgery. The tierdig1 dispatch preserves archived reports under their own rule.
+const digestScheme = "tierdig2"
 
 // The three-valued exit discipline (#718). These are the SCRIPT's — i.e. the
 // process's — codes, and 2 is never a pass. A sealed month's manifest adds 3 and
@@ -198,7 +198,12 @@ const maxQualityRevisionsListed = 10
 // gone, and the fixture that exercises this command drives the real handler, so
 // a future divergence has to get past a decode of live bytes.
 type reportManifest struct {
-	Schema string `json:"manifest_schema"`
+	Schema                string                     `json:"manifest_schema"`
+	ScoringPolicy         string                     `json:"scoring_policy,omitempty"`
+	CorrectionRuleVersion string                     `json:"correction_rule_version,omitempty"`
+	RubricVersion         int                        `json:"rubric_version,omitempty"`
+	OutcomeCounts         *manifestOutcomeCounts     `json:"outcome_counts,omitempty"`
+	CorrectionsDigest     *manifestCorrectionsDigest `json:"corrections_digest,omitempty"`
 
 	// Since/Until are the half-open window, RFC3339 UTC INSTANTS as the served
 	// emitter writes them. The legacy date grammar (YYYY-MM-DD, YYYY-MM, YYYY) is
@@ -367,7 +372,7 @@ type manifestWindowWatermarks struct {
 	// 🔴 THE ROW COUNTS ARE THE ONLY PIN THAT CAN SEE A DELETION, and without
 	// them this command returns a confident REPRODUCED over a database that has
 	// lost rows. MAX(id) is INVARIANT under deleting any non-maximal row, and a
-	// deletion writes to none of the five audit ledgers — so an EraseDeveloper
+	// deletion writes to none of the six audit ledgers — so an EraseDeveloper
 	// (GDPR Art. 17) run against the window leaves every watermark reading
 	// UNCHANGED while the figures move.
 	TokenEventCount *int64 `json:"token_event_count"`
@@ -375,7 +380,7 @@ type manifestWindowWatermarks struct {
 	OutcomeCount    *int64 `json:"outcome_count"`
 }
 
-// manifestLedgerWatermarks is the position of the five append-only mutation
+// manifestLedgerWatermarks is the position of the six append-only mutation
 // ledgers, install-wide.
 //
 // 🔴 THEY NAME THE **ROW** LEDGERS, NOT THE AGGREGATE ONES, AND THE DIFFERENCE
@@ -393,16 +398,19 @@ type manifestWindowWatermarks struct {
 // intent, but EraseDeveloper (GDPR Art. 17) hard-deletes from them — so a
 // shrinking count is a real, reachable event, and it is a change to the very
 // evidence a manifest's provenance rests on. Decoding these without checking them
-// would leave five published pins unexamined on a green run.
+// would leave published ledger pins unexamined on a green run.
 type manifestLedgerWatermarks struct {
-	MaxQualityHistoryID      *int64 `json:"max_quality_history_id"`
-	QualityHistoryCount      *int64 `json:"quality_history_count"`
-	MaxRepriceRowAuditID     *int64 `json:"max_reprice_row_audit_id"`
-	RepriceRowAuditCount     *int64 `json:"reprice_row_audit_count"`
-	MaxCostCorrectionAuditID *int64 `json:"max_cost_correction_audit_id"`
-	CostCorrectionAuditCount *int64 `json:"cost_correction_audit_count"`
-	MaxRepoRepairRowAuditID  *int64 `json:"max_repo_repair_row_audit_id"`
-	RepoRepairRowAuditCount  *int64 `json:"repo_repair_row_audit_count"`
+	MaxCorrectionAuditID         *int64 `json:"max_correction_audit_id"`
+	CorrectionAuditCount         *int64 `json:"correction_audit_count"`
+	CorrectionProjectionRevision *int64 `json:"correction_projection_revision"`
+	MaxQualityHistoryID          *int64 `json:"max_quality_history_id"`
+	QualityHistoryCount          *int64 `json:"quality_history_count"`
+	MaxRepriceRowAuditID         *int64 `json:"max_reprice_row_audit_id"`
+	RepriceRowAuditCount         *int64 `json:"reprice_row_audit_count"`
+	MaxCostCorrectionAuditID     *int64 `json:"max_cost_correction_audit_id"`
+	CostCorrectionAuditCount     *int64 `json:"cost_correction_audit_count"`
+	MaxRepoRepairRowAuditID      *int64 `json:"max_repo_repair_row_audit_id"`
+	RepoRepairRowAuditCount      *int64 `json:"repo_repair_row_audit_count"`
 	// #849: push outcomes superseded by a merged PR or re-owned in place.
 	MaxPushOutcomeAuditID *int64 `json:"max_push_outcome_audit_id"`
 	PushOutcomeAuditCount *int64 `json:"push_outcome_audit_count"`
@@ -502,6 +510,7 @@ const (
 	// the #716 read a repo predicate; it is now CHECKABLE, and the recomputation
 	// carries the manifest's canonicalized scope.
 	dimNotCheckable
+	dimInfo
 )
 
 // label is the status TOKEN printed in its own fixed-width column.
@@ -514,6 +523,8 @@ const (
 // same trap for the next reader. The column makes the status exactly matchable.
 func (s dimStatus) label() string {
 	switch s {
+	case dimInfo:
+		return "INFO"
 	case dimChanged:
 		return "CHANGED"
 	case dimNotPinned:
@@ -603,24 +614,25 @@ func (r verifyResult) diverged() bool {
 // DATA. Deliberately NOT every dimension.
 //
 // 🔴 price_table and rubric are excluded, and that is the correction to the first
-// draft. Both describe THIS BINARY, not the database: rubric.version is a
-// compiled-in constant, and the active price table travels with the binary and
-// prices nothing on the read path (#233). A manifest carrying only those two
+// draft. Both describe scoring/provenance choices, not rows in the database:
+// the rubric is checked under its pinned policy, while the active price table
+// travels with the binary and prices nothing on the read path (#233).
+// A manifest carrying only those two
 // would have returned rc 0 "REPRODUCED: every pinned input is unchanged" having
 // examined not one row — a green tick earned entirely by comparing the binary to
-// itself. The seven watermark dimensions (#849 added push reconciliations) and
-// the two digests are what say anything about the data. ⚠️ This read "only the
-// six watermark dimensions" until #740 put the digests in the map below — a count nobody re-checked while the thing it
-// counted changed, which is the shape this file keeps rediscovering.
+// itself. Window watermarks, scoped mutation attribution, window digests and
+// outcome counts examine the report's data. Event 3 corrections_digest closes
+// over its corrective dependencies too; under legacy it is informational and
+// is printed as corrections context, outside this quorum.
 //
-// ⭐ THE TWO DIGESTS ARE IN, and they are the strongest members of this set: they
-// are the only dimensions that read the row CONTENTS, so a manifest pinning
-// nothing but a digest has still had its data examined — more thoroughly than one
-// pinning all seven watermarks, which are structurally blind to an in-place edit.
+// The install-wide corrective revisions are context only: their movement says
+// nothing about this window, and their presence cannot satisfy its quorum.
+// Window digests read row CONTENTS; MAX(id)/COUNT(*) cannot see in-place edits.
 var quorumDims = map[string]bool{
 	"token_events": true, "outcomes": true, "quality revisions": true,
 	"reprice": true, "cost corrections": true, "repo repairs": true,
 	"push reconciliations": true, "events_digest": true, "outcomes_digest": true,
+	"corrections_digest": true, "outcome_counts": true,
 }
 
 // ⛔ repo_scope_excluded (#751) IS DELIBERATELY NOT IN THE MAP ABOVE, and the
@@ -694,11 +706,13 @@ func (r verifyResult) bandDisagrees() bool {
 	return false
 }
 
-// dataPinsNotChecked blocks reproduction for unchecked quorum pins or band-withheld
-// comparisons. Unknown pins and fleet-wide repo_scope_excluded do not block it.
+// dataPinsNotChecked blocks reproduction for unchecked quorum pins, incomplete
+// corrective context tuples or band-withheld comparisons. Corrective context
+// can block a pass without itself satisfying the data quorum. Unknown pins and
+// fleet-wide repo_scope_excluded do not block it.
 func (r verifyResult) dataPinsNotChecked() bool {
 	for _, d := range r.Dims {
-		if d.bandWithheld || (quorumDims[d.Name] && (d.Status == dimNotCheckable || d.Status == dimUnknown)) {
+		if d.bandWithheld || ((quorumDims[d.Name] || d.Name == "corrective revisions") && (d.Status == dimNotCheckable || d.Status == dimUnknown)) {
 			return true
 		}
 	}
@@ -739,6 +753,14 @@ func (r verifyResult) unattributed() bool {
 // which is a claim about the DATA. Keeping usage errors at 1 also keeps this
 // command aligned with every other subcommand's convention.
 func runVerifyReportCmd(args []string, stdout, stderr io.Writer) int {
+	return runVerifyReportCmdWithReplay(args, stdout, stderr, rerunScores)
+}
+
+// scoresReplay keeps the receipt check testable against a reader that ignores
+// the requested policy. The command always supplies the real in-process reader.
+type scoresReplay func(context.Context, *store.DB, manifestWindow, string, scoring.AggregationMode, int, ...scoring.ScoringPolicy) (json.RawMessage, error)
+
+func runVerifyReportCmdWithReplay(args []string, stdout, stderr io.Writer, replay scoresReplay) int {
 	// The manifest is a POSITIONAL argument (`tierd verify-report m.json --db
 	// …`), and Go's flag package stops at the first non-flag token. Lift it out
 	// before Parse so flags may follow it, which is the shape the issue
@@ -906,7 +928,7 @@ func runVerifyReportCmd(args []string, stdout, stderr io.Writer) int {
 		return rcCannotCheck
 	}
 
-	res, err := verifyAgainst(ctx, db, ro, info, m)
+	res, err := verifyAgainst(ctx, db, ro, info, m, replay)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "verify-report: %v (NOTHING was verified)\n", logsafe.Err(err))
 		return rcCannotCheck
@@ -923,7 +945,7 @@ func runVerifyReportCmd(args []string, stdout, stderr io.Writer) int {
 		for _, d := range res.Dims {
 			if d.bandWithheld {
 				_, _ = fmt.Fprintf(stderr, "  %s: %s (#1033).\n", d.Name, d.Detail)
-			} else if quorumDims[d.Name] && (d.Status == dimNotCheckable || d.Status == dimUnknown) {
+			} else if (quorumDims[d.Name] || d.Name == "corrective revisions") && (d.Status == dimNotCheckable || d.Status == dimUnknown) {
 				_, _ = fmt.Fprintf(stderr, "  %s: %s\n", d.Name, d.Detail)
 			}
 		}
@@ -1137,7 +1159,7 @@ func verifyDimUnknownPins(unknown []string) (verifyDim, bool) {
 //
 // An error return means COULD NOT CHECK (rc 2) — the caller must never treat it
 // as a pass or as a divergence.
-func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.PriceTableInfo, m reportManifest) (verifyResult, error) {
+func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.PriceTableInfo, m reportManifest, replay scoresReplay) (verifyResult, error) {
 	res := verifyResult{
 		Schema:              m.Schema,
 		Since:               m.Since,
@@ -1228,10 +1250,24 @@ func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.Pri
 		return verifyResult{}, err
 	}
 
-	// Recompute the report through the REAL serving path.
-	nowScores, err := rerunScores(ctx, db, window, scope, mode, k)
+	policy, policyDim, err := manifestScoringPolicy(m)
 	if err != nil {
 		return verifyResult{}, err
+	}
+	// Recompute with the manifest's policy, never this process's default.
+	nowScores, err := replay(ctx, db, window, scope, mode, k, policy)
+	if err != nil {
+		return verifyResult{}, err
+	}
+
+	// The requested tuple is not evidence that the serving reader applied it.
+	if replayErr := verifyReplayPolicy(nowScores, policy); replayErr != nil {
+		// R-20 still refutes an unsupported rubric as CHANGED, even when
+		// the reader cannot replay its policy. That can never reproduce.
+		if policyDim.Status != dimChanged || !errors.Is(replayErr, errReplayPolicyMismatch) {
+			return verifyResult{}, replayErr
+		}
+		policyDim.Status, policyDim.Detail = dimNotCheckable, replayErr.Error()
 	}
 
 	// --- output comparison -------------------------------------------------
@@ -1253,7 +1289,24 @@ func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.Pri
 
 	// --- input dimensions --------------------------------------------------
 	res.Dims = append(res.Dims, verifyDimPriceTable(m.PriceTable, info))
-	res.Dims = append(res.Dims, verifyDimRubric(m.Rubric))
+	res.Dims = append(res.Dims, verifyDimRubric(m.Rubric), policyDim)
+	// The current install policy is context only. Replay above uses the
+	// manifest's pinned policy even after an operator changes the live flag.
+	if policy.Event3 {
+		d := verifyDim{Name: "correction policy", Status: dimInfo}
+		state, err := db.CorrectionScoringPolicy(ctx)
+		if err != nil {
+			d.Detail = "replayed pinned Event 3 policy; current stored policy unavailable: " + logsafe.Err(err)
+		} else {
+			d.Detail = fmt.Sprintf("replayed pinned Event 3 policy %s, rubric %d; current stored enabled=%t rule=%s rubric=%d", m.CorrectionRuleVersion, m.RubricVersion, state.Enabled, logsafe.Str(state.RuleVersion), state.RubricVersion)
+		}
+		res.Dims = append(res.Dims, d)
+	}
+	correctionDims, err := verifyCorrectionPins(ctx, db, m, window, scope, policy)
+	if err != nil {
+		return verifyResult{}, err
+	}
+	res.Dims = append(res.Dims, correctionDims...)
 
 	// 🔴 THE BAND IS DECIDED BEFORE ANY PIN TAKEN OVER IT IS COMPARED (#1033).
 	// When the manifest's token_since disagrees with this binary's band (or cannot
@@ -1310,14 +1363,18 @@ func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.Pri
 // route is STRUCTURALLY ABSENT from the mux: a verification physically cannot
 // mutate anything, independent of any token check. No listener is opened and no
 // port is bound — the request never leaves the process.
-func rerunScores(ctx context.Context, db *store.DB, w manifestWindow, scope string, mode scoring.AggregationMode, k int) (json.RawMessage, error) {
+func rerunScores(ctx context.Context, db *store.DB, w manifestWindow, scope string, mode scoring.AggregationMode, k int, policies ...scoring.ScoringPolicy) (json.RawMessage, error) {
 	// Discard the handler's logs: api.New warns when no API token is set, which
 	// is correct for a server and pure noise for a local verifier reading its
 	// own database.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// WithUnsealedRecompute: a live-window manifest is replayed over its window
 	// in every mode, team and division included (#913).
-	h := api.New(db, logger, "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit), api.WithUnsealedRecompute())
+	var policy scoring.ScoringPolicy
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	h := api.New(db, logger, "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit), api.WithUnsealedRecompute(), api.WithScoringPolicy(policy))
 	h.SetAggregation(mode, k)
 
 	mux := http.NewServeMux()
@@ -1520,9 +1577,9 @@ func verifyDimRubric(want manifestRubric) verifyDim {
 		d.Detail = "manifest carries no rubric.version"
 		return d
 	}
-	if want.Version == scoring.RubricVersion {
+	if want.Version == 1 || want.Version == 2 {
 		d.Status = dimUnchanged
-		d.Detail = fmt.Sprintf("version %d", scoring.RubricVersion)
+		d.Detail = fmt.Sprintf("version %d, checked under its pinned scoring rule", want.Version)
 		return d
 	}
 	d.Status = dimChanged
@@ -1548,7 +1605,7 @@ func verifyDimRubric(want manifestRubric) verifyDim {
 //	NOT PINNED    the manifest carries no digest (an older emitter, or the
 //	              declared anonymized-mode omission — the reason is echoed).
 //	NOT CHECKED   pinned under a scheme this build cannot compute. ⛔ It must stay
-//	              REACHABLE: it is the rollback seam for a future tierdig2, and the
+//	              REACHABLE: it is the rollback seam for a future digest scheme, and the
 //	              alternative to refusing is comparing two values this build cannot
 //	              know are commensurable.
 //	UNCHANGED     recomputed and equal.
@@ -1571,38 +1628,65 @@ func verifyDimsDigests(ctx context.Context, db *store.DB, m reportManifest, w ma
 		{"outcomes_digest", m.OutcomesDigest},
 	}
 
-	// Recompute ONCE, and only when something is actually comparable — a full
-	// scan of both tables is the most expensive read in this command and there is
-	// no reason to pay it for a manifest that pins nothing.
-	var (
-		events, outcomes store.Digest
-		computed         bool
-	)
+	// U3 extended the framed inputs. A modern manifest cannot downgrade that
+	// coverage, and two window pins must use one commensurable scheme.
+	invalidScheme := ""
+	modern := m.ScoringPolicy != "" || m.CorrectionRuleVersion != "" || m.RubricVersion != 0 ||
+		m.OutcomeCounts != nil || m.CorrectionsDigest != nil
+	firstScheme := ""
 	for _, p := range pins {
-		if digestIsCheckable(p.want) {
-			var err error
-			// ReportDigests, not EventsDigest + OutcomesDigest: the single-table
-			// methods run on two pooled connections and would pair two different
-			// instants. It also owns the token/outcome window asymmetry, which is
-			// what makes this recomputation cover the same rows the emitter did.
-			events, outcomes, err = db.ReportDigests(ctx, w.Since, w.Until, store.RepoScope(scope))
-			if err != nil {
-				return nil, fmt.Errorf("recompute window digests: %w", err)
-			}
-			computed = true
-			break
+		if p.want == nil || p.want.Value == "" {
+			continue
 		}
+		scheme, _, _ := strings.Cut(p.want.Value, ":")
+		if modern && scheme == "tierdig1" {
+			invalidScheme = "tierdig1 cannot cover a manifest with U3 policy, rule, rubric, outcome_counts or corrections_digest pins"
+		}
+		if firstScheme != "" && firstScheme != scheme {
+			invalidScheme = "mixed window digest schemes are not commensurable"
+		}
+		firstScheme = scheme
 	}
-
-	got := map[string]store.Digest{"events_digest": events, "outcomes_digest": outcomes}
+	// Cache one pair under the accepted scheme.
+	type pair struct{ events, outcomes store.Digest }
+	computed := map[string]pair{}
+	for _, p := range pins {
+		if invalidScheme != "" || !digestIsCheckable(p.want) {
+			continue
+		}
+		scheme, _, _ := strings.Cut(p.want.Value, ":")
+		if _, ok := computed[scheme]; ok {
+			continue
+		}
+		events, outcomes, err := db.ReportDigestsForScheme(ctx, w.Since, w.Until, store.RepoScope(scope), scheme)
+		if err != nil {
+			return nil, fmt.Errorf("recompute window digests: %w", err)
+		}
+		computed[scheme] = pair{events, outcomes}
+	}
 	dims := make([]verifyDim, 0, len(pins))
 	for _, p := range pins {
+		if invalidScheme != "" && p.want != nil && p.want.Value != "" {
+			dims = append(dims, verifyDim{Name: p.name, Status: dimNotCheckable, Detail: invalidScheme})
+			continue
+		}
 		// The events digest covers the token side's band; outcomes_digest does not.
 		if p.name == "events_digest" && bandDisagrees && digestIsCheckable(p.want) {
 			dims = append(dims, bandIncommensurable(p.name))
 			continue
 		}
-		dims = append(dims, verifyDimDigest(p.name, p.want, got[p.name], computed, m.DigestsOmitted))
+		var got store.Digest
+		scheme := ""
+		if p.want != nil {
+			scheme, _, _ = strings.Cut(p.want.Value, ":")
+		}
+		pair, ok := computed[scheme]
+		if p.name == "events_digest" {
+			got = pair.events
+		} else {
+			got = pair.outcomes
+		}
+		dims = append(dims, verifyDimDigest(p.name, p.want, got, ok, m.DigestsOmitted))
 	}
 	return dims, nil
 }
@@ -1831,7 +1915,7 @@ func verifyDimAttributionBand(m reportManifest, w manifestWindow) (verifyDim, bo
 // recomputation carrying the same scope, which verifyDimsDigests passes.
 func digestIsCheckable(want *manifestDigest) bool {
 	return want != nil && want.Value != "" &&
-		strings.HasPrefix(want.Value, digestScheme+":")
+		(strings.HasPrefix(want.Value, digestScheme+":") || strings.HasPrefix(want.Value, "tierdig1:"))
 }
 
 func verifyDimDigest(name string, want *manifestDigest, got store.Digest, computed bool, omitted string) verifyDim {
@@ -1847,9 +1931,9 @@ func verifyDimDigest(name string, want *manifestDigest, got store.Digest, comput
 		}
 		return d
 	}
-	if !strings.HasPrefix(want.Value, digestScheme+":") {
+	if !digestIsCheckable(want) {
 		d.Status = dimNotCheckable
-		d.Detail = fmt.Sprintf("manifest pins %s, which this build cannot compute — it knows the %s scheme only, and "+
+		d.Detail = fmt.Sprintf("manifest pins %s, which this build cannot compute — it supports tierdig1 and %s, and "+
 			"comparing values from two schemes is not a comparison",
 			logsafe.Str(shortHash(want.Value)), digestScheme)
 		return d
@@ -1860,6 +1944,11 @@ func verifyDimDigest(name string, want *manifestDigest, got store.Digest, comput
 		// renders as the deliberately wrong-looking UNKNOWN rather than agreement.
 		d.Status = dimUnknown
 		d.Detail = "the digest was pinned but never recomputed — this is a bug in verify-report, not a finding about the data"
+		return d
+	}
+	if wantScheme, _, _ := strings.Cut(want.Value, ":"); !strings.HasPrefix(got.Value, wantScheme+":") {
+		d.Status = dimNotCheckable
+		d.Detail = "digest schemes differ; values were not compared"
 		return d
 	}
 	if want.Value == got.Value {
@@ -1939,6 +2028,7 @@ func assertSnapshotHoldsManifest(ctx context.Context, ro *sql.DB, m reportManife
 		{"cost_correction_audit", led.MaxCostCorrectionAuditID},
 		{"repo_repair_row_audit", led.MaxRepoRepairRowAuditID},
 		{"push_outcome_audit", led.MaxPushOutcomeAuditID},
+		{"correction_audit", led.MaxCorrectionAuditID},
 	} {
 		if f.pin == nil || *f.pin == 0 {
 			continue

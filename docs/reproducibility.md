@@ -7,11 +7,16 @@ more.
 > **The one-sentence version.** Every report can be bound to a *manifest* naming
 > the price table, the rows and the binary it was computed from — plus, on a
 > **scoped** report, the repo-blind rows the scope dropped; `tierd
-> verify-report` then either reproduces it, or **names which of those inputs
-> moved**. It does **not** replay history, and there are inputs it does not
+> verify-report` then checks the pinned inputs against the current database, or
+> **names which of those inputs moved**. Equal pinned inputs do not establish
+> byte-identical live output or complete historical capture. It does **not** replay history, and there are inputs it does not
 > watch. Both limits are printed on every run, including the successful ones.
 
 ---
+
+**Series breaks.** Before comparing periods, check the
+[score-series change register](score-series-changes.md) and apply its comparison
+rule; name the applicable changes or state that the definition history is unknown.
 
 ## 1. What a report is bound to
 
@@ -365,8 +370,9 @@ audited reprice, a repo repair, a quality revision and a GDPR erasure are all
 **legitimate** — and without attribution each is indistinguishable from
 corruption.
 
-Below is output captured from a local `dev` build against a sample manifest and
-database. One row's `billing_mode` was edited in place. No row was added or removed:
+Below is illustrative output from a `dev` build of the code released in v0.6.0
+against a sample manifest and database; it is not a fresh capture.
+It shows one row's `billing_mode` edited in place, with no row added or removed:
 
 ```console
 $ bin/engine-pass/tierd verify-report bin/engine-pass/m.json --db bin/engine-pass/tier.db ; echo "EXIT=$?"
@@ -375,7 +381,7 @@ verify-report: "tiermanifest1"  window "2026-08-01T00:00:00Z" .. "2026-09-01T00:
 FAIL: a pinned INPUT moved. ⚠ The manifest pinned no results, so whether the
       published numbers moved with it is UNKNOWN to this run — see LIMITS.
 
-  price_table:          UNCHANGED   tierpt1:3a27fb89…, version 12, effective "2026-10-02"
+  price_table:          UNCHANGED   tierpt1:ac926691…, version 14, effective "2026-10-12"
   rubric:               UNCHANGED   version 1
   token_events:         UNCHANGED   no rows above watermark 4, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
   outcomes:             UNCHANGED   no rows above watermark 3, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
@@ -422,9 +428,7 @@ cost-horizon note below are documented here and nowhere else.
 
 ### It attributes; it does not replay history
 
-`verify-report` recomputes the report **against the database as it is now**. When
-nothing moved, that recomputation *is* the original computation over the same
-rows, so `REPRODUCED` is a true statement. When something moved, it names the
+`verify-report` recomputes the report **against the database as it is now**. `REPRODUCED` means every pinned input is unchanged (see the unwatched inputs below). When something moved, it names the
 input — it does **not** reconstruct the manifest's original numbers.
 
 ### Compensating changes cannot be resolved

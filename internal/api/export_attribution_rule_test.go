@@ -44,7 +44,7 @@ func exportRules(t *testing.T, h *Handler) (fromJSON, fromCSV []string, bodies s
 	if err != nil {
 		t.Fatalf("parse CSV: %v", err)
 	}
-	last := len(records[0]) - 1
+	last := 20
 	for _, row := range records[1:] {
 		fromCSV = append(fromCSV, row[last])
 	}
@@ -76,10 +76,10 @@ func rawStore(t *testing.T, db *store.DB) *sql.DB {
 	return raw
 }
 
-// TestEventsCSVHeader_AttributionRuleLast pins attribution_rule as the column
-// appended after billed_to, last in both the declared and the served header.
-func TestEventsCSVHeader_AttributionRuleLast(t *testing.T) {
-	n := len(eventsCSVHeader)
+// TestEventsCSVHeader_AttributionRulePosition pins attribution_rule as the column
+// appended after billed_to, preserving its position when pricing columns append.
+func TestEventsCSVHeader_AttributionRulePosition(t *testing.T) {
+	n := 21
 	if eventsCSVHeader[n-1] != "attribution_rule" || eventsCSVHeader[n-2] != "billed_to" {
 		t.Fatalf("eventsCSVHeader tail = %v, want [... billed_to attribution_rule]", eventsCSVHeader[n-2:])
 	}
@@ -89,7 +89,7 @@ func TestEventsCSVHeader_AttributionRuleLast(t *testing.T) {
 	if err != nil || len(records) == 0 {
 		t.Fatalf("parse CSV: %v (%d records)", err, len(records))
 	}
-	if got := records[0][len(records[0])-1]; got != "attribution_rule" {
+	if got := records[0][20]; got != "attribution_rule" {
 		t.Errorf("served CSV header ends with %q, want attribution_rule", got)
 	}
 }
@@ -124,6 +124,40 @@ func TestExport_NullIsLegacy_JSONAndCSV(t *testing.T) {
 	}
 }
 
+func TestExport_InsertResolvedRule_JSONAndCSV(t *testing.T) {
+	h, db := newTestHandler(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	pr := 42
+	if _, err := db.InsertOutcome(ctx, store.Outcome{
+		Developer: "alice", Repo: "acme/a", PRNumber: pr, IssueID: "issue-1",
+		MergeCommitSHA: "resolved", Timestamp: ts, Weight: 1, Quality: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertTokenEvent(ctx, store.TokenEvent{
+		Developer: "alice", Repo: "acme/a", PRNumber: &pr, IssueID: "unattributed",
+		Model: "claude-sonnet-4", InputTok: 1000, CostMicro: 1, Source: "jsonl",
+		Fidelity: "realtime", Timestamp: ts,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var issue, rule string
+	if err := rawStore(t, db).QueryRow(`SELECT issue_id, attribution_rule FROM token_events`).Scan(&issue, &rule); err != nil {
+		t.Fatal(err)
+	}
+	want := string(store.AttributionRulePRNumberAtInsert)
+	if issue != "issue-1" || rule != want {
+		t.Fatalf("insert resolution = (%s, %s), want (issue-1, %s)", issue, rule, want)
+	}
+	fromJSON, fromCSV, _ := exportRules(t, h)
+	for format, rules := range map[string][]string{"JSON": fromJSON, "CSV": fromCSV} {
+		if len(rules) != 1 || rules[0] != want {
+			t.Errorf("%s attribution_rule = %v, want [%s]", format, rules, want)
+		}
+	}
+}
+
 // TestExport_OutOfSetRuleRenderedAsFixedToken pins that a stored value outside
 // store.AttributionRules(), which no insert path admits, exports as "unknown"
 // and its text never appears in either body.
@@ -152,5 +186,19 @@ func TestExport_OutOfSetRuleRenderedAsFixedToken(t *testing.T) {
 	}
 	if strings.Contains(bodies, "secret-repo") {
 		t.Error("an out-of-set stored value was echoed in the export")
+	}
+}
+
+func TestExport_BranchAtMerge_JSONAndCSV(t *testing.T) {
+	h, db := newTestHandler(t)
+	seedRuleAt(t, db, store.AttributionRuleNone, time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	if _, err := rawStore(t, db).Exec(`UPDATE token_events SET attribution_rule='branch-at-merge'`); err != nil {
+		t.Fatal(err)
+	}
+	fromJSON, fromCSV, _ := exportRules(t, h)
+	for format, rules := range map[string][]string{"JSON": fromJSON, "CSV": fromCSV} {
+		if len(rules) != 1 || rules[0] != "branch-at-merge" {
+			t.Errorf("%s rule = %v", format, rules)
+		}
 	}
 }

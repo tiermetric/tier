@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -108,18 +111,21 @@ func TestDispatch_BackfillRedirectPolicy(t *testing.T) {
 // serves those only on the single-PR detail endpoint — so the fake mirrors that
 // split: mergedAt/updatedAt drive list-side windowing, the rest lands on detail.
 type fakePR struct {
-	number    int
-	updatedAt string // RFC3339; "" ⇒ omitted
-	mergedAt  string // RFC3339; "" ⇒ null (closed-unmerged)
-	mergeSHA  string
-	branch    string
-	body      string
-	login     string
-	userType  string // GitHub user.type; "" ⇒ sent empty
-	labels    []string
-	adds      int
-	dels      int
-	changed   int
+	number        int
+	updatedAt     string // RFC3339; "" ⇒ omitted
+	mergedAt      string // RFC3339; "" ⇒ null (closed-unmerged)
+	title         string
+	mergeSHA      string
+	branch        string
+	headRepo      string
+	defaultBranch string
+	body          string
+	login         string
+	userType      string // GitHub user.type; "" ⇒ sent empty
+	labels        []string
+	adds          int
+	dels          int
+	changed       int
 }
 
 // newFakeGitHub serves the two endpoints backfill calls: the closed-PR list
@@ -153,10 +159,13 @@ func newFakeGitHub(t *testing.T, prs []fakePR) *httptest.Server {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"number":           p.number,
+				"title":            p.title,
 				"body":             p.body,
 				"merged_at":        mergedAt,
+				"created_at":       p.mergedAt,
 				"merge_commit_sha": p.mergeSHA,
-				"head":             map[string]any{"ref": p.branch},
+				"head":             map[string]any{"ref": p.branch, "repo": map[string]string{"full_name": fakeHeadRepo(p)}},
+				"base":             map[string]any{"repo": map[string]string{"default_branch": p.defaultBranch}},
 				"user":             map[string]any{"login": p.login, "type": p.userType},
 				"labels":           labels,
 				"additions":        p.adds,
@@ -244,6 +253,15 @@ func TestDispatch_BackfillReconstructsOutcomes(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
+	exp, err := db.ExportDeveloper(ctx, "alice")
+	if err != nil || len(exp.Outcomes) != 1 {
+		t.Fatalf("export: %v %v", exp.Outcomes, err)
+	}
+	metadata := exp.Outcomes[0]
+	wantHash := issueref.BranchHash("owner/repo", "feature/55-x")
+	if metadata.HeadBranchHash == nil || *metadata.HeadBranchHash != *wantHash || metadata.CreatedAt == nil || metadata.MergedAt == nil || !metadata.CreatedAt.Equal(*metadata.MergedAt) {
+		t.Fatalf("backfill metadata: %+v", metadata)
+	}
 	o101, ok, err := db.OutcomeByMergeCommit(ctx, "sha101")
 	if err != nil || !ok {
 		t.Fatalf("sha101 lookup: ok=%v err=%v", ok, err)
@@ -561,5 +579,123 @@ func TestDispatch_BackfillRejectsInvalidConfig(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "config") {
 		t.Errorf("stderr = %q, want a config error", errOut.String())
+	}
+}
+
+func fakeHeadRepo(p fakePR) string {
+	if p.headRepo != "" {
+		return p.headRepo
+	}
+	return "owner/repo"
+}
+
+func TestBackfillBranchEvidenceWithoutFill(t *testing.T) {
+	for _, tc := range []struct {
+		name, headRepo, branch, defaultBranch string
+		wantHash                              bool
+	}{
+		{"same_repo", "OWNER/REPO", "feature/topic", "main", true},
+		{"fork_same_named_branch", "fork/repo", "feature/topic", "main", false},
+		{"custom_default", "owner/repo", "trunk", "trunk", false},
+		{"custom_default_prefixed", "owner/repo", "refs/heads/trunk", "trunk", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+			srv := newFakeGitHub(t, []fakePR{{number: 42, updatedAt: merged.Format(time.RFC3339), mergedAt: merged.Format(time.RFC3339), mergeSHA: "branch-evidence", branch: tc.branch, headRepo: tc.headRepo, defaultBranch: tc.defaultBranch, body: "closes #42", login: "alice"}})
+			defer srv.Close()
+			path := filepath.Join(t.TempDir(), "tier.db")
+			db, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if err := db.InsertTokenEvent(context.Background(), store.TokenEvent{Developer: "alice", Repo: "owner/repo", IssueID: store.UnattributedIssueID, Model: "claude-sonnet-4", Source: "jsonl", Timestamp: merged.Add(-time.Hour), BranchHash: issueref.BranchHash("owner/repo", tc.branch)}); err != nil {
+				t.Fatal(err)
+			}
+			var out, errOut bytes.Buffer
+			if code := dispatch([]string{"backfill", "--repo", "owner/repo", "--since", "2026-01-01", "--token", "x", "--db", path, "--github-api-url", srv.URL}, &out, &errOut); code != 0 {
+				t.Fatalf("exit=%d stderr=%s", code, &errOut)
+			}
+			exp, err := db.ExportDeveloper(context.Background(), "alice")
+			if err != nil || len(exp.Outcomes) != 1 || len(exp.TokenEvents) != 1 {
+				t.Fatalf("export: %+v %v", exp, err)
+			}
+			o := exp.Outcomes[0]
+			if (o.HeadBranchHash != nil) != tc.wantHash {
+				t.Errorf("hash=%v want present=%v", o.HeadBranchHash, tc.wantHash)
+			}
+			if tc.wantHash && *o.HeadBranchHash != *issueref.BranchHash("owner/repo", tc.branch) {
+				t.Errorf("wrong hash: %s", *o.HeadBranchHash)
+			}
+			if o.CreatedAt == nil || o.MergedAt == nil {
+				t.Errorf("missing timestamps: %+v", o)
+			}
+			if exp.TokenEvents[0].IssueID != store.UnattributedIssueID {
+				t.Errorf("backfill branch-filled event: %s", exp.TokenEvents[0].IssueID)
+			}
+		})
+	}
+}
+
+func TestBackfill_RevertExclusionAndTitleControl(t *testing.T) {
+	for _, tc := range []struct {
+		name, head, title, body string
+		excluded                bool
+	}{
+		{"branch", "revert-45-topic", "renamed", "", true},
+		{"quoted-title-no-issue", "normal", `Revert "original"`, "", true},
+		{"ordinary-title", "feature/42-topic", "Revert to v2 API…", "Closes #42", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeGitHub(t, []fakePR{{number: 43, title: tc.title, branch: tc.head, body: tc.body, login: "alice", mergedAt: "2026-07-10T12:00:00Z", mergeSHA: "merge", adds: 40}})
+			defer srv.Close()
+			db, err := store.Open(filepath.Join(t.TempDir(), "tier.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			ctx := context.Background()
+			at := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			if _, err := db.RecordPushCommit(ctx, store.Outcome{Developer: "alice", Repo: "owner/repo", IssueID: "issue-42", Timestamp: at}, "2026-07-10", "merge", at); err != nil {
+				t.Fatal(err)
+			}
+			gh := &githubClient{http: srv.Client(), baseURL: srv.URL, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			for i := 0; i < 2; i++ {
+				inserted, unattributed, excluded, err := gh.reconstructOutcome(ctx, db, "owner/repo", 43, nil)
+				if err != nil || unattributed || excluded != tc.excluded || (tc.excluded && inserted) || (!tc.excluded && i == 0 && !inserted) {
+					t.Fatalf("reconstruct=%v %v %v", inserted, unattributed, err)
+				}
+			}
+			o, found, err := db.OutcomeByMergeCommit(ctx, "merge")
+			if err != nil || found == tc.excluded {
+				t.Fatalf("stored=%v %v", found, err)
+			}
+			exp, err := db.ExportDeveloper(ctx, "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.excluded {
+				if len(exp.Outcomes) != 0 || len(exp.OutcomeExclusions) != 1 || exp.OutcomeExclusions[0].Actor != "backfill" || exp.OutcomeExclusions[0].Source != "backfill" || exp.OutcomeExclusions[0].Developer != "alice" {
+					t.Fatalf("backfill export=%+v", exp)
+				}
+			} else if o.Weight <= 0 {
+				t.Fatalf("ordinary PR weight=%v", o.Weight)
+			}
+		})
+	}
+}
+
+func TestDispatch_BackfillReportsExcludedSeparately(t *testing.T) {
+	srv := newFakeGitHub(t, []fakePR{{number: 43, title: `Revert "original"`, branch: "revert-42-topic", login: "alice", mergedAt: "2026-07-10T12:00:00Z", mergeSHA: "merge"}})
+	defer srv.Close()
+	args := []string{"backfill", "--repo", "owner/repo", "--since", "2026-01-01", "--token", "x", "--db", filepath.Join(t.TempDir(), "tier.db"), "--github-api-url", srv.URL}
+	for i := 0; i < 2; i++ {
+		var out, errOut bytes.Buffer
+		if code := dispatch(args, &out, &errOut); code != 0 {
+			t.Fatal(errOut.String())
+		}
+		if !strings.Contains(out.String(), "merged=1 inserted=0 skipped=0 excluded=1 unattributed=0") {
+			t.Errorf("run %d: %s", i, out.String())
+		}
 	}
 }

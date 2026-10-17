@@ -3,7 +3,7 @@
 
 **Analysis performed:** March 26, 2026. This date is the historical record of when the assessment was carried out, not a freshness stamp — the findings below are re-checked against the code when the formula changes.
 
-> **Note (2026-09-26).** TIER must never be an input to performance reviews, pay, promotion, performance improvement plans, discipline or dismissal — not as the only input, and not as one of several. It is for coaching how people work with AI. Where this analysis mentions performance use, read it as a description of misuse to guard against, not a use TIER supports.
+> **Note (2026-09-26).** TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. Where this analysis mentions performance use, read it as a description of misuse to guard against, not a use TIER supports.
 
 **Formula under review:** `TIER = Σ(outcome_weight × quality_multiplier) / (total_tokens / 1,000,000)`
 
@@ -538,7 +538,7 @@ The following changes should be implemented before an organization relies on TIE
 
 ### Governance Requirements (Non-Formula)
 
-9. **TIER must never be an input to a performance decision.** This must be stated explicitly in the documentation, the dashboard, and in the enterprise onboarding process. Organizations that treat TIER as a performance target will experience Goodhart's Law convergence within one review cycle. (Addresses P-06)
+9. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. This must be stated explicitly in the documentation, the dashboard, and in the enterprise onboarding process. Organizations that treat TIER as a performance target will experience Goodhart's Law convergence within one review cycle. (Addresses P-06)
 
 10. **Implement weight assignment approval workflow.** Weight-5 and weight-8 assignments require a second approver and are locked before work begins. Post-hoc re-weighting requires manager + skip-level approval. (Addresses G-01, O-01)
 

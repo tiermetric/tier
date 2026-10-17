@@ -14,6 +14,9 @@ type AttributionRule string
 
 // The recordable attribution rules.
 const (
+	// Merge/insert resolution rules are server-owned and excluded from the client allowlist.
+	AttributionRuleBranchAtMerge    AttributionRule = "branch-at-merge"
+	AttributionRulePRNumberAtInsert AttributionRule = "pr-number-at-insert"
 	AttributionRuleNone             AttributionRule = ""
 	AttributionRuleBranch           AttributionRule = "branch"
 	AttributionRuleWorktreeCWD      AttributionRule = "worktree-cwd"
@@ -21,7 +24,7 @@ const (
 	AttributionRuleCarry            AttributionRule = "carry"
 )
 
-// AttributionRules returns every non-empty rule ValidateAttributionRule accepts.
+// AttributionRules returns the client-settable rules ValidateAttributionRule accepts.
 // It is the one list of the closed set.
 func AttributionRules() []AttributionRule {
 	return []AttributionRule{

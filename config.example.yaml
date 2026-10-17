@@ -47,6 +47,10 @@ http:
   # token". Must DIFFER from api_token and read_token. Empty = no metrics scope.
   # Flag: --metrics-token   Env: TIER_METRICS_TOKEN
   metrics_token: ""
+  # Upload-only credential for tierd ship (#1144): POST /api/v1/events only.
+  # Must differ from api/read/metrics tokens; alone cannot enable network bind.
+  # Prefer TIER_INGEST_TOKEN or @file. On laptops: ship --api-token @ingest-file.
+  ingest_token: ""
 
   # CIDRs of trusted reverse proxies / TLS terminators. When the direct peer is
   # inside one of these, the failed-auth lockout keys on the client IP from
@@ -271,6 +275,10 @@ watch:
   worktree_attribution: false
 
 outcomes:
+  # Operator opt-in only; confirmation and restart never turn scoring on.
+  # Older tierd refuses this key: remove it before rolling back. A writable
+  # restart without an enabling CLI/env/config setting turns scoring off.
+  event3_scoring: false
   # Push-to-default-branch outcome capture (#196). OFF by default. When true, a
   # qualifying direct commit to the default branch becomes a DEGRADED outcome so
   # trunk-based teams (who commit straight to main behind feature flags and never

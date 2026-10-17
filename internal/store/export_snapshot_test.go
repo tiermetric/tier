@@ -26,9 +26,9 @@ package store
 // which. The subject receives a partial answer presented as complete.
 //
 // 🔑 THE INVARIANT THESE ARMS ASSERT, and it is deliberately not "the export is
-// correct": with the subject's rows in ALL THIRTEEN exported tables written and
+// correct": with the subject's rows in ALL FOURTEEN exported tables written and
 // deleted ATOMICALLY (one write transaction each way), every snapshot of the
-// database has those thirteen tables either all populated or all empty. So an export
+// database has those fourteen tables either all populated or all empty. So an export
 // reporting some populated and some empty read two different database states,
 // and that is a tear by construction — no timing assumption, no sampling, no
 // flake.
@@ -71,10 +71,19 @@ import (
 // itself (the export's first read, and one that runs before the others) is inside
 // the covered set rather than assumed.
 var subjectSeedStatements = []struct{ table, stmt string }{
+	{"correction_declarations", `INSERT INTO correction_declarations(developer,declaration_state,recorded_at,rule_version,supporting_text) VALUES (?,'none',CURRENT_TIMESTAMP,'event3-v1','declaration evidence')`},
+	{"corrective_relations", `INSERT INTO corrective_relations(child_developer,state,revision,recorded_at,updated_at,rule_version,supporting_text) VALUES (?,'pending',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'event3-v1','relation evidence')`},
+	{"correction_audit", `INSERT INTO correction_audit(child_developer,revision,action,recorded_at,rule_version,reason_text) VALUES (?,1,'declared',CURRENT_TIMESTAMP,'event3-v1','audit evidence')`},
 	// The session_id is what joins the watcher_checkpoint seed below (#919).
 	{"token_events", `INSERT INTO token_events (developer, issue_id, model, cost_micro, source, fidelity, session_id)
 		VALUES (?1, 'issue-673', 'claude-sonnet-4', 1000, 'proxy', 'realtime', 'sess-673-' || ?1)`},
+	{"outcome_exclusions", `INSERT INTO outcome_exclusions (repo, exclusion_pr_number, exclusion_merge_commit_sha, developer, ts, reason, evidence, actor, excluded_at, exclusion_repo, author_developer)
+        VALUES ('acme/tier', 673, 'excluded-' || ?1, ?1, CURRENT_TIMESTAMP, 'github-revert-pr', 'head match', 'backfill', CURRENT_TIMESTAMP, 'acme/tier', ?1)`},
+	{"pricing_observation_audit", `INSERT INTO pricing_observation_audit (developer,token_event_id,kind,before_json,after_json) VALUES (?,1,'promotion','{}','{}')`},
 	{"outcomes", `INSERT INTO outcomes (developer, issue_id, weight) VALUES (?, 'issue-673', 1.0)`},
+	{"correction_assessments", `INSERT INTO correction_assessments(revision,basis,reviewer,recorded_at,rule_version) VALUES(1,'reviewed',?,CURRENT_TIMESTAMP,'event3-v2')`},
+	{"correction_allocations", `INSERT INTO correction_allocations(chain_version,outcome_id,role,original_weight,original_quality,raw_weight,original_term,reviewed_own_weight,before_weight,after_weight,share,projected_quality,allocated_points,marginal_credit,ranking_eligibility,status,pending_reason,provisional,recorded_at,rule_version)
+ SELECT 1,id,'original','1/1','1/1','1/1','1/1','1/1','1/1','1/1','1/1','1/1','1/1','0/1','eligible','resolved','',0,CURRENT_TIMESTAMP,'event3-v2' FROM outcomes WHERE developer=?`},
 	{"actual_spend", `INSERT INTO actual_spend (developer, period, actual_paid_micro) VALUES (?, '2026-08', 200000000)`},
 	{"org_hierarchy", `INSERT INTO org_hierarchy (developer, team, division, org) VALUES (?, 'core', 'platform', 'acme')`},
 	{"period_membership", `INSERT INTO period_membership (developer, org, period_start) VALUES (?, 'acme', '2026-08')`},
@@ -125,7 +134,10 @@ var subjectSeedStatements = []struct{ table, stmt string }{
 // EXACT count rather than "non-empty" is what turns a torn identifier set into a
 // failure instead of a shrug.
 var seededRowsPerTable = map[string]int{
-	"token_events": 2, "outcomes": 1, "actual_spend": 1, "org_hierarchy": 1,
+	"pricing_observation_audit": 1,
+	"correction_assessments":    1, "correction_allocations": 1,
+	"correction_declarations": 1, "corrective_relations": 1, "correction_audit": 1,
+	"token_events": 2, "outcomes": 1, "outcome_exclusions": 1, "actual_spend": 1, "org_hierarchy": 1,
 	"period_membership": 1, "hierarchy_membership": 1, "quality_events": 1, "quality_history": 1,
 	"repo_repair_audit": 1, "push_outcome_commits": 1, "push_outcome_audit": 1,
 	"developer_alias": 1, "watcher_checkpoint": 1,
@@ -176,19 +188,23 @@ func seedSubject(db *DB, developer string) error {
 // SAME table order as subjectSeedStatements, so a tear can be named by table.
 func exportedTableCounts(exp DeveloperExport) map[string]int {
 	return map[string]int{
-		"token_events":         len(exp.TokenEvents),
-		"outcomes":             len(exp.Outcomes),
-		"actual_spend":         len(exp.ActualSpend),
-		"org_hierarchy":        len(exp.OrgHierarchy),
-		"period_membership":    len(exp.PeriodMembership),
-		"hierarchy_membership": len(exp.HierarchyMembership),
-		"quality_events":       len(exp.QualityEvents),
-		"quality_history":      len(exp.QualityHistory),
-		"repo_repair_audit":    len(exp.RepoRepairAudit),
-		"push_outcome_commits": len(exp.PushOutcomeCommits),
-		"push_outcome_audit":   len(exp.PushOutcomeAudit),
-		"developer_alias":      len(exp.DeveloperAlias),
-		"watcher_checkpoint":   len(exp.WatcherCheckpoint),
+		"correction_assessments": len(exp.CorrectionAssessments), "correction_allocations": len(exp.CorrectionAllocations),
+		"correction_declarations": len(exp.CorrectionDeclarations), "corrective_relations": len(exp.CorrectiveRelations), "correction_audit": len(exp.CorrectionAudit),
+		"pricing_observation_audit": len(exp.PricingObservations),
+		"token_events":              len(exp.TokenEvents),
+		"outcomes":                  len(exp.Outcomes),
+		"outcome_exclusions":        len(exp.OutcomeExclusions),
+		"actual_spend":              len(exp.ActualSpend),
+		"org_hierarchy":             len(exp.OrgHierarchy),
+		"period_membership":         len(exp.PeriodMembership),
+		"hierarchy_membership":      len(exp.HierarchyMembership),
+		"quality_events":            len(exp.QualityEvents),
+		"quality_history":           len(exp.QualityHistory),
+		"repo_repair_audit":         len(exp.RepoRepairAudit),
+		"push_outcome_commits":      len(exp.PushOutcomeCommits),
+		"push_outcome_audit":        len(exp.PushOutcomeAudit),
+		"developer_alias":           len(exp.DeveloperAlias),
+		"watcher_checkpoint":        len(exp.WatcherCheckpoint),
 	}
 }
 
@@ -271,6 +287,15 @@ func countSeededTables(t *testing.T, db *DB, developer string) map[string]int {
 			continue // token_events has two seed statements; count it once
 		}
 		query := `SELECT COUNT(*) FROM ` + s.table + ` WHERE developer = ? OR developer = 'alias-of-' || ?`
+		if s.table == "corrective_relations" || s.table == "correction_audit" {
+			query = `SELECT COUNT(*) FROM ` + s.table + ` WHERE child_developer=? OR child_developer='alias-of-' || ?`
+		}
+		if s.table == "correction_assessments" {
+			query = `SELECT COUNT(*) FROM correction_assessments WHERE reviewer=? OR reviewer='alias-of-' || ?`
+		}
+		if s.table == "correction_allocations" {
+			query = `SELECT COUNT(*) FROM correction_allocations WHERE outcome_id IN (SELECT id FROM outcomes WHERE developer=? OR developer='alias-of-' || ?)`
+		}
 		if s.table == "developer_alias" {
 			query = `SELECT COUNT(*) FROM developer_alias WHERE canonical = ? OR canonical = ?`
 		}
@@ -617,7 +642,7 @@ func countRowsVia(t *testing.T, q rowQuerier, query, arg string) int {
 // ⚠️ `orderBy` is source-parity-checked against ExportDeveloper (see
 // TestExportPlanFixtureMatchesTheRealExportSQL), so it cannot drift from
 // production. The column LIST is not duplicated here, and that is measured, not
-// assumed: `SELECT *` and the real column list plan IDENTICALLY for all 13 reads
+// assumed: `SELECT *` and the real column list plan IDENTICALLY for all 14 reads
 // (checked in the same test).
 //
 // 🔴 THE HISTORY IS KEPT BECAUSE IT IS THE REASON THE TABLE EXISTS. An earlier
@@ -656,7 +681,9 @@ var exportReadPlanExpectations = []struct {
 	// orderBy is production's ORDER BY for this read, source-parity-checked.
 	orderBy string
 }{
+	{"pricing_observation_audit", true, `developer IN (?,?)`, "idx_pricing_observation_subject", true, "id"},
 	{"token_events", true, `developer IN (?,?)`, "idx_token_events_scores", true, "id"},
+	{"outcome_exclusions", true, `developer IN (?,?) OR author_developer IN (?,?)`, "idx_outcome_exclusions_developer", true, "id"},
 	{"outcomes", true, `developer IN (?,?)`, "idx_outcomes_developer", true, "id"},
 	{"actual_spend", true, `developer IN (?,?)`, "idx_actual_spend_dev_period_nu", true, "id"},
 	// The only seek with NO sort: ORDER BY developer is already the autoindex's
@@ -697,8 +724,14 @@ func TestExportReadPlansMatchTheRecordedBound(t *testing.T) {
 		if e.table == "developer_alias" {
 			args = []any{"alice"}
 		}
+		if e.table == "outcome_exclusions" {
+			args = append(args, "alice", "alias-of-alice")
+		}
 		plan := queryPlan(t, db, `SELECT * FROM `+e.table+` WHERE `+e.predicate+` ORDER BY `+e.orderBy, args...)
 		checked++
+		if e.table == "outcome_exclusions" && !strings.Contains(plan, "idx_outcome_exclusions_author_developer") {
+			t.Errorf("trusted author lookup lacks its index: %s", plan)
+		}
 		scans := strings.Contains(plan, "SCAN "+e.table)
 		switch {
 		case e.seeks && scans:
@@ -740,8 +773,8 @@ func TestExportReadPlansMatchTheRecordedBound(t *testing.T) {
 
 	// 🔴 CONTROL 1: every expectation must have been exercised. A loop that
 	// planned nothing would report no failures and look identical to a pass.
-	if checked != len(exportReadPlanExpectations) || checked != 13 {
-		t.Fatalf("control: planned %d reads, expected 13 — the loop did not cover every export read, so a regression in an unplanned table is invisible", checked)
+	if checked != len(exportReadPlanExpectations) || checked != 15 {
+		t.Fatalf("control: planned %d reads, expected 15 — the loop did not cover every export read, so a regression in an unplanned table is invisible", checked)
 	}
 
 	// 🔴 CONTROL 2: EXPLAIN QUERY PLAN must be capable of emitting the EXACT
@@ -806,13 +839,16 @@ func TestExportPlanFixtureMatchesTheRealExportSQL(t *testing.T) {
 		t.Fatal("control: could not find the end of ExportDeveloper's body in store.go — an unbounded search would match ORDER BY clauses from other methods")
 	}
 	fnSrc := body[start : start+end]
+	if !strings.Contains(fnSrc, "FROM outcome_exclusions WHERE developer IN (`+placeholders+`) OR author_developer IN (`+placeholders+`) ORDER BY id") {
+		t.Fatal("exclusion export must bind both original developer and trusted author ownership")
+	}
 
 	// 🔴 CONTROL: the slice must actually contain export reads. A zero-length or
 	// wrong slice makes every Contains below vacuously false in the wrong
 	// direction (it would fail loudly) — but a slice containing the WHOLE file
 	// would make them vacuously true, which is the dangerous direction.
-	if n := strings.Count(fnSrc, "FROM "); n < 13 {
-		t.Fatalf("control: the ExportDeveloper source slice contains %d %q occurrences, want >= 13 — the slice is too small to hold all thirteen reads", n, "FROM ")
+	if n := strings.Count(fnSrc, "FROM "); n < 14 {
+		t.Fatalf("control: the ExportDeveloper source slice contains %d %q occurrences, want >= 14 — the slice is too small to hold all fourteen reads", n, "FROM ")
 	}
 	if strings.Contains(fnSrc, "func (d *DB) EraseDeveloper(") {
 		t.Fatal("control: the ExportDeveloper source slice swallowed EraseDeveloper — the bound is wrong and an ORDER BY from another method could satisfy the parity check")
@@ -858,6 +894,9 @@ func TestExportPlanFixtureMatchesTheRealExportSQL(t *testing.T) {
 		args := []any{"alice", "alias-of-alice"}
 		if e.table == "developer_alias" {
 			args = []any{"alice"}
+		}
+		if e.table == "outcome_exclusions" {
+			args = append(args, "alice", "alias-of-alice")
 		}
 		tail := ` FROM ` + e.table + ` WHERE ` + e.predicate + ` ORDER BY ` + e.orderBy
 		starPlan := queryPlan(t, db, `SELECT *`+tail, args...)

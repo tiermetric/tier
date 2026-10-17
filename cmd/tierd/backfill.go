@@ -55,7 +55,9 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/config"
+	"github.com/tiermetric/tier/internal/corrects"
 	"github.com/tiermetric/tier/internal/issueref"
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/prderive"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
@@ -76,6 +78,8 @@ const outcomeSourceBackfill = "backfill"
 // unit-testable with a fake and honors "accept interfaces".
 type outcomeInserter interface {
 	RecordPROutcome(ctx context.Context, o store.Outcome) (inserted bool, err error)
+	RecordCorrectionDeclaration(context.Context, store.Outcome, corrects.Declaration, string, string) (int64, error)
+	ExcludePROutcome(ctx context.Context, o store.Outcome, evidence, actor string) error
 }
 
 // runBackfillCmd parses flags, resolves the token, opens the store, and runs the
@@ -222,8 +226,8 @@ func runBackfillCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	_, _ = fmt.Fprintf(stdout,
-		"backfill complete: repo=%s since=%s merged=%d inserted=%d skipped=%d unattributed=%d\n",
-		repo, since.Format("2006-01-02"), stats.merged, stats.inserted, stats.skipped, stats.unattributed)
+		"backfill complete: repo=%s since=%s merged=%d inserted=%d skipped=%d excluded=%d unattributed=%d\n",
+		repo, since.Format("2006-01-02"), stats.merged, stats.inserted, stats.skipped, stats.excluded, stats.unattributed)
 	return 0
 }
 
@@ -271,6 +275,7 @@ func dbDir(path string) string {
 type backfillStats struct {
 	merged       int // merged PRs within the window that were examined
 	inserted     int // fresh outcome rows written
+	excluded     int // recognised revert PRs excluded from credit
 	skipped      int // ON CONFLICT DO NOTHING no-ops (already present: replay/overlap)
 	unattributed int // merged PRs with no resolvable issue id, or an author login reserved for the pseudo-developer (no outcome, logged)
 }
@@ -331,13 +336,15 @@ func backfillOutcomes(ctx context.Context, gh *githubClient, ins outcomeInserter
 			}
 
 			// A merged, in-window PR: count it, then partition by reconstruction
-			// result so merged == inserted + skipped + unattributed always holds.
+			// result so merged == inserted + skipped + excluded + unattributed always holds.
 			stats.merged++
-			inserted, unattributed, err := gh.reconstructOutcome(ctx, ins, repo, it.Number, sizeLabels)
+			inserted, unattributed, excluded, err := gh.reconstructOutcome(ctx, ins, repo, it.Number, sizeLabels)
 			if err != nil {
 				return stats, fmt.Errorf("reconstruct PR #%d: %w", it.Number, err)
 			}
 			switch {
+			case excluded:
+				stats.excluded++
 			case unattributed:
 				stats.unattributed++
 			case inserted:
@@ -360,21 +367,42 @@ func backfillOutcomes(ctx context.Context, gh *githubClient, ins outcomeInserter
 // fallback) and work-type precedence (#301) — differing only in source='backfill'.
 // sizeLabels is the operator's normalized size-label table (or nil for the built-in
 // defaults), so a custom-label org scores backfilled PRs the same way the live
-// webhook does (#244/#301). Returns (inserted, unattributed): an unattributed PR (no
-// issue id) is not an error — it is logged (PR number only) and produces no outcome,
-// mirroring the webhook's Debug skip.
-func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInserter, repo string, number int, sizeLabels map[string]float64) (inserted, unattributed bool, err error) {
+// webhook does (#244/#301). Returns (inserted, unattributed, excluded): an unattributed PR (no
+// issue id) is not an error — it is logged (PR number only) and produces no outcome.
+// Correction declarations are captured even for unattributed or excluded PRs.
+func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInserter, repo string, number int, sizeLabels map[string]float64) (inserted, unattributed, excluded bool, err error) {
 	pr, err := gh.getPR(ctx, repo, number)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	// Guard against a list/detail race: only reconstruct genuinely-merged PRs.
 	if pr.MergedAt == nil || pr.MergeCommitSHA == "" {
-		return false, false, nil
+		return false, false, false, nil
 	}
 	mergedAt, err := parseGitHubTime(*pr.MergedAt)
 	if err != nil {
-		return false, false, fmt.Errorf("parse merged_at: %w", err)
+		return false, false, false, fmt.Errorf("parse merged_at: %w", err)
+	}
+	// This is the body fetched now, never a claimed merge-time body snapshot.
+	evidenceOutcome := store.Outcome{Developer: pr.User.Login, Repo: repo, PRNumber: pr.Number,
+		MergeCommitSHA: pr.MergeCommitSHA, MergedAt: &mergedAt}
+	evidenceOutcome.SetDiffStats(pr.Additions, pr.Deletions, pr.ChangedFiles)
+	if ts, err := parseGitHubTime(pr.CreatedAt); err == nil && !ts.IsZero() && !ts.After(mergedAt) {
+		evidenceOutcome.CreatedAt = &ts
+	}
+	if _, err := ins.RecordCorrectionDeclaration(ctx, evidenceOutcome, corrects.Parse(pr.Body), "", "backfill:fetch-time"); err != nil {
+		if !errors.Is(err, store.ErrCorrectionDeclarationIgnored) {
+			return false, false, false, err
+		}
+		gh.logger.Info("backfill: changed correction declaration ignored; first evidence retained", "pr", logsafe.Str(fmt.Sprint(pr.Number)))
+	}
+
+	if evidence := prderive.RevertEvidence(pr.Head.Ref, pr.Title); evidence != "" {
+		err := ins.ExcludePROutcome(ctx, store.Outcome{
+			Developer: pr.User.Login, Repo: repo, PRNumber: pr.Number,
+			MergeCommitSHA: pr.MergeCommitSHA, Timestamp: mergedAt, AuthorType: pr.User.Type,
+		}, evidence, outcomeSourceBackfill)
+		return false, false, err == nil, err
 	}
 
 	issueID := issueref.FromBranchOrBody(pr.Head.Ref, pr.Body)
@@ -382,13 +410,13 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 		// No resolvable issue id — cannot attribute. Log the PR NUMBER only (an int,
 		// not attacker-controlled); never the title/body/branch, which are.
 		gh.logger.Debug("backfill: merged PR has no derivable issue id, skipping", "pr", number)
-		return false, true, nil
+		return false, true, false, nil
 	}
 	// The webhook's #856 refusal: a login spelled like the unattributed sentinel
 	// would merge its author into the pseudo-developer pool.
 	if store.ResemblesUnattributed(pr.User.Login) {
 		gh.logger.Warn("backfill: PR author login is reserved for the unattributed pseudo-developer; outcome not recorded", "pr", number)
-		return false, true, nil
+		return false, true, false, nil
 	}
 	// Multi-issue attribution parity with the webhook (#189): a PR that closes
 	// several issues is attributed to the single primary (issueID); log the set so
@@ -400,21 +428,14 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 	}
 
 	labels := labelNames(pr.Labels)
-	weight, weightSource := store.ResolveWeight(prderive.SizeWeight(labels, sizeLabels),
-		pr.Additions, pr.Deletions, pr.ChangedFiles)
 	workType, workTypeSource := prderive.WorkTypeFromLabels(labels)
 
 	o := store.Outcome{
 		Developer:      pr.User.Login,
 		IssueID:        issueID,
 		PRNumber:       pr.Number,
-		Weight:         weight,
-		WeightSource:   weightSource,
 		Quality:        1.0,
 		MergeCommitSHA: pr.MergeCommitSHA,
-		Additions:      pr.Additions,
-		Deletions:      pr.Deletions,
-		ChangedFiles:   pr.ChangedFiles,
 		WorkType:       workType,
 		WorkTypeSource: workTypeSource,
 		Source:         outcomeSourceBackfill,
@@ -422,11 +443,21 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 		AuthorType:     pr.User.Type,
 		Timestamp:      mergedAt,
 	}
+	o.SetDiffStats(pr.Additions, pr.Deletions, pr.ChangedFiles)
+	o.Weight, o.WeightSource = store.ResolveWeight(prderive.SizeWeight(labels, sizeLabels), o.Additions, o.Deletions, o.ChangedFiles)
+	if strings.EqualFold(pr.Head.Repo.FullName, o.Repo) &&
+		strings.TrimPrefix(pr.Head.Ref, "refs/heads/") != pr.Base.Repo.DefaultBranch {
+		o.HeadBranchHash = issueref.BranchHash(o.Repo, pr.Head.Ref)
+	}
+	o.MergedAt = &mergedAt
+	if ts, err := parseGitHubTime(pr.CreatedAt); err == nil && !ts.IsZero() && !ts.After(mergedAt) {
+		o.CreatedAt = &ts
+	}
 	ins2, err := ins.RecordPROutcome(ctx, o)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
-	return ins2, false, nil
+	return ins2, false, false, nil
 }
 
 // --- GitHub REST client ---
@@ -488,12 +519,22 @@ type ghLabel struct {
 
 type ghPR struct {
 	Number         int     `json:"number"`
+	Title          string  `json:"title"`
 	Body           string  `json:"body"`
 	MergedAt       *string `json:"merged_at"`
+	CreatedAt      string  `json:"created_at"`
 	MergeCommitSHA string  `json:"merge_commit_sha"`
 	Head           struct {
-		Ref string `json:"ref"`
+		Ref  string `json:"ref"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
+	Base struct {
+		Repo struct {
+			DefaultBranch string `json:"default_branch"`
+		} `json:"repo"`
+	} `json:"base"`
 	User struct {
 		Login string `json:"login"`
 		// Type is the GitHub account type, recorded so a bot author never counts
@@ -501,9 +542,9 @@ type ghPR struct {
 		Type string `json:"type"`
 	} `json:"user"`
 	Labels       []ghLabel `json:"labels"`
-	Additions    int       `json:"additions"`
-	Deletions    int       `json:"deletions"`
-	ChangedFiles int       `json:"changed_files"`
+	Additions    *int      `json:"additions"`
+	Deletions    *int      `json:"deletions"`
+	ChangedFiles *int      `json:"changed_files"`
 }
 
 // listClosedPRs fetches one page of closed PRs sorted updated-descending. Diff stats
@@ -539,6 +580,17 @@ func (gh *githubClient) getPR(ctx context.Context, repo string, number int) (ghP
 		return ghPR{}, fmt.Errorf("decode PR detail: %w", err)
 	}
 	return pr, nil
+}
+
+// githubStatusError preserves the permanent HTTP status for callers that can
+// distinguish a missing PR from an authentication or permission failure.
+type githubStatusError struct {
+	Path       string
+	StatusCode int
+}
+
+func (e *githubStatusError) Error() string {
+	return fmt.Sprintf("GitHub API GET %s: unexpected status %d", e.Path, e.StatusCode)
 }
 
 // do performs one authenticated GET against path (which begins with "/") and returns
@@ -623,7 +675,7 @@ func (gh *githubClient) do(ctx context.Context, path string) ([]byte, error) {
 			// Permanent 4xx (404 repo/token, 401 auth, 422): do not retry. The
 			// GitHub error body can echo the request; return status only, never the
 			// body, so nothing attacker-influenced reaches a log.
-			return nil, fmt.Errorf("GitHub API GET %s: unexpected status %d", path, resp.StatusCode)
+			return nil, &githubStatusError{Path: path, StatusCode: resp.StatusCode}
 		}
 	}
 }

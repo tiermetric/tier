@@ -108,7 +108,7 @@ worth spreading is the
 </tr>
 <tr>
 <td><code>GET /api/v1/scores/compare</code> (#277)</td>
-<td>A before/after <strong>delta</strong> with a CI-honest <code>significant</code> flag</td>
+<td>A before/after <strong>delta</strong> with an unvalidated non-overlap field; inference not established</td>
 <td>Not in team/division mode</td>
 </tr>
 <tr>
@@ -122,9 +122,7 @@ worth spreading is the
 <p><strong>Who sees what.</strong> <code>developer</code> mode is meant for a developer and their
 manager, looking at the same numbers so the manager can coach. Today anyone
 with read or dashboard access sees every developer&#39;s numbers; per-viewer
-access is planned (#826). Those numbers must never be used for pay,
-promotion, performance reviews, performance improvement plans, discipline or
-dismissal. The levers below name nobody, but they are published only beside
+access is planned (#826). TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The levers below name nobody, but they are published only beside
 every developer&#39;s named row. See <a href="#coaching-not-appraisal" rel="nofollow">Coaching, not appraisal</a>.</p>
 </blockquote>
 <hr>
@@ -181,9 +179,7 @@ buying premium outcomes, or is it habit?</li>
 <li>Compare <strong>within a work type</strong> (<code>work_types[]</code>), never across types. The
 pooled top-level <code>total</code> is back-compat only and is explicitly <strong>not</strong> a
 cross-type ranking.</li>
-<li>Agree <strong>one</strong> practice change to try -- e.g. &#34;route routine refactors to the
-cheaper model,&#34; or &#34;start sessions from a cached project brief.&#34; One change,
-so the next step can actually attribute the effect.</li>
+<li>Treat a move to a cheaper model as a hypothesis to investigate. Compare similar work over finished periods, record other changes (task mix, acceptance criteria, pricing and capture), and inspect acceptance and repair evidence beside cost. A before/after change in TIER cannot show that the model change caused the difference, and TIER does not credit merged work to a model, so it cannot say whether the cheaper model did the work as well.</li>
 </ol>
 <blockquote>
 <p><strong>Honesty caveat.</strong> Yield reflects task mix and context, not raw talent. A
@@ -227,12 +223,14 @@ curl -sS -H &#34;Authorization: Bearer $TIER_READ_TOKEN&#34; \
 <ul>
 <li>Each row carries <code>delta_tier</code>, <code>delta_weighted_points</code>,
 <code>delta_total_cost_usd</code>, and a <code>significant</code> flag.</li>
-<li><code>significant</code> is <code>true</code> <strong>only</strong> when the two 95% bootstrap TIER confidence
-intervals do <strong>not</strong> overlap (and the row is <code>ranked</code> in both windows).</li>
-<li><strong>Overlapping CIs, or a window below the ranking floor, means
-<code>significant: false</code> -- the move is within sampling noise. Do not over-read
-it.</strong> A positive <code>delta_tier</code> with <code>significant: false</code> is &#34;promising, keep
-watching,&#34; not &#34;it worked.&#34;</li>
+<li><code>significant</code> is a legacy raw non-overlap result, retained for compatibility.
+It is true only for a developer present and above the floor in both windows
+with disjoint bounds, and false for withheld bounds. Neither value establishes
+an effect or a noise threshold. The API labels it unvalidated and the dashboard
+says “inference not established”, without interval-derived colours.</li>
+<li>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage.</li>
+<li>Treat a small difference as no evidence either way, and a large one as a prompt
+to investigate, not a measured effect.</li>
 <li>Watch the honest windowing skew too: a recent window B reads artificially low
 because cost books up front and outcomes land at merge time. See
 <a href="interpreting-the-number.html" rel="nofollow">docs/interpreting-the-number.md</a> before trusting
@@ -271,8 +269,10 @@ runbook -- not into TIER, which has no field for it. A good entry is four lines:
   premium model for design and hard reasoning.
 - Signal watched: premium_model_share on /scores (developer mode);
   delta_total_cost_usd on /scores/compare (May vs June).
-- Result: premium share fell, delta_tier positive but significant:false after
-  one month -- directional, re-check next cycle.
+- Result: premium share fell and delta_tier was positive with significant:false
+  after one month. This does not establish that the model change caused the
+  difference or that the cheaper model did the work as well. Investigate task
+  mix, acceptance, repair evidence, pricing and capture before interpreting it.
 - Keep / drop: keep; revisit at the next levers retro.
 </code></pre>
 <p>That entry is what actually transfers between people. The TIER surfaces told you
@@ -283,12 +283,9 @@ do</em>.</p>
 <p>TIER coaches the <strong>practice, not the person</strong>. In <code>developer</code> mode a developer
 and their manager see the same numbers, with the same caveats. Use it to coach
 practice -- which model for which job, how to reuse context, starting work
-from an issue -- never to appraise. The rules below match
-<a href="legal-and-privacy.html" rel="nofollow">docs/legal-and-privacy.md</a>.</p>
+from an issue.</p>
 <ul>
-<li><strong>Never an input to a people decision.</strong> No TIER number and no lever may be
-used for pay, promotion, performance reviews, performance improvement plans,
-discipline or dismissal -- not as the only input, and not as one of several.</li>
+<li>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</li>
 <li><strong>Talk about the habit, not the number.</strong> A coaching conversation looks at
 the practice behind a number (cache reuse, which model for which job, spend
 with no issue attached), agrees one thing to try, and checks later whether
@@ -337,8 +334,8 @@ can run this workflow without ever naming an individual.</p>
 <td>Compare the <strong>name-free levers</strong> and copy the practice behind the better one</td>
 </tr>
 <tr>
-<td>Tie a TIER number, or any lever, to pay, promotion, a review, a performance improvement plan, discipline or dismissal</td>
-<td>Use it to coach AI habits; keep it out of appraisal entirely</td>
+<td>Evaluate developers on TIER</td>
+<td>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</td>
 </tr>
 <tr>
 <td>Put a developer&#39;s number in a review, or show it to anyone beyond the developer and their manager</td>
@@ -346,7 +343,7 @@ can run this workflow without ever naming an individual.</p>
 </tr>
 <tr>
 <td>Read a <code>significant: false</code> (or a team-mode delta) as proof a change worked</td>
-<td>Treat it as directional; re-check next cycle before claiming an effect</td>
+<td>Treat it as an observation to investigate; inference is not established</td>
 </tr>
 <tr>
 <td>Compare yield across different work types</td>

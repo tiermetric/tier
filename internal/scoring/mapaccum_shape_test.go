@@ -77,6 +77,11 @@ import (
 // does anything downstream of this loop add floats in the order this loop produced?
 // If yes, sort before the loop (or sort what it built) — do not allowlist it.
 var mapAccumAllowlist = map[string]string{
+	"api/join_readiness.go:buildJoinReadiness:costs":        "SAFE: builds diagnostic receipts only; all three receipt slices are sorted by (developer, issue, cost repo) before publishing or doctor aggregation. No score consumes them.",
+	"api/join_readiness.go:buildJoinReadiness:repoCosts":    "SAFE: one independent integer-micro-dollar conversion per repo, then rows sorted by repo before publishing or aggregation.",
+	"api/join_readiness.go:buildJoinReadiness:repoOutcomes": "SAFE: copies precomputed points from the stable outcome-slice fold; rows sorted by repo before publishing or doctor aggregation.",
+	"api/join_readiness.go:sortedRepoKeys:m":                "SAFE: collects repository names only and sorts them immediately; no floats are summed.",
+
 	"scoring/engine.go:AggregateLabeledKAnon:groups": "FIXED #722. `named` is sorted by team; `otherRows` is sorted by " +
 		"(developer, label) (sortLabeledScores) before RollupTeam float-sums it.",
 	"scoring/engine.go:CompareLabeledKAnon:teamSet": "FIXED #722. `named` is sorted by team; otherARows/otherBRows are each " +
@@ -84,8 +89,10 @@ var mapAccumAllowlist = map[string]string{
 
 	"api/handler.go:loadWindow:actualSpend": "FIXED #722. The loop only COLLECTS raw keys; they are sort.Strings'd and the " +
 		"float sum happens in the sorted loop below it.",
-	"api/handler.go:handleGetDeveloperScore:spendAll": "FIXED #722. Same shape and same fix as loadWindow's canonSpend rebuild.",
+	"api/handler.go:developerScoreWindow:spendAll": "FIXED #722. Same shape and same fix as loadWindow's canonSpend rebuild.",
 
+	"api/issues.go:buildIssueReport:groups": "SAFE: collects (repo, issue) keys only; sort.Slice orders them by " +
+		"(unattributed last, repo, issue) on the next statement, before any float is summed or emitted.",
 	"api/handler.go:loadWindow:union": "SAFE: collects developer names only; sort.Strings'd immediately, and every " +
 		"downstream sum iterates the sorted slice.",
 	"api/handler.go:buildScoresResponse:orgBucketMicro": "SAFE: builds the unattributed-bucket rows, then sort.Slice by cost desc with " +
@@ -104,8 +111,8 @@ var mapAccumAllowlist = map[string]string{
 	"api/handler.go:buildSegmentReconciliation:byDev": "SAFE: collects developer names only; sort.Strings'd before the reconciliation rows.",
 	"api/handler.go:loadWindow:tokenTotals": "SAFE: accumulates int64 token counts into a map keyed by canonical DevIssue. " +
 		"Integer addition; and each target key's addends are independent of order.",
-	"api/handler.go:handleGetDeveloperScore:tokenTotals": "SAFE: same int64 re-keying as loadWindow's.",
-	"api/handler.go:handleEraseDeveloper:counts":         "SAFE: sums int64 per-table delete counts. Integer addition.",
+	"api/handler.go:developerScoreWindow:tokenTotals": "SAFE: same int64 re-keying as loadWindow's.",
+	"api/handler.go:handleEraseDeveloper:counts":      "SAFE: sums int64 per-table delete counts. Integer addition.",
 
 	"api/fidelity.go:handleGetFidelity:merged": "SAFE: collects rows only; sort.Slice by developer before the response is written.",
 	"api/compare.go:compareDevelopers:names":   "SAFE: collects developer names only; sort.Strings'd before any row is built.",
@@ -122,7 +129,7 @@ var knownSites = []string{
 	"scoring/engine.go:AggregateLabeledKAnon:groups",
 	"scoring/engine.go:CompareLabeledKAnon:teamSet",
 	"api/handler.go:loadWindow:actualSpend",
-	"api/handler.go:handleGetDeveloperScore:spendAll",
+	"api/handler.go:developerScoreWindow:spendAll",
 }
 
 func TestMapAccumDetectorSeesKnownSites(t *testing.T) {

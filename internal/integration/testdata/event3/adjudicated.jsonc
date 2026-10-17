@@ -1,0 +1,1257 @@
+// Synthetic adjudicated fixture set u5-d1-d2-d3-v1. No real disputed PR is ground truth.
+// All expected fractions below were worked by hand; loader/scoring code must not derive them.
+[
+// D1 clean pair: W_O=5, q_O=17/20, reviewed own=1, credit=min(1,max(0,5-5))=0.
+// O′=max(1/2,17/20*5+0-1)=13/4; fixer share=1, points=1*1=1; total=17/4.
+// Before audited confirmation foreign O stays 5 (no correction indicator); fixer stays 1, SampleN=0.
+// D3 dispute and post-confirm withdrawal keep 13/4 and 1; uphold also keeps them.
+// Audited remove restores 5+1=6; relation-free fixer regains ordinary SampleN=1.
+{
+  "name": "cross-author-trust-and-lifecycle",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "declared",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "5",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "disputed",
+      "actions": [
+        {
+          "kind": "dispute",
+          "pr": 102,
+          "parent": 101
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "withdrawn-after-confirmation",
+      "actions": [
+        {
+          "kind": "withdraw",
+          "pr": 102,
+          "parent": 101
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "upheld",
+      "actions": [
+        {
+          "kind": "settle-uphold",
+          "pr": 102,
+          "parent": 101
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "removed",
+      "actions": [
+        {
+          "kind": "settle-remove",
+          "pr": 102,
+          "parent": 101
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "5",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": true
+        }
+      ]
+    }
+  ],
+  "total": "6"
+},
+// S1 same-author provisional uses the same clean D1 arithmetic: 17/20*5-1=13/4; +1=17/4.
+// Withdrawal BEFORE confirmation is self-service: restore original 5 and ordinary child 1, total 6.
+{
+  "name": "same-author-provisional-and-withdrawal",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ada",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "provisional",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    },
+    {
+      "name": "withdrawn-before-confirmation",
+      "actions": [
+        {
+          "kind": "withdraw",
+          "pr": 102,
+          "parent": 101
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "5",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": true
+        }
+      ]
+    }
+  ],
+  "total": "6"
+},
+// D1 never reads fixer quality when charging original: O′=17/20*5-1=13/4.
+// Fixer share=1, own CI quality=7/10 => 7/10 points; total=65/20+14/20=79/20.
+// A terminal CI update must not turn original 13/4 into 71/20 or multiply O′ by q_O again.
+{
+  "name": "degraded-terminal-own-points",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ],
+      "quality": "7/10"
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "7/10",
+          "quality": "7/10",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "79/20"
+},
+// Root W=1, CI+corr q=11/20: budget=11/20; floor=1/10.
+// Two reviewed pure repairs W_rev=1 each: O′=max(1/10,11/20-2)=1/10.
+// Available shares=11/20-1/10=9/20. Reverse canonical reduction removes all of PR103, then 11/20 from PR102.
+// PR102 share=9/20, own q=7/10 => 63/200 points; PR103=0; total=20/200+63/200=83/200.
+// PR102/103 have equal merge times: canonical PR identity, not insertion ID, selects the survivor.
+// 9/20 and 63/200 are computed values, NOT unsupported inputs.
+{
+  "name": "reverse-canonical-floor-exhaustion",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "1",
+      "parents": [],
+      "quality": "7/10"
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ],
+      "quality": "7/10",
+      "merged": "2026-07-02T12:00:00Z"
+    },
+    {
+      "number": 103,
+      "author": "cy",
+      "weight": "1",
+      "parents": [
+        101
+      ],
+      "merged": "2026-07-02T12:00:00Z"
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "1",
+          "after": "1"
+        },
+        {
+          "kind": "confirm",
+          "pr": 103,
+          "parent": 101,
+          "own": "1",
+          "before": "1",
+          "after": "1"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "1/10",
+          "quality": "11/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "63/200",
+          "quality": "7/10",
+          "share": "9/20",
+          "growth": "0",
+          "eligible": false
+        },
+        {
+          "pr": 103,
+          "points": "0",
+          "quality": "1",
+          "share": "0",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "83/200"
+},
+// Root chain: O′=17/20*5-1=13/4, PR102 parent-allocated share=1.
+// Sub-chain replaces PR102 points: W=1, own q with its correction=17/20, floor=1/10.
+// PR102′=max(1/10,17/20-1)=1/10; PR103 share=17/20-1/10=3/4, own q=1 => 3/4.
+// Total=13/4+1/10+3/4=41/10. Never add the prior PR102 points and never charge root twice.
+// PR103 declares both ancestor101 and parent102. Operator audits ancestor101 as unrelated before confirming102;
+// no guessed multi-parent split; each child is inserted and credited once.
+{
+  "name": "repair-of-repair-and-multi-parent-disposition",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    },
+    {
+      "number": 103,
+      "author": "cy",
+      "weight": "1",
+      "parents": [
+        101,
+        102
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        },
+        {
+          "kind": "unrelated",
+          "pr": 103,
+          "parent": 101
+        },
+        {
+          "kind": "confirm",
+          "pr": 103,
+          "parent": 102,
+          "own": "1",
+          "before": "1",
+          "after": "1"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1/10",
+          "quality": "17/20",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        },
+        {
+          "pr": 103,
+          "points": "3/4",
+          "quality": "1",
+          "share": "3/4",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "41/10"
+},
+// PR102 raw weight8 is NOT reviewed own3. credit102=min(3,8-5)=3.
+// PR103 compares with cumulative BEFORE=8, AFTER=8: credit103=0, not min(1,8-5).
+// O′=max(1/2,17/20*5+3-3-1)=13/4; followups3 and1 => total29/4.
+// SampleN: root1 + growing PR1021 + pure repair1030 =2; raw OutcomeN=3.
+{
+  "name": "reviewed-growth-not-raw-padding",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "8",
+      "parents": [
+        101
+      ]
+    },
+    {
+      "number": 103,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "3",
+          "before": "5",
+          "after": "8"
+        },
+        {
+          "kind": "confirm",
+          "pr": 103,
+          "parent": 101,
+          "own": "1",
+          "before": "8",
+          "after": "8"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "3",
+          "quality": "1",
+          "share": "3",
+          "growth": "3",
+          "eligible": true
+        },
+        {
+          "pr": 103,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "29/4"
+},
+// Quality-reverted original: q_O=1/10, W=5, floor=1/2.
+// O′=max(1/2,1/10*5-1)=1/2; available fixer share=1/2-1/2=0.
+// Sub-chain W=parent-allocated share0 => floor0, original0, descendant0. Total=1/2; no points from nothing.
+{
+  "name": "quality-reverted-root-zero-descendants",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": [],
+      "quality": "1/10"
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    },
+    {
+      "number": 103,
+      "author": "cy",
+      "weight": "1",
+      "parents": [
+        102
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        },
+        {
+          "kind": "confirm",
+          "pr": 103,
+          "parent": 102,
+          "own": "1",
+          "before": "1",
+          "after": "1"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "1/2",
+          "quality": "1/10",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "0",
+          "quality": "17/20",
+          "share": "0",
+          "growth": "0",
+          "eligible": false
+        },
+        {
+          "pr": 103,
+          "points": "0",
+          "quality": "1",
+          "share": "0",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "1/2"
+},
+// D2 distinct foreign roots: no confirmation, no root indicator or movement.
+// Ada5 + Cy3 + Ben own1=9; child is counted ONCE and SampleN-ineligible, pending multiple originals.
+{
+  "name": "distinct-foreign-roots-pending",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 104,
+      "author": "cy",
+      "weight": "3",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101,
+        104
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "pending",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "5",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 104,
+          "points": "3",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "",
+          "eligible": false,
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "total": "9"
+},
+// D2 amended: any own root forces least-favourable OWN-root provisional result.
+// Ada own-root5 ->13/4, Ada repair1 =>17/4; foreign Cy root5 remains5 (byte-identical).
+// Total=17/4+5=37/4; child SampleN=0; relation stays pending, not confirmed multi-root.
+{
+  "name": "mixed-own-and-foreign-roots-pending",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 104,
+      "author": "cy",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ada",
+      "weight": "1",
+      "parents": [
+        101,
+        104
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "pending",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 104,
+          "points": "5",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "",
+          "eligible": false,
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "total": "37/4"
+},
+// D2 compare own roots5 and3: choose5 gives13/4+3+1=29/4.
+// Choose3 instead gives5+(17/20*3-1)+1=151/20 >145/20=29/4.
+// Only root101 moves; unchanged root104=3; followup1 SampleN=0; still pending.
+{
+  "name": "least-favourable-own-root",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 104,
+      "author": "ada",
+      "weight": "3",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ada",
+      "weight": "1",
+      "parents": [
+        101,
+        104
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "pending",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 104,
+          "points": "3",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "",
+          "eligible": false,
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "total": "29/4"
+},
+// Occurrence original June1, repair Aug2 (>60 days); confirmation is allowed.
+// Outside 14 days q_O=1, not17/20: O′=max(1/2,1*5-1)=4; fixer1 =>5.
+// June projection4 stays in June repo/work type/historical team; Aug repair1 stays in Aug.
+// Late confirmation changes LIVE June values, never June's sealed body or digest.
+// Independent placement ballast: Ada beta3 + Cy alpha1 + Di alpha1 => added5, total10.
+// Historical before-team Ada(4+3)+Cy1=8 points/$6; after-team Ben1+Di1=2 points/$4.
+{
+  "name": "older-than-sixty-days-and-sealed-month",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": [],
+      "merged": "2026-06-01T12:00:00Z",
+      "team": "before",
+      "repo": "replay/alpha"
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ],
+      "merged": "2026-08-02T12:00:00Z",
+      "team": "after",
+      "repo": "replay/alpha",
+      "work_type": "bug"
+    },
+    {
+      "number": 201,
+      "author": "ada",
+      "weight": "3",
+      "parents": [],
+      "merged": "2026-08-03T12:00:00Z",
+      "repo": "replay/beta"
+    },
+    {
+      "number": 301,
+      "author": "cy",
+      "weight": "1",
+      "parents": [],
+      "merged": "2026-06-02T12:00:00Z",
+      "team": "before"
+    },
+    {
+      "number": 302,
+      "author": "di",
+      "weight": "1",
+      "parents": [],
+      "merged": "2026-08-03T12:00:00Z",
+      "team": "after"
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "4",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        },
+        {
+          "pr": 201,
+          "points": "3",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 301,
+          "points": "1",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 302,
+          "points": "1",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        }
+      ]
+    }
+  ],
+  "total": "10"
+},
+// July1 12:00 -> July15 12:00 is exactly14*24h: correction included once.
+// q_O=17/20; O′=13/4; fixer1 =>17/4. Identical replay does not apply another3/20.
+{
+  "name": "inclusive-fourteen-day-boundary",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ],
+      "merged": "2026-07-15T12:00:00Z"
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        }
+      ]
+    }
+  ],
+  "total": "17/4"
+},
+// Missing parent999 has no invented outcome/credit/quality indicator.
+// Child raw own1*clean1=1; unknown growth is pending, not fabricated zero; no ranking sample.
+{
+  "name": "missing-parent-full-own-weight",
+  "prs": [
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        999
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "pending",
+      "actions": [],
+      "want": [
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "",
+          "eligible": false,
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "total": "1"
+},
+// Excluded root101 contributes no outcome or retained weight to this chain.
+// Reland102 stays pending at full own3, not automatically full confirmed growth; no resurrected parent points.
+// Excluded corrective103 remains excluded too. Surviving total=3, raw OutcomeN=1.
+{
+  "name": "excluded-parent-and-reland",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": [],
+      "excluded": true
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "3",
+      "parents": [
+        101
+      ]
+    },
+    {
+      "number": 103,
+      "author": "cy",
+      "weight": "1",
+      "parents": [
+        102
+      ],
+      "excluded": true
+    }
+  ],
+  "stages": [
+    {
+      "name": "excluded",
+      "actions": [],
+      "want": [
+        {
+          "pr": 102,
+          "points": "3",
+          "quality": "1",
+          "share": "3",
+          "growth": "",
+          "eligible": false,
+          "state": "excluded"
+        }
+      ]
+    }
+  ],
+  "total": "3"
+},
+// Off-R3 API q=0 is preserved explicitly and marked pending unsupported input.
+// No points/quality division: original raw5*0=0, foreign child1 stays1; total1.
+// A computed zero share in other cases is supported; this ZERO INPUT is different.
+{
+  "name": "api-explicit-zero-quality",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": [],
+      "quality": "0",
+      "source": "api"
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "pending",
+      "actions": [],
+      "want": [
+        {
+          "pr": 101,
+          "points": "0",
+          "quality": "0",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "",
+          "eligible": false,
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "total": "1"
+},
+// D1 root13/4 and Ben repair1 as in clean pair. Ben also owns three unrelated clean W1 PRs.
+// Ben points=1+1+1+1=4; cost=4*2=8 dollars; SampleN=3, raw OutcomeN=4.
+// Bootstrap resamples only the three identical (1 point,2 dollars) growth observations.
+// Repair is FIXED (1 point,2 dollars): every draw numerator=3+1=4, denominator=6+2=8.
+// Thus headline TIER=1000*4/8=500 and both95% CI endpoints=500 exactly (reader floats).
+// All-developer total=13/4+4=29/4; all cost=10 dollars.
+{
+  "name": "bootstrap-fixed-points",
+  "prs": [
+    {
+      "number": 101,
+      "author": "ada",
+      "weight": "5",
+      "parents": []
+    },
+    {
+      "number": 102,
+      "author": "ben",
+      "weight": "1",
+      "parents": [
+        101
+      ]
+    },
+    {
+      "number": 201,
+      "author": "ben",
+      "weight": "1",
+      "parents": []
+    },
+    {
+      "number": 202,
+      "author": "ben",
+      "weight": "1",
+      "parents": []
+    },
+    {
+      "number": 203,
+      "author": "ben",
+      "weight": "1",
+      "parents": []
+    }
+  ],
+  "stages": [
+    {
+      "name": "confirmed",
+      "actions": [
+        {
+          "kind": "confirm",
+          "pr": 102,
+          "parent": 101,
+          "own": "1",
+          "before": "5",
+          "after": "5"
+        }
+      ],
+      "want": [
+        {
+          "pr": 101,
+          "points": "13/4",
+          "quality": "17/20",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 102,
+          "points": "1",
+          "quality": "1",
+          "share": "1",
+          "growth": "0",
+          "eligible": false
+        },
+        {
+          "pr": 201,
+          "points": "1",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 202,
+          "points": "1",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        },
+        {
+          "pr": 203,
+          "points": "1",
+          "quality": "1",
+          "share": "",
+          "growth": "0",
+          "eligible": true
+        }
+      ]
+    }
+  ],
+  "total": "29/4"
+}
+]

@@ -13,7 +13,7 @@ import (
 // --- GET /api/v1/scores/compare (#277) ---
 //
 // Before/after period comparison: two half-open [since, until) windows (#276) in,
-// per-row deltas plus a CI-overlap significance flag out. Window A is the "before"
+// per-row deltas plus a legacy raw bounds-non-overlap flag out. Window A is the "before"
 // leg, window B the "after" leg; every delta is B - A. The endpoint reuses the same
 // windowed scores computation as GET /scores (loadWindow), so a compared score can
 // never diverge from what /scores reports for the same window.
@@ -38,6 +38,8 @@ import (
 
 // compareResponse is the wire shape of GET /api/v1/scores/compare (#277).
 type compareResponse struct {
+	CorrectionPolicy *scoring.CorrectionRuleStamp `json:"correction_policy,omitempty"`
+
 	WindowA compareWindowMeta `json:"window_a"`
 	WindowB compareWindowMeta `json:"window_b"`
 	// PriceTable stamps the active price-table version (#233); a compare over two
@@ -83,7 +85,9 @@ type compareResponse struct {
 // caveat 3): the mixed-version / zero-token signal is per window, so it lives on
 // the window rather than at the top level.
 type compareWindowMeta struct {
-	Since string `json:"since"`
+	CorrectionDiagnostics any                 `json:"correction_diagnostics,omitempty"`
+	SealDisclosure        *sealDisclosureJSON `json:"seal_disclosure,omitempty"`
+	Since                 string              `json:"since"`
 	// Until is omitted when the window is open-ended (no until given).
 	Until       string           `json:"until,omitempty"`
 	DataQuality *dataQualityJSON `json:"data_quality,omitempty"`
@@ -94,6 +98,8 @@ type compareWindowMeta struct {
 // CI (#133) that drives the significance test. Zero-valued (and PresentA/PresentB
 // false on the parent) when the developer had no data in that window.
 type scoreSideJSON struct {
+	OutcomeN *int `json:"outcome_n,omitempty"`
+
 	TIER            float64 `json:"tier"`
 	WeightedPoints  float64 `json:"weighted_points"`
 	TotalCostUSD    float64 `json:"total_cost_usd"`
@@ -126,10 +132,9 @@ type developerDeltaJSON struct {
 	DeltaTIER           float64       `json:"delta_tier"`
 	DeltaWeightedPoints float64       `json:"delta_weighted_points"`
 	DeltaTotalCostUSD   float64       `json:"delta_total_cost_usd"`
-	// Significant is true only when the developer is present AND ranked (#133) in
-	// BOTH windows and the two bootstrap CIs do NOT overlap. Any overlap, or an
-	// unranked/below-floor window, renders it false: the move is within noise or
-	// the sample cannot support the claim.
+	// Significant retains the legacy raw non-overlap result for compatibility.
+	// It is unvalidated, not a significance verdict; see Tier-Inference and
+	// Tier-Bounds-Status response headers (#1233).
 	Significant bool `json:"significant"`
 }
 
@@ -173,6 +178,7 @@ type teamDeltaJSON struct {
 }
 
 func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request) {
+	setInferenceHeaders(w.Header())
 	// Window A = before, window B = after. Each window's since_/until_ params share
 	// the exact grammar and validation as /scores' since/until (#276): half-open,
 	// UTC-anchored, until > since, retention-checked.
@@ -200,6 +206,7 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 	}
 
 	var winA, winB windowScores
+	var correctionsA, correctionsB any
 	var horizon time.Time
 	var hasHorizon bool
 	var perSource map[string]time.Time
@@ -214,6 +221,14 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 		winB, err = h.loadWindow(r.Context(), snap, sinceB, untilB, store.FleetWide)
 		if err != nil {
 			h.logger.Error("compare load window b", "err", err)
+			return err
+		}
+		correctionsA, err = h.correctionDisputes(r.Context(), snap, winA.policy, sinceA, untilA, store.FleetWide)
+		if err != nil {
+			return err
+		}
+		correctionsB, err = h.correctionDisputes(r.Context(), snap, winB.policy, sinceB, untilB, store.FleetWide)
+		if err != nil {
 			return err
 		}
 		if h.aggregation.Anonymized() {
@@ -261,19 +276,22 @@ func (h *Handler) handleGetScoresCompare(w http.ResponseWriter, r *http.Request)
 	}
 	activePrices := store.ActivePriceTableInfo()
 	resp := compareResponse{
+		CorrectionPolicy: correctionStampFor(winA.policy),
 		WindowA: compareWindowMeta{
-			Since: sinceA.Format("2006-01-02"),
-			Until: untilString(untilA),
-			DataQuality: withCostHorizon(
+			CorrectionDiagnostics: correctionsA,
+			Since:                 sinceA.Format("2006-01-02"),
+			Until:                 untilString(untilA),
+			DataQuality: withAggregatePricing(withCostHorizon(
 				dataQualityBlock(h.aggregation, winA.zeroTokenOutcomes, winA.priceVersions, winA.hasSpend()),
-				sinceA, horizon, hasHorizon, perSource),
+				sinceA, horizon, hasHorizon, perSource), winA.aggregatePricing, h.aggregation),
 		},
 		WindowB: compareWindowMeta{
-			Since: sinceB.Format("2006-01-02"),
-			Until: untilString(untilB),
-			DataQuality: withCostHorizon(
+			CorrectionDiagnostics: correctionsB,
+			Since:                 sinceB.Format("2006-01-02"),
+			Until:                 untilString(untilB),
+			DataQuality: withAggregatePricing(withCostHorizon(
 				dataQualityBlock(h.aggregation, winB.zeroTokenOutcomes, winB.priceVersions, winB.hasSpend()),
-				sinceB, horizon, hasHorizon, perSource),
+				sinceB, horizon, hasHorizon, perSource), winB.aggregatePricing, h.aggregation),
 		},
 		PriceTable: priceTableStamp(activePrices),
 		// Never nil: developer mode fills it, an anonymized mode leaves it an explicit
@@ -471,6 +489,7 @@ func indexWindowSides(win windowScores) map[string]scoreSideJSON {
 			// compare A-side is bit-identical to /scores for the same window.
 			CostPerPoint: costPerPointOrNull(s.WeightedPoints, s.CostPerPoint),
 			SampleN:      s.SampleN,
+			OutcomeN:     rawOutcomeN(s, win.projectedPolicy),
 			CILow:        lo,
 			CIHigh:       hi,
 			Ranked:       s.Ranked,
@@ -534,11 +553,9 @@ func teamSideJSON(ts scoring.TeamScore) teamScoreJSON {
 	return j
 }
 
-// ciDisjoint reports whether two 95% bootstrap TIER intervals do NOT overlap (#277
-// significance test). Non-overlapping intervals are the conservative signal that a
-// before/after move is beyond sampling noise; any overlap renders the move NOT
-// significant, so the dumbbell never implies a difference the sample cannot support
-// (#133). The caller additionally requires both windows to be ranked.
+// ciDisjoint reports raw non-overlap of nominal 95% bootstrap TIER bounds.
+// The compatibility field is descriptive: coverage is unvalidated and inference
+// is not established. The caller additionally requires both windows to be ranked.
 func ciDisjoint(aLo, aHi, bLo, bHi float64) bool {
 	return aHi < bLo || bHi < aLo
 }

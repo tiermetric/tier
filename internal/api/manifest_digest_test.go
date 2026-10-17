@@ -94,10 +94,10 @@ func TestReportManifest_EmitsWindowDigests(t *testing.T) {
 		// have to GUESS at; the tag is what lets it answer NOT CHECKED instead of
 		// comparing two values it cannot know are commensurable. Same discipline
 		// as the ManifestSchema pin.
-		if !strings.HasPrefix(value, "tierdig1:") {
-			t.Errorf("%s.value = %q, want a tierdig1-tagged digest", key, value)
+		if !strings.HasPrefix(value, "tierdig2:") {
+			t.Errorf("%s.value = %q, want a tierdig2-tagged digest", key, value)
 		}
-		if len(value) != len("tierdig1:")+64 {
+		if len(value) != len("tierdig2:")+64 {
 			t.Errorf("%s.value = %q (len %d), want the scheme tag plus 64 hex characters",
 				key, value, len(value))
 		}

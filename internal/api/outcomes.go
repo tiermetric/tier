@@ -55,7 +55,8 @@ const maxOutcomeDiffStat = 100_000_000
 //
 // Additions/Deletions/ChangedFiles are the raw diff stats: they feed the
 // heuristic when Weight is absent AND are retained on every row for future
-// re-scoring, exactly as the webhook persists them.
+// re-scoring, exactly as the webhook persists them. Omitted or null fields
+// remain unavailable evidence; an explicit zero is available.
 type outcomeRequest struct {
 	Developer      string   `json:"developer"`
 	IssueID        string   `json:"issue_id"`
@@ -67,9 +68,9 @@ type outcomeRequest struct {
 	// which /scores windows on — an outcome shipped after the fact must carry
 	// when the PR merged, not when the batch arrived (mirrors /events).
 	MergedAt     string `json:"merged_at"`
-	Additions    int    `json:"additions,omitempty"`
-	Deletions    int    `json:"deletions,omitempty"`
-	ChangedFiles int    `json:"changed_files,omitempty"`
+	Additions    *int   `json:"additions,omitempty"`
+	Deletions    *int   `json:"deletions,omitempty"`
+	ChangedFiles *int   `json:"changed_files,omitempty"`
 	// WorkType is the optional work category (#187). When present it must be one of
 	// the fixed taxonomy (store.ValidWorkType) — an unknown value is a 400, never a
 	// silently-coerced default — and the row records work_type_source='api'. When
@@ -234,11 +235,13 @@ func validateOutcomeRequest(req outcomeRequest, now time.Time) (store.Outcome, e
 	if req.PRNumber < 1 {
 		return zero, fmt.Errorf("pr_number is required and must be >= 1")
 	}
-	if req.Additions < 0 || req.Deletions < 0 || req.ChangedFiles < 0 {
-		return zero, fmt.Errorf("additions, deletions, and changed_files must be >= 0")
-	}
-	if req.Additions > maxOutcomeDiffStat || req.Deletions > maxOutcomeDiffStat || req.ChangedFiles > maxOutcomeDiffStat {
-		return zero, fmt.Errorf("additions, deletions, and changed_files must be <= %d", maxOutcomeDiffStat)
+	for _, stat := range []*int{req.Additions, req.Deletions, req.ChangedFiles} {
+		if stat != nil && *stat < 0 {
+			return zero, fmt.Errorf("additions, deletions, and changed_files must be >= 0")
+		}
+		if stat != nil && *stat > maxOutcomeDiffStat {
+			return zero, fmt.Errorf("additions, deletions, and changed_files must be <= %d", maxOutcomeDiffStat)
+		}
 	}
 
 	// weight: an explicit label-equivalent weight, or absent to fall through to the
@@ -256,7 +259,6 @@ func validateOutcomeRequest(req outcomeRequest, now time.Time) (store.Outcome, e
 		}
 		explicitWeight = w
 	}
-	weight, weightSource := store.ResolveWeight(explicitWeight, req.Additions, req.Deletions, req.ChangedFiles)
 
 	// quality: a multiplier in [0, 1]; absent defaults to 1.0 (the webhook's
 	// insert-time value). >1 would inflate the score, <0 is nonsensical.
@@ -307,21 +309,19 @@ func validateOutcomeRequest(req outcomeRequest, now time.Time) (store.Outcome, e
 		return zero, err
 	}
 
-	return store.Outcome{
+	o := store.Outcome{
 		Developer:      req.Developer,
 		IssueID:        req.IssueID,
 		PRNumber:       req.PRNumber,
-		Weight:         weight,
-		WeightSource:   weightSource,
 		Quality:        quality,
 		MergeCommitSHA: req.MergeCommitSHA,
-		Additions:      req.Additions,
-		Deletions:      req.Deletions,
-		ChangedFiles:   req.ChangedFiles,
 		Source:         store.OutcomeSourceAPI,
 		WorkType:       workType,
 		WorkTypeSource: workTypeSource,
 		Repo:           repo,
 		Timestamp:      ts.UTC(),
-	}, nil
+	}
+	o.SetDiffStats(req.Additions, req.Deletions, req.ChangedFiles)
+	o.Weight, o.WeightSource = store.ResolveWeight(explicitWeight, o.Additions, o.Deletions, o.ChangedFiles)
+	return o, nil
 }

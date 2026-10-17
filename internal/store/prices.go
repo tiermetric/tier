@@ -524,8 +524,10 @@ var requiredSelfHostedKeys = []string{"self-hosted-large", "self-hosted-medium",
 // explicit override. parsePriceTable bakes the resolved value into modelPrice.
 //
 // Anthropic: published prices (claude.com/pricing) — 5m write 1.25×, 1h write
-// 2.0×, read 0.1×. OpenAI: prompt-cache hit at 0.5× of input; no write SKU (its
-// write buckets stay 0 in the parser, so the 1.0× default is inert). Z.ai
+// 2.0×, read 0.1×. OpenAI: fallback read 0.5×, write 1.0×; model rows can
+// override these (GPT-6 rows set write multipliers to 1.25×). Current OpenAI
+// capture paths leave write buckets at 0; those multipliers do not validate
+// a captured write field's billing meaning or containment for a route. Z.ai
 // publishes no per-token cache-write rate (its "limited-time free" line is cache
 // STORAGE, not writes), so zai writes default to 1.0× input — the conservative
 // choice — and every zai row sets its own read multiplier. Meta publishes no
@@ -1390,8 +1392,9 @@ func warnHeuristicModel(norm, class string) {
 //   - Anthropic: CacheRead is `cache_read_input_tokens`. CacheWrite5m / CacheWrite1h
 //     come from the nested `cache_creation.ephemeral_{5m,1h}_input_tokens` object.
 //     Legacy entries without the nested object bucket all writes into CacheWrite5m.
-//   - OpenAI: CacheRead is `prompt_tokens_details.cached_tokens`. Both write
-//     buckets are 0 — OpenAI has no notion of cache writes.
+//   - OpenAI: CacheRead comes from the route's cached-input count. Current capture
+//     paths leave both write buckets at 0. Codex reports a cache-write field, but
+//     its separate pricing and containment are not yet validated for that route.
 //   - Google (Gemini): CacheRead is `cachedContentTokenCount` (a subset of
 //     promptTokenCount, carved out by the parser). Both write buckets are 0.
 //   - xAI / DeepSeek: all three cache fields are 0 today (DeepSeek publishes a
@@ -1444,11 +1447,10 @@ const MaxTokenCount = 1_000_000_000_000
 //
 // ⚠️ NO PERSISTING CALLER MAY USE THIS. The JSONL collector and both org
 // pollers did, and were fixed by #525 — that was the last of them. The ONE
-// remaining caller is the one-shot #55 repricer at the top of Open()
-// (store.go), which is marker-guarded, runs before any insert, and only ever
-// touches pre-#300 rows whose host is the backfilled sentinel; for those the
-// model-only rate is exactly correct. It UPDATEs cost_micro on existing rows
-// rather than persisting a new TokenEvent, so it resolves no mode to discard.
+// remaining reference is the legacy #55 helper in store.go. Open now retires
+// its marker before reaching it (#1231): upgrades do not reprice or substitute
+// current rates when original evidence is absent. Its old arithmetic remains
+// solely for historical migration regression tests; it persists no new event.
 //
 // That exemption is narrow and load-bearing: it is NOT a precedent. A new
 // caller that persists a TokenEvent must use ComputeCostHost and store the
@@ -1668,14 +1670,22 @@ func IsPremiumModel(host, model string) bool {
 // boundary (see ComputeCost's contract), so the extraction is exactly cost-
 // equivalent to the pre-#135 inline form. Kept separate so ComputeCost has a
 // single return point at which it can record spend.
-func priceCall(p modelPrice, u CostUsage) int64 {
+func priceCall(p modelPrice, u CostUsage) int64 { return priceCallV1(p, u) }
+
+// priceCallV1 is retained for request-v1 snapshots; new rules get another function.
+func priceCallV1(p modelPrice, u CostUsage) int64 {
+	return DollarsToMicro(priceCallDollarsV1(p, u))
+}
+
+// Retain the floating result so disclosures can reject saturation before conversion.
+func priceCallDollarsV1(p modelPrice, u CostUsage) float64 {
 	const perM = 1_000_000.0
 	if p.combined {
 		// Combined rate: every token class billed at the single rate, no
 		// cache discount. This matches the "we don't know your real billing"
 		// semantics of self-hosted reference rates.
 		total := (float64(u.Input) + float64(u.Output) + float64(u.CacheRead) + float64(u.CacheWrite5m) + float64(u.CacheWrite1h)) / perM * p.inputPerM
-		return DollarsToMicro(total)
+		return total
 	}
 
 	// Per-model cache multipliers (#122), resolved once at parse time from the
@@ -1704,5 +1714,5 @@ func priceCall(p modelPrice, u CostUsage) int64 {
 	write5m := float64(u.CacheWrite5m) / perM * inputRate * write5mMult
 	write1h := float64(u.CacheWrite1h) / perM * inputRate * write1hMult
 	out := float64(u.Output) / perM * outputRate
-	return DollarsToMicro(in + read + write5m + write1h + out)
+	return in + read + write5m + write1h + out
 }

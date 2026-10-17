@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -90,6 +91,11 @@ func freeLoopbackPort(t *testing.T) string {
 // The deliverable here is pinned boot behavior (flags -> mux -> listen -> serve
 // -> graceful stop), not the coverage number.
 func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
+	// Pin the spawn's env scrub against a poisoned parent, even on clean CI.
+	t.Setenv("TIER_CODEX_ROLLOUT", "1")
+	t.Setenv("TIER_API_TOKEN", "poison")
+	t.Setenv("TIER_LOG_FORMAT", "text")
+
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("locate test binary: %v", err)
@@ -109,7 +115,7 @@ func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -130,7 +136,7 @@ func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
 	base := "http://" + addr
 
 	// Poll the open livez probe until the server is up (no fixed sleep -- house
-	// rule). 10s deadline / 50ms interval.
+	// rule). smokeStartupTimeout (60s) deadline / 50ms interval.
 	waitUntilLive(t, base+"/api/v1/livez", stderr, exited)
 
 	// Y1/Y2: the dashboard is really mounted at "/" in the live composition.
@@ -178,7 +184,7 @@ func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
 			if tc.host != "" {
 				req.Host = tc.host
 			}
-			res, err := http.DefaultClient.Do(req)
+			res, err := smokeClient.Do(req)
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
@@ -243,7 +249,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -262,7 +268,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 		"/gemini/v1beta/models/x:generateContent": "/gemini/",
 	} {
 		t.Run(route, func(t *testing.T) {
-			resp, err := http.Post(base+path, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
+			resp, err := smokeClient.Post(base+path, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
 			if err != nil {
 				t.Fatalf("POST %s: %v", path, err)
 			}
@@ -283,7 +289,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 		}
 		req.Host = "tier.example.com"
 		req.Header.Set("Authorization", "Bearer smoke-test-api-token")
-		res, err := http.DefaultClient.Do(req)
+		res, err := smokeClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -328,7 +334,7 @@ func TestServeSmoke_BootsWithExampleConfig(t *testing.T) {
 
 	cmd := exec.Command(self)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -406,7 +412,7 @@ func TestServeSmoke_ReadOnlyOmitsWrites(t *testing.T) {
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -451,7 +457,7 @@ func TestServeSmoke_ReadOnlyOmitsWrites(t *testing.T) {
 		"/api/v1/events", "/api/v1/costs", "/webhook/github",
 		"/anthropic/v1/messages", "/openai/v1/chat/completions", "/gemini/v1beta/models",
 	} {
-		resp, err := http.Post(base+w, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
+		resp, err := smokeClient.Post(base+w, "application/json", strings.NewReader("{}")) //nolint:noctx // loopback test POST
 		if err != nil {
 			t.Fatalf("POST %s: %v", w, err)
 		}
@@ -537,7 +543,7 @@ func TestServeSmoke_CodexRolloutWithoutWatchRepoRefusesToStart(t *testing.T) {
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -575,44 +581,93 @@ func TestServeSmoke_CodexRolloutWithoutWatchRepoRefusesToStart(t *testing.T) {
 	}
 }
 
-// waitUntilLive polls url until it returns 200, failing fast if the child exits
-// during boot (exited fires) and failing on the 10s deadline otherwise.
+// 60s gives headroom over the recorded 10s failure under 6+ concurrent gates (R-2026-10-05-12).
+const smokeStartupTimeout = 60 * time.Second
+
+// waitUntilLive polls url until it returns 200 or the child exits/deadline expires.
 func waitUntilLive(t *testing.T, url string, stderr *lockedBuffer, exited <-chan error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		// If the child has already exited, stop waiting and report why.
+	if err := waitForSmokeLive(url, stderr, exited, smokeStartupTimeout); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForSmokeLive(url string, stderr *lockedBuffer, exited <-chan error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return waitForSmokeLiveContext(ctx, url, stderr, exited, timeout)
+}
+
+// waitForSmokeLiveContext lets tests arm cancellation after a probe arrives.
+func waitForSmokeLiveContext(ctx context.Context, url string, stderr *lockedBuffer, exited <-chan error, timeout time.Duration) error {
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	defer client.CloseIdleConnections()
+	for {
 		select {
 		case err := <-exited:
-			t.Fatalf("child exited before becoming live (%v); stderr:\n%s", err, stderr.String())
+			return fmt.Errorf("child exited before becoming live (%v); stderr:\n%s", err, stderr.String())
 		default:
 		}
-		resp, err := http.Get(url) //nolint:noctx // short-lived loopback probe in a test
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+		ready := make(chan bool, 1)
+		go func() {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				ready <- false
 				return
 			}
+			resp, err := client.Do(req)
+			if err != nil {
+				ready <- false
+				return
+			}
+			_, err = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			ready <- err == nil && resp.StatusCode == http.StatusOK
+		}()
+		select {
+		case err := <-exited:
+			return fmt.Errorf("child exited before becoming live (%v); stderr:\n%s", err, stderr.String())
+		case <-ctx.Done():
+			return fmt.Errorf("server not live within %s at %s; stderr:\n%s", timeout, url, stderr.String())
+		case live := <-ready:
+			if live {
+				return nil
+			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case err := <-exited:
+			return fmt.Errorf("child exited before becoming live (%v); stderr:\n%s", err, stderr.String())
+		case <-ctx.Done():
+			return fmt.Errorf("server not live within %s at %s; stderr:\n%s", timeout, url, stderr.String())
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	t.Fatalf("server not live within 10s at %s; stderr:\n%s", url, stderr.String())
 }
+
+// Bound post-readiness stalls while allowing 30s of headroom on a loaded gate box.
+var smokeClient = &http.Client{Timeout: 30 * time.Second}
 
 // httpGet performs a GET and returns the response plus its fully-read body.
 func httpGet(t *testing.T, url string) (*http.Response, string) {
 	t.Helper()
-	resp, err := http.Get(url) //nolint:noctx // short-lived loopback GET in a test
+	resp, body, err := httpGetWith(smokeClient, url)
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		t.Fatal(err)
 	}
+	return resp, body
+}
+
+func httpGetWith(client *http.Client, url string) (*http.Response, string, error) {
+	resp, err := client.Get(url) //nolint:noctx // bounded loopback GET in a test
+	if err != nil {
+		return nil, "", fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read body of %s: %v", url, err)
+		return nil, "", fmt.Errorf("read body of %s: %w", url, err)
 	}
-	_ = resp.Body.Close()
-	return resp, string(body)
+	return resp, string(body), nil
 }
 
 // TestServeSmoke_ReadOnlyRegistersNoSources (#913-D9 condition 3): a read-only
@@ -636,7 +691,7 @@ func TestServeSmoke_ReadOnlyRegistersNoSources(t *testing.T) {
 
 	addr := freeLoopbackPort(t)
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+strings.Join([]string{
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+strings.Join([]string{
 		"serve", "--addr", addr, "--db", dbPath, "--aggregation", "developer", "--read-only",
 	}, "\n"))
 	stderr := &lockedBuffer{}
@@ -652,7 +707,10 @@ func TestServeSmoke_ReadOnlyRegistersNoSources(t *testing.T) {
 		t.Fatalf("signal SIGTERM: %v", err)
 	}
 	select {
-	case <-exited:
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("child exited non-zero on SIGTERM: %v (stderr: %s)", err, stderr.String())
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("child did not exit within 10s of SIGTERM (stderr: %s)", stderr.String())
 	}
@@ -663,7 +721,7 @@ func TestServeSmoke_ReadOnlyRegistersNoSources(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	rows, err := db.SourceWatermarks(context.Background())
-	if err != nil || len(rows) != 1 || rows[0].Retired {
+	if err != nil || len(rows) != 1 || rows[0].Source != collector.SourceAnthropicAdmin || rows[0].Retired {
 		t.Errorf("after a read-only serve: %+v %v, want %s still registered", rows, err, collector.SourceAnthropicAdmin)
 	}
 }

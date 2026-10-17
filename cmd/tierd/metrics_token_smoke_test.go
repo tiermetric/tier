@@ -64,12 +64,15 @@ func scrapeMetrics(t *testing.T, base, tok string) (int, string) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	res, err := http.DefaultClient.Do(req)
+	res, err := smokeClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = res.Body.Close() }()
-	b, _ := io.ReadAll(res.Body)
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read metrics body: %v", err)
+	}
 	return res.StatusCode, string(b)
 }
 

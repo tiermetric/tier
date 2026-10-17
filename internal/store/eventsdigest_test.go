@@ -1315,10 +1315,14 @@ var goldenOutcomeRows = []outcomeDigestRow{
 // The four frozen digests. See TestDigestGoldenVector for what they mean and
 // what to do when one of them fails.
 const (
-	goldenTokenEventDigest = "tierdig1:f7860b950da365026dc3ddf4ad31e80ccfc0cf23eb1493d29b7acae5079a6180"
-	goldenOutcomeDigest    = "tierdig1:e5ca09dc60fa2fd7688688a2b9068fb1bd30a2cc714ef675e665482c641366a3"
-	goldenEmptyEventDigest = "tierdig1:471f175a8135c504950c9e9f9e92aba4450fd5efa718db0684abe3f5857d1f52"
-	goldenEmptyOutcomeDig  = "tierdig1:958df6619e6881d1bf974a9d410d0471f0ee8c9eb38011e1e681cce205f1d758"
+	goldenTokenEventDigest       = "tierdig2:deea30a6738c17f3037e4fccec099db891a1444fc032d41223396b5024a86d0a"
+	goldenOutcomeDigest          = "tierdig2:9d8c8e31d12cc6c2a48eff6381921040af109fd4f109848909e1e862f36d7865"
+	goldenEmptyEventDigest       = "tierdig2:ecfabeac6ec5660a443558a9e388e4e9e3f7c729598c82ad56d6699fd2321dac"
+	goldenEmptyOutcomeDig        = "tierdig2:9afcadb56c7df2033ae0b49de202ab953935e0eed7a5203d9046e350a1c1f466"
+	legacyGoldenTokenEventDigest = "tierdig1:f7860b950da365026dc3ddf4ad31e80ccfc0cf23eb1493d29b7acae5079a6180"
+	legacyGoldenOutcomeDigest    = "tierdig1:e5ca09dc60fa2fd7688688a2b9068fb1bd30a2cc714ef675e665482c641366a3"
+	legacyGoldenEmptyEventDigest = "tierdig1:471f175a8135c504950c9e9f9e92aba4450fd5efa718db0684abe3f5857d1f52"
+	legacyGoldenEmptyOutcomeDig  = "tierdig1:958df6619e6881d1bf974a9d410d0471f0ee8c9eb38011e1e681cce205f1d758"
 )
 
 // TestDigestGoldenVector is the ONLY test in this file that would notice a
@@ -1352,25 +1356,12 @@ const (
 // re-identified), then update these constants. If it was not, you have found the
 // bug this test exists for.
 //
-// 📌 THE ONE DELIBERATE REGENERATION SO FAR, RECORDED SO THE PROCEDURE IS SEEN TO
-// HAVE BEEN FOLLOWED RATHER THAN ASSERTED. Adding pr_number and merge_commit_sha
-// to the outcomes digest reddened goldenOutcomeDigest; the change was ruled
-// intentional (see outcomeDigestRow's field comments for the provenance
-// argument), so the constant was updated by hand, once, with the diff inspected:
-//
-//	goldenOutcomeDigest  f4013d09… -> e5ca09dc…
-//
-// ⭐ THE OTHER THREE CONSTANTS DID NOT MOVE, and that is the check that says the
-// edit was scoped. goldenTokenEventDigest is untouched because token_events was
-// not touched; BOTH empty sentinels are untouched because a per-row frame change
-// cannot reach a digest that folds no rows. A regeneration that moved all four
-// would have meant something wider had changed than intended — a domain frame or
-// the scheme — and would have needed re-diagnosing, not re-pasting.
-//
-// digestScheme was deliberately NOT bumped: nothing has published a digest yet
-// (#715's manifest surface does not exist), so there is no prior identity to
-// invalidate. ⚠️ That reasoning expires the moment #715 ships — after it, a
-// change of this shape REQUIRES the bump.
+// The pre-publication provenance-frame change moved only goldenOutcomeDigest
+// from f4013d09… to e5ca09dc… without a scheme bump. Event 3 U3 deliberately
+// bumped tierdig1 to tierdig2 for diff stats, merged_at and availability frames,
+// regenerating all four fleet-wide and both scoped constants (the scheme is
+// part of every domain). The six original tierdig1 constants remain below and
+// are checked against live reads through legacyDigestFrom.
 func TestDigestGoldenVector(t *testing.T) {
 	if got := expectedEventsDigest(goldenTokenEventRows); got != goldenTokenEventDigest {
 		t.Errorf("token_events golden vector changed:\n  got  %s\n  want %s\nThe serialization of a FIXED row set moved, so every digest this store has ever published now means something different. Read this test's doc block before touching the constant", got, goldenTokenEventDigest)
@@ -1478,6 +1469,21 @@ func TestDigestGoldenVectorMatchesTheLiveRead(t *testing.T) {
 	if gotOut := outcomesDigest(t, db, FleetWide); gotOut.Value != goldenOutcomeDigest {
 		t.Errorf("the LIVE outcomes read does not reproduce the golden vector:\n  live   %s\n  golden %s\nMost likely two columns are transposed in outcomeDigestSelect — e.g. weight recorded as quality", gotOut.Value, goldenOutcomeDigest)
 	}
+	// U3 preserves tierdig1's published identity alongside the new tierdig2
+	// goldens. These literals came from origin/main, not this implementation.
+	if got, err := legacyDigestFrom(ctx, db.db, digestSince, digestUntil, FleetWide, false); err != nil || got.Value != legacyGoldenTokenEventDigest || got.Rows != int64(len(goldenTokenEventRows)) {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenTokenEventDigest)
+	}
+	if got, err := legacyDigestFrom(ctx, db.db, digestSince, digestUntil, FleetWide, true); err != nil || got.Value != legacyGoldenOutcomeDigest || got.Rows != int64(len(goldenOutcomeRows)) {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenOutcomeDigest)
+	}
+	if got, err := legacyDigestFrom(ctx, db.db, digestUntil, digestUntil.AddDate(0, 1, 0), FleetWide, false); err != nil || got.Value != legacyGoldenEmptyEventDigest || got.Rows != 0 {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenEmptyEventDigest)
+	}
+	if got, err := legacyDigestFrom(ctx, db.db, digestUntil, digestUntil.AddDate(0, 1, 0), FleetWide, true); err != nil || got.Value != legacyGoldenEmptyOutcomeDig || got.Rows != 0 {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenEmptyOutcomeDig)
+	}
+
 }
 
 // expectedOutcomesDigest is expectedEventsDigest's counterpart.
@@ -1689,19 +1695,24 @@ func TestDigestCoversEveryCostBearingColumn(t *testing.T) {
 	// Columns deliberately outside the digest. Each reason is in eventsdigest.go.
 	excluded := map[string]map[string]string{
 		"token_events": {
+			"pricing_basis":        "aggregate disclosure input outside EventsDigest; sealed disclosure is bound by body_digest",
+			"rate_snapshot":        "aggregate disclosure rates outside EventsDigest; sealed disclosure is bound by body_digest",
+			"cache_write_evidence": "observation-selection provenance; existing reports read the selected token counts",
+
 			"idempotency_key":  "nullable + PARTIAL unique index; the whole point of the file header",
 			"session_id":       "opaque grouping key; no published figure reads it",
+			"branch_hash":      "pseudonymised attribution input; published figures read issue_id",
+			"pr_number":        "insert-time lookup input; published figures read the resolved issue_id, never this reference",
 			"billed_to":        "a /costs admission declaration (#854); no spend query reads it",
 			"cost_clamped":     "diagnostic clamp history; no spend or scoring query reads it",
 			"poller_baseline":  "baseline cutover provenance; no spend or scoring query reads it",
 			"attribution_rule": "no published figure or spend query reads it as of #823 S1; the first report that reads it must move it into the digest with a digestScheme bump",
 		},
 		"outcomes": {
+			"head_branch_hash": "merge-time attribution input; published figures read the resolved token issue_id",
+			"created_at":       "branch-window input; published figures read the resolved token issue_id",
 			"weight_source":    "records HOW weight was derived, not the value",
 			"work_type_source": "records HOW work_type was derived, not the value",
-			"additions":        "raw diff stat retained for future recalibration; read by nothing today",
-			"deletions":        "raw diff stat retained for future recalibration; read by nothing today",
-			"changed_files":    "raw diff stat retained for future recalibration; read by nothing today",
 			"push_day":         "push-dedup key, not part of the outcome's value",
 			"author_type":      "decides only whether the author counts toward the k-anonymity floor (#856); moves no figure",
 		},

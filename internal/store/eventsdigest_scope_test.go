@@ -441,16 +441,14 @@ func scopedGoldenOutcomeRows() []outcomeDigestRow {
 // The frozen SCOPED digests. Same contract as TestDigestGoldenVector — read that
 // test's doc block before touching a constant here.
 //
-// 📌 MINTED, NOT REGENERATED (#747). These two constants describe a value that
-// had never been computed before this change, so writing down what the code
-// produces is the act of freezing a NEW identity rather than accepting a moved
-// one. That is the only circumstance in which pasting a computed digest into a
-// golden vector is correct, and it is why the four fleet-wide constants in
-// TestDigestGoldenVector had to stay untouched in the same commit: those DO
-// describe already-published values.
+// #747 minted the scoped tierdig1 identities without moving fleet-wide bytes.
+// Event 3 U3 bumped the scheme to tierdig2 and regenerated both scoped and all
+// four fleet-wide goldens. The original scoped literals remain frozen here.
 const (
-	goldenScopedEventDigest   = "tierdig1:cb3d45544cb782bd6ef08ebecc81ade224618613dfcff4f704ffa70a1f6c4b69"
-	goldenScopedOutcomeDigest = "tierdig1:161fba6e1a5bbc22d05bb7e2777ba81dbb4335007602f6a1e6093fcbe93150aa"
+	goldenScopedEventDigest         = "tierdig2:910d53c44380617a47e00b37d73eee8aab1bbe9440237663176e42c64aea2f5e"
+	goldenScopedOutcomeDigest       = "tierdig2:0a15ad21300111e018b1d72cb160784342847a0d236be950efadb8366117cf99"
+	legacyGoldenScopedEventDigest   = "tierdig1:cb3d45544cb782bd6ef08ebecc81ade224618613dfcff4f704ffa70a1f6c4b69"
+	legacyGoldenScopedOutcomeDigest = "tierdig1:161fba6e1a5bbc22d05bb7e2777ba81dbb4335007602f6a1e6093fcbe93150aa"
 )
 
 // TestScopedDigestGoldenVector freezes the SCOPED wire format, and it exists for
@@ -458,13 +456,9 @@ const (
 // compares one run of the hasher against another run of the same hasher, so any
 // change to digestDomainFor moves both sides together and they stay green.
 //
-// ⭐ THE FLEET-WIDE CONSTANTS ARE THE OTHER HALF OF THIS TEST, AND THEY LIVE IN
-// TestDigestGoldenVector UNTOUCHED. That is the #747 regression pin: every digest
-// published before this change was fleet-wide, and a scheme that re-identified
-// them would invalidate every manifest already in an operator's hands. The four
-// constants there did not move, which is what says the scope was added ALONGSIDE
-// the old identity rather than on top of it. If they ever move together with
-// these, something wider changed than a scope — re-diagnose, do not re-paste.
+// The fleet-wide and scoped live-read tests also assert the six preserved
+// tierdig1 literals through legacyDigestFrom; U3's deliberate scheme bump does
+// not change the identity of an already-published tierdig1 manifest.
 //
 // ⚠️ THIS ARM ALONE PINS ONLY THE SERIALIZER, and that is not enough. It runs the
 // TEST's hasher, so it constrains digestDomainFor and the frame writers and
@@ -583,6 +577,15 @@ func TestScopedDigestGoldenVectorMatchesTheLiveRead(t *testing.T) {
 	if gotOut.Rows != int64(len(goldenScopedOutcomeRows)) {
 		t.Errorf("the live scoped outcomes read covered %d rows, want %d", gotOut.Rows, len(goldenScopedOutcomeRows))
 	}
+	// U3 preserves tierdig1's published identity alongside the new tierdig2
+	// goldens. These literals came from origin/main, not this implementation.
+	if got, err := legacyDigestFrom(ctx, db.db, digestSince, digestUntil, goldenScopeSlug, false); err != nil || got.Value != legacyGoldenScopedEventDigest || got.Rows != int64(len(goldenTokenEventRows)) {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenScopedEventDigest)
+	}
+	if got, err := legacyDigestFrom(ctx, db.db, digestSince, digestUntil, goldenScopeSlug, true); err != nil || got.Value != legacyGoldenScopedOutcomeDigest || got.Rows != int64(len(goldenOutcomeRows)) {
+		t.Errorf("legacy live golden: got %+v err=%v, want %s", got, err, legacyGoldenScopedOutcomeDigest)
+	}
+
 }
 
 func scopedEventsDigestOf(rows []tokenEventDigestRow, scope RepoScope) string {

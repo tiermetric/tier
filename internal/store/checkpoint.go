@@ -26,11 +26,15 @@ const CheckpointTombstoneMetadata = `{"erased":true}`
 // CheckpointSessionIDKey is the top-level JSON key under which the JSONL
 // watcher's metadata blob stores the session id. It is the join an erasure and
 // an export use to find a subject's checkpoint rows from their
-// token_events.session_id, and the ONLY thing the store reads out of the blob.
+// token_events.session_id, and the identity key the store reads out of the blob. The #972 diagnostic also
+// reads CWD and the stored path to describe capture provenance; it emits neither.
 // collector's TestCheckpointMetadataCarriesTheStoreSessionKey fails if the
 // watcher's blob stops carrying it — that failure is the only thing standing
 // between a renamed field and an erasure that silently finds nothing.
 const CheckpointSessionIDKey = "SessionID"
+
+// CheckpointCWDKey identifies the stored session working directory used by diagnostics.
+const CheckpointCWDKey = "CWD"
 
 // ErrCheckpointTombstoned is returned by SaveWatcherCheckpoint when the row at
 // that path is an erasure tombstone and the save was refused.
@@ -42,7 +46,8 @@ var ErrCheckpointTombstoned = errors.New("watcher checkpoint is an erasure tombs
 // rotation/truncation, and an opaque Metadata blob. The store treats Metadata
 // as an opaque string (JSON owned by the collector — session id, cwd, branch,
 // and the parse-sequence counter that keeps id-less message dedup keys stable
-// on resume); it never parses it.
+// on resume). The #972 diagnostic reads SessionID/CWD and the stored path,
+// never transcript content.
 type WatcherCheckpoint struct {
 	Path     string
 	Inode    uint64

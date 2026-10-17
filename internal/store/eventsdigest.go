@@ -1,5 +1,11 @@
 package store
 
+// Pricing-basis columns are operational promotion/repair provenance. Existing
+// report digests cover selected counts and dollars, not rates or evidence labels.
+// Live aggregate-pricing disclosures are operational diagnostics outside this
+// input digest; a sealed body binds its emitted disclosure through body_digest.
+// These diagnostics are not an independent reproduction of the billing basis.
+
 import (
 	"bytes"
 	"context"
@@ -124,7 +130,7 @@ const (
 	// declares which algorithm produced it and a future scheme can be
 	// distinguished rather than silently compared. Same discipline as
 	// priceTableHashScheme (#713).
-	digestScheme = "tierdig1"
+	digestScheme = "tierdig2"
 
 	// Domain separation. These are hashed as the FIRST frame of every digest,
 	// which is what makes an empty window's digest a distinguishable sentinel
@@ -145,7 +151,7 @@ const (
 	// unambiguously, and therefore what makes distinct row sets produce distinct
 	// bytes. See the injectivity note on appendTokenEventFrames.
 	digestFramesPerTokenEvent = 17
-	digestFramesPerOutcome    = 11
+	digestFramesPerOutcome    = 16
 
 	// digestRowBytesHint pre-sizes the per-row frame buffer so the steady-state
 	// loop does not reallocate. 16 frames × 8 bytes of framing is 128 before a
@@ -166,7 +172,7 @@ const (
 // count is already recoverable from the frame stream (frames ÷ frames-per-row),
 // so folding it in would add no injectivity and one more thing to keep in step.
 type Digest struct {
-	// Value is "tierdig1:" followed by 64 lowercase hex characters. Never empty,
+	// Value is "tierdig2:" followed by 64 lowercase hex characters. Never empty,
 	// including for an empty window.
 	Value string
 	// Rows is the number of rows the digest covers.
@@ -193,6 +199,9 @@ type Digest struct {
 // now covered. See the Fidelity field below.
 // cost_clamped is diagnostic history; no spend or scoring query reads it.
 // poller_baseline records the baseline cutover; no spend or scoring query reads it.
+// pr_number is an insert-time lookup input; published figures read the resolved
+// issue_id, never this reference. branch_hash is a pseudonymised attribution
+// input; published figures read issue_id.
 //
 // 🔴 Adding or removing any field here is a WIRE-FORMAT change: it re-identifies
 // every digest previously published. Once anything is published, such a change
@@ -239,7 +248,6 @@ type tokenEventDigestRow struct {
 //
 //	UPDATE outcomes SET weight_source = 'label'              -- digest unchanged
 //	UPDATE outcomes SET work_type_source = 'label'           -- digest unchanged
-//	UPDATE outcomes SET additions = 999999, deletions = 1    -- digest unchanged
 //	UPDATE outcomes SET push_day = '2026-01-01'              -- digest unchanged
 //	UPDATE outcomes SET author_type = 'Bot'                  -- digest unchanged
 //
@@ -251,9 +259,10 @@ type tokenEventDigestRow struct {
 //     and merge_commit_sha, which move no number at all. See their field
 //     comments; that second line is why they are in.
 //
-// What remains outside fails BOTH tests: additions / deletions / changed_files
-// are raw diff stats retained for a future recalibration and read by nothing
-// today; weight_source / work_type_source record HOW a value was derived rather
+// Outcome head_branch_hash/created_at are merge-time lookup inputs;
+// the resolved token issue_id and reporting ts are already covered.
+// tierdig2 covers nullable diff stats, merged_at and the availability bit because
+// they now feed Event 3 projections. weight_source / work_type_source record HOW a value was derived rather
 // than the value or its origin; push_day is a dedup key for the push-capture
 // path. author_type (#856) is the arguable one: it is no figure, but it decides
 // whether its author counts toward the k-anonymity floor, so editing it moves
@@ -300,6 +309,9 @@ type outcomeDigestRow struct {
 	// as ListOutcomes does ('' and 0) so digest and export agree on the value.
 	PRNumber       int64
 	MergeCommitSHA string
+	// Nullable evidence is encoded as n (NULL) or v followed by raw stored text.
+	Additions, Deletions, ChangedFiles, MergedAt string
+	LegacyDiffStats                              int64
 }
 
 // The projections below mirror ListTokenEvents / ListOutcomes' COALESCE choices
@@ -326,7 +338,8 @@ type outcomeDigestRow struct {
 // into a time.Time. The digest reads the same window fine. Worth its own issue.)
 //
 // ORDER BY (ts, id) is served by idx_token_events_ts_id / idx_outcomes_ts_id —
-// both already exist with exactly this shape — so the read is a window seek and
+// both already exist with exactly this shape; pin both indexes so repo/PR
+// lookups cannot displace its window seek. The read is a window seek and
 // an ordered walk, with no sort and no temp b-tree.
 // TestDigestReadsAreOneWindowSeek pins that against the planner, and
 // TestDigestSQLRequestsItsOrderExplicitly pins that the ORDER BY is asked for at
@@ -337,14 +350,19 @@ const (
 		       issue_id, model, host, input_tok, output_tok, cache_read,
 		       cache_write_5m, cache_write_1h, cost_micro, price_version,
 		       billing_mode, source, fidelity
-		FROM token_events WHERE `
+		FROM token_events INDEXED BY idx_token_events_ts_id WHERE `
 
 	outcomeDigestSelect = `
 		SELECT id, CAST(ts AS TEXT), developer, COALESCE(repo, 'unqualified'),
 		       issue_id, weight, quality, COALESCE(work_type, 'feature'),
 		       COALESCE(source, 'github-webhook'), COALESCE(pr_number, 0),
-		       COALESCE(merge_commit_sha, '')
-		FROM outcomes WHERE `
+		       COALESCE(merge_commit_sha, ''),
+               CASE WHEN additions IS NULL THEN 'n' ELSE 'v'||CAST(additions AS TEXT) END,
+               CASE WHEN deletions IS NULL THEN 'n' ELSE 'v'||CAST(deletions AS TEXT) END,
+               CASE WHEN changed_files IS NULL THEN 'n' ELSE 'v'||CAST(changed_files AS TEXT) END,
+               CASE WHEN merged_at IS NULL THEN 'n' ELSE 'v'||CAST(merged_at AS TEXT) END,
+               ` + outcomeDiffStatsUnavailableSQL + `
+		FROM outcomes INDEXED BY idx_outcomes_ts_id WHERE `
 
 	digestOrderSQL = ` ORDER BY ts, id`
 )
@@ -418,11 +436,10 @@ func checkDigestWindow(since, until time.Time) error {
 // weaken the regrouping argument the whole scheme stands on. Rewriting the ONE
 // prologue frame keeps the stream exactly as decodable as before.
 //
-// 🔑 FLEET-WIDE BYTES ARE UNCHANGED, WHICH IS WHY digestScheme IS NOT BUMPED.
-// Every digest published before #747 was fleet-wide, and every one of them still
-// recomputes to the same value — TestDigestGoldenVector's frozen constants are
-// the pin. A scoped digest is a NEW value that never existed, so it invalidates
-// nothing.
+// #747 added scope without changing tierdig1's fleet-wide bytes. Event 3 U3
+// deliberately bumped the scheme to tierdig2 and regenerated fleet-wide and
+// scoped goldens for the extended outcome frames. The six tierdig1 goldens
+// remain frozen and are asserted through legacyDigestFrom on live reads.
 func digestDomainFor(base string, scope RepoScope) string {
 	if scope.IsFleetWide() {
 		return base
@@ -727,7 +744,7 @@ func outcomesDigestFrom(ctx context.Context, q digestQueryer, since, until time.
 		var r outcomeDigestRow
 		if err := rows.Scan(&r.ID, &r.TS, &r.Developer, &r.Repo, &r.IssueID,
 			&r.Weight, &r.Quality, &r.WorkType, &r.Source,
-			&r.PRNumber, &r.MergeCommitSHA); err != nil {
+			&r.PRNumber, &r.MergeCommitSHA, &r.Additions, &r.Deletions, &r.ChangedFiles, &r.MergedAt, &r.LegacyDiffStats); err != nil {
 			return Digest{}, fmt.Errorf("OutcomesDigest: scan: %w", err)
 		}
 		appendOutcomeFrames(buf, r)
@@ -799,6 +816,13 @@ func appendOutcomeFrames(buf *bytes.Buffer, r outcomeDigestRow) {
 	writeLengthPrefixed(buf, r.Source)
 	writeLengthPrefixed(buf, strconv.FormatInt(r.PRNumber, 10))
 	writeLengthPrefixed(buf, r.MergeCommitSHA)
+	for _, value := range []string{r.Additions, r.Deletions, r.ChangedFiles, r.MergedAt} {
+		if value == "" {
+			value = "n"
+		}
+		writeLengthPrefixed(buf, value)
+	}
+	writeLengthPrefixed(buf, strconv.FormatInt(r.LegacyDiffStats, 10))
 }
 
 // foldFrames folds buf's accumulated frames into the running hash and empties

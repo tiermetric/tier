@@ -212,8 +212,8 @@ func TestEmbeddedPriceTableIdentityIsPinned(t *testing.T) {
 	pinEmbeddedPriceTable(t)
 
 	// Bump BOTH literals together, in the same commit as the rate change.
-	const wantVersion = 12
-	const wantTableHash = "tierpt1:3a27fb89ee0312ff4b82ac4116840a2ea5f522e5f74f494ee8e9c1fec59edb66"
+	const wantVersion = 14
+	const wantTableHash = "tierpt1:ac926691fb6f6013d7e72f854b895b8dd122f7a5c731e50710e70434a578a5de"
 
 	got := ActivePriceTableInfo()
 	if got.Version != wantVersion || got.TableHash != wantTableHash {

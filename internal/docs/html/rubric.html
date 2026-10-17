@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The canonical TIER rubric (v1) — TIER docs</title>
+<title>The canonical TIER rubric (v1 and opt-in v2) — TIER docs</title>
 <style>
 :root {
   --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
@@ -61,14 +61,14 @@ footer.site a { color: var(--muted); }
 <body>
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
-<h1 id="the-canonical-tier-rubric-v1">The canonical TIER rubric (v1)</h1>
+<h1 id="the-canonical-tier-rubric-v1-and-opt-in-v2">The canonical TIER rubric (v1 and opt-in v2)</h1>
 <p>This document is the <strong>versioned, normative rubric</strong> for TIER&#39;s outcome weights
 and work-type taxonomy. It is the weight-side analogue of the
 <a href="reference-price-table.html" rel="nofollow">reference price table</a>: the price table pins the
 <strong>dollars</strong>, this rubric pins the <strong>weighted points</strong>, and a TIER number is only
 comparable across two measurements when <strong>both</strong> stamps match.</p>
 <ul>
-<li><strong>Rubric version:</strong> <code>1</code> (the <code>scoring.RubricVersion</code> constant).</li>
+<li><strong>Rubric version:</strong> disabled Event 3 policy uses <code>1</code> (the legacy <code>scoring.RubricVersion</code> constant); enabled, fully resolved stored policy uses <code>2</code>.</li>
 <li><strong>Where it is stamped:</strong> every <code>GET /api/v1/scores</code> response carries a top-level
 <code>rubric: {version}</code> block next to <code>price_table: {version, effective_date}</code>.</li>
 <li><strong>When it must change:</strong> any edit to the weight scale or the work-type taxonomy
@@ -80,12 +80,11 @@ to today&#39;s.</li>
 <p><strong>There is no absolute &#34;good&#34; TIER.</strong> This rubric deliberately defines <strong>no</strong>
 reference cohort and <strong>no</strong> good/ok/poor band. A weighted point is org-local by
 construction; a bare TIER of 40 is neither good nor bad on its own. What <em>is</em>
-defensible is a <strong>self-relative</strong> comparison — the same org over time, or two
-parties under a <em>matched</em> rubric + price version — expressed through
+defensible is a <strong>self-relative</strong> comparison — the same org over time, subject to matched measurement definitions — expressed through
 <code>cost_per_point</code>. See <a href="#what-you-may-and-may-not-compare" rel="nofollow">What you may and may not compare</a>.</p>
 </blockquote>
 <h2 id="why-the-rubric-is-versioned-the-exploit-it-closes">Why the rubric is versioned (the exploit it closes)</h2>
-<p>TIER&#39;s numerator is <code>Σ(weight × quality)</code>. The weight comes from a size label (or
+<p>With Event 3 scoring disabled, TIER&#39;s numerator is <code>Σ(weight × quality)</code>. Enabled scoring uses the allocated points in <a href="#rubric-2-corrective-work-operator-opt-in" rel="nofollow">rubric 2</a>. The weight comes from a size label (or
 a heuristic fallback — see <a href="conventions.html" rel="nofollow">conventions.md</a>). If the label→weight
 mapping is merely a &#34;convention&#34;, two orgs can apply it with different generosity:
 a generous-labeling org calls the same change <code>size/l</code> (5) that a strict org calls
@@ -95,10 +94,10 @@ culture, not engineering yield — and TIER drifts into people-ranking, the one
 thing it must not do.</p>
 <p>Two distinct mechanisms address this — do not conflate them:</p>
 <ul>
-<li><strong>Normativity</strong> (this document&#39;s worked examples) is what makes a strict org and
-a generous org score the <em>same real work</em> the same way. Both are expected to
-calibrate against this canonical rubric rather than their house habits. This is
-the actual cross-org generosity guard.</li>
+<li><strong>Normativity</strong> (this document&#39;s worked examples) provides common definitions.
+It does not establish that two organisations calibrate labels equally, and
+TIER neither validates nor enforces inter-rater equivalence. Two organisations
+do not compare, even when their version stamps match.</li>
 <li><strong>The version stamp</strong> (<code>rubric.version</code> on the wire) is <em>provenance</em>: it makes a
 change to the rubric <strong>definition</strong> detectable over time, so a self-over-time or
 matched-version comparison can confirm the weighting did not drift. It does
@@ -106,10 +105,7 @@ matched-version comparison can confirm the weighting did not drift. It does
 same binary stamp the same version however each labels — nor a local
 <code>size_labels</code> remap (see the caveat under <a href="#size--weight" rel="nofollow">Size → weight</a>).</li>
 </ul>
-<p>So: a <code>rubric.version</code> <strong>mismatch</strong> makes a comparison non-comparable and visibly
-so; a <code>rubric.version</code> <strong>match</strong> is necessary but not sufficient — it must be
-paired with shared normative calibration (and matched <code>size_labels</code>) before a
-cross-org <code>cost_per_point</code> reading is defensible.</p>
+<p>A <code>rubric.version</code> mismatch identifies a definition change. Matching versions do not establish shared calibration or comparable capture and task mix; a cross-organisation <code>cost_per_point</code> reading remains unsupported.</p>
 <h2 id="size--weight">Size → weight</h2>
 <p>The weight of a merged PR is its size, read from a GitHub label (case-insensitive,
 <code>size/</code> prefix optional). The scale is fixed — these five values and no others:</p>
@@ -165,10 +161,9 @@ stays honest for that case. A local convention that maps a size to a
 <em>different</em> weight than this document&#39;s calibration (e.g. treating everyday
 work as <code>l</code>/5 rather than <code>m</code>/3) is a <strong>divergence the operator owns</strong>: the
 stamp cannot detect it, so such an org must not read its <code>cost_per_point</code>
-against another party&#39;s until the calibrations are reconciled. A
-config-fingerprint stamp is a possible future refinement; today the honest rule
-is &#34;matched <code>rubric.version</code> is necessary, not sufficient, across orgs with
-customized labels.&#34;</p>
+against another party&#39;s. A config-fingerprint stamp is a possible future
+refinement; cross-organisation comparison remains unsupported even with
+matched versions and reconciled labels.</p>
 </blockquote>
 <h3 id="worked-examples-per-size">Worked examples (per size)</h3>
 <p>Assume a clean outcome (<code>quality = 1.0</code>; see <a href="#quality-multiplier" rel="nofollow">Quality multiplier</a>).</p>
@@ -278,7 +273,7 @@ segments <em>what is compared to what</em>, it does not change how a point is ea
 </tbody>
 </table>
 <p>Each <code>cost_per_point</code> is meaningful <strong>only against the same segment</strong> in another
-window or (under a matched rubric + price version) another party. A pooled
+window. A pooled
 <code>cost_per_point</code> across the three is <strong>not</strong> a supported comparison — the
 <code>/scores</code> <code>work_types</code> array is the authoritative surface, and the pooled
 top-level rows are a back-compat summary, not a cross-type ranking (<code>#187</code>).</p>
@@ -319,16 +314,19 @@ point. It is the <strong>inverse-unit dual</strong> of TIER (numerically <code>1
 both are defined) and is the unit TIER should be <em>benchmarked and trended</em> on:</p>
 <ul>
 <li>It reads as money a CFO already understands (&#34;$2.40 per weighted point&#34;).</li>
-<li>Paired with the <code>price_table.version</code> stamp, it is a <strong>constant-dollar</strong>
-self-comparison over time.</li>
+<li>Constant-price self-comparison requires matching resolved price fingerprints,
+the original pricing basis of stored rows (or an explicit common reprice),
+rubric, release and population. A loaded <code>price_table.version</code> alone does not
+establish that older rows used the same rates; see
+<a href="technical-reference.html#21-the-formula" rel="nofollow">technical reference §2.1</a>.</li>
 <li>It is guarded on the points denominator: a zero-point row reports <code>null</code>
 (rendered <code>—</code>), never a divide-by-zero and never a <code>0</code> that would read as
 the most efficient row (<code>#472</code>). (A <code>$0</code>-cost row with points reports a
 legitimate <code>0.0</code>, already surfaced by the zero-token tripwire <code>#136</code>.)</li>
 </ul>
 <h3 id="self-relative-interval-not-an-absolute-rank">Self-relative interval (not an absolute rank)</h3>
-<p><code>/scores</code> also returns <code>cost_per_point_ci_low/high</code>: the 95% percentile-bootstrap
-interval for a ranked developer&#39;s <code>cost_per_point</code>, derived by reciprocal
+<p><code>/scores</code> also returns <code>cost_per_point_ci_low/high</code>: the nominal 95% percentile-bootstrap bounds (coverage unvalidated)
+for a ranked developer&#39;s <code>cost_per_point</code>, derived by reciprocal
 transform from the same TIER bootstrap (<code>#133</code>) — it expresses <code>cost_per_point</code>
 against <strong>that developer&#39;s own resampled outcome history</strong>, the honest thing a
 single window supports. It is <strong>not</strong> a percentile rank against other developers
@@ -347,21 +345,21 @@ Compare a team with its own past.</p>
 <tbody>
 <tr>
 <td>Same developer/team over time</td>
-<td><strong>Yes</strong></td>
+<td><strong>Conditional</strong></td>
 <td><code>cost_per_point</code></td>
-<td>Same <code>rubric.version</code> <strong>and</strong> same <code>price_table.version</code>. A <code>price_table</code> bump is a constant-dollar break; a <code>rubric</code> bump is a weighting break.</td>
+<td>Match resolved price fingerprints, historical row pricing or an explicit common reprice, rubric, release, population and capture. Matching loaded version numbers alone is insufficient.</td>
 </tr>
 <tr>
 <td>Same developer/team, within one <code>work_type</code>, over time</td>
-<td><strong>Yes</strong></td>
+<td><strong>Conditional</strong></td>
 <td><code>cost_per_point</code> (per segment)</td>
 <td>As above; compare a segment only to the same segment.</td>
 </tr>
 <tr>
-<td>Two parties, matched versions</td>
-<td><strong>Cautiously</strong></td>
+<td>Two organisations</td>
+<td><strong>No cross-organisation comparison</strong></td>
 <td><code>cost_per_point</code></td>
-<td>Same <code>rubric.version</code> <strong>and</strong> <code>price_table.version</code>, <strong>and</strong> matched <code>outcomes.size_labels</code> (a remap diverges from canonical calibration — the stamp cannot see it), <strong>and</strong> comparable cache-share context (see <a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md §4</a>). Different cache-hit rates change cost independent of yield.</td>
+<td>Matching stamps do not establish shared calibration, capture or task mix. Within one organisation, a comparison remains a question to investigate under the technical reference §2.1 conditions.</td>
 </tr>
 <tr>
 <td>Two parties, mismatched <code>rubric.version</code> or <code>price_table.version</code></td>
@@ -371,9 +369,9 @@ Compare a team with its own past.</p>
 </tr>
 <tr>
 <td>Raw <code>tier</code> across parties</td>
-<td><strong>No</strong></td>
+<td><strong>No cross-organisation comparison</strong></td>
 <td>—</td>
-<td>The numerator is org-local; use <code>cost_per_point</code> under matched versions instead.</td>
+<td>Neither <code>tier</code> nor <code>cost_per_point</code> makes differently calibrated organisations comparable; matched stamps do not establish equivalence.</td>
 </tr>
 <tr>
 <td>Cross-type (<code>feature</code> vs <code>security</code>)</td>
@@ -396,10 +394,91 @@ Compare a team with its own past.</p>
 <li><a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> — the dollar side of the
 pair; its <code>version</code> co-stamps every comparison.</li>
 <li><a href="pricing-philosophy.html" rel="nofollow">pricing-philosophy.md</a> — cache-share context (§4),
-required for any cross-party <code>cost_per_point</code> reading.</li>
+required when interpreting <code>cost_per_point</code> over time.</li>
 <li><a href="api-compatibility.html" rel="nofollow">api-compatibility.md</a> — the <code>/scores</code> wire contract for
 <code>cost_per_point</code>, its CI, and the <code>rubric</code> stamp.</li>
 </ul>
+<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage. Inference is not established.</p>
+<h2 id="rubric-2-corrective-work-operator-opt-in">Rubric 2: corrective work (operator opt-in)</h2>
+<p>The size scale and work-type taxonomy above are unchanged. The default-off
+<code>outcomes.event3_scoring</code> switch selects the correction rule and rubric together
+from persisted state. One transaction resolves every outcome&#39;s complete chain
+and pins rubric 2; unresolved enabled state refuses scores and new seals.
+Disabling restores legacy scoring and rubric 1. Lifecycle confirmation alone
+never enables scoring.</p>
+<p>Rubric 2 retains the quality floors above and adds this step when an enabled
+correction occurs within the inclusive 14-day window after its parent merged:</p>
+<table>
+<thead>
+<tr>
+<th>Parent&#39;s own quality before correction</th>
+<th>Corrected quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Clean: 1</td>
+<td>17/20 (0.85)</td>
+</tr>
+<tr>
+<td>CI failure: 0.7</td>
+<td>11/20 (0.55)</td>
+</tr>
+<tr>
+<td>Other quality values</td>
+<td>Unchanged</td>
+</tr>
+</tbody>
+</table>
+<p>This step applies once to the parent&#39;s own quality, including when the parent
+is itself a follow-up. An unconfirmed cross-author declaration does not enable it.</p>
+<p>Under rubric 2, an original receives
+<code>max(0.1 * W_original, q_original_corrected * W_original + sum(credit) - sum(revised_weight))</code>.
+Here <code>q_original_corrected</code> is the original&#39;s own quality after the correction step above; it never reads a follow-up&#39;s quality.
+A follow-up receives its allocated share multiplied by <strong>its own</strong> quality, never
+its parent&#39;s quality. Repairing a repair runs the allocation on the parent&#39;s
+share and replaces it. Stored rational inputs use exact <code>math/big.Rat</code> values in
+lowest terms. Raw activity (<code>outcome_n</code>) remains separate from eligible growth
+(<code>sample_n</code>); repair-only activity cannot inflate the ranking evidence floor.
+Same-author declarations are provisional until operator review. Cross-author
+credit requires confirmation; multi-root foreign relations remain pending. An
+own-root multi-root declaration takes the least-favourable own-root result.
+Disputes and withdrawals after confirmation retain credit until operator
+settlement. Team/division diagnostics are <code>not_shown</code>.</p>
+<p>Rubrics 1 and 2 each verify under their own rule; this change does not move the
+weight scale. Unknown rubric versions remain a changed-definition signal.
+Sealed comparisons reject differing rubric versions, and existing seals retain
+their original bytes and digest. A shared rubric still does not establish
+comparable calibration, capture completeness, or task mix.</p>
+<p>See <a href="technical-reference.html#enable-event-3-scoring" rel="nofollow">Enable Event 3 scoring</a> for configuration, rollback and startup behavior.</p>
+<h3 id="reviewed-allocation-and-review-limits">Reviewed allocation and review limits</h3>
+<p>Reviewed cumulative scope before and after the correction determines marginal
+growth; an explicit pure repair has zero marginal growth. This differs from the
+follow-up&#39;s reviewed own size and its individual allocated share. The original
+is charged first, retaining its floor; the remaining budget goes to follow-ups
+in canonical order, capped at their reviewed own sizes. Their shares then take
+their own quality. For a clean original of weight 5, corrected quality 0.85 and a
+clean pure repair of size 1, the original receives 3.25 points and the fixer
+receives 1: total 4.25, with zero added growth and no repair-only SampleN credit.</p>
+<p>Growth is read on the same 0.5–8 scale, so it stops at the top bucket. When
+the chain&#39;s cumulative scope before a follow-up already sizes at 8, whether
+reviewed or bucketed from churn, the follow-up adds zero growth however much new
+scope it delivers. For a confirmed or same-author pair, its share is then charged
+against the original; either way it adds no SampleN credit. New scope merged as
+its own PR that declares no parent (<code>Corrects: none</code>) is sized and credited on
+its own.</p>
+<p>Unconfirmed eligible same-author pairs use recorded churn and file counts as a
+provisional approximation, not reviewed delivered growth. Missing sizing can
+remain pending; unconfirmed foreign roots cannot move another author&#39;s points.
+Reviewed per-root shares for multiple originals are planned, not shipped.
+Actor/role are self-asserted local CLI input, not
+authentication; single-operator installations confirm their own pairs. The
+required distinct actor label is advisory and does not prove independent review.
+Disputed status appears in developer/operator views, exports, the corrective
+digest and new seals, while team/division views return <code>not_shown</code>. Disputes and
+withdrawals after confirmation retain prior treatment until operator settlement.
+Existing sealed reports never change.</p>
+<p>See <a href="technical-reference.html#event-3-coverage" rel="nofollow">Event 3 coverage</a> for recorded declarations and limits.</p>
 
 </main></div>
 <footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>

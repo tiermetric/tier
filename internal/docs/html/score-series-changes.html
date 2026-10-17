@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Score-series changes — TIER docs</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1d21; --muted: #5c636b; --border: #e2e5e9;
+  --link: #0b6bcb; --code-bg: #f4f6f8; --accent: #0b6bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e6e9ec; --muted: #9aa2ab; --border: #2a2f36;
+    --link: #6db3f2; --code-bg: #1d2126; --accent: #6db3f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border); margin-bottom: 32px;
+}
+header.site .bar { max-width: 760px; margin: 0 auto; padding: 14px 20px; }
+header.site a.brand { color: var(--fg); text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+header.site a.brand .tier { color: var(--accent); }
+main { overflow-wrap: break-word; }
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.8em; }
+h1 { margin-top: .4em; font-size: 1.9rem; }
+a { color: var(--link); }
+p, li { color: var(--fg); }
+code {
+  background: var(--code-bg); padding: .15em .4em; border-radius: 4px;
+  font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+pre {
+  background: var(--code-bg); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1.2em 0; padding: .2em 1em; color: var(--muted);
+  border-left: 3px solid var(--border);
+}
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--code-bg); }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+footer.site {
+  max-width: 760px; margin: 48px auto 0; padding: 20px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .875rem;
+}
+footer.site a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
+<div class="wrap"><main>
+<h1 id="score-series-changes">Score-series changes</h1>
+<p>This register identifies shipped changes that can alter a score series, its
+attribution, eligibility or statistical meaning. Use it when interpreting a
+before/after figure or re-deriving a historical period. It is a seed register,
+not proof that an installation&#39;s complete definition history is known.
+Eligibility-only changes must be recorded separately from scoring changes: a
+ranking gate can withdraw ranking or an interval without changing the points or
+headline. Attribution and inference changes are labelled separately below.</p>
+<h2 id="comparison-rule">Comparison rule</h2>
+<p>Compare figures under the same measurement definition. If a scoring, pricing, attribution or eligibility change affects either period, label the comparison &#39;definition changed&#39; and name the change. Historical sealed bytes remain unchanged; a revised live derivation is a separate observation. A comparison across a break names the break&#39;s row; a published comparison either names its applicable entries or states that the definition history is unknown.</p>
+<h2 id="reading-the-register">Reading the register</h2>
+<p>All timestamps below identify <strong>shipment to main</strong>, not inferred deployment or
+operator activation times. Non-price rows use the merge commit&#39;s committer time,
+measured with <code>git log --format=&#39;%H %cI&#39; -1 &lt;commit&gt;</code> and converted to UTC;
+price rows use <code>gh pr view &lt;PR&gt; --json mergedAt</code>, retaining the file-change SHA
+as a secondary citation. A table&#39;s <code>effective_date</code> is not its shipment timestamp.
+Cited SHAs and PRs are in the private development history; public readers cannot
+resolve them. Installation activation times are <strong>unknown</strong> unless separately
+recorded; #823 is opt-in and Event 3 scoring is OFF by default. The four Event 3
+rows record shipped capabilities, not four activated score breaks. Price v1 is
+the baseline, with unchanged default values, included to account for every table
+version.</p>
+<p>Effect types describe when the change reaches observations:</p>
+<ul>
+<li><strong>prospective</strong>: new insertion/capture, or a newly priced scan, uses the shipped
+rule after deployment/opt-in. It does not by itself rewrite stored history.</li>
+<li><strong>live-retroactive</strong>: reading existing inputs under a new method, re-ingesting
+earlier outcomes, or a guarded fill of earlier unsealed usage can change a live
+historical derivation.</li>
+<li><strong>explicit-apply</strong>: an operator deliberately applies a historical change.
+A dry run is not activation. Record the actual apply time, scope and receipt
+in its own row; the shipped tool or price-table date is not that receipt.</li>
+</ul>
+<h3 id="pricing-surfaces">Pricing surfaces</h3>
+<p>For each price row, <strong>headline</strong> and <strong>segments</strong> can move through cost;
+<strong>shares</strong> weighted by dollars and <strong>interval</strong> can move with the affected cost
+mix; <strong>flags</strong> about unknown/guessed rates can change when a model gains a row,
+while the token-count tripwire is unchanged by rates alone; <strong>eligibility</strong> can
+change at a cost floor. These are pricing changes, not changes to outcome
+weights. A row addition leaves previously listed rate values unchanged but can
+replace fallback pricing for matching usage. An existing-rate correction changes
+the pricing definition for an already listed model.
+At read time, premium-model share, fidelity unknown-model dollars and the
+unknown-pricing token share classify historical inputs against the active table
+without changing stored cost, so model coverage or premium-threshold changes can
+revise those live historical surfaces; even a rate-only version change can alter
+the unknown-pricing flag because the stored price version differs from the active
+version.</p>
+<p>Neither kind of table revision automatically updates stored <code>cost_micro</code>.
+Ordinary re-shipping keeps the stored cost. Newly captured rows and fresh scans
+use the active table; changing historical stored prices requires an audited
+<code>tierd reprice --commit</code> operation with its own <strong>explicit-apply</strong> row. No such
+installation apply date has been established for this seed. At fixed points,
+lower total cost raises TIER and higher total cost lowers it; where token/model
+mix does not establish a direction, the table says <strong>unknown</strong>. See the
+<a href="reference-price-table.html" rel="nofollow">reference price table</a> and
+<a href="reproducibility.html" rel="nofollow">reproducibility contract</a>.</p>
+<h3 id="sealed-report-treatment">Sealed-report treatment</h3>
+<p>Every row follows R-2026-09-29-11: <strong>sealed report bytes never change</strong>. Config
+changes apply from the first unsealed period and cross-config sealed comparison is refused. Recomputed live history
+is a separate observation, never a replacement of the sealed report. Earlier
+rows predate sealing; the same preservation rule governs their use today.</p>
+<h2 id="shipped-register">Shipped register</h2>
+<table>
+<thead>
+<tr>
+<th>shipped (UTC)</th>
+<th>PR + rule id</th>
+<th>surfaces moved (headline, shares, interval, flags, segments, eligibility)</th>
+<th>direction</th>
+<th>effect type (prospective / live-retroactive / explicit-apply)</th>
+<th>sealed-report treatment</th>
+<th>compatible comparison conditions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2026-06-25T19:52:39Z</td>
+<td>#111; <code>price-table v1</code>; file change <code>75407d96</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Baseline: externalised the existing rates without changing their values.</td>
+<td>Unchanged from the prior hardcoded table.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same default rates; an override needs its own identity. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-01T20:58:20Z</td>
+<td>#112; <code>price-table v2</code>; file change <code>01e16c4b</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Existing-rate change: threshold pricing for Gemini 2.5 Pro; adds Sonnet 4.5 and Gemini 3.1 Pro rows.</td>
+<td>Gemini 2.5 Pro cost rises above the context threshold, so headline falls at fixed points; new-row net direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same context-tier logic and table content. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-02T12:40:14Z</td>
+<td>#158; <code>price-table v3</code>; file change <code>73db5ec9</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Existing-rate corrections: o3, o3-mini, GPT-4.1 nano and DeepSeek R1 fall; Gemini 2.5 Flash rises; DeepSeek V3 changes both ways; retires GPT-4.5.</td>
+<td>Mixed cost directions; aggregate headline direction unknown. Retired model can fall back to a guessed rate.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same corrected rates, model resolution and fallback treatment. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-02T15:01:43Z</td>
+<td>#167; <code>price-table v4</code>; file change <code>e46abb37</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Existing-rate change: per-model cache reads for Gemini 2.5/3.1 and DeepSeek; also ships Gemini thought/cache capture.</td>
+<td>Discounted cache-read cost falls; newly captured thought tokens can raise cost; net headline direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same cache multipliers AND captured token classes. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-07T03:41:45Z</td>
+<td>#209; <code>price-table v5</code>; file change <code>148efb0f</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds missing RPT model rows: GPT-5.x, o1/o4-mini, Claude Opus 4.1 and 4.5 rows, Gemini lite/3.x, Grok variants and DeepSeek V3.2; existing rate rows unchanged.</td>
+<td>Unknown in aggregate: explicit rows replace model fallback pricing for matching usage.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same new-row coverage and fallback/capture population. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-09T15:58:27Z</td>
+<td>#247 (issue #231); rule id: unknown</td>
+<td>Attribution/scoring: headline can move through future push deduplication or revert quality; shares, interval, flags, segments and eligibility can move through repository-qualified joins.</td>
+<td>Stops cross-repo issue fusion, wrong-repo revert penalties and dropped push outcomes. Numerical direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same repository qualifiers and tolerant join. Pre-#247 rows carry <code>unqualified</code> and read unchanged under the tolerant join. New capture is prospective; migration does not recover discarded outcomes or infer old repositories.</td>
+</tr>
+<tr>
+<td>2026-07-13T06:11:34Z</td>
+<td>#308; <code>price-table v6</code>; file change <code>c93dc8e4</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds host-qualified open-weights per-token rows; existing model-only rates unchanged.</td>
+<td>Unknown: host rates replace size-class/model-only pricing only on matching host/model keys.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same host-qualified keys and billing modes. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-13T16:23:01Z</td>
+<td>#358; <code>price-table v7</code>; file change <code>179e2452</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds Claude Sonnet 5 and Mythos 5 rows; existing rate rows unchanged.</td>
+<td>Matching usage moves from guessed rates to explicit rates; aggregate direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same row coverage and model resolution. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-22T20:35:23Z</td>
+<td>#461; <code>price-table v8</code>; file change <code>d3e41077</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds GPT-5.6 sol/terra/luna rows; existing rate rows unchanged.</td>
+<td>Matching usage replaces fallback pricing; aggregate direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same GPT-5.6 rows and cache-read multipliers. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-07-24T14:47:02Z</td>
+<td>#510 (issue #495); rule id: unknown</td>
+<td>Inference only: interval (pooled, compare, segments and detail); headline, shares, flags, segment point scores and eligibility unchanged.</td>
+<td>Joint contribution/cost resampling replaces a fixed denominator. Width may rise or fall with correlation; no universal direction.</td>
+<td>live-retroactive</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same joint resampling, shared-issue allocation and fixed unmatched-cost remainder; compare statistical meaning only under the same method. This shipment establishes no general coverage guarantee.</td>
+</tr>
+<tr>
+<td>2026-07-26T20:12:09Z</td>
+<td>#513; <code>price-table v9</code>; file change <code>6720959b</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds Claude Opus 5 row; existing rate rows unchanged.</td>
+<td>Matching usage replaces guessed pricing; aggregate direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same Opus 5 row and fast-mode capture limitation. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-09-25T14:40:38Z</td>
+<td>#787; <code>price-table v10</code>; file change <code>7b133529</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Existing-rate change: Sonnet 5 input/output $3/$15 → $2/$10; adds Opus 5.5, Fable/Mythos 5.1, GPT-6 and GLM rows. Premium input threshold also falls from $5 to $4.</td>
+<td>Sonnet 5 cost falls, headline rises at fixed points; added-row aggregate direction unknown; Opus 5.5 counts as premium.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same v10 rates, Z.ai write treatment, premium threshold and model mix. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-09-27T21:21:45Z</td>
+<td>#897; <code>price-table v11</code>; file change <code>b63b5587</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds Meta Muse Spark standard and Contributor rows under the meta provider; existing rate rows unchanged.</td>
+<td>Matching usage replaces fallback pricing; aggregate direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same Muse rows, billing mode and capture; non-token search charges remain outside these rates. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-09-30T20:55:49Z</td>
+<td>#1014 (issue #823); R-2026-09-30-10</td>
+<td>Opt-in attribution: shares move; interval, flags, segments and eligibility can move. Headline unchanged for the same retained events and outcomes; routing/capture changes can also change that population.</td>
+<td>Attribution moves among issues/repos, including the foreign-repo bucket; aggregate direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same worktree-attribution setting and capture/routing population. Default off; only newly stored messages use the opt-in rule; existing bookings keep their first issue/repo/rule.</td>
+</tr>
+<tr>
+<td>2026-10-03T01:45:43Z</td>
+<td>#1056; <code>price-table v12</code>; file change <code>d68a9d62</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds Claude Sonnet 5.5 row; existing rate rows unchanged.</td>
+<td>Matching usage replaces guessed pricing; aggregate direction unknown.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same Sonnet 5.5 row and cache-read rate. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-10-11T08:25:56Z</td>
+<td>#1183 (#1074 PR a); R-2026-10-11-2 / R-2026-10-11-3</td>
+<td>Attribution: shares, interval, flags, segments and eligibility can move; headline unchanged at fixed total cost and points.</td>
+<td>Exactly one same-repo real-issue PR match can convert unattributed insertion to attributed usage; affected attribution share can rise and zero-token flags can clear. Other directions unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same PR-number evidence, insert-time resolution and server support; explicit attribution wins, ambiguous matches stay unattributed. No merge-time fill yet.</td>
+</tr>
+<tr>
+<td>2026-10-11T20:55:21Z</td>
+<td>#1187 (#1074 PR b); R-2026-10-11-3 / R-2026-10-11-4</td>
+<td>Attribution fills: shares, interval, flags, segments and eligibility can move on earlier unsealed usage; headline unchanged at fixed total cost and points.</td>
+<td>Eligible unattributed usage becomes attributed; attribution share can rise and zero-token flags can clear. Interval/segment direction unknown.</td>
+<td>live-retroactive</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same PR-number-first fill and bounded branch evidence. Never overwrites attribution; protects sealed months and sealed token lookbacks; branch fill skips forks, PR-number rows, backfill and ambiguous windows. Record fill receipts and the accepted late-webhook residual.</td>
+</tr>
+<tr>
+<td>2026-10-12T14:16:52Z</td>
+<td>#1203; <code>price-table v13</code>; file change <code>770afeaa</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Adds Claude Haiku 5.5 (including its context tier) and GPT-6.1 Sol rows; existing rate rows unchanged.</td>
+<td>Unknown in aggregate; model, context and cache mix determine the cost shift.</td>
+<td>prospective (stored cost); live-retroactive (premium share and guessed/unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same two rows, context tiers and cache multipliers. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-10-13T07:44:03Z</td>
+<td>#1207; <code>price-table v14</code>; file change <code>db7963e1</code></td>
+<td><a href="#pricing-surfaces" rel="nofollow">Pricing surfaces</a>. Existing-rate change: Sonnet 5.5 cache reads $0.20/M → $0.10/M (0.1× → 0.05×); no added rows.</td>
+<td>Cost falls for affected reads; headline rises at fixed points. Other token classes keep their rates.</td>
+<td>prospective (stored cost); live-retroactive (unknown-pricing flags)</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same cache-read rate and captured cache classes. Historical stored-cost changes require a separate explicit-apply receipt.</td>
+</tr>
+<tr>
+<td>2026-10-14T19:21:38Z</td>
+<td>#1239 (issue #1229); R-2026-10-14-4</td>
+<td>Scoring exclusion: headline points, interval and segments can fall/change; shares and flags can change with outcome population; eligibility can change. This is not merely an eligibility-only gate.</td>
+<td>Recognised revert PRs earn no positive credit. Their credit is removed/refused; fixed-cost headline cannot rise from removing it. Original penalties still require separate recognised revert evidence.</td>
+<td>prospective (insertion) + live-retroactive on re-ingest/backfill</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td>Same revert classifier and exclusion state on insertion paths (webhook, backfill, API and push). Webhook redelivery and <code>tierd backfill</code> (default <code>--since</code>: 90 days ago) can remove an existing revert outcome by merge SHA in any month and reconcile push credit, with no sealed-month check: sealed report bytes stay unchanged, but live re-derivation of a sealed month can change. #1277 historical discovery/explicit-apply remains pending as a separate activation.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="shipped-inactive">Shipped, inactive</h3>
+<p>Dormant shipments record capability availability. Activation adds a second row
+under the maintenance rules below.</p>
+<table>
+<thead>
+<tr>
+<th>shipped (UTC)</th>
+<th>PR + rule id</th>
+<th>surfaces moved (headline, shares, interval, flags, segments, eligibility)</th>
+<th>direction</th>
+<th>effect type (prospective / live-retroactive / explicit-apply)</th>
+<th>sealed-report treatment</th>
+<th>compatible comparison conditions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2026-10-15T15:43:33Z</td>
+<td>#1266 (Event 3); R-2026-10-14-19 / R-2026-10-14-20</td>
+<td>Shipped schema, chain assessment, reviewed sizing and allocation core. With scoring OFF by default: headline, shares, interval, flags, scoring segments and eligibility retain legacy scoring.</td>
+<td>No scoring change while inactive; active numerical direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td><strong>shipped, inactive; activation adds its row</strong>. No installation activation is established here. Compare under the same stored policy/rule/rubric; off is rubric 1, explicit on is rubric 2. Cross-rubric sealed comparisons are refused.</td>
+</tr>
+<tr>
+<td>2026-10-15T19:50:01Z</td>
+<td>#1268 (Event 3); R-2026-10-14-19 / R-2026-10-14-20</td>
+<td>Shipped operator lifecycle and projection readers. With scoring OFF by default: headline, shares, interval, flags, scoring segments and eligibility retain legacy scoring.</td>
+<td>No scoring change while inactive; active numerical direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td><strong>shipped, inactive; activation adds its row</strong>. No installation activation is established here. Compare under the same stored policy/rule/rubric; off is rubric 1, explicit on is rubric 2. Cross-rubric sealed comparisons are refused.</td>
+</tr>
+<tr>
+<td>2026-10-15T22:03:40Z</td>
+<td>#1267 (Event 3); R-2026-10-14-19 / R-2026-10-14-20</td>
+<td>Shipped tierdig2, policy/rubric pinning and verification. With scoring OFF by default: headline, shares, interval, flags, scoring segments and eligibility retain legacy scoring.</td>
+<td>No scoring change while inactive; active numerical direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td><strong>shipped, inactive; activation adds its row</strong>. No installation activation is established here. Compare under the same stored policy/rule/rubric; off is rubric 1, explicit on is rubric 2. Cross-rubric sealed comparisons are refused.</td>
+</tr>
+<tr>
+<td>2026-10-15T23:41:55Z</td>
+<td>#1269 (Event 3); R-2026-10-14-19 / R-2026-10-14-20</td>
+<td>Shipped repair diagnostics, scoring switch and seal preservation. With scoring OFF by default: headline, shares, interval, flags, scoring segments and eligibility retain legacy scoring.</td>
+<td>No scoring change while inactive; active numerical direction unknown.</td>
+<td>prospective</td>
+<td>Sealed bytes never change (R-2026-09-29-11).</td>
+<td><strong>shipped, inactive; activation adds its row</strong>. No installation activation is established here. Compare under the same stored policy/rule/rubric; off is rubric 1, explicit on is rubric 2. Cross-rubric sealed comparisons are refused.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="pending--added-by-their-own-prs-on-activation">Pending — added by their own PRs on activation</h2>
+<p>No activation dates are assigned here:</p>
+<ul>
+<li>Fix 1 <code>exclude-reverts</code> historical discovery/apply (#1277).</li>
+<li>Fix 2 <code>trigger_event</code> cutover.</li>
+<li>Fix 5 attribution floor (record eligibility/withholding separately from scoring).</li>
+<li>Event 3 RubricVersion activation (the default-off shipments above are not activation).</li>
+<li>U86 tripwire and its propagated scoring/sealing inputs.</li>
+<li>U84 inference method selected after the study.</li>
+<li>#489 read-time recovery.</li>
+<li>U93 correction overlays.</li>
+<li>Cost promotion and poller cutovers.</li>
+</ul>
+<h2 id="maintaining-this-register">Maintaining this register</h2>
+<p>A PR that changes scoring, pricing, attribution or eligibility adds its own row in <code>docs/score-series-changes.md</code>.</p>
+<p>This is an acceptance condition for every fix-plan PR, including an
+eligibility-only change. Dormant shipments get a <strong>shipped, inactive</strong> row;
+activation adds a second row. A default flip adds a row by PR. A per-install
+enablement is recorded with that install&#39;s time and receipt, never as a
+product-wide row here. Do not substitute a planned date for measured evidence.
+Retain measured shipment evidence; record actual activation/apply timestamps and
+receipts in the appropriate product-wide row or installation record when known.
+Record a rule id (or <strong>unknown</strong>), the six surfaces, direction, effect type, sealed treatment and
+comparison conditions. Keep prospective insertion, revised live derivation and
+explicit historical application distinct. Record each timestamp&#39;s measurement
+command in the commit message. A published comparison names its applicable rows
+or states that the definition history is unknown.</p>
+
+</main></div>
+<footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>
+</body>
+</html>

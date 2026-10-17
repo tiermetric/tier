@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -522,6 +523,17 @@ func TestJSONLCollector_WorktreeAttributionStampsEachRule(t *testing.T) {
 	)
 	seen := map[store.AttributionRule]bool{}
 	for _, e := range events {
+		branch := "main"
+		if e.IssueID == "issue-11" {
+			branch = "feature/11-a"
+		}
+		if e.IssueID == "issue-22" {
+			branch = "feature/22-b"
+		}
+		want := issueref.BranchHash(e.Repo, branch)
+		if (e.BranchHash == nil) != (want == nil) || (want != nil && *e.BranchHash != *want) {
+			t.Fatalf("worktree branch hash: %+v, want %v", e, want)
+		}
 		seen[e.AttributionRule] = true
 	}
 	wantSet := []store.AttributionRule{"branch", "worktree-cwd", "worktree-toolpath", "carry"}
@@ -634,7 +646,7 @@ func TestParseSessionFileAttributed_SkipsSessionsBeforeSince(t *testing.T) {
 
 // Pins: with the option off (the zero JSONLCollector), output is today's: no
 // rule on any event, and every issue from the transcript branch. With it on,
-// only IssueID and AttributionRule may differ.
+// IssueID, AttributionRule and the branch hash may differ.
 func TestJSONLCollector_WorktreeAttributionOffIsTodaysOutput(t *testing.T) {
 	f := newWTFixture(t)
 	off := wtCollect(t, f, wtSession(t, f))
@@ -647,7 +659,7 @@ func TestJSONLCollector_WorktreeAttributionOffIsTodaysOutput(t *testing.T) {
 		t.Fatalf("on %d events, off %d", len(on), len(off))
 	}
 	for i := range on {
-		on[i].IssueID, on[i].AttributionRule = off[i].IssueID, off[i].AttributionRule
+		on[i].IssueID, on[i].AttributionRule, on[i].BranchHash = off[i].IssueID, off[i].AttributionRule, off[i].BranchHash
 		if on[i] != off[i] {
 			t.Errorf("event %d differs beyond IssueID and AttributionRule:\n on %+v\noff %+v", i, on[i], off[i])
 		}

@@ -204,14 +204,8 @@ func BenchmarkReportManifestWatermarks(b *testing.B) {
 // interpretation rests on, and it exists because the first draft of that
 // interpretation was wrong.
 //
-// 🔴 THE COMMENT USED TO SAY "`repo` IS IN NO INDEX". That is false for
-// `outcomes`, which carries idx_outcomes_push_daily_repo ON outcomes(repo,
-// issue_id, push_day) — repo LEADING. The conclusion survives only because that
-// index is PARTIAL (`WHERE source = 'push'`) and the exclusion query carries no
-// `source` predicate, so SQLite cannot use it. That is a chain of reasoning about
-// the planner, which is exactly the kind of claim that should be MEASURED rather
-// than asserted in a comment — a later change adding `source` to the query would
-// silently flip the plan while the prose kept insisting there was no index to hit.
+// The outcome read pins its timestamp index so the repo/PR lookup index cannot
+// turn this into a repo-wide seek instead of a bounded window seek.
 //
 // MEASURED, both arms: each statement SEEKS its ts index and evaluates `repo` as
 // a filter, so the cost is proportional to the WINDOW and not to the table. That
@@ -230,13 +224,13 @@ func TestExclusionReadIsAWindowSeekNotARepoSeek(t *testing.T) {
 	}{
 		{
 			name:  "token_events exclusion",
-			sql:   "SELECT COUNT(*), COALESCE(SUM(cost_micro), 0) FROM token_events WHERE " + tokenWhere + " AND repo = ?",
+			sql:   "SELECT COUNT(*), COALESCE(SUM(cost_micro), 0) FROM token_events INDEXED BY idx_token_events_ts_id WHERE " + tokenWhere + " AND repo = ?",
 			index: "idx_token_events_ts_id",
 			args:  append(append([]any{}, tokenArgs...), repoid.Unqualified),
 		},
 		{
 			name:  "outcomes exclusion",
-			sql:   "SELECT COUNT(*) FROM outcomes WHERE " + where + " AND repo = ?",
+			sql:   "SELECT COUNT(*) FROM outcomes INDEXED BY idx_outcomes_ts_id WHERE " + where + " AND repo = ?",
 			index: "idx_outcomes_ts_id",
 			args:  append(append([]any{}, args...), repoid.Unqualified),
 		},

@@ -111,10 +111,11 @@ keeps it until you close the browser tab.</p>
 rather than on the command line, because on most systems anyone else logged in
 to the same machine can see a program&#39;s command line in the list of running
 programs (<code>ps</code>). <code>printf</code> is built into bash and zsh, so it never shows up in
-that list. Only a server listening on this machine alone (<code>127.0.0.1</code>) can run
-with sign-in turned off; <code>tierd serve</code> refuses to start on any other address
-without an admin token. If a request with no token works instead of failing
-with HTTP 401, sign-in is off: drop the <code>printf</code> line and the <code>-H @-</code>.</p>
+that list. With sign-in turned off, <code>tierd serve</code> is restricted to loopback IP
+addresses (such as <code>127.0.0.1</code> or <code>::1</code>, without a zone suffix) or the exact
+hostname <code>localhost</code>; any other address needs an admin token. If a request with
+no token works instead of failing with HTTP 401, sign-in is off: drop the
+<code>printf</code> line and the <code>-H @-</code>.</p>
 <p>Every <code>curl</code> here fails on an HTTP error (<code>-f</code>, or <code>--fail-with-body</code> where
 the error text matters). When the server answers with an error, such as 401
 for a wrong token or 400 for a bad request, curl prints
@@ -161,11 +162,9 @@ the raw records behind the rows (<code>GET /api/v1/events</code>): each recorded
 message&#39;s time, model, repository, issue and session id, per developer. A token
 cannot be limited to one team: one server holds one set of data for everyone it
 records. The manager
-and the developer see the same page. Use it to coach practice, never to
-appraise: TIER is not for pay, promotion, performance reviews, improvement plans
-or discipline. TIER cannot enforce that; your policy or works agreement (a
+and the developer see the same page. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER cannot enforce that stance; your policy or works agreement (a
 written agreement with your works council or other employee representatives)
-has to (see <a href="#how-do-i-use-this-to-help-my-team-get-better" rel="nofollow">How do I use this to help my team get better?</a>).</p>
+has to support it (see <a href="#how-do-i-use-this-to-help-my-team-get-better" rel="nofollow">How do I use this to help my team get better?</a>).</p>
 <p><strong>Planned, not yet built.</strong> Developer mode will stop relying on one
 shared read token. Each developer&#39;s page will open only to that developer, their
 declared manager and, if the operator turns it on, a skip-level manager, and the
@@ -189,8 +188,9 @@ fewest people a group must have before TIER shows it by name. <em>k</em> is set 
 TIER counts people, not identifiers (#856). An identifier with spend or merged
 work in the window you asked for counts toward <em>k</em> only if all of these hold:</p>
 <ul>
-<li>it is on the roster (loaded with <code>tierd hierarchy import</code> or
-<code>PUT /api/v1/org_hierarchy</code>) at some point during the window, after aliases
+<li>it is on the roster (loaded with <code>tierd hierarchy import</code>,
+<code>POST /api/v1/org_hierarchy</code> or <code>PUT /api/v1/org_hierarchy/{developer}</code>)
+at some point during the window, after aliases
 are joined (next section), so two identifiers of one person count once;</li>
 <li>it is not a bot: GitHub&#39;s account type <code>Bot</code> on a pull request the webhook
 recorded in the window, a login ending in <code>[bot]</code>, or a known bot login such
@@ -203,9 +203,9 @@ count on their own.</li>
 <p>Spend recorded under <code>unattributed</code> is left out of every figure (see below).
 Any other identifier that does not count keeps its spend and merged work in
 its group&#39;s figures; it just does not make the group bigger. On top of that, each figure needs its own <em>k</em>: a group&#39;s
-cost is shown only if at least <em>k</em> counted people in it have captured spend
-(hand-entered spend does not count here either), its merged-work points only if
-at least <em>k</em> have merged work, and its paid spend (<code>actual_paid_usd</code>) only if at
+cost, when non-zero, is shown only if at least <em>k</em> counted people in it have captured spend
+(hand-entered spend does not count here either), its merged-work points, when non-zero, only if
+at least <em>k</em> have merged work, and its paid spend (<code>actual_paid_usd</code>), when non-zero, only if at
 least <em>k</em> have paid spend. So five people where only one has spend, or only one
 has an invoice, is not shown. <code>tier</code> and <code>cost_per_point</code> need cost and points;
 <code>spend_leverage</code> needs cost and paid spend. <code>coverage_pct</code> splits cost into
@@ -216,7 +216,7 @@ identifiers did not count, and why, in <code>data_quality.uncounted_active_ids</
 (<code>manual_only</code>, <code>push_only</code>, <code>not_on_roster</code>, <code>bot</code>), once for the whole window.
 To bring those people back into the count, capture their work through a
 collector or the proxy and put them on the roster. This protects what someone
-holding the read-only token can see. Anyone holding the write token can still
+holding the read-only token can see. Anyone holding the admin token can still
 edit the roster and aliases, so treat that token as an admin credential (#908).
 A group smaller than <em>k</em> is folded into a row called <code>other</code>. That row also holds
 everyone with no team (in <code>division</code> mode, no division) and any team you named
@@ -321,7 +321,7 @@ stores.)</p>
 </tr>
 <tr>
 <td><code>POST /api/v1/org_hierarchy</code></td>
-<td>Loads a list of developer → team, division, org in one call. <code>tierd hierarchy import</code> sends a CSV file here.</td>
+<td>Loads a list of developer → team, division, org in one call. <code>tierd hierarchy import</code> reads a CSV file and sends its rows here as JSON.</td>
 </tr>
 <tr>
 <td><code>PUT /api/v1/org_hierarchy/{developer}</code></td>
@@ -344,9 +344,11 @@ page. Do this once for each person whose two identifiers differ:</p>
 # prints nothing when it works (HTTP 201)
 </code></pre>
 <p>One GitHub login can have several aliases, for example one per laptop; send one
-request for each. An alias also applies to spend recorded before you added it,
-because TIER joins identities each time it computes a score. It does not change
-which team that earlier spend counts toward (see below).</p>
+request for each. An alias applies to spend recorded before you added it when
+TIER recomputes a score or creates a new seal, because it joins identities when
+computing scores. Already-sealed team/division months stay as sealed: they return
+stored results and are not recomputed. An alias does not change which team that
+earlier spend counts toward (see below).</p>
 <p>If you skip this, that person shows up as two identifiers: one with spend and no
 merged work, the other with merged work and no spend, and neither score means
 anything. <code>GET /api/v1/scores</code> lists identifiers found on only one side under
@@ -369,11 +371,20 @@ optional; it matters only if finance records an org-level invoice (what the
 organisation paid a provider, sent to <code>POST /api/v1/org_actual_spend</code>; see the
 README&#39;s <a href="https://github.com/tiermetric/tier/blob/main/README.md#api-reference" rel="nofollow">API reference</a>), and then it must match
 that invoice&#39;s <code>org</code> exactly. An empty cell is the same as leaving the field
-out.</li>
-<li>Each value can be up to 256 characters. Names are stored exactly as typed, so
-<code>Platform</code> and <code>platform</code> are two different teams.</li>
-<li>The header must be exactly these four columns, in any order. Any other column
-is refused, so a name column cannot slip in.</li>
+out: on re-import, it closes the person&#39;s open org memberships at the current
+UTC month, so those seats receive no org-level invoice allocation for later
+months. Keep the existing <code>org</code> when updating a team unless you mean to end
+the membership.</li>
+<li>Each <code>developer</code>, <code>team</code>, <code>division</code>, and <code>org</code> value can be up to 256 UTF-8
+bytes after leading and trailing whitespace is trimmed from CSV cells. Names
+are case-sensitive, so <code>Platform</code> and <code>platform</code> are two different teams.</li>
+<li>The header must contain these four columns, in any order, with an optional
+<code>rejoin</code> column. <code>true</code> re-enrols the person in the org from this UTC month
+after an explicit departure. <code>false</code> or an empty cell keeps an explicit
+departure in place, unless a later membership started at or after it ended;
+then the import reopens the org as usual. <code>rejoin</code> accepts <code>true</code>, <code>false</code>, or
+an empty cell, case-insensitively; any other value is refused. Any other
+column is refused, so a name column cannot slip in.</li>
 </ul>
 <p><strong>Step 3: load it.</strong> <code>tierd hierarchy import</code> reads the CSV, checks it, and sends
 it to the server. It needs the <code>tierd</code> program on your machine (see the README)
@@ -404,7 +415,7 @@ array of objects with the same four fields. Save them in a file called
 <pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
   curl -sS --fail-with-body -X POST -H @- -H &#34;Content-Type: application/json&#34; \
     --data-binary @teams.json &#34;$TIER_HOST/api/v1/org_hierarchy&#34;
-# prints {&#34;accepted&#34;:2} when it works (HTTP 201)
+# success response (HTTP 201) includes &#34;accepted&#34;:2 plus membership-decision lists and counts
 </code></pre>
 <p>This uses <code>--fail-with-body</code> rather than <code>-f</code> so that an error prints the
 server&#39;s explanation. The explanation names the row by its position counting
@@ -495,8 +506,9 @@ in <code>YYYY-MM-DD</code> form:</p>
 </code></pre>
 <p>The dashboard defaults to 30 days back; the API defaults to midnight UTC 90 days
 ago through now. Match the window to compare figures. Spend counts when it was
-spent, merged work when it merged. For one team&#39;s roll-up in <code>team</code>, add
-<code>--data-urlencode &#34;team=platform&#34;</code> to the curl command. If
+spent, merged work when it merged. In <code>developer</code> mode, add
+<code>--data-urlencode &#34;team=platform&#34;</code> to the curl command and read <code>.team</code> in <code>jq</code>
+for that team&#39;s roll-up; <code>team_rollups</code> stays unchanged. If
 <code>data_quality.window_predates_cost_capture</code> is <code>true</code>, move <code>since</code> to
 <code>data_quality.cost_coverage_safe_since</code> or later. Both fields are absent (printed
 as <code>null</code> above) when TIER had no coverage start to report — no spend recorded
@@ -514,6 +526,19 @@ issue), less than $5 of spend at list price, or any one merged outcome whose
 developer recorded fewer than 1,000 AI tokens (input, output and cache tokens
 together) against that issue in the 14 days before it merged. The number is
 still reported, but do not present it as a headline figure.</p>
+<h2 id="what-happens-when-tier-cannot-tell-which-merge-a-revert-undid">What happens when TIER cannot tell which merge a revert undid?</h2>
+<p>When a footerless revert&#39;s issue matches several eligible outcomes in the same
+repository, v0.6.0 penalises no one for that check and marks each
+candidate outcome <code>unknown</code> (revert ambiguous). Its numeric quality stays as it
+was; a clean outcome stays at 1.0. The JSON outcomes export and quality-event
+exports expose the unresolved status; the dashboard does not display it.
+An unresolved commit footer never falls back to guessing by issue. If there is
+no qualified candidate, TIER logs a warning and increments a diagnostic counter
+but has no outcome to mark unknown. Unresolved checks are never quality evidence
+and do not count toward evidence share. These checks do not establish complete
+quality coverage. <a href="technical-reference.html#44-quality-floors-what-is-enforced-and-what-is-specified-but-not" rel="nofollow">The technical reference</a>
+gives the repository, timestamp and merge-push limits. Corrective-work accounting
+(Event 3) is built and off by default; it affects live scores when the operator enables it on their installation. See <a href="how-it-works.html#event-3-enabled-operation" rel="nofollow">enabled operation</a>.</p>
 <h2 id="how-do-the-team-scores-add-up-to-one-company-score">How do the team scores add up to one company score?</h2>
 <p>They don&#39;t add up, and they aren&#39;t averaged. TIER is weighted points of merged
 work per $1,000 of AI spend. Each merged outcome earns points from the size
@@ -597,9 +622,11 @@ issue 42 in two repositories stays two issues):</p>
 <li>Spend: every Claude Code message is recorded with its git branch. A Codex CLI
 session is recorded with the branch it started on, for every message in it. TIER
 first looks for a commit on that branch, made within 30 minutes either side of
-the message, whose subject line names an issue (<code>closes #42</code>, <code>#42</code>, or a
-tracker key such as Jira&#39;s <code>TIER-99</code>). If there is none, it reads the issue
-from the branch name: <code>feature/42-login</code> becomes issue 42, <code>fix/TIER-99-crash</code>
+the message, and takes the issue from the branch names attached to that commit
+first, then from a closing directive (<code>closes #42</code>) or a tracker key such as
+Jira&#39;s <code>TIER-99</code> in its subject. A bare <code>#42</code> in the subject does not
+attach spend to an issue. If no matching commit supplies an issue, it reads the
+issue from the recorded branch name: <code>feature/42-login</code> becomes issue 42, <code>fix/TIER-99-crash</code>
 becomes <code>TIER-99</code>. Commits are matched on the last part of the branch name, so
 <code>feature/42-login</code> and <code>42-login</code> count as the same branch.</li>
 <li>Merged work: a merged pull request is tied to an issue from its branch name
@@ -713,25 +740,18 @@ linked too.</li>
 review. TIER keeps it in the cost and shows it as its own share, so the team
 can decide whether that amount is intended.</li>
 </ol>
-<p>These changes work going forward. Spend already recorded keeps the label it got
-when TIER first read it; renaming a branch or adding a commit later does not
-move it, and there is no command today that relabels stored spend.</p>
+<p>These practice changes affect future capture. There is no supported correction of an already assigned issue; renaming a branch does not move a wrong assignment. In v0.6.0, server-side PR and branch fills can assign previously unlinked rows without overwriting an assigned issue or revising sealed reports.</p>
 <h2 id="how-do-i-use-this-to-help-my-team-get-better">How do I use this to help my team get better?</h2>
-<p>Use the figures to change how the team works with AI. They grade the work, not
-the worker. They describe how AI spend turned into merged work: which models the
-spend went to, how much input was served from cache, how much spend is tied to
-an issue. In <code>developer</code> mode you see each developer&#39;s figures, on the same page
-they see, so you can talk with them about exactly those figures. Those figures must never go
-into pay, promotion, performance reviews, improvement plans or discipline; TIER
-cannot enforce that, so your policy has to.</p>
+<p>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is <strong>grade the work, not the worker</strong>, by policy rather than by mechanism. In <code>developer</code> mode anyone with report access can see individual rows; the access boundary is separate from the coaching stance.</p>
 <p>Do not rank developers against each other or build a leaderboard from these
 figures. The dashboard lists developers in identifier order and never sorts
 them by TIER; a row with too little evidence stays in its place with a &#34;below
 evidence floor&#34; tag. Compare a person or a team with their own earlier periods,
 within one kind of work. Before the number itself, read the attribution
-coverage and, where there is one, the confidence interval: each ranked developer
-row in <code>developer</code> mode carries a 95% interval (<code>ci_low</code> and <code>ci_high</code>, drawn as a
-whisker on the dashboard bar), and team rows and the company <code>total</code> carry none.</p>
+coverage and, where there are bounds, their limitations: each ranked developer
+row in <code>developer</code> mode carries bootstrap bounds (<code>ci_low</code> and <code>ci_high</code>, drawn as a
+whisker on the dashboard bar; nominal 95% percentile bootstrap; coverage unvalidated), and team rows and the company <code>total</code> carry none.</p>
+<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. When shown, the bounds are the 2.5th and 97.5th percentiles of the stated bootstrap resampling procedure. Their 95% repeated-sampling coverage has not been validated. They exclude uncertainty from uncaptured usage, incorrect attribution and unattributed spend. Spend is counted when usage happened and points when the work merged, so work that crosses a period boundary can move the ratio either way. Team scores carry no interval, and month-to-month noise is large: TIER has not established how large a change must be to stand out from ordinary variation. Treat a small difference as no evidence either way, and a large one as a prompt to investigate, not a measured effect. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. &#39;Not shown&#39; is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain. The 50% attributed-cost-share withholding rule is planned, not implemented in v0.6.0.</p>
 <p><a href="peer-learning.html" rel="nofollow">peer-learning.md</a> is the full method for a team. In four
 steps:</p>
 <ol>
@@ -752,9 +772,7 @@ count only spend tied to an issue, so they read high while much spend is
 unlinked.</p>
 </li>
 <li>
-<p>Agree one practice change, such as &#34;use the cheaper model for routine
-refactors&#34;. One change at a time, so that if the score moves you know which
-change to look at.</p>
+<p>Treat a move to a cheaper model as a hypothesis to investigate. Compare similar work over finished periods, record other changes (task mix, acceptance criteria, pricing and capture), and inspect acceptance and repair evidence beside cost. A before/after change in TIER cannot show that the model change caused the difference, and TIER does not credit merged work to a model, so it cannot say whether the cheaper model did the work as well.</p>
 </li>
 <li>
 <p>Compare the team&#39;s score before and after the change, over two periods that
@@ -786,7 +804,10 @@ months instead, and read the team&#39;s row:</p>
     jq -c &#39;{row: ((.teams // [])[] | select(.team == &#34;platform&#34;) | {tier, ranked}), predates: .data_quality.window_predates_cost_capture}&#39;
 done
 </code></pre>
-<p>Months differ in length by up to three days, the nearest a sealed read comes
+<p>Sealed months freeze the recorded observation; they do not align each merge
+with all of its spending. Two complete months can still have different
+boundary-crossing work. Before interpreting a change, document differences in repository scope, membership, work mix, capture and measurement rules. If those differences are unknown or substantial, report the two observations without calling their difference an improvement or deterioration.
+Months differ in length by up to three days, the nearest a sealed read comes
 to equal periods. A sealed month carries no <code>safe_since</code>; if <code>predates</code> is
 <code>true</code>, pick a later month. If curl reports a 404, that month is not sealed;
 <code>--fail-with-body</code> in place of <code>-f</code>, with the <code>| jq</code> stage left off, prints
@@ -794,26 +815,26 @@ the reason.
 If curl printed no error and <code>jq</code> printed nothing, there is no <code>platform</code> row
 that month. To see why, run the same <code>curl</code> with
 <code>jq -c &#39;{teams: [(.teams // [])[].team], total: (.total != null), suppressed: .data_quality.kanon_suppressed}&#39;</code>.
-If <code>teams</code> lists <code>other</code>, <code>platform</code> had fewer than <em>k</em> developers with work
-that month (or none at all) and anything it had is folded into <code>other</code>. If
+If <code>teams</code> lists <code>other</code>, <code>platform</code> may have had fewer than <em>k</em> counted
+developers that month (or none at all), or a non-zero measure with fewer than
+<em>k</em> counted contributors; anything it had is folded into <code>other</code>. If
 <code>suppressed</code> is not <code>null</code>, figures were withheld, as described in
 <a href="#can-i-see-my-developers-names" rel="nofollow">Can I see my developers&#39; names?</a>. If <code>teams</code> is <code>[]</code>, <code>total</code> is <code>false</code> and <code>suppressed</code> is <code>null</code>,
 the month has no data at all.
 In <code>division</code> mode the row&#39;s <code>team</code> field holds the division name.</p>
 <p>Compare the two <code>tier</code> values as a direction, not a measured effect: team
-roll-ups carry no confidence interval. Check that <code>ranked</code> is <code>true</code> in both
+roll-ups carry no bootstrap bounds. Check that <code>ranked</code> is <code>true</code> in both
 periods; if either is <code>false</code>, there is too little evidence to read the
 change. If <code>predates</code> is <code>true</code> for the earlier period, it started before
 TIER was recording spend: its merged work counts but the spend before that
 point does not, so its score reads too high. In <code>developer</code> mode, pick a
 start date on or after the <code>safe_since</code> date the command prints
-(<code>data_quality.cost_coverage_safe_since</code>); it is <code>null</code> only when TIER has
-recorded no spend at all.
+(<code>data_quality.cost_coverage_safe_since</code>); it is <code>null</code> when no coverage
+horizon was available, including when no spend was recorded or the coverage
+lookup failed.
 <code>GET /api/v1/scores/compare</code> does not help here. It covers the whole company
 with no team filter, and its <code>total</code> and <code>teams</code> rows always say
-<code>significant: false</code>. Only its per-developer rows carry significance, so it
-suits one developer&#39;s before and after. Use those in a coaching conversation
-with that developer, never in an appraisal.</p>
+<code>significant: false</code>. Its per-developer rows retain a raw unvalidated non-overlap field; neither value establishes an inference. The dashboard shows “inference not established”. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</p>
 </li>
 <li>
 <p>Write the practice down in your team&#39;s own runbook: what changed, which
@@ -821,6 +842,15 @@ figure you watched, what happened, keep or drop. TIER does not record
 practice changes, so the note is where another team can find and copy one.</p>
 </li>
 </ol>
+<p><strong>Seal timing disclosure.</strong> Sealed reports show the actual UTC seal timestamp,
+configured grace (or “not recorded” for legacy seals) and elapsed days after
+period end. In team and division mode, revert-window status is <code>withheld</code> because
+outcome-dependent observations can identify a person in an anonymized cohort.
+Only developer-level disclosures can state that some outcomes&#39; 60-day revert
+windows were still open, when recorded as true at sealing. The default 14-day grace can
+leave those windows open; longer grace does not establish delivery completeness.
+Late evidence never changes sealed bytes. See the <a href="api-compatibility.html#seal-disclosure-1233" rel="nofollow">seal disclosure wire
+contract</a>.</p>
 
 </main></div>
 <footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>

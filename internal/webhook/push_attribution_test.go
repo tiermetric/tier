@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -8,7 +9,165 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/issueref"
+	"github.com/tiermetric/tier/internal/store"
 )
+
+// Reserved pseudo-developer logins must never create an outcome or ledger entry,
+// but must still be observable through the push skip log and counter (#1191).
+func TestHandlePush_CaptureReservedAuthorIsObservable(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		author     string
+		wantRows   int
+		wantReason string
+	}{
+		{"reserved", "unattributed", 0, "author login is reserved for the unattributed pseudo-developer (#619)"},
+		{"lookalike", " UnAtTrIbUtEd ", 0, "author login is reserved for the unattributed pseudo-developer (#619)"},
+		{"labeled_lookalike", " UnAtTrIbUtEd:unknown ", 0, "author login is reserved for the unattributed pseudo-developer (#619)"},
+		{"empty", "", 0, "no GitHub author login"},
+		{"normal", "alice", 1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := newFakeStore()
+			ctr := &fakePushCounter{}
+			ts := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+			logs := captureLogs(func(logger *slog.Logger) {
+				h := New(st, testSecret, logger, WithPushCapture(ctr))
+				dispatchPush(t, h, "refs/heads/main", "main",
+					pushCommit("a1a1a1a1", "fix: thing (closes #12)", c.author, ts))
+			})
+
+			if got := st.outcomeCount(); got != c.wantRows {
+				t.Errorf("outcomes = %d, want %d", got, c.wantRows)
+			}
+			st.mu.Lock()
+			ledgerRows := len(st.ledger)
+			st.mu.Unlock()
+			if ledgerRows != c.wantRows {
+				t.Errorf("push ledger rows = %d, want %d", ledgerRows, c.wantRows)
+			}
+			if got, want := ctr.count(), int64(1-c.wantRows); got != want {
+				t.Errorf("unattributed counter = %d, want %d", got, want)
+			}
+			if c.wantReason != "" && !strings.Contains(logs, "push capture: direct commit not scored — "+c.wantReason) {
+				t.Errorf("missing push skip reason %q in logs: %q", c.wantReason, logs)
+			}
+			if c.wantRows == 1 {
+				outcomes := st.pushSource()
+				if len(outcomes) != 1 || outcomes[0].Developer != c.author || outcomes[0].IssueID != "issue-12" {
+					t.Errorf("push outcomes = %+v, want one for %s and issue-12", outcomes, c.author)
+				}
+			}
+		})
+	}
+}
+
+func TestHandlePush_RevertLeadingBlankLines(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"control", ""},
+		{"leading_newline", "\n"},
+		{"leading_whitespace_lines", "\n \t\r\v\f\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			ts := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+			if _, err := st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
+				Developer: "bob", IssueID: "issue-12", PRNumber: 10,
+				Weight: 5, Quality: 1, Timestamp: ts,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ctr := &fakePushCounter{}
+			h := New(st, testSecret, quietLogger(), WithPushCapture(ctr))
+			const sha = "abcdef0123456789abcdef0123456789abcdef01"
+			dispatchPush(t, h, "refs/heads/main", "main",
+				pushCommit(sha, tc.prefix+`Revert "fix: thing (closes #12)"`, "alice", ts))
+
+			if got := len(st.pushSource()); got != 0 {
+				t.Errorf("revert commit: push outcomes = %d, want 0", got)
+			}
+			if got := ctr.count(); got != 0 {
+				t.Errorf("revert commit: unattributed counter = %d, want 0", got)
+			}
+			if len(st.qualityUpdates) != 1 {
+				t.Fatalf("quality updates = %d, want 1 on original outcome", len(st.qualityUpdates))
+			}
+			u := st.qualityUpdates[0]
+			if u.Developer != "bob" || u.IssueID != "issue-12" || u.Quality != 0.1 || u.Reason != "revert_quality" || u.SourceRef != sha {
+				t.Errorf("quality update = %+v, want original author bob, issue-12, quality 0.1, revert_quality, source %s", u, sha)
+			}
+		})
+	}
+}
+
+func TestHandlePush_MergeLeadingBlankLines(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{"control", "Merge pull request #5 from x/y"},
+		{"leading_newline", "\nMerge pull request #5 from x/y"},
+		{"attributed_control", "Merge pull request #5 from x/y\ncloses #12"},
+		{"attributed_leading_newline", "\nMerge pull request #5 from x/y\ncloses #12"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			ctr := &fakePushCounter{}
+			h := New(st, testSecret, quietLogger(), WithPushCapture(ctr))
+			dispatchPush(t, h, "refs/heads/main", "main",
+				pushCommit("abcdef0123456789abcdef0123456789abcdef01", tc.message, "alice", time.Now().UTC()))
+			if got := len(st.pushSource()); got != 0 {
+				t.Errorf("merge commit: push outcomes = %d, want 0", got)
+			}
+			if got := ctr.count(); got != 0 {
+				t.Errorf("merge commit reached attribution: unattributed counter = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestHandlePush_RevertWrappedSubject(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{"control", `Revert "fix: thing (closes #12)"`},
+		{"wrapped_subject", "Revert\n\"fix: thing (closes #12)\""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			ts := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+			if _, err := st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
+				Developer: "bob", IssueID: "issue-12", PRNumber: 10,
+				Weight: 5, Quality: 1, Timestamp: ts,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ctr := &fakePushCounter{}
+			h := New(st, testSecret, quietLogger(), WithPushCapture(ctr))
+			const sha = "abcdef0123456789abcdef0123456789abcdef01"
+			dispatchPush(t, h, "refs/heads/main", "main",
+				pushCommit(sha, tc.message, "alice", ts))
+
+			if got := len(st.pushSource()); got != 0 {
+				t.Errorf("revert commit: push outcomes = %d, want 0", got)
+			}
+			if got := ctr.count(); got != 0 {
+				t.Errorf("revert commit: unattributed counter = %d, want 0", got)
+			}
+			if len(st.qualityUpdates) != 1 {
+				t.Fatalf("quality updates = %d, want 1 on original outcome", len(st.qualityUpdates))
+			}
+			u := st.qualityUpdates[0]
+			if u.Developer != "bob" || u.IssueID != "issue-12" || u.Quality != 0.1 || u.Reason != "revert_quality" || u.SourceRef != sha {
+				t.Errorf("quality update = %+v, want original author bob, issue-12, quality 0.1, revert_quality, source %s", u, sha)
+			}
+		})
+	}
+}
 
 // Mirror #1017's commit-subject rule at the push webhook boundary, including
 // observable unattributed commits and the collector's subject-only input.

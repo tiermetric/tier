@@ -177,6 +177,34 @@ func TestGoldenRow_HandComputedCost(t *testing.T) {
 	}
 }
 
+// TestCacheWriteIsEmittedAndPriced pins both collector cache-write mappings.
+func TestCacheWriteIsEmittedAndPriced(t *testing.T) {
+	withZaiPrices(t)
+	repo := repoDir(t)
+	completed := goldenCompleted
+	dbPath := newFixtureDB(t, dbSpec{
+		Migrations: 3,
+		Rows: []msgRow{buildRow(t, msgSpec{
+			ID: "msg_cache_write", SessionID: "ses_cache_write",
+			Cwd: filepath.Join(repo, "src"), Created: completed - 1000,
+			Completed: &completed, TimeUpdated: completed,
+			Tokens: autoTotal(100, 20, 5, 10, 15),
+		})},
+	})
+	events, _ := collectFrom(t, dbPath, repo)
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	if got := events[0].CacheWrite5m; got != 15 {
+		t.Errorf("CacheWrite5m = %d, want 15", got)
+	}
+	// GLM-5.3: 100*1.40 + (20+5)*4.40 + 10*0.26 + 15*1.40
+	// = 273.6 micro-dollars, rounded to 274 (253 without cache writes).
+	if got := events[0].CostMicro; got != 274 {
+		t.Errorf("CostMicro = %d, want 274 including cache writes", got)
+	}
+}
+
 // TestGoldenRow_PricingPathIsComputeCostHost proves the collector routes through
 // the SAME entry point every other persisting producer uses, rather than
 // reimplementing the arithmetic.

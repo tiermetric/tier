@@ -274,7 +274,7 @@ func TestDemoSmoke_AlwaysReseedsCanonicalData(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostReq.Host = "demo.tiermetric.org"
-	hostRes, err := http.DefaultClient.Do(hostReq)
+	hostRes, err := smokeClient.Do(hostReq)
 	if err != nil {
 		t.Fatal(err)
 	}

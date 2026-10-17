@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tiermetric/tier/internal/docs"
 	"github.com/tiermetric/tier/internal/scoring"
 )
 
@@ -134,9 +135,13 @@ func TestDashboard_UnknownPathStill404(t *testing.T) {
 // TestDashboard_HTMLReferencesOnlyServedAssets guards the exact failure mode of
 // this refactor: an asset referenced by the HTML (src=/href=) that the handler
 // does not actually route would 404 at runtime. Every same-origin (absolute
-// path) reference must resolve to a 200 from this handler.
+// path) reference must resolve to a 200 from the dashboard/docs handlers.
 func TestDashboard_HTMLReferencesOnlyServedAssets(t *testing.T) {
 	_, body := get(t, "/")
+	// Documentation links are served by the sibling docs handler mounted by serve.
+	mux := http.NewServeMux()
+	mux.Handle("/docs/", docs.New())
+	mux.Handle("/", New())
 	// Matches src="/..." and href="/..." with an absolute (same-origin) path.
 	ref := regexp.MustCompile(`(?:src|href)="(/[^"]*)"`)
 	matches := ref.FindAllStringSubmatch(body, -1)
@@ -150,7 +155,11 @@ func TestDashboard_HTMLReferencesOnlyServedAssets(t *testing.T) {
 			continue
 		}
 		seen[path] = true
-		res, _ := get(t, path)
+		requestPath, _, _ := strings.Cut(path, "#") // fragments never reach HTTP
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		res := rec.Result()
+		_ = res.Body.Close()
 		if res.StatusCode != http.StatusOK {
 			t.Errorf("HTML references %q but handler returned %d (not routed)", path, res.StatusCode)
 		}
@@ -426,6 +435,15 @@ func TestDashboard_LeverageLabelIsMeteredCost(t *testing.T) {
 // here, so they pin the served HTML structure and the load-bearing JS render
 // paths + guards that make the fields render when present, degrade when absent,
 // and stay XSS-safe.
+
+// K3 U53 specifies this completeness marker, not the rest of the caption prose.
+func TestDashboardFidelityTileCaptionNamesCompleteness(t *testing.T) {
+	_, body := get(t, "/")
+	caption := regexp.MustCompile(`<span[^>]*id="kpi-fidelity-sub"[^>]*>([^<]*)</span>`).FindStringSubmatch(body)
+	if len(caption) != 2 || !strings.Contains(caption[1], "not capture completeness") {
+		t.Error("Capture-Fidelity caption must carry the 'not capture completeness' marker (#1228)")
+	}
+}
 
 // TestDashboard_HTMLHasHonestCoverageElements asserts the two new banner
 // containers and the fidelity-clarity caption exist in the served HTML. The JS
@@ -854,10 +872,8 @@ func TestDashboard_CompareView(t *testing.T) {
 		"/api/v1/scores/compare",
 		// Two-window contract: window B = selected/after, window A = baseline/before.
 		"since_a=", "since_b=", "until_a=", "until_b=",
-		// Significance is SERVER-authoritative (#277), never recomputed client-side.
-		"row.significant",
-		// Not-significant / below-floor / one-window treatments (the acceptance).
-		"not significant", "BELOW_FLOOR_TAG", "only in selected period", "only in baseline period",
+		// Inference labels and colours are covered by the DOM behaviour test.
+		"BELOW_FLOOR_TAG", "only in selected period", "only in baseline period",
 		// Team aggregates NEVER assert significance (no bootstrap CI in anon modes).
 		"aggregate — not tested",
 		// sample_n == 0 is treated as "no data" for that side, never a misleading 0.
@@ -897,31 +913,7 @@ func TestDashboard_CompareView(t *testing.T) {
 		}
 	}
 
-	// Honesty pairing (the #278 acceptance): the below-floor / not-significant branch
-	// must render the MUTED treatment (flat delta + dashed connector), and ONLY the
-	// significant branch may set a directional (green/red) dot class. A grep for the
-	// tag strings alone would pass even if that branch were switched to a confident
-	// colour, so slice buildDevDumbbell and pin the pairing.
-	devDb := js[strings.Index(js, "function buildDevDumbbell("):]
-	devDb = devDb[:strings.Index(devDb, "function buildTeamDumbbell(")]
-	// The significant branch is the sole source of a directional bClass, and since
-	// #613 (2026-08-05) that direction is itself GATED on bothRanked. The dot's colour
-	// is a third publication channel: `.cmp-db-dot.b.up`/`.down` paint yield-green and
-	// danger-red, so an ungated `bClass = dir` publishes SIGN(Δ) for a Δ the row printed
-	// as '—'. Pinning the gated form — the bare one is now the defect.
-	if strings.Count(devDb, "bClass = bothRanked ? dir : 'below'") != 1 {
-		t.Error("buildDevDumbbell: the significant branch must set its directional dot colour " +
-			"GATED on bothRanked (`bClass = bothRanked ? dir : 'below'`). Ungated, the dot's " +
-			"colour asserts the direction of a Δ this row withheld — the same cross-channel " +
-			"leak #613 closed for the digits and the position")
-	}
-	if strings.Contains(devDb, "bClass = dir;") {
-		t.Error("buildDevDumbbell still assigns an UNGATED directional dot colour (`bClass = dir;`)")
-	}
-	// The not-significant branch pairs the muted delta with the dashed connector.
-	if !strings.Contains(devDb, "connectClass = 'insignificant'") || !strings.Contains(devDb, "deltaCls = 'flat'") {
-		t.Error("buildDevDumbbell not-significant branch must render muted (deltaCls='flat' + connectClass='insignificant'), never a confident move")
-	}
+	// Comparison inference rendering is exercised in withdraw_labels_test.go.
 
 	// "Both aggregation modes" coverage: the mode DISPATCH must be reachable, or a
 	// team-only string living in dead code would pass while team mode is broken.
@@ -2604,13 +2596,14 @@ var moneyConcatRe = regexp.MustCompile(`\$["']\+`)
 // disagreement rather than ended it — the cost-composition drawer renders the same
 // window's spend, one scroll down.
 //
-// So: no bare `'$' + …toFixed(2)` anywhere, with two exceptions that are listed
+// So: no bare `'$' + …toFixed(2)` anywhere, with three exceptions that are listed
 // rather than pattern-matched, because each needs a REASON and a reason cannot be
 // expressed as a regex.
 func TestDashboard_MoneyHasOneFormatter(t *testing.T) {
 	_, js := get(t, jsPath)
 
-	// The exceptions, by the expression they render. Neither is an AMOUNT of money:
+	// The exceptions, by the expression they render:
+	//   - issueUSDText preserves micro-dollar amounts for disjoint reconciliation.
 	//   - cost_per_point is a RATE, $ per weighted point (#239). Truncating a rate
 	//     to the cent is a different question from truncating a spend figure, and
 	//     it belongs to that issue. (It does render "$0.00/pt" for a sub-cent rate,
@@ -2619,6 +2612,7 @@ func TestDashboard_MoneyHasOneFormatter(t *testing.T) {
 	//     review (#605), explicitly out of scope here.
 	type exemption struct{ match, why string }
 	exempt := []exemption{
+		{"num(v).toFixed(6)", "Per-issue reconciliation retains integer micro-dollar precision so disjoint rows add to the total; rounding these amounts to cents would obscure conservation."},
 		{"cost_per_point", "cost_per_point is a RATE, $ per weighted point (#239) — not an " +
 			"amount of spend. Whether a rate should truncate is that issue's question. " +
 			"(It does render \"$0.00/pt\" for a sub-cent rate, which is worth its own look.)"},
@@ -5055,7 +5049,8 @@ var renderCompareRootAllow = map[string]bool{
 	// rule, here or in the #605 guard.
 	"$": true, "el": true, "setText": true, "showStatus": true,
 	"renderCompareWindows": true, "renderCompareTotal": true, "compareScale": true,
-	"compareNote": true, "buildDevDumbbell": true, "buildTeamDumbbell": true,
+	"showCompareSealDisclosure": true,
+	"compareNote":               true, "buildDevDumbbell": true, "buildTeamDumbbell": true,
 	// Handed only the kanon_suppressed declaration, which carries no figure.
 	"showKAnonWithheld": true,
 }
@@ -5791,9 +5786,8 @@ func teamRankedPassthroughViolations(js string) (bad []string, ok bool) {
 	}
 	for _, want := range []struct{ code, why string }{
 		{"el('div', 'cmp-db-delta num ' + (bothRanked ? deltaCls : 'flat'),",
-			"a both-ranked row must still print its Δ in the class it was handed — that is where " +
-				"#277's significance colour reaches a developer row, and hardcoding 'flat' here " +
-				"would drop it silently"},
+			"a both-ranked row must print its Δ in the class it was handed; the caller " +
+				"owns the neutral treatment, and this shared gate must preserve it"},
 		{"el('div', 'cmp-db-tag', tag)",
 			"the status tag survives withholding — it is what keeps the row's shape and states " +
 				"the verdict a sighted reader sees"},
@@ -6037,6 +6031,7 @@ func TestDashboard_CompareTeamWithholdGuardCatchesTheDefect(t *testing.T) {
 	// sitting in the fixture, invisible to the rule that exists to catch exactly that.
 	// The real six-argument one lives in sideFn and is drift-checked.
 	const builderHead = `function renderCompare(data) {
+  showCompareSealDisclosure(data);
   // #864: a withheld comparison carries no rows and no total, so this must come
   // before the no-data check or a withhold reads as an empty period.
   if (data.kanon_suppressed) {
@@ -6872,21 +6867,20 @@ func TestDashboard_CompareRenderingGuardCatchesTheDefect(t *testing.T) {
 // unguarded on the developer row while every #613 rule reported clean. Withholding
 // two cells means nothing if the row can print the number in a third.
 //
-// The developer builder is the harder of the two: three arms, a `sig` flag, a
-// missing-side tag, and a delta CLASS that carries #277's significance colour. Each
-// of those is a surface the team row does not have.
+// The developer builder also has a missing-side tag and a below-floor prefix.
+// Its delta class remains neutral; the legacy non-overlap flag cannot drive it.
 var devRowBuilderRootAllow = map[string]bool{
 	"var": true, "const": true, "let": true, "return": true,
 	"if": true, "else": true,
 	"true": true, "false": true, "null": true, "undefined": true,
 	// Parameters and locals.
 	"row": true, "scale": true, "hasA": true, "hasB": true, "both": true, "d": true,
-	"aRanked": true, "bRanked": true, "bothRanked": true, "sig": true, "dir": true,
+	"aRanked": true, "bRanked": true, "bothRanked": true,
 	"plotA": true, "plotB": true, "fracA": true, "fracB": true,
 	"rowEl": true, "label": true, "tag": true,
 	"bClass": true, "connectClass": true, "deltaCls": true, "deltaText": true,
 	// Formatters, shared vocabulary, and the builders it composes.
-	"num": true, "Math": true, "signStr": true, "deltaDir": true,
+	"num": true, "Math": true, "signStr": true,
 	"sideData": true, "missingSideTag": true, "abReadout": true,
 	"withheldSidesNote": true,
 	"el":                true, "buildDumbbellTrack": true, "cmpRankedRowValue": true,
@@ -6896,7 +6890,7 @@ var devRowBuilderRootAllow = map[string]bool{
 var devRowBuilderPropAllow = map[string]bool{
 	// The ONLY fields of `row` this function may read.
 	"a": true, "b": true, "ranked": true, "tier": true, "delta_tier": true,
-	"developer": true, "present_a": true, "present_b": true, "significant": true,
+	"developer": true, "present_a": true, "present_b": true,
 	// Formatting and the two DOM mechanics it needs (the label's text is written
 	// through textContent, unlike the team row's, which passes it to el()).
 	"abs": true, "toFixed": true, "appendChild": true, "textContent": true,
@@ -7036,9 +7030,7 @@ func devRowGateViolations(js string) (bad []string, ok bool) {
 			"the tag is the one cell that survives withholding, and it must be the row's own " +
 				"computed verdict"},
 		{"deltaCls", squashSpace(args[1]), "deltaCls",
-			"a DEVELOPER row's Δ class is computed per arm and carries #277's significance " +
-				"colour — hardcoding it here drops that colour silently, which is a regression " +
-				"no withholding rule would catch"},
+			"the class is passed through the audited row builder"},
 		{"gate", squashSpace(args[2]), "bothRanked",
 			"the Δ gate is the both-sides verdict. 🔴 It must NOT be used per side: bothRanked " +
 				"folds PRESENCE in, so it is false for every one-sided row, and using it as the " +
@@ -7072,43 +7064,24 @@ func devRowGateViolations(js string) (bad []string, ok bool) {
 			"comparable pair, and its Δ published from a side with no data")
 	}
 
-	// 🔴 THE TAG CELL, ALL FOUR ARMS. The tag is never withheld, so ANYTHING that
-	// reaches it is published unconditionally — the team guard pins its single `tag`
-	// expression whole for exactly this reason, and the first draft of this mirror
-	// pinned only the `sig` arm. Measured survivors of that gap:
-	//   tag = missingSideTag(…) + ' ' + num(row.a && row.a.tier).toFixed(1);
-	//   tag = BELOW_FLOOR_TAG + ', ' + tag + ' ' + num(row.a && row.a.tier).toFixed(1);
-	//   tag = 'not significant';
-	// The first two print the withheld DIGIT in the tag cell. The third relabels a
-	// withheld row "we tested and found nothing" instead of "we cannot rank this".
-	//
-	// ⚠️ And note WHICH arm the first draft pinned: the `sig` one, which cannot fire
-	// for a below-floor row at all (the server computes Significant = a.Ranked &&
-	// b.Ranked && ciDisjoint). It pinned the dead branch and left the live one open.
+	// The tag survives withholding: pin every arm and reject later relabelling.
 	for _, want := range []struct{ code, why string }{
 		{"tag = missingSideTag(hasA, !!row.present_a, hasB, !!row.present_b);",
 			"the one-sided arm's tag must be the missing-window verdict ALONE"},
 		{"tag = BELOW_FLOOR_TAG + ', ' + tag;",
-			"the one-sided BELOW-FLOOR arm names the floor first, then the missing window, and " +
-				"nothing else — this arm is where a withheld digit is easiest to smuggle"},
-		{"tag = bothRanked ? 'significant' : BELOW_FLOOR_TAG;",
-			"the significant arm must be gated: 'should be unreachable' is not an enforcement"},
-		{"tag = bothRanked ? 'not significant' : BELOW_FLOOR_TAG;",
-			"the not-significant arm must be gated. THIS is the arm every two-sided below-floor " +
-				"developer row actually reaches — the sig arm above cannot fire for one — so an " +
-				"ungated 'not significant' mislabels the exact rows this ruling withholds"},
+			"the one-sided BELOW-FLOOR arm names the floor first, then the missing window"},
+		{"tag = bothRanked ? 'inference not established' : BELOW_FLOOR_TAG;",
+			"the two-sided tag must distinguish unvalidated inference from a withheld reading"},
 	} {
 		if !strings.Contains(body, want.code) {
-			bad = append(bad, "buildDevDumbbell is missing the exact source `"+want.code+"` — "+
-				want.why+". Deliberately UNSQUASHED: squashing deletes the whitespace a split "+
-				"string literal is made of")
+			bad = append(bad, "buildDevDumbbell is missing the exact source `"+want.code+"` — "+want.why)
 		}
 	}
-	if n := jsAssignCount(code, "tag"); n != 4 {
+	if n := jsAssignCount(code, "tag"); n != 3 {
 		bad = append(bad, "buildDevDumbbell assigns `tag` "+strconv.Itoa(n)+" times, want exactly "+
-			"4 (one per arm, plus the below-floor prefix) — a fifth assignment relabels a row "+
-			"after the pinned expressions above set it")
+			"3 (one per arm, plus the below-floor prefix) — a later assignment relabels the row")
 	}
+
 	// No tag expression may reach a NUMBER. The pins above are whole-expression, but
 	// this is the property they exist to protect, stated once and independently.
 	for _, ln := range strings.Split(body, "\n") {
@@ -7120,14 +7093,6 @@ func devRowGateViolations(js string) (bad []string, ok bool) {
 		}
 	}
 
-	// The connector class, UNSQUASHED. Split into `in` + `significant` the CSS rule
-	// stops matching and the row renders the SOLID ACCENT connector — the
-	// significant-move treatment, asserted for a comparison never tested (#277).
-	if !strings.Contains(body, "connectClass = 'insignificant'") {
-		bad = append(bad, "buildDevDumbbell's not-significant arm does not set the single literal "+
-			"'insignificant'; split by a space it stops matching .cmp-db-connect.insignificant "+
-			"and the row renders the solid accent connector, asserting a move it never tested")
-	}
 	return bad, true
 }
 
@@ -7164,6 +7129,30 @@ func TestDashboard_CompareDevRowGuardCatchesTheDefect(t *testing.T) {
 	for _, tt := range []struct {
 		name, from, to, want string
 	}{
+		{
+			name: "significance drives the label again",
+			from: "    tag = bothRanked ? 'inference not established' : BELOW_FLOOR_TAG;",
+			to:   "    tag = row.significant ? 'inference not established' : BELOW_FLOOR_TAG;",
+			want: "significant",
+		},
+		{
+			name: "the missing-side tag is replaced",
+			from: "    tag = missingSideTag(hasA, !!row.present_a, hasB, !!row.present_b);",
+			to:   "    tag = BELOW_FLOOR_TAG;",
+			want: "missing-window verdict ALONE",
+		},
+		{
+			name: "the one-sided below-floor tag loses its prefix",
+			from: "      tag = BELOW_FLOOR_TAG + ', ' + tag;",
+			to:   "      tag = tag;",
+			want: "names the floor first",
+		},
+		{
+			name: "the tag is assigned again after the pinned arms",
+			from: "  rowEl.appendChild(cmpRankedRowValue(tag, deltaCls, bothRanked, deltaText,",
+			to:   "  tag = BELOW_FLOOR_TAG; rowEl.appendChild(cmpRankedRowValue(tag, deltaCls, bothRanked, deltaText,",
+			want: "assigns `tag` 4 times",
+		},
 		{
 			// 🔴 THE ONE THAT MATTERS MOST. This is what a naive reuse of the team gate
 			// ships: bothRanked folds PRESENCE in, so it is false for every one-sided row,
@@ -7208,15 +7197,7 @@ func TestDashboard_CompareDevRowGuardCatchesTheDefect(t *testing.T) {
 			want: "leading space",
 		},
 		{
-			// The significant arm asserts a tested move about withheld numbers.
-			name: "the significant arm's tag is ungated",
-			from: "    tag = bothRanked ? 'significant' : BELOW_FLOOR_TAG;",
-			to:   "    tag = 'significant';",
-			want: "'should be unreachable' is not an enforcement",
-		},
-		{
-			// The delta class is hardcoded, silently dropping #277's significance colour —
-			// a regression no withholding rule would ever notice.
+			// The shared gate must preserve the caller's delta class rather than replace it.
 			name: "the developer delta class is hardcoded flat",
 			from: "  rowEl.appendChild(cmpRankedRowValue(tag, deltaCls, bothRanked, deltaText,",
 			to:   "  rowEl.appendChild(cmpRankedRowValue(tag, 'flat', bothRanked, deltaText,",
@@ -7250,8 +7231,8 @@ func TestDashboard_CompareDevRowGuardCatchesTheDefect(t *testing.T) {
 		{
 			// A side's verdict reopened after the pinned declaration still reads correctly.
 			name: "a developer side's verdict is reassigned after it was set",
-			from: "  var sig = both && !!row.significant;",
-			to:   "  var sig = both && !!row.significant; aRanked = true;",
+			from: "  var bothRanked = both && aRanked && bRanked;",
+			to:   "  var bothRanked = both && aRanked && bRanked; aRanked = true;",
 			want: "assigns `aRanked` 2 times",
 		},
 		{
@@ -7261,14 +7242,6 @@ func TestDashboard_CompareDevRowGuardCatchesTheDefect(t *testing.T) {
 			from: "    tag = missingSideTag(hasA, !!row.present_a, hasB, !!row.present_b);",
 			to:   "    tag = missingSideTag(hasA, !!row.present_a, hasB, !!row.present_b) + ' ' + num(row.a && row.a.tier).toFixed(1);",
 			want: "writes a NUMBER into the tag cell",
-		},
-		{
-			// The LIVE not-significant arm ungated — where every two-sided below-floor
-			// developer row lands. Relabels it "we tested and found nothing".
-			name: "the live not-significant arm's tag is ungated",
-			from: "    tag = bothRanked ? 'not significant' : BELOW_FLOOR_TAG;",
-			to:   "    tag = 'not significant';",
-			want: "the arm every two-sided below-floor",
 		},
 		{
 			// The baseline verdict stops failing closed: a server that does not say gets
@@ -7455,10 +7428,10 @@ func loadGenerationViolations(js string) (bad []string) {
 		bad = append(bad, fmt.Sprintf("`var loadGen = 0;` is declared %d times, want 1", n))
 	}
 	total := len(regexp.MustCompile(`\bloadGen\b`).FindAllStringIndex(code, -1))
-	if want := 1 + 2*len(dashboardLoaders) + len(dashboardLoaders) + detailLoadGenTouches + manifestLoadGenTouches; total != want {
+	if want := 1 + 2*len(dashboardLoaders) + len(dashboardLoaders) + detailLoadGenTouches + manifestLoadGenTouches + correctionLoadGenTouches + issueLoadGenTouches; total != want {
 		bad = append(bad, fmt.Sprintf("loadGen is touched %d times, want %d (one declaration, "+
 			"one capture per loader, one comparison per callback, showDetail's read-only "+
-			"capture and two comparisons, and readManifest's capture and two comparisons)", total, want))
+			"capture and two comparisons, readManifest's capture and two comparisons, corrective-context's capture and two comparisons, and issue-report's capture and two comparisons)", total, want))
 	}
 
 	for _, l := range dashboardLoaders {
@@ -8918,7 +8891,7 @@ func TestDashboard_AttributionNotShownInAnonymisedModes(t *testing.T) {
 	if !ok {
 		t.Fatal("the banner has no not-shown state")
 	}
-	if !strings.Contains(bannerNS, "banner.className = 'not-shown';") || strings.Contains(bannerNS, "warn") ||
+	if !strings.Contains(bannerNS, "banner.className = 'not-shown';") || strings.Contains(bannerNS, "banner.className = 'warn'") ||
 		strings.Contains(bannerNS, "share *") || !strings.Contains(bannerNS, "return;") {
 		t.Errorf("the not-shown banner must be calm (className 'not-shown'), figure-free, and return: %q", bannerNS)
 	}

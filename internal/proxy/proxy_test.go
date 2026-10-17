@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2122,16 +2123,9 @@ func TestProxy_PathNotForgeable(t *testing.T) {
 func TestProxy_UpstreamDown_502NoEventNoHang(t *testing.T) {
 	t.Parallel()
 
-	// Reserve a loopback port, then release it so nothing is listening — the
-	// address is guaranteed connection-refused, the ErrorHandler trigger.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve loopback port: %v", err)
-	}
-	deadURL := "http://" + ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("release reserved port: %v", err)
-	}
+	// Keep a valid target URL, but refuse the dial in-process below: port 1 can
+	// have a listener, and a firewall can drop loopback packets instead of refusing.
+	deadURL := "http://127.0.0.1:1"
 	target, err := url.Parse(deadURL)
 	if err != nil {
 		t.Fatalf("parse dead target %q: %v", deadURL, err)
@@ -2143,6 +2137,11 @@ func TestProxy_UpstreamDown_502NoEventNoHang(t *testing.T) {
 	// process-global slog.Default().
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p := New(target, ProviderAnthropic, collector.SourceProxy, sink, nil, nil, quiet)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(_ context.Context, network, _ string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+	}
+	p.rp.Transport = transport
 	proxySrv := httptest.NewServer(p)
 	defer proxySrv.Close()
 

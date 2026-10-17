@@ -81,6 +81,9 @@ artifact, not anything about how productive the work was.</p>
 <li><a href="#summary" rel="nofollow">Summary</a></li>
 </ul>
 <hr>
+<p><strong>Series breaks.</strong> Before comparing periods, check the
+<a href="score-series-changes.html" rel="nofollow">score-series change register</a> and apply its comparison
+rule; name the applicable changes or state that the definition history is unknown.</p>
 <h2 id="the-one-sentence-version">The one-sentence version</h2>
 <p>TIER&#39;s headline is</p>
 <pre><code>TIER = Σ(outcome_weight × quality_multiplier) / (cost_usd / $1,000)
@@ -131,15 +134,18 @@ row and the outcome it eventually produces only both appear in a window if
 backdated to the cost window. It is a <strong>point event stamped at close time</strong>:</p>
 <ul>
 <li><strong>PR-merge capture</strong> (the <code>closes #N</code>-on-merge path, the common case):
-<code>outcomes.ts</code> is set to <code>time.Now().UTC()</code> at the moment the merge webhook is
-processed -- i.e. <strong>merge / close time</strong>
+<code>outcomes.ts</code> uses the PR&#39;s valid, nonzero, non-future <code>merged_at</code> -- i.e.
+<strong>merge / close time</strong> -- falling back to webhook receipt time only when
+<code>merged_at</code> is missing, malformed, zero or future
 (<code>internal/webhook/handler.go</code>).</li>
 <li><strong>Push-to-default-branch capture</strong> (trunk-based teams, opt-in <code>#196</code>):
-<code>outcomes.ts</code> is the <strong>commit timestamp</strong> of the qualifying push.</li>
+<code>outcomes.ts</code> is the <strong>commit timestamp</strong> of the qualifying push, falling back
+to server time when the commit timestamp is missing or zero.</li>
 <li>The <code>outcomes.ts</code> column itself defaults to SQLite <code>CURRENT_TIMESTAMP</code>, but
 every live capture path supplies the event instant explicitly.</li>
 </ul>
-<p>So the outcome is credited <strong>all at once, at the close/commit instant</strong> -- it is
+<p>So the outcome is credited <strong>all at once, at the close/commit instant</strong> (or the
+fallback time above) -- it is
 <strong>never spread back across the days when the cost was actually spent.</strong> The cost
 for that same issue, by contrast, was dribbled in continuously over those
 earlier days. The numerator is a spike at the end; the denominator is a ramp

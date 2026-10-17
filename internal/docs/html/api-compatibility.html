@@ -88,12 +88,120 @@ separately.</li>
 <li><strong>Encoding:</strong> UTF-8 JSON unless noted. The four bulk exports also emit CSV via
 <code>Accept: text/csv</code>.</li>
 </ul>
+<h2 id="pricing-provenance-additions-1231-1232">Pricing provenance additions (#1231, #1232)</h2>
+<p><code>POST /events</code> accepts optional <code>cache_write_evidence</code> (<code>nested</code> or <code>legacy</code>; omitted means unknown). <code>legacy</code> with a nonzero 1h write count is refused. The receiver derives costs and basis; clients cannot declare a pricing snapshot or rule. Shippers preserve the evidence on current receivers and retry once without additive provenance/PR fields only for an exact unknown-field 400 from an older receiver. Other 400s retain their usual failure behavior.</p>
+<p><code>GET /events</code> appends <code>pricing_basis</code>, <code>rate_snapshot</code> and <code>cache_write_evidence</code> to JSON and CSV; the previous columns retain their positions. Bases include <code>token_derived</code>, <code>guessed_estimate</code>, <code>caller_authoritative</code>, <code>aggregate_approx</code>, <code>legacy_aggregate</code> and <code>basis_unavailable</code>; historical nulls export empty strings. Snapshot identities resolve inside the operator&#39;s database to immutable effective rates and a retained rule implementation.</p>
+<p><code>/scores</code> and each <code>/scores/compare</code> window add <code>data_quality.aggregate_pricing</code> when provider remainders exist in developer mode. It carries <code>cutover</code>, approximation/historical notices, row counts, <code>ceiling_status</code> and, where positive, <code>possible_increase_micro</code>. This is an original-rate highest-rate-per-class diagnostic, not proven overbilling. It bounds the retained rate effect on aggregate counts, with one aggregate rounding step; per-request rounding and unrecorded fees are outside that calculation, so it is not a provider-invoice bound. A full ceiling is unavailable for missing, unsupported or estimated original bases (or sum overflow); a partial known-rate amount does not bound the whole window. Anonymous modes always emit the same conditional notice with <code>ceiling_status=not_shown</code> and no amounts or populations. All read responses also carry constant <code>X-TIER-Aggregate-Pricing</code> policy text, including CSV/array views and older sealed bodies without pricing metadata. New sealed responses retain the emitted notice; old sealed bytes are not rewritten or overlaid with current metadata. The dashboard shows conditional policy text when metadata is absent. Request-level tier arithmetic, raw numeric columns, actual-paid reconciliation and completed-poller retry semantics are otherwise unchanged. See <a href="how-it-works.html#pricing-provenance-and-daily-approximations-1231-1232" rel="nofollow">the policy and repair commands</a>.</p>
+<h2 id="per-issue-report-addition-1273">Per-issue report addition (#1273)</h2>
+<p><code>GET /api/v1/issues</code> is a <strong>read-scoped</strong>, live <strong>developer-mode-only</strong>
+report, also mounted by the read-only server. Both team and division modes return
+<code>403</code> before reading data, including on sealed installations. No issue-level
+k-anonymity or tracker hierarchy is implied. Existing <code>/scores</code> routes and
+response shapes are unchanged.</p>
+<p><strong>Issue-id misfiling.</strong> Pull-request points and captured spend do not depend on issue ids. Misfiling can merge or split direct-push credit (one 0.5 per issue per UTC day per repository) or change which outcome a footerless revert penalises, so headline TIER can move and per-issue rows can be wrong. See <a href="technical-reference.html#51-the-shared-key-is-the-issue-id" rel="nofollow">the measured rate and how to avoid it</a>.</p>
+<p>Parameters are <code>since</code>, <code>until</code>, <code>before</code> (the existing alias for <code>until</code>), and
+<code>repo</code>. Bounds use the <code>/scores</code> grammar (<code>YYYY-MM-DD</code>, <code>YYYY-MM</code>, <code>YYYY</code>), UTC
+midnight and half-open <code>[since, until)</code> semantics. Omitted <code>since</code> defaults to
+90 days ago at UTC midnight; omitted/empty <code>until</code> is <strong>open-ended</strong>, and its echo
+is omitted. Invalid bounds, non-increasing windows, invalid repository slugs,
+and unknown parameters (including <code>sort=tier</code>) return <code>400</code>. Retention violations
+return <code>422</code>. <code>repo</code> is strict equality; <code>repo_scope_excluded</code>, when present,
+discloses excluded unqualified records exactly as on <code>/scores</code>. All totals and
+shares use the selected scope and window.</p>
+<p>The report consumes the <strong>same <code>loadWindow</code> path and scoring engine as <code>/scores</code></strong>,
+with stored Event 3 policy and outcome projections read in one snapshot. Unresolved
+policy/projections refuse the report (<code>500</code>, <code>db error</code>). The additive wire shape is:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>since</code>, optional <code>until</code>, optional <code>repo</code></td>
+<td>Echoed UTC bounds and repository scope</td>
+</tr>
+<tr>
+<td><code>scoring_policy</code>, <code>correction_rule_version</code>, <code>rubric_version</code></td>
+<td>Shared policy stamp: legacy / legacy-v1 / 1, or event3 / event3-v2 / 2</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>Literal <code>attributed (lower bound)</code></td>
+</tr>
+<tr>
+<td><code>total_cost_usd</code></td>
+<td>All captured list-price spend in the window/scope, including manual cost rows; not invoice spend or a claim of complete capture</td>
+</tr>
+<tr>
+<td><code>attributed_cost_usd</code>, <code>unattributed_cost_usd</code></td>
+<td>Disjoint spend totals, summing to <code>total_cost_usd</code></td>
+</tr>
+<tr>
+<td><code>unattributed_share</code></td>
+<td>Unattributed / total captured spend, a fraction 0–1; zero when total spend is zero</td>
+</tr>
+<tr>
+<td>optional <code>data_quality</code></td>
+<td>The shared <code>/scores</code> zero-token and mixed-price signals, plus cost horizon (<code>cost_coverage_start</code>, <code>cost_coverage_safe_since</code>, <code>window_predates_cost_capture</code>, and optional <code>source_coverage_start</code>); same window and repo scope</td>
+</tr>
+<tr>
+<td><code>reconciliation</code></td>
+<td>Always an array, empty for an empty window; disjoint rows covering all spend</td>
+</tr>
+</tbody>
+</table>
+<p>Each reconciliation row has <code>kind</code> (<code>issue</code> or <code>unattributed</code>), <code>repo</code>, <code>issue_id</code>,
+<code>label</code>, <code>unattributed_share</code>, <code>cost_usd</code>, <code>weighted_points</code>, <code>outcome_n</code>, <code>sample_n</code>,
+<code>flagged_outcomes</code>, <code>tier</code> and <code>score_status</code>. Issue rows carry the literal
+<code>attributed (lower bound)</code> label and the <strong>window&#39;s unattributed share beside their
+figures</strong>. Unattributed rows carry label <code>unattributed</code> and retain the sentinel
+<code>issue_id</code> as the reason (including <code>unattributed:&lt;reason&gt;</code>); an empty historical
+issue ID is also unattributed. Such rows have no TIER. <code>unqualified</code> repository
+identity (including historical empty repos) is retained as stored; it is never
+assigned to another repo by a tolerant join for this partition. Cost is accumulated in integer micro-dollars before
+conversion to USD; floating point JSON sums should be compared at that precision.</p>
+<p>Rows are ordered by repository then issue ID, with unattributed rows last,
+<strong>never by TIER</strong>. The union includes spend-only and outcome-only issues. All
+spend tied to the stored <code>(repo, issue_id)</code> stays in that row&#39;s denominator, even
+from developers with no outcome. Each outcome contributes once; Event 3&#39;s debit stays on the corrected
+original&#39;s issue while the follow-up&#39;s own projected points stay on its own issue.
+<code>outcome_n</code> counts raw outcomes and <code>sample_n</code> counts the shared engine&#39;s eligible
+observations. Points are summed, then divided by summed issue cost / 1000.
+The evidence floor is applied <strong>after summing</strong>, never per developer: at least
+3 eligible outcomes, at least $5, and no zero-token flags. Only then is <code>tier</code> a
+number with <code>score_status: &#34;scored&#34;</code> if repository identity is also unambiguous.
+A row with a repo-blind identity (the same definition used by <code>store.RepoMatch</code>),
+or a real-repo row whose issue ID has repo-blind spend <strong>or outcomes</strong> in the
+selected window/scope, always has <code>tier: null</code> and
+<code>score_status: &#34;repo-blind spend on this issue id&#34;</code>. This status also covers
+outcome-only ambiguity. The disjoint stored rows are unchanged: no blind spend
+or outcomes are reassigned to a real repository. For example, $5 on <code>acme/app#1</code>
+and $45 on <code>unqualified#1</code> remain separate rows, and neither publishes a TIER.
+Absent that ambiguity, unattributed rows have <code>no score</code>; issue rows with
+zero-token flags have <code>zero-token outcome</code>; zero eligible accepted outcomes have
+<code>no score</code>; other insufficient evidence has <code>below evidence floor</code>. Each withholds
+TIER as JSON <code>null</code>, never a low numeric score. These partial denominators make issue TIER unsuitable for direct
+comparison with an all-spend developer score. No feature/parent rollup or seal is
+created by this endpoint.</p>
+<p><code>tierd issues --server &lt;url&gt; [--since &lt;date&gt;] [--until &lt;date&gt;] [--repo owner/repo]</code>
+prints this report, cost-horizon and mixed-price disclosures, and its
+reconciliation; <code>--json</code> prints the validated server response bytes, preserving
+additive wire fields. A covered window explicitly reports
+<code>window_predates_cost_capture: false</code>; a store with no captured cost has no horizon
+to report. A single-price window omits <code>mixed_price_versions</code>.
+It accepts <code>--api-token</code> (including <code>@file</code>) or <code>TIER_API_TOKEN</code>, allows the read
+token, refuses redirects and returns nonzero on mode/auth/server/decode failure.
+The dashboard&#39;s developer-mode per-issue table uses the same endpoint; it never
+fetches this breakdown in team/division mode.</p>
 <h2 id="feature-detection">Feature detection</h2>
 <p><strong>The supported feature-detection mechanism is the <code>version</code> field of
 <code>GET /api/v1/livez</code>.</strong> It is the build version the binary was compiled with
 (injected via <code>-ldflags</code>; falls back to <code>&#34;dev&#34;</code>). A client that needs to know
 whether a server supports a given field or endpoint should read <code>livez.version</code>
-rather than probing behaviour. <code>livez</code> is unauthenticated (a liveness probe must
+rather than probing behaviour, except for the narrow events fallback below. <code>livez</code> is unauthenticated (a liveness probe must
 not need credentials), so feature detection never requires a token.</p>
 <h3 id="identifying-a-deployment-get-apiv1version">Identifying a deployment: <code>GET /api/v1/version</code></h3>
 <p>Feature detection asks <em>&#34;what can this server do?&#34;</em> — a different question from
@@ -435,6 +543,8 @@ what it now means and what a consumer should read instead.</li>
 <ul>
 <li><strong>write</strong> -- requires the write/admin bearer token (<code>Authorization: Bearer</code>).
 The read-only viewer token is rejected 403.</li>
+<li><strong>ingest</strong> -- <code>POST /api/v1/events</code> only: the ingest token or the write token
+(#1144). The ingest token is rejected 403 on every other protected route.</li>
 <li><strong>read</strong> -- satisfied by EITHER the read-only viewer token or the write token.</li>
 <li><strong>metrics</strong> -- <code>GET /metrics</code> only: the metrics token or the write token, and
 in <code>developer</code> mode also the read-only viewer token (#944). The metrics token
@@ -855,9 +965,13 @@ in-flight request behind it.</p>
 </ul>
 <h4 id="post-apiv1events"><code>POST /api/v1/events</code></h4>
 <ul>
-<li><strong>Scope:</strong> write. <strong>Success:</strong> <code>201 Created</code>, body <code>{&#34;accepted&#34;: &lt;int&gt;}</code>.</li>
-<li>Bulk repo-aware ingest (array body). <code>accepted</code> counts events processed, not
-rows newly created (the MAX-on-conflict UPSERT absorbs replays). Per-event
+<li><strong>Scope:</strong> ingest or write (#1144). <strong>Success:</strong> <code>201 Created</code>, body
+<code>{&#34;accepted&#34;: &lt;int&gt;, &#34;rejected_cross_developer&#34;: &lt;int&gt;}</code>.</li>
+<li>Cross-developer key collisions leave the original row unchanged and increment
+<code>rejected_cross_developer</code>; the server logs a WARN and the shipper warns without
+failing or retrying. No migration; global idempotency stays unchanged.</li>
+<li>Bulk repo-aware ingest (array body). <code>accepted</code> counts processed events excluding cross-developer rejections, not
+rows newly created (coherent original-basis promotion absorbs replays). Per-event
 fields mirror <code>costRequest</code> plus <code>repo</code>, <code>session_id</code>, and a <strong>required</strong>
 RFC3339 <code>timestamp</code>. Since #233 the server reprices token counts with its own
 price table; the client <code>cost_usd</code> is retained only as a cross-check.</li>
@@ -908,10 +1022,32 @@ sending <code>host</code> to a pre-#719 server 400s the whole batch (all-or-noth
 4xx is terminal with no retry). The field is <code>omitempty</code>, so a jsonl/codex batch
 is byte-identical to what a pre-#719 shipper sent and is unaffected; only a
 batch actually carrying a host is at risk, and it fails loudly.</li>
+<li><strong><code>pr_number</code> and <code>branch_hash</code> are OPTIONAL (#1074).</strong> <code>pr_number</code> is a positive integer;
+zero/negative values are a <code>400</code>. <code>branch_hash</code> is exactly 64 lower-case hex characters;
+other shapes are a <code>400</code>. Omitted/null fields store NULL. The hash is SHA-256 of canonical
+<code>repo + &#34;\x00&#34; + branch</code>, using the full name with <code>refs/heads/</code> removed. Default/unknown
+branches and <code>unqualified</code> repositories do not produce a hash.
+The shipper sends both fields whenever set. Only an HTTP <code>400</code> whose error body contains
+<code>json: unknown field &#34;pr_number&#34;</code> or <code>json: unknown field &#34;branch_hash&#34;</code> resends that batch
+once with both fields stripped and omits them for that server for the rest of the process.
+Other <code>400</code>s, <code>5xx</code>, timeouts and network errors follow the existing error/retry path and
+cache nothing; a <code>2xx</code> never strips fields. There is no capabilities route; ingest-token
+scope remains <code>POST /api/v1/events</code> only. Old servers accept the stripped batch but retain
+neither field; old shippers omit both fields even against new servers.
+At insert, only an unattributed event in a real repo and an unsealed month resolves through
+exactly one real-issue outcome on <code>(repo, pr_number)</code>. Its <code>pr-number-at-insert</code> rule is
+server-owned and rejected as client input. Recording a merged PR fills eligible
+unattributed, unsealed <code>(repo, pr_number)</code> rows with the same rule. Branch matches on
+the same repo and pseudonymised head hash credit only inside <code>[max(previous merge, PR opened − 7 days), merge]</code>, with server-owned <code>branch-at-merge</code>; overlapping recorded
+windows are skipped. Both rules export verbatim in event JSON/CSV and are rejected
+as client input. Branch reuse bounds later credit at the previous merge. Guessable
+branch names can be recovered from the hash. API outcomes have no head-ref field and
+leave the hash NULL; webhook/backfill set it only with head-ref evidence.</li>
 <li><strong><code>attribution_rule</code> is OPTIONAL (#823):</strong> the rule that assigned <code>issue_id</code>,
 empty or one of the closed set <code>store.AttributionRules()</code> (<code>branch</code>,
 <code>worktree-cwd</code>, <code>worktree-toolpath</code>, <code>carry</code>). Omitted, the row stores no rule --
-exactly how every pre-#823 shipper behaves. Any other value is a <code>400</code> naming the
+exactly how every pre-#823 shipper behaves. <code>pr-number-at-insert</code> and
+<code>branch-at-merge</code> (#1074) are server-assigned, never client-sent. Any other input is a <code>400</code> naming the
 allowed set; the refused value is not echoed. Stored on insert only; a replay
 never rewrites it. Same version skew as <code>host</code>: a pre-#823 server <code>400</code>s a batch
 that carries the field, so upgrade tierd before the shippers.</li>
@@ -1096,7 +1232,7 @@ store failure. Only the <code>503</code> should be retried automatically.</li>
 <h4 id="get-apiv1developeridexport-gdpr-art-15-access"><code>GET /api/v1/developer/{id}/export</code> (GDPR Art. 15 access)</h4>
 <ul>
 <li><strong>Scope:</strong> write. <strong>Success:</strong> <code>200 OK</code>, <code>store.DeveloperExport</code>:
-<code>{developer, identifiers, token_events, outcomes, actual_spend, org_hierarchy, period_membership, hierarchy_membership, quality_events, quality_history, repo_repair_audit, push_outcome_commits, push_outcome_audit, developer_alias, watcher_checkpoint}</code> (each a row array grouped by table). <code>push_outcome_commits</code>
+<code>{developer, identifiers, token_events, outcomes, actual_spend, org_hierarchy, period_membership, hierarchy_membership, quality_events, quality_history, repo_repair_audit, push_outcome_commits, push_outcome_audit, developer_alias, watcher_checkpoint, correction_declarations, corrective_relations, correction_audit, correction_assessments, correction_allocations}</code> (each a row array grouped by table). <code>push_outcome_commits</code>
 and <code>push_outcome_audit</code> (#849) are the push-capture commit ledger and its
 audit; a <code>commit_sha</code> starting <code>pre-ledger:</code> is a marker, not a commit. A
 <code>push_outcome_commits</code> row&#39;s <code>push_order</code> (#938) is its ownership sort key. The
@@ -1282,6 +1418,35 @@ developer-&gt;team map itself, stays write-scoped.</li>
 <li>Not named <code>teams</code>: that key is frozen as the k-anonymized array whose rows are
 labelled by the <code>aggregation</code> discriminator.</li>
 </ul>
+</li>
+<li>
+<p><strong>Additive diagnostics (#972 / U97), developer/operator mode only:</strong>
+<code>data_quality.join_readiness</code> contains arrays <code>outcome_only_repos</code>
+(<code>{repo, outcome_count, points}</code>), <code>cost_only_repos</code>
+(<code>{repo, captured_cost_usd}</code>), <code>incompatible_repos</code>
+(<code>{developer, issue_id, cost_repo, outcome_repos}</code>),
+<code>ambiguous_repo_blind_matches</code> (<code>{developer, issue_id, plausible_repos}</code>),
+and <code>issue_spend_without_same_developer_outcome</code>
+(<code>{developer, issue_id, cost_repo}</code>), plus <code>unqualified_cost_share</code>.
+The three per-(developer, issue) lists are sorted and capped at 50 rows each;
+<code>incompatible_repos_total</code>, <code>ambiguous_repo_blind_matches_total</code> and
+<code>issue_spend_without_same_developer_outcome_total</code> carry their uncapped counts.
+Arrays are empty when clean. Repository gaps compare qualified real repo ids
+exactly; unqualified rows cannot satisfy repository presence. Issue joins
+require the same canonical developer. The repository-only fold does not
+establish that any particular developer&#39;s issue joined. Points use the same
+policy-projected <code>Outcome.Points()</code> as scores, including corrections. Dollar
+figures use captured non-API costs. <code>unqualified_cost_share</code> divides captured
+micro-dollars on non-real repositories by all captured micro-dollars in the
+window; it is zero when the denominator is zero or under strict <code>?repo=</code>.
+Cost presence for join checks
+includes manual cost rows, matching the scoring join. All inputs are loaded
+in the score&#39;s read snapshot; scoring and attribution are unchanged.
+Join readiness is <strong>entirely absent in team/division modes</strong>. Live checkpoint
+evidence, current engine enablement and on-disk worktree checks are absent
+from <code>/scores</code>, its comparison responses and report manifests. The separate
+<a href="#get-apiv1diagnosticscaptured-dollars" rel="nofollow">captured-dollar diagnostics route</a>
+serves that live evidence without changing reproducible scores.</p>
 </li>
 <li>
 <p><code>data_quality</code> (<code>omitempty</code>) -- <strong>presence contract (#351):</strong> the block is now
@@ -1658,7 +1823,7 @@ highest TIER first. <code>cost_per_point</code> (#239) is
 (numerically <code>1000/tier</code>); it is <strong><code>null</code> on a zero-point row</strong> (#472) so &#34;no
 accepted outcome&#34; is not encoded as the most-efficient <code>0</code>, while a genuine
 zero-cost (FREE) row keeps its honest <code>0</code>. <code>cost_per_point_ci_low/high</code>
-are its 95% self-relative bootstrap interval, the reciprocal (ends swapped) of
+are its nominal 95% self-relative bootstrap bounds (coverage unvalidated), the reciprocal (ends swapped) of
 the <code>tier</code> CI -- <code>0</code> for unranked rows. See <a href="rubric.html" rel="nofollow">docs/rubric.md</a>.</li>
 <li><code>teamScoreJSON</code>: <code>team (omitempty), tier, weighted_points, total_cost_usd, actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, ranked</code>. No CI at
 team grain (the bootstrap is a per-developer signal, #133). <code>ranked</code> (#502) is
@@ -1669,6 +1834,51 @@ true quotient, so a consumer must gate the headline on <code>ranked</code> rathe
 expect a scrubbed number (#136). There is deliberately <strong>no team-level
 <code>sample_n</code></strong> -- see the #502 changelog entry.</li>
 </ul>
+<h4 id="get-apiv1diagnosticscaptured-dollars"><code>GET /api/v1/diagnostics/captured-dollars</code></h4>
+<ul>
+<li><strong>New ADDITIVE public v1 read endpoint (#972 / #1279).</strong> It carries the same
+<a href="#the-compatibility-rule" rel="nofollow">stability promise</a> as the other public v1 read routes:
+existing response fields retain their names, meanings, units and scopes;
+incompatible changes require the versioning/deprecation process above.</li>
+<li><strong>Auth and modes:</strong> read scope (<code>requireRead</code>); developer mode only. Team and
+division modes return <code>403</code>, without diagnostic counts or shares.</li>
+<li><strong>Bounds:</strong> the same <code>since</code>, <code>until</code> (or <code>before</code>) and strict <code>repo</code> query
+bounds as <code>/scores</code>. Malformed dates, an upper bound at or before <code>since</code>,
+disallowed repository scopes (including <code>unqualified</code>), and unknown query
+parameters return <code>400</code>. A diagnostic query failure returns <code>500</code> here alone.</li>
+<li><strong>Release history:</strong> <code>/scores</code> never carried <code>captured_dollar_diagnostics</code> in
+any release; that field existed only on this unmerged branch. Adding this
+endpoint changes no released <code>/scores</code> wire contract.</li>
+<li><strong>Response:</strong> receipt with <code>share_label: &#34;share of captured dollars&#34;</code>, <code>since</code> (RFC3339),
+optional <code>until</code> (RFC3339; absent means open-ended), <code>scope</code> (<code>fleet</code> or the
+strict requested repo), <code>sample_size</code> (captured token-event count),
+<code>captured_cost_usd</code>, <code>engine_enablement</code> (engine → <code>enabled</code>, <code>disabled</code> or
+<code>unknown</code>), <code>enablement_scope</code>, <code>buckets</code> and
+<code>main_checkout_worktree_share</code>, <code>stored_cwd_sample_size</code> (events with stored
+cwd) and <code>stored_cwd_cost_share</code> (their share of captured dollars). Metadata
+availability does not establish historical working-directory evidence. The
+worktree share is captured dollars in
+<code>unattributed:main</code> whose stored cwd resolves to a main checkout with verified
+linked worktrees present now, divided by all captured dollars in scope.
+<code>buckets[]</code> has <code>{engine, bucket, subagent_origin, sample_size, captured_cost_usd, share}</code>; each share uses that same whole-window captured
+denominator, not the engine subtotal. Only unattributed buckets appear;
+attributed dollars remain in the denominator. Empty/zero-cost windows have
+zero shares. Engine uses capture source (<code>jsonl</code> → <code>claude-code</code>).
+<code>subagent_origin</code> is session-level: <code>main_session</code> (parent paths only), <code>subagent</code> (subagent
+paths only), <code>mixed</code> (both), or <code>unknown</code> (no stored evidence). Parent and
+subagent events sharing a session id cannot be split per event. The stored
+cwd is retained when all checkpoints agree; otherwise a single parent path
+supplies cwd, or cwd remains unknown. Current local engine enablement cannot
+establish
+historical or remote-shipper enablement. Paths/session ids are never emitted.
+Manual <code>source=api</code> costs are excluded. These are never shares of real spending.</li>
+</ul>
+<p>Live checkpoint evidence, current engine enablement and on-disk worktree checks
+are excluded from <code>/scores</code>, its comparisons and report manifests, so they do
+not change <code>verify-report</code>&#39;s reproducible canonical body. Doctor reads this
+separate endpoint. Strict <code>?repo=</code> reads use only the selected repository&#39;s
+inputs, including metadata joins. See <a href="technical-reference.html#captured-dollar-diagnostics" rel="nofollow">the explanation and
+limitations</a>.</p>
 <h4 id="get-apiv1scoresdeveloper"><code>GET /api/v1/scores/{developer}</code></h4>
 <ul>
 <li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>, <code>developerDetailResponse</code>.</li>
@@ -1819,16 +2029,50 @@ reaches every consumer instead of being re-implemented at each.</li>
 </ul>
 </li>
 <li>
-<p><strong>Significance test:</strong> <code>significant</code> is <code>true</code> for a developer row only when the
-developer is present AND <code>ranked</code> (#133) in BOTH windows and the two 95% bootstrap
-TIER confidence intervals do <strong>not</strong> overlap (<code>a.ci_high &lt; b.ci_low</code> or
-<code>b.ci_high &lt; a.ci_low</code>). Any overlap, or an unranked/below-floor window, renders it
-<code>false</code> -- the move is within sampling noise or the sample cannot support the claim.</p>
+<p><strong>Unvalidated descriptive bounds:</strong> Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage.
+<code>/scores</code>, its work-type segments, developer detail and <code>/scores/compare</code> carry
+<code>Tier-Bounds-Status: unvalidated_descriptive</code>, <code>Tier-Inference: not_established</code>
+and a <code>Tier-Bounds-Note</code> header. Legacy <code>ci_*</code> field names remain for compatibility.</p>
+</li>
+<li>
+<p><strong>Legacy non-overlap result:</strong> <code>significant</code> is retained, not a validated inference
+verdict. It is true only when a developer is present and above the floor in both
+windows and the bounds do not overlap; touching ends overlap. Withheld bounds,
+an absent side or a below-floor side make it false; it is always false for groups.
+Neither value establishes an effect or a noise threshold. The dashboard shows
+“inference not established” and does not colour changes from this flag.</p>
 </li>
 <li>
 <p>Unblocks the dashboard dumbbell comparison (#278).</p>
 </li>
 </ul>
+<h4 id="seal-disclosure-1233">Seal disclosure (#1233)</h4>
+<p>Sealed report bytes and <code>body_digest</code> never change. <code>/report_manifest</code> adds
+<code>seal_disclosure</code>, and sealed <code>/scores/compare</code> includes that object on each
+<code>window_a</code> / <code>window_b</code>. It contains <code>sealed_at</code> (actual insertion time in UTC),
+<code>configured_grace_seconds</code> (nullable), <code>grace_status</code> (<code>recorded</code> or <code>not_recorded</code>),
+<code>days_after_period_end</code>, <code>revert_windows_at_seal</code> (<code>withheld</code>, <code>open</code>, <code>closed</code>, or <code>not_recorded</code>)
+and <code>note</code>. Future seals record their grace and whether any recorded outcome&#39;s
+60-day revert window was still open, atomically at the actual insertion time.
+The note states that some windows were still open only for <code>open</code>.</p>
+<p>Every non-<code>developer</code> seal level returns <code>withheld</code>, because outcome-dependent
+observations can identify a person in an anonymized cohort. This includes all
+production seals in team and division modes; developer mode refuses sealing.
+Only developer-level records can return <code>open</code> (recorded as true at sealing),
+<code>closed</code> (recorded as false, or inferred for legacy records as below), or
+<code>not_recorded</code> (legacy status unknown).</p>
+<p>Legacy grace is <code>null</code> / <code>not_recorded</code>, never the current configuration. Legacy
+window status for developer-level records is <code>not_recorded</code> unless the actual
+seal occurred at least 60 days after period end, when all nominal windows were
+closed; non-developer levels still return <code>withheld</code>. A short delay alone does
+not prove any particular outcome still had an open window. No historical report
+body, digest or <code>config_digest</code> is rewritten.</p>
+<p>Sealed <code>/scores</code> exposes the same disclosure beside the stored bytes:
+<code>Tier-Sealed-At</code>, <code>Tier-Report-Grace-Seconds</code> (<code>not_recorded</code> for legacy seals),
+<code>Tier-Sealed-Days-After-End</code>, <code>Tier-Revert-Windows-At-Seal</code> and <code>Tier-Seal-Note</code>.
+The dashboard displays the selected month&#39;s own disclosure, and both months in
+a comparison. The default grace remains 14 days; it can leave 60-day revert
+windows open. Longer grace does not establish delivery completeness.</p>
 <h4 id="get-apiv1report_manifest"><code>GET /api/v1/report_manifest</code></h4>
 <ul>
 <li><strong>Scope:</strong> read (satisfied by EITHER the viewer token or the write token).
@@ -1952,7 +2196,7 @@ costs a full window load, and a cheaper approximation would be a second,
 divergent floor that errs toward disclosure.</li>
 <li><code>watermarks.ledgers</code> -- <code>max_&lt;ledger&gt;_id</code> and <code>&lt;ledger&gt;_count</code> for
 <code>quality_history</code>, <code>reprice_row_audit</code>, <code>cost_correction_audit</code>,
-<code>repo_repair_row_audit</code> and <code>push_outcome_audit</code> (#849). <strong>Unwindowed and unscoped</strong> (see below), and
+<code>repo_repair_row_audit</code>, <code>push_outcome_audit</code> (#849) and <code>correction_audit</code> (#1235). <strong>Unwindowed and unscoped</strong> (see below), and
 present in every mode: install-wide and window-independent, so it carries
 no count of the caller&#39;s chosen population.
 <strong>Every key within a present sub-object is always present</strong>; a <code>0</code> is a real
@@ -1961,7 +2205,7 @@ reading (&#34;nothing here yet&#34;) and is never dropped.</li>
 </li>
 <li>
 <p><code>events_digest</code>, <code>outcomes_digest</code> (objects, <code>omitempty</code>) -- <code>value</code> and
-<code>rows</code> (#716, wired by #740). <code>value</code> is <code>&#34;tierdig1:&#34;</code> plus 64 hex
+<code>rows</code> (#716, wired by #740; tierdig2 in #1235). <code>value</code> is <code>&#34;tierdig2:&#34;</code> plus 64 hex
 characters: a content identity over the ROWS the report was computed over.
 🔴 <strong>This is the only pin that can see an in-place <code>UPDATE</code></strong>, which a
 <code>MAX(id)</code>/<code>COUNT(*)</code> watermark pair structurally cannot -- a reprice, a
@@ -2149,7 +2393,7 @@ raw per-developer rows are suppressed). Keyset-paginated bulk export of
 <li>Query: <code>?since=</code>, <code>?until=</code>, <code>?limit=</code> (rejected loudly above the store max),
 <code>?cursor=</code> (opaque, echo the previous page&#39;s cursor).</li>
 <li><strong>JSON</strong> (default): <code>eventsExportResponse</code> -- <code>{next_cursor, events: [...]}</code>.
-Each event: <code>id, ts, developer, issue_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cost_micro, source, fidelity, idempotency_key, repo, session_id, price_version, host, billing_mode, billed_to, attribution_rule</code>.</li>
+Each event: <code>id, ts, developer, issue_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cost_micro, source, fidelity, idempotency_key, repo, session_id, price_version, host, billing_mode, billed_to, attribution_rule, pricing_basis, rate_snapshot, cache_write_evidence</code>.</li>
 <li><strong>CSV</strong> (<code>Accept: text/csv</code>): same fields in the <strong>append-only</strong> column order
 of <code>eventsCSVHeader</code>. Empty <code>next_cursor</code> (body and the <code>X-Next-Cursor</code> header)
 means the window is exhausted.</li>
@@ -2160,7 +2404,9 @@ return, following OWASP CSV-injection guidance. Numeric columns remain numeric
 when the original text is required without the CSV safety prefix.</li>
 <li><code>attribution_rule</code> (#823) is an <strong>additive</strong> field and the appended trailing
 CSV column: the rule that assigned the row&#39;s <code>issue_id</code>. The values are
-<code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code> or <code>carry</code>. A row with no rule
+<code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code>, <code>carry</code>, <code>pr-number-at-insert</code>
+or <code>branch-at-merge</code> (#1074: server-assigned, never client-sent;
+<code>branch-at-merge</code> is the merged PR&#39;s head-branch fill). A row with no rule
 recorded (every row stored before #823, and any row whose producer records
 none) exports as <code>legacy</code>, and any other stored value exports as <code>unknown</code>
 (<code>exportAttributionRule</code>). The DSAR export shows the stored value as stored:
@@ -2171,9 +2417,13 @@ none) exports as <code>legacy</code>, and any other stored value exports as <cod
 <li><strong>Scope:</strong> read. <strong>Success:</strong> <code>200 OK</code>. <strong>403 in any anonymized (team/division) mode</strong> (#185, #270).
 Same pagination/CSV contract as <code>GET /events</code>.</li>
 <li><strong>JSON:</strong> <code>outcomesExportResponse</code> -- <code>{next_cursor, outcomes: [...]}</code>. Each
-outcome: <code>id, ts, developer, issue_id, pr_number, weight, weight_source, quality, merge_commit_sha, additions, deletions, changed_files, source, work_type, work_type_source, repo, push_day</code>.</li>
+outcome: <code>id, ts, developer, issue_id, pr_number, weight, weight_source, quality, merge_commit_sha, additions, deletions, changed_files, source, work_type, work_type_source, repo, push_day, quality_status</code>.</li>
 <li><strong>CSV:</strong> the <strong>append-only</strong> <code>outcomesCSVHeader</code> order.</li>
-<li><code>push_day</code> (#242) is the appended trailing column: the UTC calendar day a
+<li><code>quality_status</code> (#1228) is appended after <code>push_day</code> in CSV; JSON omits it
+when empty. <code>unknown</code> means the outcome has an unresolved or unrecognized
+quality check. Empty does not establish observed quality. This diagnostic
+field does not change the numeric <code>quality</code> multiplier.</li>
+<li><code>push_day</code> (#242) is the UTC calendar day a
 <code>source=&#39;push&#39;</code> outcome aggregates to (part of the <code>(repo, issue_id, push_day)</code> dedup key), and
 <code>&#34;&#34;</code> for a PR outcome (NULL column), matching <code>merge_commit_sha</code>.</li>
 </ul>
@@ -2184,13 +2434,21 @@ rows carry a per-developer <code>developer</code> column). Keyset-paginated bulk
 the append-only <code>quality_events</code> signal log (#242). Same <code>?since</code>/<code>?until</code>/
 <code>?limit</code>/<code>?cursor</code> query, pagination, and content-negotiation contract as
 <code>GET /events</code>.</li>
-<li><strong>JSON</strong> (default): <code>qualityEventsExportResponse</code> -- <code>{next_cursor, quality_events: [...]}</code>. Each row: <code>id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at</code>.</li>
+<li><strong>JSON</strong> (default): <code>qualityEventsExportResponse</code> -- <code>{next_cursor, quality_events: [...]}</code>. Each row: <code>id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason, status, evidence</code>.</li>
 <li>⚠️ <strong><code>source_ref</code>&#39;s value shape for CI rows changed in #687 (BREAKING)</strong> --
 <code>head_sha:run_attempt:workflow_id</code>, was <code>head_sha:run_attempt</code>. Same column,
 different bytes; see the <a href="#api-changelog" rel="nofollow">changelog entry</a>. The identical
 change applies to <code>source_ref</code> on <code>GET /api/v1/quality_history</code>, which carries
 the CI ref through <code>UpdateQualityForOutcome</code>.</li>
-<li><strong>CSV</strong> (<code>Accept: text/csv</code>): the <strong>append-only</strong> <code>qualityEventsCSVHeader</code> order.</li>
+<li><strong>CSV</strong> (<code>Accept: text/csv</code>): the <strong>append-only</strong> <code>qualityEventsCSVHeader</code> order;
+<code>reason</code>, <code>status</code>, and <code>evidence</code> (#1228) follow the original eight columns.</li>
+<li><code>revert_ambiguous</code> records a checked but unresolved revert against each
+qualified candidate, with <code>reason=&#34;ambiguous&#34;</code>, <code>status=&#34;unknown&#34;</code>, and
+<code>evidence=false</code>. It neither changes numeric quality nor adds quality history.
+<code>source_ref</code> is the revert SHA; distinct SHAs, rather than candidate rows or
+delivery counts, count unresolved reverts. Recognized CI and resolved revert
+event types have <code>status=&#34;observed&#34;</code> and <code>evidence=true</code>; unrecognized types
+fail closed as <code>unknown</code>/<code>false</code>. <code>reason</code> is empty on earlier rows.</li>
 </ul>
 <h4 id="get-apiv1quality_history"><code>GET /api/v1/quality_history</code></h4>
 <ul>
@@ -2249,11 +2507,45 @@ fidelity level (<code>realtime</code>/<code>daily</code>/<code>estimated</code>)
 when empty); a developer with no <code>realtime</code> count is on a degraded capture
 path. Keys are the same <code>fidelity</code> closed set as elsewhere in this contract.</li>
 <li><code>unknown_model_cost_share</code> (number, <code>0..1</code>) -- the fraction of the developer&#39;s
-30d spend billed at the unknown-model pricing guess (#267): high share means
-TIER is pricing that spend at a <code>(host, model)</code> rate it cannot audit. <code>0</code> when
-30d spend is zero.</li>
+30d stored spend whose <code>(host, model)</code> has no exact entry in the <strong>current</strong>
+table (#267). <code>0</code> when 30d spend is zero. This existing read-time lookup does
+not establish whether the original dollars were guessed.</li>
+<li><code>unknown_pricing_token_share</code> (number, <code>0..1</code>, always present; #1228) --
+<strong>share of tokens with an unknown pricing basis or without an exact entry in
+the current price table</strong>. Computed at read time over the same 30d window:
+sum input, output, cache read, 5m cache write and 1h cache write tokens on
+qualifying rows, divided by those five classes on all rows. Zero-cost rows
+with tokens count; zero-token rows do not. Returns <code>0</code> with no 30d tokens.
+A row qualifies when its <code>price_version</code> is <strong>different from</strong> the active
+table version, its host-aware model lookup has no exact current entry, or
+its stored <code>pricing_basis</code> is missing, unrecognized, guessed, unavailable,
+or an aggregate approximation (including historical aggregates).
+<code>token_derived</code> and <code>caller_authoritative</code> are known bases; both still need
+the active version and an exact current table entry to avoid qualifying.
+Other versions (including the legacy <code>0</code> sentinel and higher override
+versions after a rollback) count as basis-unknown even
+when the model is listed exactly today; the registry retains identity, not
+historical rates. Alias merging sums token counts before dividing.</li>
+<li><code>unknown_pricing_token_share_label</code> (string, always present; #1228) -- exactly
+<code>&#34;share of tokens with an unknown pricing basis or without an exact entry in the current price table&#34;</code>
+(R-2026-10-14-17, D-32 C″).</li>
+<li><code>cost_label</code> (string, optional; #1228) -- <code>&#34;estimated cost&#34;</code> iff
+<code>unknown_pricing_token_share &gt; 0</code>; omitted otherwise. On <code>/fidelity</code> this
+label refers only to the token-share test; the response has no dollar field
+for it to qualify. A guessed-cost row with zero tokens does not contribute
+to the share and therefore does not trigger this label.</li>
 </ul>
 </li>
+<li>#1228 is an additive read-only diagnostic with the same mode/auth gating, no
+migration and no automatic repricing. An explicit audited <code>tierd reprice</code>
+updates the price basis, so an exact row can clear on the next read. Exact
+configured self-hosted estimates remain exact table entries; this share does
+not certify provider list rates, bound dollar error or establish capture
+completeness. It adds no headline-withholding threshold or <code>/scores</code> field.
+Local <code>tierd score</code> prints the same label and a token-weighted percentage for
+its Claude Code JSONL window, qualifying each affected developer/issue cost
+and total as <code>estimated cost</code>. It freshly prices the logs under the active
+table on every run, so it has no stored legacy price-version basis.</li>
 <li><strong>Additive</strong> per the <a href="#additive-vs-breaking-at-a-glance" rel="nofollow">matrix above</a>: a new
 endpoint is additive, not a compat break. It was added in #320 (behind #236),
 after this contract doc (#241) was written, hence the catalog backfill (#322).</li>
@@ -2325,11 +2617,256 @@ valid viewer or admin token is supplied.</li>
 build identity. <code>version</code> is the
 documented <a href="#feature-detection" rel="nofollow">feature-detection</a> signal.</li>
 </ul>
+<h2 id="event-3-corrective-scoring-contract-1235">Event 3 corrective scoring contract (#1235)</h2>
+<p>Event 3 is <strong>off by default</strong>. The API&#39;s <code>WithScoringPolicy</code> option accepts the
+scoring policy contract; its zero value selects legacy scoring. An enabled policy
+requires resolved state and <code>event3-v2</code>. These interfaces do not enable scoring;
+see <a href="technical-reference.html#enable-event-3-scoring" rel="nofollow">Enable Event 3 scoring</a> for
+operator configuration. Existing flag-off score bodies and values retain their
+legacy meaning.</p>
+<h3 id="scores-detail-segments-and-comparison">Scores, detail, segments and comparison</h3>
+<p>Enabled <code>/scores</code>, developer detail and <code>/scores/compare</code> responses disclose
+<code>correction_policy</code>: <code>{scoring_policy: &#34;event3&#34;, correction_rule_version: &#34;event3-v2&#34;, rubric_version: 2}</code>. Legacy uses rubric 1. This stamp comes from
+<code>scoring.ScoringPolicy.Stamp</code>; readers must not infer policy from a size or
+quality value. Flag-off score responses retain their previous representation.
+Unknown or unresolved enabled policy refuses computation.</p>
+<p>When enabled, developer score rows gain <code>outcome_n</code>, the raw outcome count used
+for activity and coverage. <code>sample_n</code> becomes the number of eligible growth
+observations used for ranking floors. A pure repair can receive allocated points
+while adding zero samples. Cross-author declarations awaiting confirmation use
+growth eligibility without moving either participant&#39;s contribution. Unknown
+growth remains explicitly unknown. Counts follow the same projection through
+rollups and folding; team/division responses continue to withhold unfloored
+counts and identifying relation evidence.</p>
+<p>Headline, developer detail, work-type segments and comparison consume persisted
+whole-chain projections before partitioning by repository, window, work type,
+developer or historical team. Costs stay with the original cost records. Detail
+issues expose an enabled-policy <code>projection</code> object with the fields described
+below. Bootstrap resamples only eligible growth observations; excluded repairs&#39;
+points and their cost shares are fixed terms. Pooled issue cost is split across
+raw outcomes before partitioning and counted once. <code>tierd score</code> remains the
+local cost-attribution command.</p>
+<h3 id="raw-evidence-and-subject-access">Raw evidence and subject access</h3>
+<p><code>POST /api/v1/outcomes</code> preserves omitted/null diff stats separately from genuine
+zero stats; ordinary outcome fallback weight is unchanged. <code>Corrects:</code> references
+never invent issue attribution. The existing numeric outcome response/export
+columns remain compatible; nullable evidence fields disclose availability.</p>
+<p><code>GET /api/v1/developer/{id}/export</code> adds <code>correction_declarations</code>,
+<code>corrective_relations</code>, <code>correction_audit</code>, <code>correction_assessments</code> and
+<code>correction_allocations</code> arrays. Endpoint matching includes either party, aliases
+and reviewer evidence across the connected chain. <code>DELETE /api/v1/developer/{id}</code>
+adds corresponding keys under <code>deleted</code>, counting rows changed. Assessment and
+allocation counts measure rows scrubbed/frozen; subject declarations are deleted
+after connected text and links are scrubbed. Erasure removes endpoint identities, comparison SHAs and
+subject-bearing text before deleting outcomes, severs identifying indirect links,
+and retains numeric allocations. Any erased party freezes the allocation; the
+survivor&#39;s numbers are never redistributed. The reviewed-allocation schema upgrade
+ensures eraser compatibility; corrective evidence pins add no schema version.</p>
+<h3 id="existing-outcome-revert-exclusion-cli-1277">Existing-outcome revert exclusion CLI (#1277)</h3>
+<p><code>tierd outcomes exclude-reverts [--dry-run] [--db PATH] [--repo owner/name] [--since DATE] [--out FILE]</code> produces a deterministic version-1 JSON plan;
+<code>--dry-run</code> is the default. It opens the existing database read-only and refuses
+a schema mismatch. Candidates have <code>repo</code>, <code>pr</code>, <code>outcome_id</code>, <code>merge_sha</code>,
+<code>evidence_source</code>, <code>head_ref</code>, <code>title</code>, <code>verdict</code> (<code>exclude|keep|unknown</code>) and
+<code>reason</code>. Counts include <code>total</code>, <code>exclude</code>, <code>keep</code>, <code>unknown</code>. Approval uses
+lowercase SHA-256 hex of the <strong>raw plan file bytes</strong> (<code>shasum -a 256 plan.json</code>);
+the dry run prints this digest to stderr, outside the JSON plan. The plan has no
+embedded digest. Top-level fields in order are <code>version</code>, <code>repo</code>, <code>since</code>,
+<code>candidates</code>, <code>counts</code>; candidates sort by stored repository, PR, outcome id.
+The source is <code>payload</code> or <code>api</code> (including unavailable API fallback for missing
+stored identity). A supplied evidence merge SHA must match the stored SHA;
+API evidence must supply it. For a matching SHA, usable <code>action=closed</code>,
+<code>merged=true</code> payloads take precedence over later edits, then the newest usable
+payload without a SHA, then API fallback. API fallback uses the current title.
+Only API 404 becomes unknown; authentication/permission errors, exhausted
+retries and interruption abort without writing a plan. Incomplete evidence or
+a mismatched API merge identity remains unknown.
+Raw branch hashes and issue attribution never establish a revert.</p>
+<p><code>tierd outcomes exclude-reverts --apply PLANFILE --actor OPERATOR --approved-digest SHA256 [--db PATH]</code> requires recorded operator sign-off on
+that exact dry-run plan. Operators must review and approve each install&#39;s plan
+and must not run apply unattended. Actor/approval are self-asserted, not
+authentication. Apply requires the file to be byte-identical to the dry-run
+encoder&#39;s canonical re-encoding of the decoded plan (two-space indentation and
+a final newline); duplicate/case-variant keys, reformatted whitespace and unknown
+JSON fields are refused. It checks the raw-bytes approval digest, version and
+counts, and each row&#39;s evidence for self-consistency against the shared
+classifier, including consistency between <code>reason</code> and <code>verdict</code>. <code>payload</code>
+rows are re-verified against retained payloads before any exclusions are applied;
+missing or changed retained evidence requires a fresh dry run and approval.
+Apply accepts no filters or API/output flags and makes no API requests. Each
+<code>exclude</code> row is verified and moved through the existing exclusion mechanism
+atomically under its write lock. Earlier rows remain committed if a later row
+is stale or erased. Matching replay is a no-op. The existing audit row holds
+actor, time, approved raw plan digest and candidate evidence; no new schema or
+unique key is introduced. Exit status is 0 on success, 1 on invalid input or
+apply failure; success JSON contains <code>plan_digest</code>, <code>applied</code>, <code>replayed</code>,
+<code>skipped</code> and <code>actor_identity</code>. Sealed report bytes are unchanged. Historical
+unsealed manifests can mismatch after current outcomes are excluded. See the
+<a href="technical-reference.html#exclude-recognised-revert-prs-from-existing-outcomes-1277" rel="nofollow">operator procedure</a>.</p>
+<h3 id="operator-lifecycle">Operator lifecycle</h3>
+<p><code>tierd corrections list|show|confirm|dispute|withdraw|settle --db PATH</code> operates
+on local recorded evidence. Mutations use <code>--relation ID --revision N --actor LOGIN --role ROLE</code>; actor/role are <strong>self-asserted local input, not authentication</strong>.
+This installation&#39;s confirmer and settler is the operator. Confirmation requires
+an actor different from the declarer and reviewed sizing: <code>--reviewed-original</code>,
+<code>--reviewed-own</code>, <code>--reviewed-before</code>, <code>--reviewed-after</code> (or explicit
+<code>--pure-repair</code>), <code>--scope</code>, <code>--rationale</code>, <code>--reviewer</code>, <code>--reviewed-at</code>.
+Comparison identities use <code>--comparison-base</code>, <code>--comparison-before</code>,
+<code>--comparison-after</code>. Review time is RFC3339; weights are exact rational values.</p>
+<p>Disputes and withdrawals require <code>--reason</code>. A dispute or withdrawal after
+confirmation retains the last allocation until operator settlement with
+<code>--settlement uphold|re-assess|remove</code>; re-assessment requires a reviewed sizing
+record. Revision checks reject stale decisions; replay of an identical audited
+action is idempotent. Confirmation never enables scoring. Distinct-root
+relations remain pending under D2; launch scoring makes no multi-root claim.</p>
+<h3 id="outcome-and-evidence-exports">Outcome and evidence exports</h3>
+<p><code>GET /api/v1/outcomes</code> retains the meaning and types of existing <code>weight</code>,
+<code>quality</code>, <code>additions</code>, <code>deletions</code>, <code>changed_files</code> and all existing CSV positions.
+JSON adds nullable <code>raw_additions</code>, <code>raw_deletions</code>, <code>raw_changed_files</code> and
+<code>diff_stats_available</code>. SQL NULL differs from a genuine numeric zero; pre-cutover
+API all-zero stats remain unavailable evidence. A persisted projection adds
+<code>raw_weight</code>, <code>reviewed_own_weight</code>, <code>marginal_credit</code>, <code>credited_weight</code>,
+<code>projected_quality</code>, <code>allocated_points</code>, <code>ranking_eligibility</code>, <code>status</code>,
+<code>pending_reason</code>, <code>rule_version</code>, <code>provisional</code>, <code>disputed</code>, <code>frozen</code>.
+Sizing/share/marginal fields retain exact rational strings. Quality and allocated
+points are numeric. <code>allocated_points</code> is final participant credit, consumed
+once; never reconstruct it by dividing and multiplying by quality. D1 preserves
+each follow-up&#39;s own quality. Frozen allocations survive endpoint erasure without
+redistribution.</p>
+<p>The CSV prefix through <code>push_day</code> is unchanged. Append this tail in order:</p>
+<pre><code>raw_additions,raw_deletions,raw_changed_files,diff_stats_available,reviewed_own_weight,marginal_credit,credited_weight,projected_quality,allocated_points,ranking_eligibility,correction_status,correction_pending_reason,correction_rule_version,correction_provisional,correction_disputed,correction_frozen
+</code></pre>
+<p><code>GET /api/v1/corrections/{kind}</code> adds read-scoped exports for <code>relations</code>,
+<code>audit</code>, <code>assessments</code> and <code>allocations</code>. Each supports the bulk
+export pagination, <code>since</code>/<code>until</code>, opaque cursor and <code>Accept: text/csv</code> contract,
+and returns <code>{next_cursor, &lt;kind&gt;: [...]}</code> in JSON. These exports window by
+recording time, while the manifest digest windows by endpoint dependency.
+Nullable endpoints and text reflect erasure; a missing endpoint is never a new
+identity. Free text passes through CSV formula protection. Team/division modes
+return <code>403</code> <strong>before any evidence query</strong>; identifying evidence is <code>not_shown</code>.</p>
+<h3 id="digest-and-manifest-verification">Digest and manifest verification</h3>
+<p>New digests use <strong><code>tierdig2:</code> plus 64 hex characters</strong>. This is an explicit
+scheme change, including new domain frames for token events. Token frames retain
+17 fields. Outcome frames increase from 11 to 16: the original 11, then nullable
+additions, deletions, changed files, merge occurrence, and the legacy stats
+availability bit. Nullable fields use <code>n</code> for NULL or <code>v</code> plus stored text;
+timestamps use raw stored bytes. No receipt-time fallback substitutes for merge
+occurrence evidence. Framing is an eight-byte big-endian byte length followed by
+UTF-8 payload, with fixed arity per row. Floats retain the exact canonical
+hexadecimal representation with negative zero normalized.</p>
+<p><code>events_digest.rows</code> still counts token rows in <code>[token_since, until)</code>;
+<code>outcomes_digest.rows</code> still counts outcome rows in <code>[since, until)</code>, under the
+same repository scope. Neither population changes. The additive
+<code>corrections_digest</code> is separately domain-separated and has <code>{value, counts}</code>;
+<code>counts</code> contains <code>declarations</code>, <code>relations</code>, <code>audit</code>, <code>assessments</code>,
+<code>allocations</code>, <code>dependency_outcomes</code>. Its graph starts with window outcomes and
+endpoint merge occurrence evidence, then closes over connected declarations,
+relations, audit, assessments, allocation chain versions and outcome evidence.
+It includes ancestors/children outside the window and dispositions recorded
+later. Independent repositories remain outside the selected dependency graph.
+Each table has its own domain and explicit ordered column list; NULL, integer,
+float and text have distinct frame tags. Erasure removes identifiers from the
+stored inputs; surviving frozen numeric allocations remain digestible.</p>
+<p><code>tiermanifest1</code> is retained because all manifest changes are additive:</p>
+<ul>
+<li><code>scoring_policy</code>, <code>correction_rule_version</code>, <code>rubric_version</code> pin the same
+scoring rule stamp. <code>rubric.version</code> agrees: legacy/legacy-v1/1 or event3/event3-v2/2.</li>
+<li><code>outcome_counts: {outcome_n, sample_n}</code> pins raw and eligible counts separately.</li>
+<li><code>corrections_digest</code> pins corrective evidence even while scoring is disabled.</li>
+<li><code>watermarks.ledgers.max_correction_audit_id</code>, <code>correction_audit_count</code> and
+<code>correction_projection_revision</code> pin install-wide audit and projection state.
+They can move without a change in this window; the scoped digest identifies
+whether this window&#39;s evidence changed.</li>
+</ul>
+<p>Watermarks, counts, raw outcome inputs and all digests use one read snapshot.
+TIER resolves the stored scoring policy in that same snapshot for each request;
+the policy stamp and eligible counts cannot use stale startup policy options.
+Manifest policy provenance uses only the top-level evidence fields above, and the
+projection revision uses only <code>watermarks.ledgers.correction_projection_revision</code>.
+The nested <code>correction_policy</code> receipt remains part of enabled score responses.
+Team/division manifests withhold <code>outcome_counts</code> and all three digests along
+with <code>watermarks.window</code>, declaring the withhold in <code>kanon_suppressed</code> and
+<code>digests_omitted</code>. TIER also withholds <code>correction_projection_revision</code> in
+these modes. Policy stamps and the remaining install-wide ledgers stay visible.</p>
+<p><code>tierd verify-report</code> recognizes rubrics 1 and 2 under their own pinned policies
+and passes that policy to the scoring handler for replay. A manifest without
+Event 3 fields uses legacy-v1; a rubric-2 manifest requires explicit policy pins.
+Unknown policies/rules, contradictory policy/rubric pins, unknown digest schemes
+and equal hashes with contradictory row counts are uncheckable (exit 2), never
+agreement. Other rubric versions report CHANGED under R-2026-10-14-20; the two
+rubric pins must still agree. An actual changed input gives exit 1. <strong>Old <code>tierdig1</code> pins are
+recomputed with their original domains, 17/11 frames, column projections and
+scope</strong>, so an unchanged archived report verifies cleanly; values from different
+schemes are never compared as tampering. No scoring flag is enabled by verification.
+The current stored correction policy and install-wide corrective counters are
+informational; a live policy change cannot override the pinned replay policy or
+refute an unchanged report. The verifier checks the replayed score body&#39;s nested
+<code>correction_policy</code> receipt independently of the requested manifest policy.
+Sealed reports likewise recompute with their recorded policy, rule and rubric.</p>
 <h2 id="api-changelog">API changelog</h2>
+<ul>
+<li><strong>#972 / #1279 -- <code>GET /api/v1/diagnostics/captured-dollars</code> (ADDITIVE).</strong>
+New public v1 read endpoint with the same stability promise as the other v1
+reads. Read scope, developer mode only (<code>403</code> in team/division modes), with
+the same <code>since</code> / <code>until</code> / <code>before</code> / <code>repo</code> bounds as <code>/scores</code>. Live
+diagnostic evidence is separate from reproducible scores; no released
+<code>/scores</code> field is removed or changed.</li>
+</ul>
 <p>Newest first. Every entry names the change, its classification, and the issue.
 Backfilled entries (<code>#185</code>, <code>#187</code>, <code>#191</code>, and the additive-column history)
 predate this discipline and are recorded here so the record is complete.</p>
 <ul>
+<li>
+<p><strong>#1235 -- Event 3 scoring contract (ADDITIVE fields/option/CLI/routes;
+POLICY-GATED semantic change).</strong> The contract adds <code>WithScoringPolicy</code>, <code>outcome_n</code>
+and the policy/rule/rubric stamp, plus assessment/allocation DSAR arrays and
+endpoint-aware scrub counts. It also adds audited corrective
+commands, enabled-policy SampleN and shared projected readers/bootstrap,
+detail projections, append-only outcome CSV fields and read-scoped corrective
+evidence exports. Flag-off scores keep legacy bytes. See the
+<a href="#event-3-corrective-scoring-contract-1235" rel="nofollow">Event 3 contract</a> for field names,
+actor limitations, count populations and anonymized suppression. Production
+enablement remains off by default and requires operator configuration.</p>
+</li>
+<li>
+<p><strong>#1235 -- Event 3 evidence pins (DIGEST SCHEME CHANGE; ADDITIVE manifest).</strong>
+<code>tierdig2</code> adds nullable stats, merge occurrence and availability to outcome
+frames (11 → 16), and a domain-separated corrective digest with typed counts
+over full connected dependencies. Existing digest row populations stay intact.
+<code>tiermanifest1</code> adds policy/rule/rubric, raw/eligible counts and corrective
+audit/revision pins in one snapshot. The verifier replays the pinned policy,
+verifies <code>tierdig1</code> with its old definition, and refuses unknown schemes rather
+than calling a scheme transition tampering. The digest and verifier changes
+ship together; no schema bump or production flag enablement.</p>
+</li>
+<li>
+<p><strong>#1228 -- unresolved revert diagnostics (ADDITIVE export fields/type).</strong>
+<code>GET /api/v1/quality_events</code> adds <code>reason</code>, <code>status</code>, and <code>evidence</code> to JSON
+and appends them to CSV. <code>revert_ambiguous</code> is an unresolved check, never
+penalty or quality evidence. <code>GET /api/v1/outcomes</code> adds optional JSON
+<code>quality_status</code> and appends the CSV column; <code>unknown</code> is diagnostic and
+leaves numeric quality unchanged. See the endpoint schemas above.</p>
+</li>
+<li>
+<p><strong>#1228 -- unknown-pricing token share on <code>/fidelity</code> (ADDITIVE response fields).</strong>
+<code>GET /api/v1/fidelity</code> adds per-developer <code>unknown_pricing_token_share</code> and
+<code>unknown_pricing_token_share_label</code>, both always present, plus optional
+<code>cost_label</code> (<code>&#34;estimated cost&#34;</code> iff <code>unknown_pricing_token_share &gt; 0</code>). The
+share measures tokens with an unknown pricing basis or without an exact entry
+in the current price table over the 30d window; it is <code>0</code> with no 30d tokens.</p>
+</li>
+<li>
+<p><strong>#1074 -- PR attribution at insert (ADDITIVE request fields/rule value).</strong>
+<code>POST /api/v1/events</code> accepts optional <code>pr_number</code> and <code>branch_hash</code> fields.
+At insert, an unattributed event in a real repository and an unsealed month
+resolves through exactly one real-issue outcome on <code>(repo, pr_number)</code> and
+records <code>pr-number-at-insert</code>, a server-assigned rule never client-sent.</p>
+</li>
+<li>
+<p><strong>#1144 -- scoped ingestion (ADDITIVE auth/response; BREAKING collision behaviour).</strong>
+<code>POST /api/v1/events</code> also accepts the new ingest scope alongside write/admin.
+Its receipt gains the additive <code>rejected_cross_developer</code> count. Cross-developer
+idempotency-key collisions no longer merge token counts: they are rejected and
+counted in <code>rejected_cross_developer</code>.</p>
+</li>
 <li>
 <p><strong>#1095 -- S03-3 requires an explicit paid amount (BREAKING request behaviour).</strong>
 <code>POST /api/v1/actual_spend</code> and <code>POST /api/v1/org_actual_spend</code> now return
@@ -2525,7 +3062,8 @@ or under a fold rule this binary does not refold, are a <code>409</code> carryin
 <p><strong>#823 -- the <code>/events</code> export names the rule that assigned each row&#39;s issue
 (ADDITIVE; one export column).</strong> <code>GET /api/v1/events</code> appends
 <code>attribution_rule</code> as the last JSON field and the last CSV column: <code>branch</code>,
-<code>worktree-cwd</code>, <code>worktree-toolpath</code> or <code>carry</code>; <code>legacy</code> where no rule was
+<code>worktree-cwd</code>, <code>worktree-toolpath</code>, <code>carry</code>, <code>pr-number-at-insert</code> or
+<code>branch-at-merge</code> (#1074: server-assigned, never client-sent); <code>legacy</code> where no rule was
 recorded (every row stored before #823); <code>unknown</code> for a stored value outside
 that set. The DSAR export (<code>GET /developer/{id}/export</code>) shows the stored
 value as stored: <code>null</code> where none was recorded. No field is retired; see
@@ -3233,7 +3771,7 @@ a guarantee against a determined caller who can issue arbitrary windows.</p>
 <li>
 <p><strong>#277 -- <code>GET /api/v1/scores/compare</code> (additive: new endpoint).</strong> A before/after
 period comparison: two half-open windows (<code>since_a</code>/<code>until_a</code>, <code>since_b</code>/<code>until_b</code>)
-in, per-developer or per-group deltas plus a CI-overlap <code>significant</code> flag out. Read
+in, per-developer or per-group deltas plus a legacy raw, unvalidated non-overlap <code>significant</code> flag out. Read
 scope. Reuses the <code>/scores</code> windowed computation (extracted into a shared
 <code>loadWindow</code>), so a compared score matches <code>/scores</code> for the same window. Three
 invariants are enforced server-side (the reason it is an endpoint, not a client
@@ -3321,7 +3859,7 @@ trust strip keys only off the zero-token fields, so it is visually unchanged.</p
 <code>omitempty</code> <code>[&lt;int&gt;]</code> field to the <a href="#get-apiv1scores" rel="nofollow"><code>data_quality</code></a> block: the
 ascending distinct <code>price_table</code> versions that priced the window&#39;s <code>token_events</code>,
 present ONLY when more than one version is spanned. <code>scores.price_table.version</code>
-stamps a single active table, but <code>cost_micro</code> is immutable per row (#233) so a
+stamps a single active table, but promotions retain the original row basis (#1231), so a
 window legitimately mixes historical and active pricing; this WARN keeps the stamp
 from reading as false uniformity. Name-free (version integers only), so it carries
 identically in developer and team-aggregation mode. No existing field changed
@@ -3483,6 +4021,13 @@ API tier itself PRODUCES.
 The <code>/api/v1</code> REST surface is not yet pinned as its own formally versioned seam
 contract; that is a possible follow-up once an external consumer of the REST
 contract needs a stability guarantee.</p>
+<h3 id="merged-pr-attribution-evidence-1074">Merged-PR attribution evidence (#1074)</h3>
+<p>Developer data exports include nullable outcome <code>head_branch_hash</code>, <code>created_at</code> and
+<code>merged_at</code>. Older rows retain NULL. These fields are additive in that export; the
+<code>GET /api/v1/outcomes</code> JSON/CSV contract and <code>POST /api/v1/outcomes</code> request are unchanged.
+Head refs are hashed using canonical <code>repo + &#34;\x00&#34; + branch</code> after stripping
+<code>refs/heads/</code>; default/unknown branches produce NULL, and raw head refs are not stored
+on outcomes. Missing PR-opened or merge evidence disables branch credit.</p>
 
 </main></div>
 <footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>

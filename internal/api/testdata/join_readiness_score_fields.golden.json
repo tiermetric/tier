@@ -1,0 +1,32 @@
+{
+  "developers": [
+    {
+      "developer": "alice",
+      "tier": 300,
+      "weighted_points": 3,
+      "total_cost_usd": 10,
+      "actual_paid_usd": 0,
+      "spend_leverage": 0,
+      "coverage_pct": 100,
+      "exploratory_cost_share": 0,
+      "cost_per_point": 3.3333333333333335,
+      "sample_n": 1,
+      "ci_low": 0,
+      "ci_high": 0,
+      "cost_per_point_ci_low": 0,
+      "cost_per_point_ci_high": 0,
+      "ranked": false,
+      "flagged_outcomes": 1
+    }
+  ],
+  "total": {
+    "tier": 300,
+    "weighted_points": 3,
+    "total_cost_usd": 10,
+    "actual_paid_usd": 0,
+    "spend_leverage": 0,
+    "coverage_pct": 100,
+    "cost_per_point": 3.3333333333333335,
+    "ranked": false
+  }
+}

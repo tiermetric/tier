@@ -39,4 +39,8 @@ package scoring
 // security, incident, tech-debt, research, compliance). See docs/rubric.md for
 // the worked per-size and per-work_type examples and the "what you may / may not
 // compare" rules, and docs/api-compatibility.md for the wire contract.
+//
+// No bump is owed while the correction rule is unreachable from scoring;
+// PR 16 carries the bump, derived from stored state and tied to the flag
+// (R-2026-10-14-20).
 const RubricVersion = 1

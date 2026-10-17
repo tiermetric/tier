@@ -867,9 +867,9 @@ func (c *Collector) buildEvents(s *rolloutSession, t *scanTarget, developer stri
 			Input:     call.Input,
 			Output:    call.Output,
 			CacheRead: call.CacheRead,
-			// OpenAI has no cache-write SKU, so both write buckets stay zero —
-			// identical to the proxy's parseOpenAI. See parseUsage for what
-			// happens to a nonzero cache_write_input_tokens.
+			// Current Codex accounting omits a separate write class, so both
+			// write buckets stay zero. parseRollout warns on a nonzero write
+			// count; separate pricing and containment remain unvalidated.
 		})
 		events = append(events, collector.TokenEvent{
 			Developer: developer,

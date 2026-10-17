@@ -14,12 +14,17 @@ func seedDeveloperPII(t *testing.T, db *DB, dev string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
+	if err := db.ExcludePROutcome(ctx, Outcome{Developer: dev, Repo: "acme/" + dev, PRNumber: 1, MergeCommitSHA: "excluded-" + dev, Timestamp: now}, "head.ref matches ^revert-[0-9]+-", "github-webhook"); err != nil {
+		t.Fatal(err)
+	}
 	stmts := []struct {
 		sql  string
 		args []any
 	}{
 		{`INSERT INTO token_events (developer, issue_id, model, cost_micro, source, fidelity, ts) VALUES (?,?,?,?,?,?,?)`,
 			[]any{dev, "issue-" + dev, "claude-sonnet-4", int64(1000), "jsonl", "realtime", now}},
+		{`INSERT INTO pricing_observation_audit (developer, token_event_id, kind, before_json, after_json) VALUES (?,?,?,?,?)`,
+			[]any{dev, 1, "promotion", "{}", "{}"}},
 		{`INSERT INTO outcomes (developer, issue_id, weight, quality, ts) VALUES (?,?,?,?,?)`,
 			[]any{dev, "issue-" + dev, 1.0, 1.0, now}},
 		{`INSERT INTO actual_spend (developer, period, actual_paid_micro, ts) VALUES (?,?,?,?)`,
@@ -239,6 +244,9 @@ func TestExportDeveloper_ReturnsAllTables(t *testing.T) {
 	// developer-keyed table, plus 3 closed memberships; 1 alias row.
 	if len(exp.TokenEvents) != 2 {
 		t.Errorf("TokenEvents = %d, want 2", len(exp.TokenEvents))
+	}
+	if len(exp.OutcomeExclusions) != 2 {
+		t.Errorf("OutcomeExclusions = %d, want 2", len(exp.OutcomeExclusions))
 	}
 	if len(exp.Outcomes) != 2 {
 		t.Errorf("Outcomes = %d, want 2", len(exp.Outcomes))

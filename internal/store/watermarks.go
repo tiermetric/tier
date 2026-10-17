@@ -14,19 +14,21 @@ import (
 // different numbers and both be correct. A report binds to (predicate, as-of),
 // never the predicate alone.
 //
-// 🔴 WHY THERE ARE FIVE LEDGERS AND NOT ONE. A watermark on `token_events.id`
+// 🔴 WHY THERE ARE SIX MUTATION LEDGERS (INCLUDING EVENT 3 U3) AND NOT ONE. A watermark on `token_events.id`
 // alone CANNOT bound a report, and that is measured, not reasoned:
 // `outcomes.quality` is MUTATED IN PLACE by UpdateQuality and
 // UpdateQualityForOutcome. An outcome's quality — a direct multiplier on every
 // weighted point the report publishes — can change with NO NEW ROW anywhere in
 // `token_events` or `outcomes`. `quality_history` is the append-only transition
-// log that makes such a revision visible, and it is joined by four more
+// log that makes such a revision visible, and it is joined by the existing
 // in-place-mutation ledgers: `reprice_row_audit` (cost_micro/price_version/
 // billing_mode rewritten by Reprice), `cost_correction_audit` (cost_micro
 // rewritten by a sanctioned POST /costs override, #346),
 // `repo_repair_row_audit` (repo rewritten by RepairRepo, #493) and
 // `push_outcome_audit` (a push outcome's developer/ts re-derived, or the row
 // superseded by a merged PR, #849).
+// Event 3 adds correction_audit plus the monotonic correction_policy projection
+// revision; content digests cover in-place edits to corrective evidence.
 // TestWatermarks_QualityRevisionIsInvisibleToTheObviousSequences drives exactly
 // that case: the two obvious id sequences do not move and the report changes.
 //
@@ -36,7 +38,7 @@ import (
 //	MAX(id)  catches an INSERT      — a new row raises the high-water mark.
 //	COUNT(*) catches a DELETE       — EraseDeveloper hard-deletes; ids never
 //	                                  come back, so only the count moves.
-//	neither  catches an in-place UPDATE — which is precisely why the five
+//	neither  catches an in-place UPDATE — which is precisely why the six
 //	                                  ledgers above are watermarked at all: an
 //	                                  UPDATE that matters appends to one of them.
 //
@@ -93,7 +95,7 @@ type Watermarks struct {
 	// in an anonymized aggregation mode rather than publishing an unfloored
 	// window aggregate.
 	Window WindowWatermarks `json:"window"`
-	// Ledgers is UNWINDOWED and UNSCOPED — install-wide positions of the five
+	// Ledgers is UNWINDOWED and UNSCOPED — install-wide positions of the six
 	// append-only mutation ledgers.
 	Ledgers LedgerWatermarks `json:"ledgers"`
 }
@@ -135,7 +137,8 @@ type WindowWatermarks struct {
 	OutcomeCount    int64 `json:"outcome_count"`
 }
 
-// LedgerWatermarks is the position of the five append-only mutation ledgers.
+// LedgerWatermarks pins six append-only mutation ledgers and the Event 3
+// projection state revision.
 //
 // 🔴 THEY ARE GLOBAL, NOT WINDOWED, AND THAT ASYMMETRY IS DELIBERATE. Every one
 // of these tables stamps `ts DEFAULT CURRENT_TIMESTAMP` — the instant of the
@@ -149,7 +152,7 @@ type WindowWatermarks struct {
 // ⚠️ It also keeps ReportWatermarks clear of the CURRENT_TIMESTAMP keyset trap:
 // these columns store second-precision 'YYYY-MM-DD HH:MM:SS' text, not Go's
 // time.Time rendering, so a bound time.Time would silently match no rows.
-// Nothing in this file binds a time against these five.
+// Nothing in this file binds a time against these six ledgers.
 //
 // Field names track the PHYSICAL tables. `reprice_row_audit` and
 // `repo_repair_row_audit` each have a sibling AGGREGATE ledger (`reprice_audit`,
@@ -158,14 +161,18 @@ type WindowWatermarks struct {
 // are what a replay needs. Naming these "reprice_audit" would point a reader at
 // the wrong table.
 type LedgerWatermarks struct {
-	MaxQualityHistoryID      int64 `json:"max_quality_history_id"`
-	QualityHistoryCount      int64 `json:"quality_history_count"`
-	MaxRepriceRowAuditID     int64 `json:"max_reprice_row_audit_id"`
-	RepriceRowAuditCount     int64 `json:"reprice_row_audit_count"`
-	MaxCostCorrectionAuditID int64 `json:"max_cost_correction_audit_id"`
-	CostCorrectionAuditCount int64 `json:"cost_correction_audit_count"`
-	MaxRepoRepairRowAuditID  int64 `json:"max_repo_repair_row_audit_id"`
-	RepoRepairRowAuditCount  int64 `json:"repo_repair_row_audit_count"`
+	MaxCorrectionAuditID int64 `json:"max_correction_audit_id"`
+	CorrectionAuditCount int64 `json:"correction_audit_count"`
+	// A monotonic resolved-state revision, not a physical row ID.
+	CorrectionProjectionRevision int64 `json:"correction_projection_revision"`
+	MaxQualityHistoryID          int64 `json:"max_quality_history_id"`
+	QualityHistoryCount          int64 `json:"quality_history_count"`
+	MaxRepriceRowAuditID         int64 `json:"max_reprice_row_audit_id"`
+	RepriceRowAuditCount         int64 `json:"reprice_row_audit_count"`
+	MaxCostCorrectionAuditID     int64 `json:"max_cost_correction_audit_id"`
+	CostCorrectionAuditCount     int64 `json:"cost_correction_audit_count"`
+	MaxRepoRepairRowAuditID      int64 `json:"max_repo_repair_row_audit_id"`
+	RepoRepairRowAuditCount      int64 `json:"repo_repair_row_audit_count"`
 	// push_outcome_audit (#849): a merged PR superseding a push outcome, or a
 	// push outcome's owner being re-derived. The re-derivation rewrites
 	// outcomes.developer/ts in place, so only this ledger shows it moved.
@@ -190,13 +197,14 @@ var watermarkLedgers = map[string]string{
 	"cost_correction_audit": "cost_correction_audit",
 	"repo_repair_row_audit": "repo_repair_row_audit",
 	"push_outcome_audit":    "push_outcome_audit",
+	"correction_audit":      "correction_audit",
 }
 
 // ReportWatermarks reads the as-of position of every ledger in Watermarks for
 // the half-open window [since, until) under `scope` (#715). A zero `until` is
 // open-ended, matching every other windowed read.
 //
-// 🔴 ALL SEVEN LEDGERS ARE READ IN ONE TRANSACTION, AND THAT IS A CORRECTNESS
+// 🔴 ALL EIGHT ROW SEQUENCES AND THE PROJECTION REVISION ARE READ IN ONE TRANSACTION, AND THAT IS A CORRECTNESS
 // REQUIREMENT, NOT TIDINESS. The whole product of this function is a claim about
 // ONE INSTANT. Read across separate connections, a quality revision committing
 // between the outcomes read and the quality_history read yields a manifest whose
@@ -216,7 +224,7 @@ var watermarkLedgers = map[string]string{
 // open, not how long any single one runs. beginRead's only previous caller was a
 // human-initiated DSAR export, where the gap between calls is the bound; this is
 // the first REQUEST-PATH holder, and a report generator can poll it in a loop.
-// The transaction is deliberately kept to four statements and no application
+// The transaction is deliberately kept to three statements and no application
 // work for that reason. If a future caller adds work inside it, re-read that
 // measurement first.
 func (d *DB) ReportWatermarks(ctx context.Context, since, until time.Time, scope RepoScope) (Watermarks, error) {
@@ -267,8 +275,8 @@ func (r reader) ReportWatermarks(ctx context.Context, since, until time.Time, sc
 		return Watermarks{}, err
 	}
 
-	// The five mutation ledgers, unwindowed and unscoped — see the field comment.
-	// One statement so all five share the snapshot without five more round trips.
+	// The six mutation ledgers and projection revision, unwindowed and unscoped — see the field comment.
+	// One statement so all pins share the snapshot without additional round trips.
 	if err := tx.QueryRowContext(ctx, `
 		SELECT
 		    (SELECT COALESCE(MAX(id), 0) FROM quality_history),
@@ -280,13 +288,18 @@ func (r reader) ReportWatermarks(ctx context.Context, since, until time.Time, sc
 		    (SELECT COALESCE(MAX(id), 0) FROM repo_repair_row_audit),
 		    (SELECT COUNT(*)             FROM repo_repair_row_audit),
 		    (SELECT COALESCE(MAX(id), 0) FROM push_outcome_audit),
-		    (SELECT COUNT(*)             FROM push_outcome_audit)`,
+		    (SELECT COUNT(*)             FROM push_outcome_audit),
+            (SELECT COALESCE(MAX(id),0) FROM correction_audit),
+            (SELECT COUNT(*) FROM correction_audit),
+            (SELECT projection_revision FROM correction_policy WHERE id=1)`,
 	).Scan(
 		&w.Ledgers.MaxQualityHistoryID, &w.Ledgers.QualityHistoryCount,
 		&w.Ledgers.MaxRepriceRowAuditID, &w.Ledgers.RepriceRowAuditCount,
 		&w.Ledgers.MaxCostCorrectionAuditID, &w.Ledgers.CostCorrectionAuditCount,
 		&w.Ledgers.MaxRepoRepairRowAuditID, &w.Ledgers.RepoRepairRowAuditCount,
 		&w.Ledgers.MaxPushOutcomeAuditID, &w.Ledgers.PushOutcomeAuditCount,
+		&w.Ledgers.MaxCorrectionAuditID, &w.Ledgers.CorrectionAuditCount,
+		&w.Ledgers.CorrectionProjectionRevision,
 	); err != nil {
 		return Watermarks{}, fmt.Errorf("ReportWatermarks: mutation ledgers: %w", err)
 	}

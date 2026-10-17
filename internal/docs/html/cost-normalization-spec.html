@@ -62,15 +62,15 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="tier-cost-normalization-specification">TIER Cost Normalization Specification</h1>
-<h2 id="version-10--issued-march-26-2026-last-revised-2026-07-13">Version 1.0 — issued March 26, 2026; last revised 2026-07-13</h2>
+<h2 id="version-11--issued-march-26-2026-last-revised-2026-10-17-v060-release">Version 1.1 — issued March 26, 2026; last revised 2026-10-17 (v0.6.0 release)</h2>
 <p><strong>Status:</strong> Published specification. It describes the <strong>target</strong> design; <code>tierd</code> implements a subset, itemized in the implementation-status banner below.</p>
 <p><strong>Scope:</strong> Defines how the TIER denominator converts raw token consumption into cost-normalized dollars, ensuring comparability across API providers, self-hosted infrastructure, hybrid environments, and time periods.</p>
 <blockquote>
-<p>⚠️ <strong>Implementation status (as of 2026-09-26, <code>main</code>).</strong> This document specifies
+<p>⚠️ <strong>Implementation status (v0.6.0 release, 2026-10-17).</strong> This document specifies
 the <strong>full, target</strong> cost-normalization design. <code>tierd</code> implements a <strong>subset</strong>,
 and two areas below describe behavior that <strong>no code enforces today</strong>. Ground
 truth is <code>internal/store/prices.go</code> (<code>ComputeCost</code>) + <code>internal/store/prices.yaml</code>
-(<code>version: 12</code>, <code>effective_date: 2026-10-02</code>).</p>
+(v0.6.0: <code>version: 14</code>, <code>effective_date: 2026-10-12</code>, 93 models).</p>
 <p><strong>Unknown-model fallback — shipped reality (NOT the tiered design in §2.2 / §2.3 / §7.1).</strong>
 There is <strong>no</strong> <code>frontier-default</code> / <code>standard-default</code> / <code>efficient-default</code>
 tier, <strong>no</strong> <code>standard-default 3.00/12.00</code> &#34;ultimate fallback&#34;, <strong>no</strong>
@@ -91,8 +91,8 @@ prices it at a <strong>self-hosted reference rate</strong>:</p>
 <p><strong>Governance / RPT publication is aspirational.</strong> No official RPT has ever been
 published. The &#34;published annually, pinned
 to January 1 / community review Dec 15-31&#34; language in §2.2, §2.4, and §8 is
-<strong>target governance, not current fact</strong>. The shipped table is the embedded
-<code>internal/store/prices.yaml</code> (v12, effective <strong>2026-10-02</strong>).</p>
+<strong>target governance, not current fact</strong>. The v0.6.0 table is the embedded
+<code>internal/store/prices.yaml</code> (v14, effective <strong>2026-10-12</strong>).</p>
 <p><strong>RPT-2026 table errata.</strong> Several rows in §2.3 below carry <strong>known-wrong</strong>
 prices (retired / never-launched models, swapped in/out rates). They are <strong>kept
 for provenance</strong> and each is annotated with a pointer to the corrected
@@ -122,8 +122,8 @@ uncorrected rows.</p>
 <blockquote>
 <p><strong>Target governance, not current fact.</strong> The annual-publication / January-1
 pinning described here is the intended governance model. No RPT has been
-published to date; the shipped reference table is the embedded
-<code>internal/store/prices.yaml</code> (v12, <code>effective_date: 2026-10-02</code>). See the
+published to date; the v0.6.0 reference table is the embedded
+<code>internal/store/prices.yaml</code> (v14, <code>effective_date: 2026-10-12</code>). See the
 implementation-status banner at the top of this document.</p>
 </blockquote>
 <p>The TIER project intends to publish an official RPT annually, pinned to January 1 of each year. The RPT for a given year is called <strong>RPT-YYYY</strong> (e.g., RPT-2026).</p>
@@ -417,9 +417,9 @@ at the top and <code>docs/reference-price-table.md</code> §5.</p>
 <h3 id="24-rpt-update-cadence">2.4 RPT Update Cadence</h3>
 <blockquote>
 <p>⚠️ <strong>Target cadence, not current practice.</strong> No RPT has been published on this
-cadence to date. Today the reference table ships embedded in the binary
-(<code>internal/store/prices.yaml</code>, v12, effective 2026-10-02) and is updated by
-editing that file, not by an annual January-1 publication.</p>
+cadence to date. TIER v0.6.0 embeds
+the reference table (<code>internal/store/prices.yaml</code>, v14, effective 2026-10-12).
+Maintainers update it by editing that file, not by an annual January-1 publication.</p>
 </blockquote>
 <ul>
 <li><strong>Annual publication:</strong> A new RPT is intended to be published each January 1. It is the sole reference for all TIER scores computed during that calendar year.</li>
@@ -899,8 +899,8 @@ the implementation-status banner at the top.</p>
 <p>⚠️ <strong>Proposed process, not yet operating.</strong> No RPT has been published through
 this process; the community-review and
 January-1 publication steps below are the intended governance model, not a
-record of anything that has happened. Today the table ships embedded
-(<code>internal/store/prices.yaml</code>, v12, effective 2026-10-02).</p>
+record of anything that has happened. TIER v0.6.0 embeds the table
+(<code>internal/store/prices.yaml</code>, v14, effective 2026-10-12).</p>
 </blockquote>
 <ol>
 <li><strong>Data collection (December):</strong> The TIER project scrapes current list prices from all major providers&#39; public pricing pages.</li>

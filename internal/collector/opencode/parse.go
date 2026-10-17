@@ -3,33 +3,9 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
-)
 
-// maxMessageTokens is the absolute sanity ceiling on any single token class in
-// one message. The additive identity below is RELATIONAL: an
-// internally-consistent but absurd row (~4e18 in every class) satisfies it at any
-// scale. Without a magnitude bound such a row prices to a clamped MaxInt64
-// cost_micro (~$9.2 trillion), and two of those overflow SQLite's integer SUM(),
-// which ERRORS rather than saturating — and SUM(cost_micro) backs /api/v1/scores,
-// so one corrupt local row would take down the read plane.
-//
-// ⚠️ IT IS DELIBERATELY SMALLER THAN codexrollout's 1e12, AND THE DIFFERENCE IS
-// NOT COSMETIC. That constant bounds a CUMULATIVE session series; this one bounds
-// ONE message. More importantly, the counts here are int64 and are narrowed to
-// `int` on the way into store.CostUsage — and `int` is 32 bits on a 32-bit build
-// (`go install` on GOARCH=386/arm/mips is supported even though the release
-// matrix is amd64/arm64 only). A 1e12 ceiling wraps there: a count of 3e9 narrows
-// to a NEGATIVE int and is priced as one.
-//
-// 2^29 keeps every narrowing safe by construction on every platform Go supports:
-// each class fits in an int32, and the one DERIVED value that is also narrowed —
-// output + reasoning — is at most 2^30, still inside int32. The five-class Total
-// can reach 5*2^29, which is why Total is compared as int64 and never narrowed.
-//
-// The bound is generous, not tight: 2^29 is 536,870,912 tokens in ONE message,
-// ~1000x the largest single message ever observed here (~5e5) and about $2,300 at
-// Z.ai's output rate for that one message. Nothing legitimate approaches it.
-const maxMessageTokens = 1 << 29
+	"github.com/tiermetric/tier/internal/tokenacct"
+)
 
 // messageData is the subset of Opencode's `message.data` JSON blob this collector
 // reads.
@@ -91,11 +67,19 @@ type usage struct {
 	TotalPresent bool
 }
 
-// BillableParts returns the sum of every class that participates in the additive
-// identity. Named rather than inlined so the check below and the error message it
-// produces cannot drift apart.
-func (u usage) BillableParts() int64 {
-	return u.Input + u.Output + u.Reasoning + u.CacheRead + u.CacheWrite
+// rawUsage preserves the collector's decoding convention: absent input and
+// output have already been resolved to zero. The shared rule itself requires
+// measured input and output; callers supplying raw nullable counts get
+// ErrUnmeasured when either is absent.
+func (u usage) rawUsage() tokenacct.RawUsage {
+	raw := tokenacct.RawUsage{
+		Input: &u.Input, Output: &u.Output, Reasoning: &u.Reasoning,
+		CacheRead: &u.CacheRead, CacheWrite: &u.CacheWrite,
+	}
+	if u.TotalPresent {
+		raw.Total = &u.Total
+	}
+	return raw
 }
 
 // AnyNonZero reports whether this row carries any token at all.
@@ -103,7 +87,7 @@ func (u usage) BillableParts() int64 {
 // ⚠️ IT CHECKS EACH FIELD, IT DOES NOT SUM THEM, and that is the point. Summing
 // first lets a malformed row cancel itself out — `input=5, output=-5` sums to
 // zero and would be filed under the QUIET zero-token counter instead of reaching
-// the loud negative-count arm in checkAdditiveIdentity. Both drop the row, so no
+// the loud negative-count arm in tokenacct.Opencode. Both drop the row, so no
 // wrong money either way; the difference is whether anyone finds out. Summing
 // five near-MaxInt64 values would also overflow int64 before any ceiling check
 // had a chance to run.
@@ -139,67 +123,4 @@ func readUsage(m messageData) usage {
 	}
 	u.Total = deref(m.Tokens.Total)
 	return u
-}
-
-// checkAdditiveIdentity asserts the invariants an Opencode row's own numbers must
-// satisfy before we are willing to price it.
-//
-// 🔴 THE IDENTITY IS ADDITIVE, WHICH IS THE OPPOSITE OF codexrollout's
-// checkContainment. Codex asserts `reasoning <= output` because Codex's reasoning
-// count sits INSIDE its output count; asserting that here would reject 77% of the
-// real corpus, where reasoning routinely exceeds output several-fold. What holds
-// here — on 3,943 of 3,943 completed GLM-5.3 rows — is
-//
-//	total == input + output + reasoning + cache.read + cache.write
-//
-// ⚠️ THE `cache.write` TERM IS UNMEASURED, and saying so precisely matters.
-// cache.write is 0 on every one of the 9,267 assistant rows in the maintainer's
-// store — every provider, every model — so the identity as measured is really the
-// four-term one, and the fifth term is a prediction about a shape nobody has
-// observed. It is included rather than ignored because the alternative is worse:
-// if Opencode ever reports a cache write and counts it in `total`, a four-term
-// check would reject that row, while a five-term check prices it. If instead it
-// reports a write OUTSIDE `total`, the five-term check rejects it loudly — which
-// is the correct outcome, because we would then not know whether the write is
-// billable, and this collector's contract is that no figure beats a wrong figure.
-//
-// ⚠️ WHAT THIS CHECK CANNOT SEE. A Codex-shaped row whose reasoning happens to be
-// ZERO satisfies the additive identity too (total == input + output, and adding a
-// zero reasoning changes nothing), so it is accepted and priced identically under
-// either convention. That is not a gap: where the two conventions agree, the
-// arithmetic agrees, and there is nothing to disambiguate. The check bites on
-// exactly the rows where they disagree.
-//
-// A violation is a SKIP, not a fatal, and the caller logs it at WARN with a
-// counter — the same posture codexrollout uses for implausible usage
-// (parse.go's checkContainment) with one deliberate difference: Codex fails the
-// whole FILE because its per-call values are derived by differencing a cumulative
-// series, so one bad snapshot poisons its neighbours. Opencode rows are
-// independent per-message facts, so a bad row costs exactly itself.
-func checkAdditiveIdentity(u usage) error {
-	if u.Input < 0 || u.Output < 0 || u.Reasoning < 0 || u.CacheRead < 0 ||
-		u.CacheWrite < 0 || u.Total < 0 {
-		return fmt.Errorf("implausible usage: a negative token count (total=%d input=%d output=%d reasoning=%d cache_read=%d cache_write=%d)",
-			u.Total, u.Input, u.Output, u.Reasoning, u.CacheRead, u.CacheWrite)
-	}
-	if u.Input > maxMessageTokens || u.Output > maxMessageTokens ||
-		u.Reasoning > maxMessageTokens || u.CacheRead > maxMessageTokens ||
-		u.CacheWrite > maxMessageTokens || u.Total > maxMessageTokens {
-		return fmt.Errorf("implausible usage: a token count exceeds the %d-token sanity ceiling (total=%d input=%d output=%d reasoning=%d cache_read=%d cache_write=%d)",
-			maxMessageTokens, u.Total, u.Input, u.Output, u.Reasoning, u.CacheRead, u.CacheWrite)
-	}
-	// The identity is only checkable when `total` was actually present. A row
-	// with no total and NO tokens at all is an aborted turn and is dropped
-	// earlier as zero-token; a row with no total but real tokens reaches the
-	// caller's unverifiable arm, which is loud. Neither is silently trusted.
-	if !u.TotalPresent {
-		return nil
-	}
-	if got := u.BillableParts(); u.Total != got {
-		return fmt.Errorf("additive identity broken: total=%d != input+output+reasoning+cache.read+cache.write=%d "+
-			"(input=%d output=%d reasoning=%d cache_read=%d cache_write=%d). "+
-			"Opencode's reasoning tokens sit BESIDE output, not inside it; a row that does not sum is a shape this collector has never seen and cannot price honestly",
-			u.Total, got, u.Input, u.Output, u.Reasoning, u.CacheRead, u.CacheWrite)
-	}
-	return nil
 }

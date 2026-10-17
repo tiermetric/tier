@@ -68,11 +68,15 @@ more.</p>
 <blockquote>
 <p><strong>The one-sentence version.</strong> Every report can be bound to a <em>manifest</em> naming
 the price table, the rows and the binary it was computed from — plus, on a
-<strong>scoped</strong> report, the repo-blind rows the scope dropped; <code>tierd verify-report</code> then either reproduces it, or <strong>names which of those inputs
-moved</strong>. It does <strong>not</strong> replay history, and there are inputs it does not
+<strong>scoped</strong> report, the repo-blind rows the scope dropped; <code>tierd verify-report</code> then checks the pinned inputs against the current database, or
+<strong>names which of those inputs moved</strong>. Equal pinned inputs do not establish
+byte-identical live output or complete historical capture. It does <strong>not</strong> replay history, and there are inputs it does not
 watch. Both limits are printed on every run, including the successful ones.</p>
 </blockquote>
 <hr>
+<p><strong>Series breaks.</strong> Before comparing periods, check the
+<a href="score-series-changes.html" rel="nofollow">score-series change register</a> and apply its comparison
+rule; name the applicable changes or state that the definition history is unknown.</p>
 <h2 id="1-what-a-report-is-bound-to">1. What a report is bound to</h2>
 <p><code>GET /api/v1/report_manifest</code> returns a <code>tiermanifest1</code> document. It is the
 receipt for a figure. On a developer-mode server with a token, pipe the header
@@ -430,15 +434,16 @@ UTC day, or pass explicit bounds.</p>
 audited reprice, a repo repair, a quality revision and a GDPR erasure are all
 <strong>legitimate</strong> — and without attribution each is indistinguishable from
 corruption.</p>
-<p>Below is output captured from a local <code>dev</code> build against a sample manifest and
-database. One row&#39;s <code>billing_mode</code> was edited in place. No row was added or removed:</p>
+<p>Below is illustrative output from a <code>dev</code> build of the code released in v0.6.0
+against a sample manifest and database; it is not a fresh capture.
+It shows one row&#39;s <code>billing_mode</code> edited in place, with no row added or removed:</p>
 <pre><code>$ bin/engine-pass/tierd verify-report bin/engine-pass/m.json --db bin/engine-pass/tier.db ; echo &#34;EXIT=$?&#34;
 verify-report: &#34;tiermanifest1&#34;  window &#34;2026-08-01T00:00:00Z&#34; .. &#34;2026-09-01T00:00:00Z&#34;  scope fleet-wide  aggregation &#34;developer&#34; k=(none)
 
 FAIL: a pinned INPUT moved. ⚠ The manifest pinned no results, so whether the
       published numbers moved with it is UNKNOWN to this run — see LIMITS.
 
-  price_table:          UNCHANGED   tierpt1:3a27fb89…, version 12, effective &#34;2026-10-02&#34;
+  price_table:          UNCHANGED   tierpt1:ac926691…, version 14, effective &#34;2026-10-12&#34;
   rubric:               UNCHANGED   version 1
   token_events:         UNCHANGED   no rows above watermark 4, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
   outcomes:             UNCHANGED   no rows above watermark 3, and the counted population still holds 3 rows at or below it, 3 pinned (count only)
@@ -479,9 +484,7 @@ bullets, a fourth when the manifest pinned no <code>results</code>, and one line
 <code>NOT PINNED</code> / <code>NOT CHECKED</code> dimension. The uncovered-inputs table and the
 cost-horizon note below are documented here and nowhere else.</p>
 <h3 id="it-attributes-it-does-not-replay-history">It attributes; it does not replay history</h3>
-<p><code>verify-report</code> recomputes the report <strong>against the database as it is now</strong>. When
-nothing moved, that recomputation <em>is</em> the original computation over the same
-rows, so <code>REPRODUCED</code> is a true statement. When something moved, it names the
+<p><code>verify-report</code> recomputes the report <strong>against the database as it is now</strong>. <code>REPRODUCED</code> means every pinned input is unchanged (see the unwatched inputs below). When something moved, it names the
 input — it does <strong>not</strong> reconstruct the manifest&#39;s original numbers.</p>
 <h3 id="compensating-changes-cannot-be-resolved">Compensating changes cannot be resolved</h3>
 <p>A repair that moved $200 out of a window and a late ingest that brought $200 in

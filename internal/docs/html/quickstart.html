@@ -84,11 +84,13 @@ footer.site a { color: var(--muted); }
 </ol>
 <hr>
 <h2 id="1-install">1. Install</h2>
+<p>Building v0.6.0 requires <strong>Go 1.27.2 or newer</strong>. Download a release
+archive below if you do not have a Go toolchain.</p>
 <pre><code>go install github.com/tiermetric/tier/cmd/tierd@latest
 </code></pre>
 <p><code>@latest</code> resolves to the newest tagged release — it does <strong>not</strong> track <code>main</code>,
 so you always get a published, reproducible version. Pin an exact tag instead
-(<code>@v0.5.2</code>, the release used as the example below) when you need a build that never moves, e.g. in CI.</p>
+(<code>@v0.6.0</code>, the release used as the example below) when you need a build that never moves, e.g. in CI.</p>
 <p><code>go install</code> puts the binary in <code>$(go env GOPATH)/bin</code> — usually <code>~/go/bin</code> —
 or in <code>GOBIN</code> if you have set it. If the next command says <code>command not found</code>,
 add that folder to your <code>PATH</code> (e.g. <code>export PATH=&#34;$HOME/go/bin:$PATH&#34;</code> in your
@@ -101,10 +103,10 @@ Each release carries one archive per platform, named
 each with a <code>.sha256</code> checksum beside it. The archive unpacks to a folder of the
 same name holding a single file, <code>tierd</code> (<code>tierd.exe</code> on Windows); move it
 somewhere on your <code>PATH</code>. <code>&lt;version&gt;</code> is the newest tag on the Releases page —
-<code>v0.5.2</code> at the time of writing, used below as the example:</p>
-<pre><code>tar -xzf tierd-v0.5.2-darwin-arm64.tar.gz
-sudo mv tierd-v0.5.2-darwin-arm64/tierd /usr/local/bin/
-# optional: gh attestation verify tierd-v0.5.2-darwin-arm64.tar.gz --repo tiermetric/tier
+<code>v0.6.0</code> at the time of writing, used below as the example:</p>
+<pre><code>tar -xzf tierd-v0.6.0-darwin-arm64.tar.gz
+sudo mv tierd-v0.6.0-darwin-arm64/tierd /usr/local/bin/
+# optional: gh attestation verify tierd-v0.6.0-darwin-arm64.tar.gz --repo tiermetric/tier
 </code></pre>
 <p><strong>macOS:</strong> if you downloaded the archive with a web browser, macOS marks the
 binary as downloaded, and because it is not notarized the system stops it from
@@ -190,7 +192,13 @@ session files still on your disk.</p>
 <li>No <code>--api-token</code> is needed if the server has no token. <code>serve</code> takes its
 token from the <code>TIER_API_TOKEN</code> variable when <code>--api-token</code> is not passed,
 so if that variable was exported in the step 2 terminal, the server has one:
-export the same value here before running <code>ship</code>.</li>
+create a distinct credential using the <a href="https://github.com/tiermetric/tier/blob/main/README.md#the-ingest-token-tier_ingest_token---ingest-token--recommended-for-shippers" rel="nofollow">README “The ingest token” umask recipe</a>,
+restart <code>serve</code> with <code>--ingest-token @$HOME/.tier/ingest-token</code>
+(<code>TIER_INGEST_TOKEN</code> or <code>http.ingest_token</code> also works), and pass that ingest
+credential to <code>ship --api-token @$HOME/.tier/ingest-token</code>
+(or the laptop&#39;s <code>TIER_API_TOKEN</code>). Since v0.6.0 (#1144), the ingest token is
+the recommended shipper credential and opens only <code>POST /api/v1/events</code>.
+The admin token also works.</li>
 <li>A server with no token is safe only on a single-user machine: anyone who can
 reach <code>127.0.0.1:8080</code> can use every route, including erase. If anyone else
 can reach it, such as other users of a shared machine, or anyone coming
@@ -270,12 +278,13 @@ rollout logs are the supported way to capture Codex.</li>
 on the shipper — it is off by default there too:</p>
 <blockquote>
 <p><code>https://&lt;your-server&gt;</code> stands for your central server&#39;s address, and
-<code>@$HOME/.tier/api-token</code> is the file holding that server&#39;s API token — the
-value you started <code>serve --api-token</code> with. Both are explained in the README
+<code>@$HOME/.tier/ingest-token</code> holds the server&#39;s recommended shipper credential —
+the value you configured with <code>serve --ingest-token</code>. The admin token also works.
+Both are explained in the README
 under <a href="https://github.com/tiermetric/tier/blob/main/README.md#what-you-need-before-you-start" rel="nofollow">What you need before you start</a>.</p>
 </blockquote>
 <pre><code>tierd ship --server https://&lt;your-server&gt; --repo ~/src/your-repo \
-  --codex-rollout --api-token @$HOME/.tier/api-token
+  --codex-rollout --api-token @$HOME/.tier/ingest-token
 </code></pre>
 <p>Without that flag, a central deployment records the laptop&#39;s Codex <strong>outcomes</strong>
 (they arrive by webhook, whichever model did the work) while none of its
@@ -308,7 +317,7 @@ count are logged, so what is left out is visible rather than inferred.</li>
 </ul>
 <p>The shipper mirrors it, off by default there too:</p>
 <pre><code>tierd ship --server https://&lt;your-server&gt; --repo ~/src/your-repo \
-  --opencode --api-token @$HOME/.tier/api-token
+  --opencode --api-token @$HOME/.tier/ingest-token
 </code></pre>
 <p>⚠️ <strong>Do not also route Opencode through TIER&#39;s reverse proxy.</strong> Its spend would be
 captured twice and the two rows cannot dedup — this collector keys on Opencode&#39;s
@@ -401,9 +410,9 @@ off the command line, as in step 4 of §5:</p>
 read token&#39;s file also works). With no token, drop the
 <code>printf … |</code> line and <code>-H @-</code>. <code>tierd doctor</code> does not check Muse.</p>
 <p>The shipper mirrors it, off by default there too. <code>https://&lt;your-server&gt;</code> and
-<code>@$HOME/.tier/api-token</code> mean what the note in <a href="#6-capturing-openai-codex-spend" rel="nofollow">§6</a> says:</p>
+<code>@$HOME/.tier/ingest-token</code> mean what the note in <a href="#6-capturing-openai-codex-spend" rel="nofollow">§6</a> says:</p>
 <pre><code>tierd ship --server https://&lt;your-server&gt; --repo ~/src/your-repo \
-  --muse --api-token @$HOME/.tier/api-token
+  --muse --api-token @$HOME/.tier/ingest-token
 </code></pre>
 <p>Its summary prints a <code>muse (all repos): events_shipped=&lt;n&gt;</code> line. A run still
 in progress is not shipped; the next <code>ship</code> picks it up once it finishes.</p>

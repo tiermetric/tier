@@ -262,8 +262,11 @@ func TestEmbeddedPriceTable_NoValueDrift(t *testing.T) {
 		"muse-spark-1.3-contributor": {inputPerM: 0.10, outputPerM: 0.20, provider: providerMeta, cacheReadMult: 0.02, cacheWrite5mMult: 1.0, cacheWrite1hMult: 1.0},
 		"muse-spark-1.2-contributor": {inputPerM: 0.10, outputPerM: 0.20, provider: providerMeta, cacheReadMult: 0.02, cacheWrite5mMult: 1.0, cacheWrite1hMult: 1.0},
 		// --- end v11 additions ---
-		// --- v12 addition (#1047): anthropic defaults, as published for Sonnet 5.5.
-		"claude-sonnet-5-5":  {inputPerM: 2.00, outputPerM: 10.00, provider: providerAnthropic, cacheReadMult: 0.10, cacheWrite5mMult: 1.25, cacheWrite1hMult: 2.00},
+		// --- v12 addition (#1047), cache read revised to 0.05x in v14 (#1206).
+		"claude-sonnet-5-5": {inputPerM: 2.00, outputPerM: 10.00, provider: providerAnthropic, cacheReadMult: 0.05, cacheWrite5mMult: 1.25, cacheWrite1hMult: 2.00},
+		// --- v13 additions (#1202): Haiku's 100K tier and Sol's 0.05x cache read.
+		"claude-haiku-5-5":   {inputPerM: 0.10, outputPerM: 0.50, provider: providerAnthropic, cacheReadMult: 0.1, cacheWrite5mMult: 1.25, cacheWrite1hMult: 2.00, contextThreshold: 100000, inputPerMOver: 0.50, outputPerMOver: 2.50},
+		"gpt-6.1-sol":        {inputPerM: 2.00, outputPerM: 10.00, provider: providerOpenAI, cacheReadMult: 0.05, cacheWrite5mMult: 1.25, cacheWrite1hMult: 1.25},
 		"self-hosted-large":  {inputPerM: 2.00, combined: true, provider: providerSelfHosted, cacheReadMult: 1.0, cacheWrite5mMult: 1.0, cacheWrite1hMult: 1.0},
 		"self-hosted-medium": {inputPerM: 0.50, combined: true, provider: providerSelfHosted, cacheReadMult: 1.0, cacheWrite5mMult: 1.0, cacheWrite1hMult: 1.0},
 		"self-hosted-small":  {inputPerM: 0.10, combined: true, provider: providerSelfHosted, cacheReadMult: 1.0, cacheWrite5mMult: 1.0, cacheWrite1hMult: 1.0},

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tiermetric/tier/internal/qualityrule"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -26,38 +27,35 @@ import (
 const (
 	// EventCIPass records a clean CI run on the merge commit. Audit value only;
 	// it applies no floor.
-	EventCIPass = "ci_pass"
+	EventCIPass = qualityrule.EventCIPass
 	// EventCIFail records a failing CI run on the merge commit (floor 0.7),
 	// unless neutralised by a matching EventCIFailFlaky.
-	EventCIFail = "ci_fail"
+	EventCIFail = qualityrule.EventCIFail
 	// EventCIFailFlaky reclassifies an earlier EventCIFail as flaky (a re-run
 	// of the SAME WORKFLOW on the same merge commit succeeded within 30
 	// minutes — #687; see CIKey). It neutralises the failure rather than
 	// mutating it, keeping quality_events append-only.
-	EventCIFailFlaky = "ci_fail_flaky"
+	EventCIFailFlaky = qualityrule.EventCIFailFlaky
 	// EventRevertQuality records a full revert attributed to a code problem
 	// (floor 0.1) — the default when classification is ambiguous.
-	EventRevertQuality = "revert_quality"
+	EventRevertQuality = qualityrule.EventRevertQuality
 	// EventRevertStrategic records a full revert attributed to a business
 	// decision (floor 0.8) — the code worked, but did not survive.
-	EventRevertStrategic = "revert_strategic"
+	EventRevertStrategic = qualityrule.EventRevertStrategic
+	// EventRevertAmbiguous records a checked, unresolved revert; never evidence or a floor.
+	EventRevertAmbiguous = qualityrule.EventRevertAmbiguous
 )
 
-// Quality floors and clamp bounds (quality-degradation-spec §3, §5).
+// Quality floors (quality-degradation-spec §3, §5).
 const (
 	// FloorClean is the multiplier for an outcome with no degrading events.
-	FloorClean = 1.0
+	FloorClean = qualityrule.FloorClean
 	// FloorCIFail is the multiplier a CI failure on the merge commit floors to.
-	FloorCIFail = 0.7
+	FloorCIFail = qualityrule.FloorCIFail
 	// FloorRevertStrategic is the multiplier a business-reason revert floors to.
-	FloorRevertStrategic = 0.8
+	FloorRevertStrategic = qualityrule.FloorRevertStrategic
 	// FloorRevertQuality is the multiplier a code-problem revert floors to.
-	FloorRevertQuality = 0.1
-	// qualityMin / qualityMax are the hard clamp bounds. Quality never drops
-	// below 0.1 (marginal learning value survives even a full revert — see spec
-	// §3 Event 4 rationale) and never exceeds 1.0.
-	qualityMin = 0.1
-	qualityMax = 1.0
+	FloorRevertQuality = qualityrule.FloorRevertQuality
 )
 
 // Resolve computes the quality multiplier from an outcome's event set
@@ -68,16 +66,17 @@ const (
 //	ci_fail          -> 0.7 (neutralised by a matching ci_fail_flaky)
 //	revert_strategic -> 0.8
 //	revert_quality   -> 0.1
+//	revert_ambiguous -> no effect (checked, unresolved; never evidence)
 //	ci_pass          -> no effect (audit only)
 //	ci_fail_flaky    -> no effect (it only neutralises a ci_fail)
 //
-// The result is clamped to [0.1, 1.0]. Phase-2 event types (follow-up fix,
-// partial revert, hotfix, ...) are not present in quality_events yet and, if
-// they were, fall through the switch's default with no effect until their
-// floors are added.
+// The result is selected from fixed levels within [0.1, 1.0]. Phase-2 event
+// types (follow-up fix, partial revert, hotfix, ...) are not present in
+// quality_events yet and, if they were, fall through the switch's default with
+// no effect until their floors are added.
 //
 // Invariant relied on downstream: this returns one of a small set of EXACT
-// float64 constants (selection + worst-of + clamp, never arithmetic). The
+// float64 constants (selection + worst-of, never arithmetic). The
 // store's UpdateQualityForOutcome no-op guard (old == quality) depends on that
 // exactness. A future Phase-2 rule that COMPUTES a value (e.g. additive
 // stacking) must revisit that equality guard (epsilon/normalised compare).
@@ -86,79 +85,14 @@ const (
 // (head SHA, workflow id) for flaky matching. Pure and safe for concurrent use
 // (no shared state).
 func Resolve(events []store.QualityEvent) float64 {
-	if len(events) == 0 {
-		return FloorClean
-	}
-
-	// A ci_fail is neutralised iff a ci_fail_flaky exists for the SAME merge
-	// commit AND THE SAME WORKFLOW (CIKey — #687). The 30-minute re-run rule
-	// appends the reclassifying flaky event rather than mutating the failure, so
-	// both rows coexist and resolution must know to drop the failure.
-	//
-	// ⚠️ The workflow half is not belt-and-braces on top of the classifier. The
-	// classifier decides what to WRITE at delivery time; this decides what a
-	// stored set MEANS, and it runs over rows the classifier never saw — replays,
-	// crash recovery, and every future re-derivation. Matching here on head SHA
-	// alone would let one workflow's flaky success clear another's failure no
-	// matter how carefully the write side was gated.
-	//
-	// ⚠️ AND IT DELIBERATELY IGNORES run_attempt, which the classifier does not.
-	// Pairing here answers "which failure does this flaky row speak for", and a
-	// stored ci_fail_flaky was already adjudicated a genuine re-run when it was
-	// written. Re-imposing the attempt rule here would re-judge history: the
-	// most common pre-#687 row pair is a ci_fail and a ci_fail_flaky BOTH at
-	// attempt 1 (the bug's own signature), and outcomes scored 1.0 for months
-	// would silently drop to 0.7 the next time anything re-resolved them.
-	//
-	// ⚠️ AND THE COST OF THAT CHOICE, STATED SO IT IS A DECISION AND NOT AN
-	// ACCIDENT: once a workflow's flaky success is on record, a LATER failure
-	// of that same workflow on that same commit is also neutralised
-	// (fail@1, flaky@2, fail@3 -> 1.0; pinned in TestResolve). Reviewers have
-	// twice proposed gating the attempt rule on `WorkflowID != ""`, which would
-	// leave every legacy pair untouched and make that later failure stand.
-	// DECLINED, on the merits rather than only on back-compat: the events all
-	// describe ONE unchanged commit, and a workflow that went fail -> pass ->
-	// fail on identical code is the textbook definition of a flaky test. The
-	// 0.7 floor is for "this merge broke the build", and a run that has
-	// demonstrably passed on this exact tree has not shown that. If this is
-	// ever revisited, revisit that argument — not the back-compat one, which
-	// only explains why it must not be applied to legacy rows.
-	flakyRuns := make(map[CIKey]struct{})
-	for _, e := range events {
-		if e.EventType == EventCIFailFlaky {
-			flakyRuns[ParseCIRef(e.SourceRef).CIKey] = struct{}{}
+	facts := make([]qualityrule.Event, len(events))
+	for i, e := range events {
+		ref := ParseCIRef(e.SourceRef)
+		facts[i] = qualityrule.Event{
+			EventType: e.EventType, HeadSHA: ref.HeadSHA, WorkflowID: ref.WorkflowID,
 		}
 	}
-
-	quality := FloorClean
-	for _, e := range events {
-		var floor float64
-		switch e.EventType {
-		case EventCIFail:
-			if _, flaky := flakyRuns[ParseCIRef(e.SourceRef).CIKey]; flaky {
-				continue // neutralised by a matching flaky re-run success
-			}
-			floor = FloorCIFail
-		case EventRevertQuality:
-			floor = FloorRevertQuality
-		case EventRevertStrategic:
-			floor = FloorRevertStrategic
-		default:
-			// ci_pass, ci_fail_flaky, and any not-yet-scored Phase-2 type.
-			continue
-		}
-		if floor < quality {
-			quality = floor
-		}
-	}
-
-	if quality < qualityMin {
-		quality = qualityMin
-	}
-	if quality > qualityMax {
-		quality = qualityMax
-	}
-	return quality
+	return qualityrule.Resolve(facts).Float64
 }
 
 // CIKey is the identity two CI events must SHARE for one to say anything about
@@ -185,7 +119,8 @@ func Resolve(events []store.QualityEvent) float64 {
 //     the conservative direction, and it is reachable only by a failure and a
 //     success straddling the deploy inside one 30-minute window.
 //
-// It is a comparable struct so Resolve can use it as a map key directly.
+// CIKey is comparable so callers can compare identities directly. The qualityrule
+// resolver uses the equivalent (HeadSHA, WorkflowID) pair as its flaky map key.
 type CIKey struct {
 	HeadSHA    string
 	WorkflowID string

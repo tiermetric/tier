@@ -197,17 +197,35 @@ configurable; this applies to <em>size</em> labels only.</p>
 <ul>
 <li><strong>Signature:</strong> <code>X-Hub-Signature-256: sha256=&lt;hmac&gt;</code> — required; a mismatch is
 <code>403</code>.</li>
+<li><strong>Body bounds (before authentication):</strong> <code>push</code> bodies may be up to 25 MiB;
+all other event types are limited to 1 MiB. These limits also apply to chunked
+requests. Larger bodies return <code>413</code>, are not processed or stored, and increment
+<code>tier_webhook_oversized_total{event}</code>. The event label is <code>push</code>, <code>pull_request</code>,
+<code>workflow_run</code>, or <code>other</code>; both the event and delivery headers are
+unauthenticated, even on a signed body. The ERROR log includes the bounded
+event label, sanitized delivery identifier and size class. One push at a time
+may grow beyond 1 MiB; contention returns <code>503</code> with <code>Retry-After: 1</code>. The slot
+remains held through signature verification and processing.</li>
 <li><strong>Dedup:</strong> replays are deduped by the <code>X-GitHub-Delivery</code> GUID (combined with
 the event type), and merged-PR outcomes carry a durable merge-commit-SHA
 guard, so a redelivery is a safe no-op.</li>
 <li><strong>Failures:</strong> a successful (including duplicate) delivery returns <code>204</code>. A
 failed one returns <code>503</code> (the database stayed locked past its 5-second wait)
 or <code>500</code> (any other error, which can also be a lock held past that wait), or
-times out with no response. Redeliver it either way: <strong>GitHub does not
+times out with no response. After resolving the cause, manually redeliver
+transient failures: <strong>GitHub does not
 redeliver a failed delivery on its own</strong>, so that event is lost until you
 redeliver it — see
-<a href="#redelivering-a-failed-delivery" rel="nofollow">Redelivering a failed delivery</a>.</li>
+<a href="#redelivering-a-failed-delivery" rel="nofollow">Redelivering a failed delivery</a>. Redelivering
+the same oversized body repeats <code>413</code>; it does not recover the event.</li>
 </ul>
+<p>These local bounds do not establish complete delivery. GitHub documents a
+separate <strong>25 MB</strong> provider payload cap: events exceeding it produce no webhook
+payload. Push payloads include at most <strong>2,048 commits</strong>. TIER cannot observe
+omitted payloads or commits through this endpoint; retrying a local <code>413</code> does
+not recover provider omissions. See GitHub&#39;s
+<a href="https://docs.github.com/en/webhooks/webhook-events-and-payloads#payload-cap" rel="nofollow">webhook payload limits</a>
+and <a href="https://docs.github.com/en/webhooks/webhook-events-and-payloads#push" rel="nofollow">push payload</a>.</p>
 <h2 id="redelivering-a-failed-delivery">Redelivering a failed delivery</h2>
 <p>GitHub can redeliver only deliveries from the past 3 days, so act promptly. A
 redelivery carries the same <code>X-GitHub-Delivery</code> GUID, and tierd
@@ -237,7 +255,11 @@ default <code>gh auth login</code> does not grant: add it with
 <h2 id="verifying-it-works">Verifying it works</h2>
 <p>You can compute a signature by hand and post a synthetic merged-PR payload
 (the key file must be the same file given to <code>tierd serve --webhook-secret</code>):</p>
-<pre><code>PAYLOAD=&#39;{&#34;action&#34;:&#34;closed&#34;,&#34;pull_request&#34;:{&#34;number&#34;:42,&#34;merged&#34;:true,&#34;merge_commit_sha&#34;:&#34;abc123&#34;,&#34;user&#34;:{&#34;login&#34;:&#34;alice&#34;},&#34;body&#34;:&#34;closes #42&#34;,&#34;labels&#34;:[{&#34;name&#34;:&#34;size/m&#34;}],&#34;additions&#34;:10,&#34;deletions&#34;:2,&#34;changed_files&#34;:3}}&#39;
+<p>This writes an outcome for the fake login <code>__tier_webhook_test__</code> and issue
+<code>WEBHOOKTEST-000000</code> into the receiving server&#39;s store. The row persists there
+and can affect reports; this is not a dry run. Use a test server if you do not
+want synthetic data in your live store.</p>
+<pre><code>PAYLOAD=&#39;{&#34;action&#34;:&#34;closed&#34;,&#34;pull_request&#34;:{&#34;number&#34;:999999999,&#34;merged&#34;:true,&#34;merge_commit_sha&#34;:&#34;tier-webhook-test-not-a-real-merge&#34;,&#34;user&#34;:{&#34;login&#34;:&#34;__tier_webhook_test__&#34;},&#34;body&#34;:&#34;closes WEBHOOKTEST-000000&#34;,&#34;labels&#34;:[{&#34;name&#34;:&#34;size/m&#34;}],&#34;additions&#34;:10,&#34;deletions&#34;:2,&#34;changed_files&#34;:3}}&#39;
 SIG=&#34;sha256=$(printf &#39;%s&#39; &#34;$PAYLOAD&#34; | perl -MDigest::SHA=hmac_sha256_hex -e &#39;
   local $/;
   open my $fh, &#34;&lt;&#34;, &#34;$ENV{HOME}/.tier/webhook-secret&#34; or die $!;

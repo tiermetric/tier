@@ -13,6 +13,9 @@
 // a user-supplied string.
 "use strict";
 
+var BOUNDS_LABEL = 'Nominal 95% bounds (unvalidated descriptive bounds)';
+var BOUNDS_NOTE = 'Coverage is unvalidated: in constructed tests where several outcomes share one issue, the bounds covered the true value less often than 95%. Excludes uncertainty from unattributed spend, incorrect attribution and uncaptured usage.';
+
 // --- Small DOM helpers ------------------------------------------------------
 
 function $(id) { return document.getElementById(id); }
@@ -59,15 +62,17 @@ function pct(fraction) {
 //     screen at all, and it is indistinguishable from a genuine zero-cost row,
 //     which is the FREE reading — unbounded yield, the opposite meaning.
 //
-// EVERY USD *amount* on this page goes through here — the SPEND tile, the
+// USD *amounts* on this page go through here — the SPEND tile, the
 // cost-composition total, the per-model and per-bucket costs, the unattributed
-// figure, the below-floor cause line, and the team panel's row costs. That is not tidiness: these figures sit
+// figure, the below-floor cause line, the team panel's row costs, and the pooled
+// segment reconciliation. That is not tidiness: these figures sit
 // beside each other and are read against each other, and two formatters for one
 // quantity is how "$5.00 of measured AI spend — below the $5.00 evidence floor"
-// happened. Two renderings are deliberately NOT routed here, both for stated
+// happened. Three renderings are deliberately NOT routed here, each for stated
 // reasons: cost_per_point is a RATE in $/point, not an amount (#239), and the
 // compare view renders signed DELTAS whose semantics are still under review
-// (#605). TestDashboard_MoneyHasOneFormatter pins the list.
+// (#605); issueUSDText retains micro-dollar precision so reconciliation rows add
+// to the displayed total. TestDashboard_MoneyHasOneFormatter pins the list.
 //
 // A true zero renders "$0.00", which is the honest figure there, and that branch
 // IS exercised: the SPEND tile is in renderKPIs' common tail, so a FREE or
@@ -250,7 +255,20 @@ function fetchJSON(url) {
       throw new Error('this server requires an API token — enter it above and click Refresh');
     }
     if (!r.ok) { return httpFailure(r); }
-    return r.json();
+    return r.json().then(function(data) {
+      if (r.headers && r.headers.get('Tier-Sealed-At')) {
+        var grace = r.headers.get('Tier-Report-Grace-Seconds');
+        var delay = r.headers.get('Tier-Sealed-Days-After-End');
+        data._sealDisclosure = {
+          sealed_at: r.headers.get('Tier-Sealed-At'),
+          configured_grace_seconds: grace && grace.trim() && Number.isFinite(Number(grace)) && Number(grace) >= 0 ? Number(grace) : null,
+          days_after_period_end: delay && delay.trim() && Number.isFinite(Number(delay)) && Number(delay) >= 0 ? Number(delay) : null,
+          revert_windows_at_seal: r.headers.get('Tier-Revert-Windows-At-Seal'),
+          note: r.headers.get('Tier-Seal-Note')
+        };
+      }
+      return data;
+    });
   });
 }
 
@@ -337,8 +355,8 @@ function quarterStartISO() {
 // fills. Also drops the retained levers-export payload so a stale window can
 // never be exported.
 function resetViews() {
-  var hide = ['kpi-row', 'provenance', 'segments-note', 'segments-retro',
-              'detail-card', 'trust-strip', 'unattr-breakdown', 'attr-coverage',
+  var hide = ['issue-report', 'correction-context', 'seal-disclosure', 'kpi-row', 'provenance', 'segments-note', 'segments-retro',
+              'detail-card', 'aggregate-pricing', 'trust-strip', 'unattr-breakdown', 'attr-coverage',
               'unjoined-strip', 'cost-comp', 'team-rollups', 'compare-view', 'cmp-total',
               // cost-horizon (#512) MUST be in this list. It is the only banner
               // that renders in a calm "checked and covered" state, so a stale
@@ -468,6 +486,14 @@ function leaveSealedMode() {
 // enterSealedMode swaps the date window for the month picker, fills the picker
 // from the manifest's earliest to latest month (newest first), keeps the month on
 // screen when it is still listed, and states the seal markers.
+function sealDisclosureText(d) {
+  var grace = d.configured_grace_seconds;
+  var text = 'Sealed ' + d.sealed_at + '; configured grace ' +
+    (grace === null || grace === undefined || grace === 'not_recorded' ? 'not recorded' : num(grace) / 86400 + ' days') +
+    '; ' + (d.days_after_period_end === null || d.days_after_period_end === undefined ? 'seal delay not recorded. ' : 'sealed ' + num(d.days_after_period_end).toFixed(2) + ' days after period end. ');
+  return text + (d.note || 'Longer grace does not establish delivery completeness.');
+}
+
 function enterSealedMode(m) {
   sealedMode = true;
   sealedLatest = m.period;
@@ -492,8 +518,12 @@ function enterSealedMode(m) {
   sel.value = months.indexOf(keep) >= 0 ? keep : m.period;
   var note = typeof m.sealed_at === 'string'
     ? 'Reports in this mode are sealed calendar months, never recomputed. The newest sealed month is ' + m.period +
-      ', sealed ' + dayOf(m.sealed_at) + '.'
+      ', sealed ' + m.sealed_at + '.'
     : 'Reports in this mode are sealed calendar months, and none is published yet.';
+  if (m.seal_disclosure) {
+    setText('seal-disclosure', sealDisclosureText(m.seal_disclosure));
+    $('seal-disclosure').style.display = 'block';
+  }
   if (typeof m.next_seal_at === 'string') { note += ' The next month can be sealed from ' + dayOf(m.next_seal_at) + '.'; }
   setText('seal-note', note + stallText(m));
   $('seal-note').style.display = 'block';
@@ -575,11 +605,17 @@ function showKAnonWithheld(kanon, level) {
 }
 
 function renderScores(data, since, until) {
+  if (data._sealDisclosure) {
+    setText('seal-disclosure', sealDisclosureText(data._sealDisclosure));
+    $('seal-disclosure').style.display = 'block';
+  }
   // Team-aggregation mode (#185): the server ships a k-anonymized "teams" array
   // (already ordered, no individual names) and an empty "developers". The same
   // signal governs the per-type panels -- in team mode each panel carries "teams"
   // rows and NEVER a named individual.
   var teamMode = Array.isArray(data.teams);
+  loadCorrectionContext(since, until, loadGen, teamMode);
+  loadIssueReport(data.since || since, until, loadGen, teamMode);
 
   var pooled = (teamMode ? data.teams : data.developers) || [];
 
@@ -615,6 +651,7 @@ function renderScores(data, since, until) {
                     (data.total && typeof data.total.total_cost_usd === 'number') ? data.total.total_cost_usd : 0);
   renderUnjoinedDevelopers(data.data_quality);
   renderTrustStrip(data.data_quality);
+  renderAggregatePricing(data.data_quality);
   // Immediately after the four checks and NOT at the end of the function. The
   // band must run once every check has decided whether it is showing -- but the
   // four caveats are now gated on the band's own reveal, so every unrelated
@@ -999,7 +1036,7 @@ function renderKPIs(data, pooled, teamMode) {
     // states the population the number is drawn from.
     var ciHigh = num(total.ci_high);
     if (ciHigh > 0) {
-      setText('kpi-tier-ci', '95% CI [' + num(total.ci_low).toFixed(0) + ', ' + ciHigh.toFixed(0) + ']');
+      setText('kpi-tier-ci', BOUNDS_LABEL + ' [' + num(total.ci_low).toFixed(0) + ', ' + ciHigh.toFixed(0) + ']');
     } else {
       setText('kpi-tier-ci', 'across ' + pooled.length + ' ' + noun + (pooled.length !== 1 ? 's' : ''));
     }
@@ -1071,7 +1108,7 @@ function renderKPIs(data, pooled, teamMode) {
   }
 
   // Capture fidelity meter (amber = trust). toFixed(1) so 99.6% doesn't round up
-  // to "100%" and hide the not-quite-fully-captured case -- the case this number
+  // to "100%" and hide the not-fully-request-level case -- the case this number
   // exists to surface. Wire field stays coverage_pct (#136); only the label
   // changed to "Capture fidelity".
   setText('kpi-fidelity', fidelity.toFixed(1) + '%');
@@ -1128,10 +1165,19 @@ function renderProvenance(data) {
 function renderSegments(data, teamMode, since, until) {
   var container = $('segments');
   container.textContent = '';
-  var segments = data.work_types || [];
-  segments.forEach(function(seg) {
-    container.appendChild(buildPanel(seg, teamMode, since, until));
+  // Anonymous modes publish no segment breakdown or reconciliation (#864),
+  // even if a stale payload happens to carry them.
+  var segments = teamMode ? [] : (data.work_types || []);
+  segments.forEach(function(seg, index) {
+    var panel = container.appendChild(buildPanel(seg, teamMode, since, until));
+    if (!teamMode) {
+      appendSegmentReconciliation(panel, data.segment_reconciliation && data.segment_reconciliation.total, 'segment-heading-' + index);
+    }
   });
+  // Captured spend can exist without accepted outcomes or work-type panels.
+  if (!teamMode && segments.length === 0 && data.segment_reconciliation && data.segment_reconciliation.total) {
+    appendSegmentReconciliation(container, data.segment_reconciliation.total, 'segment-heading-standalone');
+  }
   // The retro prompt (#419) and the cross-type caveat share the panels' presence:
   // show both when there are work-type panels, hide both when there are none.
   var segShow = segments.length ? '' : 'none';
@@ -1146,6 +1192,34 @@ function renderSegments(data, teamMode, since, until) {
   $('segments-retro').style.display = segShow;
 }
 
+function appendSegmentReconciliation(panel, total, headingID) {
+  var reconciliation = el('section', 'segment-reconciliation');
+  var heading = el('h3', '', 'Pooled window cost reconciliation (all work types)');
+  heading.id = headingID + '-reconciliation';
+  reconciliation.setAttribute('aria-labelledby', heading.id);
+  reconciliation.appendChild(heading);
+  if (total) {
+    var costs = el('ul');
+    // Display the server's pooled partition unchanged, including on ?work_type=
+    // responses. usdText supplies the shared money format; the integer companions
+    // preserve micro-dollar detail that its cent display intentionally truncates.
+    [
+      ['Outcome-linked cost', 'outcome_linked_cost'],
+      ['No-outcome cost', 'no_outcome_cost'],
+      ['Unattributed cost', 'unattributed_cost'],
+      ['Total window cost', 'window_cost']
+    ].forEach(function(field) {
+      costs.appendChild(el('li', '', field[0] + ': ' + usdText(total[field[1] + '_usd']) +
+        ' (' + num(total[field[1] + '_micro']).toLocaleString('en-US') + ' micro-USD)'));
+    });
+    reconciliation.appendChild(costs);
+  } else {
+    reconciliation.appendChild(el('p', '', 'Reconciliation unavailable.'));
+  }
+  reconciliation.appendChild(el('p', '', 'Segments use cost associated with accepted outcomes. They omit no-outcome and unattributed cost, and their denominators can overlap. Use the pooled figure beside them; do not add segment costs.'));
+  panel.appendChild(reconciliation);
+}
+
 // buildPanel renders one work-type's rows as a small-multiple panel. Each
 // panel computes its OWN horizontal scale, so bar lengths are never comparable
 // across panels -- the UI enforces "never compare TIER across types".
@@ -1156,7 +1230,7 @@ function buildPanel(seg, teamMode, since, until) {
 
   var head = el('div', 'panel-head');
   // textContent: work_type is a fixed enum, but treated as data on principle.
-  head.appendChild(el('div', 'panel-title', seg.work_type));
+  head.appendChild(el('h2', 'panel-title', seg.work_type));
   head.appendChild(el('div', 'panel-count num',
     rows.length + ' ' + (teamMode ? 'team' : 'developer') + (rows.length !== 1 ? 's' : '')));
   panel.appendChild(head);
@@ -1284,14 +1358,14 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
     // (#274 a11y review). Team rows and below-floor rows carry no CI, so they get
     // no aria-label and read as their plain textContent.
     row.setAttribute('aria-label',
-      'TIER ' + tierVal.toFixed(1) + ', 95% CI [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + ']' +
+      'TIER ' + tierVal.toFixed(1) + ', ' + BOUNDS_LABEL + ' [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + ']' +
       ', cost per point $' + num(d.cost_per_point).toFixed(2));
     if (hi > lo) {
       var whisker = el('div', 'ybar-whisker');
       whisker.style.left = pct(lo / scale);
       whisker.style.width = pct((hi - lo) / scale);
-      whisker.title = '95% CI [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + '] over ' +
-        num(d.sample_n) + ' outcomes (bootstrap)';
+      whisker.title = BOUNDS_LABEL + ' [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + '] over ' +
+        num(d.sample_n) + ' outcomes (bootstrap). ' + BOUNDS_NOTE;
       track.appendChild(whisker);
     }
   } else if (num(d.weighted_points) <= 0) {
@@ -1362,8 +1436,8 @@ function buildTierReading(d, teamMode, isRanked) {
   var tier = el('div', 'ybar-tier num', num(d.tier).toFixed(1));
   if (!teamMode) {
     tier.title = isRanked
-      ? '95% CI [' + num(d.ci_low).toFixed(0) + ', ' + num(d.ci_high).toFixed(0) + '] over ' +
-        num(d.sample_n) + ' outcomes (bootstrap)'
+      ? BOUNDS_LABEL + ' [' + num(d.ci_low).toFixed(0) + ', ' + num(d.ci_high).toFixed(0) + '] over ' +
+        num(d.sample_n) + ' outcomes (bootstrap). ' + BOUNDS_NOTE
       // Names the conditions this row actually fails, never one asserted cause:
       // "insufficient sample to rank" was false for a 20-outcome, $500 row held
       // back by a single zero-token outcome, with both cleared numbers printed
@@ -1416,8 +1490,8 @@ function buildCostPerPoint(d, teamMode, isRanked) {
   if (!teamMode && isRanked) {
     var lo = num(d.cost_per_point_ci_low), hi = num(d.cost_per_point_ci_high);
     if (hi > 0 || lo > 0) {
-      cpp.title = 'cost-per-point 95% CI [$' + lo.toFixed(2) + ', $' + hi.toFixed(2) +
-        '/pt] (self-relative)';
+      cpp.title = 'cost-per-point ' + BOUNDS_LABEL + ' [$' + lo.toFixed(2) + ', $' + hi.toFixed(2) +
+        '/pt] (self-relative). ' + BOUNDS_NOTE;
     }
   }
   return cpp;
@@ -1563,6 +1637,8 @@ function attributionCoverage(dq, anonymised) {
 function renderAttributionCoverage(dq, anonymised) {
   var banner = $('attr-coverage');
   var share = attributionCoverage(dq, anonymised);
+  var help = $('attr-coverage-help');
+  if (help) help.hidden = share === null || share === ATTR_NOT_SHOWN;
   if (share === null) {
     banner.style.display = 'none';
     return;
@@ -1575,10 +1651,11 @@ function renderAttributionCoverage(dq, anonymised) {
     setText('attr-coverage-sub',
       'In team and division mode TIER does not show how much of your AI spend is linked to ' +
       'an issue: beside the team totals, that figure could reveal the spend of one person. Treat ' +
-      'the TIER figure as provisional. This does not mean coverage is low.');
+      'the TIER figure as provisional. This does not mean coverage is low. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. Not shown is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain.');
     banner.style.display = 'flex';
     return;
   }
+  if (help) help.textContent = 'Why sessions started on main can leave captured dollars unattributed';
   var low = share < ATTR_WARN_THRESHOLD;
   // The base look is the id-scoped calm style; the 'warn' class swaps it to the
   // danger palette. No user string ever reaches className -- it is one of two
@@ -1969,6 +2046,27 @@ function appendUnjoinedNames(list, names, side) {
 // Hidden unless the server shipped a non-empty zero_token_outcomes list (or, in
 // team-aggregation mode, a name-free count). Every value is written via
 // textContent -- developer/issue ids are user-controlled.
+function aggregatePricingNotes(dq) {
+  var p = dq && dq.aggregate_pricing;
+  if (!p) { return ['New provider daily remainders use base-rate approximations and may understate long-context cost, raising TIER. Historical provider aggregates may differ from request-level billing in either direction. Request lengths are unavailable in daily aggregates.']; }
+  var notes = [];
+  if (p.approximation_notice) { notes.push(p.approximation_notice); }
+  if (p.historical_notice) { notes.push(p.historical_notice); }
+  if (num(p.approximate_rows) + num(p.historical_rows) === 0) { return notes; }
+  if (p.ceiling_status === 'available') {
+    notes.push('Retained-rate effect ceiling: ' + usdText(Math.ceil(num(p.possible_increase_micro) / 10000) / 100) + ' (rounded up to the cent). This covers the retained rate effect on aggregate counts; per-request rounding and unrecorded fees are outside it. It is not a provider-invoice bound or evidence of request sizes or overbilling.');
+  } else if (p.ceiling_status !== 'not_shown') {
+    notes.push('A full cost ceiling is unavailable: original pricing evidence is missing, estimated, or outside the supported numeric range.');
+  }
+  notes.push('Pricing policy: ' + p.cutover + '.');
+  return notes;
+}
+function renderAggregatePricing(dq) {
+  var host = $('aggregate-pricing');
+  var notes = aggregatePricingNotes(dq);
+  host.textContent = notes.join(' ');
+  host.style.display = notes.length ? 'block' : 'none';
+}
 function renderTrustStrip(dq) {
   var strip = $('trust-strip');
   var list = $('trust-list');
@@ -2128,8 +2226,8 @@ function downloadLeversCSV() {
 // every Δ is B − A, matching the endpoint contract. In an anonymized mode
 // (team/division, #185/#270) the rows are k-anonymized groups and significance
 // is NEVER asserted (a group aggregate carries no bootstrap CI); in developer
-// mode a row is "significant" only when the SERVER flags it (present + ranked in
-// BOTH windows and disjoint 95% CIs). Every value here is a finite number or a
+// mode inference remains unestablished; the legacy non-overlap flag never drives
+// colours or labels. Every value here is a finite number or a
 // server-controlled developer/team string written via textContent -- the same
 // XSS posture as the rest of this file; the only inline styles are dot/connector
 // positions routed through pct() from finite numbers.
@@ -2178,6 +2276,7 @@ function loadCompare() {
 }
 
 function renderCompare(data) {
+  showCompareSealDisclosure(data);
   // #864: a withheld comparison carries no rows and no total, so this must come
   // before the no-data check or a withhold reads as an empty period.
   if (data.kanon_suppressed) {
@@ -2219,6 +2318,13 @@ function fmtWindow(meta) {
   return meta.since + (meta.until ? ' → ' + meta.until : ' → now');
 }
 
+function showCompareSealDisclosure(data) {
+  if (data.window_a && data.window_a.seal_disclosure && data.window_b && data.window_b.seal_disclosure) {
+    setText('seal-disclosure', 'Baseline: ' + sealDisclosureText(data.window_a.seal_disclosure) + ' Selected: ' + sealDisclosureText(data.window_b.seal_disclosure));
+    $('seal-disclosure').style.display = 'block';
+  }
+}
+
 function renderCompareWindows(data) {
   var host = $('cmp-windows');
   host.textContent = '';
@@ -2238,7 +2344,7 @@ function renderCompareWindows(data) {
 function appendWindowCaveat(host, which, dq, anonymised, since, totalCostUSD) {
   var coverage = attributionCoverage(dq, anonymised);
   dq = dq || {};
-  var notes = [];
+  var notes = aggregatePricingNotes(dq);
   if (Array.isArray(dq.mixed_price_versions) && dq.mixed_price_versions.length > 1) {
     notes.push('mixed price versions');
   }
@@ -2255,8 +2361,8 @@ function appendWindowCaveat(host, which, dq, anonymised, since, totalCostUSD) {
   // that means the window's TIER is structurally inflated rather than merely
   // caveated -- and compare is where it does the most damage: window A is by
   // construction the older one, so it is the likeliest to predate the horizon,
-  // and the resulting delta reads as a real regression carrying a significance
-  // flag. The single-window path gives this a full warning banner; without this line
+  // and the resulting delta can read as a real regression despite unvalidated
+  // bounds. The single-window path gives this a full warning banner; without this line
   // the compare view gave it nothing at all, which is the one outcome #512 exists
   // to prevent. An explicit false stays silent for the global horizon. A missing
   // or non-boolean result with spend means the horizon could not be checked,
@@ -2562,7 +2668,7 @@ function buildDevDumbbell(row, scale) {
   var aRanked = !!(row.a && row.a.ranked);
   var bRanked = !!(row.b && row.b.ranked);
   var bothRanked = both && aRanked && bRanked;
-  var sig = both && !!row.significant; // server-authoritative significance (#277)
+  // The legacy API non-overlap flag is unvalidated; it never controls labels or colours.
   var d = num(row.delta_tier);
   // Only a RANKED side is PLOTTED (#605), which is the second half of the scale
   // fix: excluding an unranked reading from the denominator leaves its own dot at
@@ -2606,36 +2712,9 @@ function buildDevDumbbell(row, scale) {
       tag = BELOW_FLOOR_TAG + ', ' + tag;
     }
     deltaCls = 'flat'; deltaText = '—';
-  } else if (sig) {
-    var dir = deltaDir(d);
-    connectClass = '';
-    // ALL THREE CHANNELS GATED (#613). `sig` is server-authoritative and the server
-    // pins that a below-floor row is never significant (compare.go computes
-    // Significant = a.Ranked && b.Ranked && ciDisjoint), so this arm should be
-    // unreachable without both sides ranked — but "should be unreachable" is not an
-    // enforcement, and a server contradiction here would assert a tested,
-    // beyond-noise move about numbers this row just withheld.
-    //
-    // 🔴 The dot's COLOUR is the third channel, and the first draft of this hardening
-    // gated only the other two. `.cmp-db-dot.b.up`/`.down` paint yield-green and
-    // danger-red, so an ungated bClass publishes SIGN(Δ) for a Δ printed as '—' —
-    // the same cross-channel leak this ruling exists to close, in the arm written to
-    // close it. When you harden against a class, the next question is which SITES
-    // got the hardening.
-    bClass = bothRanked ? dir : 'below';
-    tag = bothRanked ? 'significant' : BELOW_FLOOR_TAG;
-    deltaCls = dir; deltaText = signStr(d) + Math.abs(d).toFixed(1);
   } else {
-    // Both present but not significant: within the CI (noise) or below the
-    // evidence floor. Dashed connector + muted delta so it never reads as a
-    // confident move; the tag says which.
-    //
-    // ⚠️ THIS is the arm every two-sided below-floor developer row actually reaches —
-    // the `sig` arm above cannot fire for one. Its tag is gated for that reason: left
-    // ungated it would label a withheld row 'not significant', i.e. "we tested and
-    // found nothing", when the truth is "we cannot rank this at all".
-    bClass = ''; connectClass = 'insignificant';
-    tag = bothRanked ? 'not significant' : BELOW_FLOOR_TAG;
+    bClass = ''; connectClass = '';
+    tag = bothRanked ? 'inference not established' : BELOW_FLOOR_TAG;
     deltaCls = 'flat'; deltaText = signStr(d) + Math.abs(d).toFixed(1);
   }
   rowEl.appendChild(buildDumbbellTrack(plotA, fracA, plotB, fracB, bClass, connectClass));
@@ -2806,10 +2885,153 @@ function compareNote(devMode) {
     'too small for either to mean anything. A Δ is shown only when ' +
     'both periods clear the evidence floor, since a difference of two readings is no more ' +
     'publishable than the readings themselves.';
-  if (devMode) {
-    return base + ' A move is "significant" only when the developer clears the evidence floor in both periods and their 95% confidence intervals do not overlap; otherwise it is within noise (dashed) or below the evidence floor. A below-floor side is withheld on the same terms as the headline above it, always — not only when a single developer makes this row the whole organisation.';
+  if (devMode) { return base + ' Inference not established. Differences are descriptive observations; interval coverage is unvalidated.'; }
+  return base + ' Inference not established. Group rows carry no interval.';
+}
+
+// Corrective-work coverage is fetched separately so flag-off score bodies keep
+// their legacy bytes. Never request or render personal context in team/division.
+function correctionLabel(value) {
+  if (value === undefined || value === null || value === '') { return 'unknown'; }
+  var labels = {unadjudicated_30_days: 'unadjudicated for 30 days', not_shown: 'not shown',
+    ci_fail: 'CI failure', event3: 'Event 3'};
+  return labels[value] || String(value).replace(/[_-]/g, ' ');
+}
+function loadCorrectionContext(since, until, gen, anonymized) {
+  var host = $('correction-context');
+  if (!host) { return; }
+  host.textContent = '';
+  host.style.display = 'none';
+  if (anonymized || sealedMode) {
+    renderCorrectionContext(host, {status: 'not_shown'}, {});
+    return;
   }
-  return base + ' Rows are k-anonymized teams — no individual names; significance is not tested for a group aggregate, so the magnitude is shown but never asserted as beyond noise. The withholding does not depend on how many rows are present: when the k-anonymity fold yields a single cohort that row IS the org total, and publishing it would republish the headline withheld above it.';
+  var bounds = '?since=' + encodeURIComponent(since) + (until ? '&until=' + encodeURIComponent(until) : '');
+  Promise.all([fetchJSON('/api/v1/correction_diagnostics' + bounds), fetchJSON('/api/v1/repair_spend' + bounds)])
+    .then(function(parts) {
+      if (gen !== loadGen) { return; }
+      renderCorrectionContext(host, parts[0], parts[1]);
+    }).catch(function() {
+      if (gen !== loadGen) { return; }
+      host.textContent = 'Corrective-work diagnostics unavailable; coverage is not established.';
+      host.style.display = 'block';
+    });
+}
+function renderCorrectionContext(host, diagnostics, spend) {
+  host.textContent = '';
+  host.style.display = 'block';
+  if (diagnostics.status === 'not_shown') { host.removeAttribute('aria-labelledby'); host.setAttribute('aria-label', 'Corrective work'); host.textContent = 'Corrective work is not shown in this view.'; return; }
+  host.setAttribute('aria-labelledby', 'correction-context-title');
+  var title = document.createElement('h2');
+  title.id = 'correction-context-title'; title.className = 'cc-title';
+  title.textContent = 'Corrective work'; host.appendChild(title);
+  var coverage = document.createElement('p');
+  coverage.textContent = 'Declarations: ' + correctionLabel(diagnostics.declaration_coverage) + '; history: ' + correctionLabel(diagnostics.history_coverage) +
+    '. Captured-spend fidelity: ' + correctionLabel(diagnostics.captured_spend_fidelity) +
+    '. CI or revert evidence: ' + (diagnostics.ci_or_revert_evidence === true ? 'yes' : diagnostics.ci_or_revert_evidence === false ? 'no' : 'unknown') +
+    '. Supporting repair spend: ' + usdText(spend.cost_micro / 1000000) +
+    ' USD; PR-supported: ' + usdText(spend.supported_pr_cost_micro / 1000000) + ' USD; pooled issue: ' + usdText(spend.pooled_issue_cost_micro / 1000000) +
+    ' USD. Attribution: ' + correctionLabel(spend.attribution) + '. ' + (spend.claim_limit || '') + ' ' + (diagnostics.claim_limit || '');
+  host.appendChild(coverage);
+  ['repairs_performed', 'repairs_received'].forEach(function(key) {
+    var p = document.createElement('p');
+    p.textContent = (key === 'repairs_performed' ? 'Repairs performed: ' : 'Repairs received: ') +
+      Object.keys(diagnostics[key] || {}).map(function(dev) { return dev + ': ' + diagnostics[key][dev]; }).join(', ');
+    host.appendChild(p);
+  });
+  var list = document.createElement('ul');
+  (diagnostics.relations || []).forEach(function(relation) {
+    var row = document.createElement('li');
+    row.textContent = relation.child_repo + '#' + relation.child_pr + ' corrects ' + relation.parent_repo + '#' + relation.parent_pr +
+      ': ' + correctionLabel(relation.status) + '; ' + correctionLabel(relation.scoring_status) + '; raw weight ' + correctionLabel(relation.raw_weight) +
+      ', credited weight ' + correctionLabel(relation.credited_weight) + ', allocated points ' + correctionLabel(relation.allocated_points) +
+      '; original raw weight ' + correctionLabel(relation.original_raw_weight) + ', credited weight ' + correctionLabel(relation.original_credited_weight) +
+      ', allocated points ' + correctionLabel(relation.original_allocated_points) + (relation.disputed ? '; disputed' : '') +
+      (relation.escalation ? '; ' + correctionLabel(relation.escalation) : '') +
+      (relation.pending_reason ? '; pending reason: ' + correctionLabel(relation.pending_reason) : '') +
+      '; original period ' + correctionLabel(relation.original_period) + ' (' + correctionLabel(relation.original_report) + '), child period ' + correctionLabel(relation.child_period) + ' (' + correctionLabel(relation.child_report) + ')';
+    list.appendChild(row);
+  });
+  host.appendChild(list);
+}
+
+// Per-issue figures are a separate live developer-mode view. A request made for
+// an old window cannot repaint this panel after a mode or window switch.
+function loadIssueReport(since, until, gen, anonymized) {
+  var host = $('issue-report');
+  host.style.display = 'none';
+  host.textContent = '';
+  if (anonymized || sealedMode) { return; }
+  var q = '/api/v1/issues?since=' + encodeURIComponent(since)
+        + (until ? '&until=' + encodeURIComponent(until) : '');
+  fetchJSON(q).then(function(report) {
+    if (gen !== loadGen) { return; }
+    renderIssueReport(host, report);
+    host.style.display = 'block';
+  }).catch(function() {
+    if (gen !== loadGen) { return; }
+    host.textContent = 'Per-issue report unavailable for this window.';
+    host.style.display = 'block';
+  });
+}
+
+// A reconciliation keeps micro-dollar precision so displayed disjoint amounts
+// add to the displayed total, including sub-cent spend.
+function issueUSDText(v) {
+  return '$' + num(v).toFixed(6);
+}
+
+function renderIssueReport(host, report) {
+  host.textContent = '';
+  if (!(report.reconciliation || []).length) {
+    var empty = document.createElement('p');
+    empty.id = 'issue-report-title'; empty.className = 'tr-caption';
+    empty.textContent = 'No per-issue reconciliation data for this window.';
+    host.appendChild(empty);
+    return;
+  }
+  var title = document.createElement('h2');
+  title.id = 'issue-report-title';
+  title.className = 'cc-title';
+  title.textContent = 'Per-issue reconciliation — rubric ' + report.rubric_version;
+  host.appendChild(title);
+  var summary = document.createElement('p');
+  summary.className = 'tr-caption';
+  summary.textContent = report.label + ': ' + issueUSDText(report.attributed_cost_usd)
+    + '; unattributed ' + (100 * report.unattributed_share).toFixed(2) + '% ('
+    + issueUSDText(report.unattributed_cost_usd) + '); total captured spend '
+    + issueUSDText(report.total_cost_usd) + '. Disjoint rows sum to total spend. Identifier order.';
+  host.appendChild(summary);
+  var table = document.createElement('table');
+  table.className = 'tr-table';
+  var header = document.createElement('tr');
+  ['Repository', 'Issue / reason', 'Basis', 'Cost USD', 'Points', 'Outcomes / eligible', 'TIER / status'].forEach(function(label, i) {
+    var th = document.createElement('th'); th.scope = 'col'; th.textContent = label;
+    if (i < 3) { th.className = 'tr-team'; }
+    header.appendChild(th);
+  });
+  var thead = document.createElement('thead'); thead.appendChild(header); table.appendChild(thead);
+  var tbody = document.createElement('tbody');
+  (report.reconciliation || []).forEach(function(row) {
+    var tr = document.createElement('tr');
+    [row.repo, row.issue_id || '(missing issue)', row.label, issueUSDText(row.cost_usd),
+      num(row.weighted_points).toFixed(1), row.outcome_n + ' / ' + row.sample_n,
+      row.tier == null ? row.score_status : num(row.tier).toFixed(1)].forEach(function(value, i) {
+      var td = document.createElement(i === 1 ? 'th' : 'td');
+      if (i === 1) { td.scope = 'row'; }
+      if (i < 3) { td.className = 'tr-team'; }
+      td.textContent = value; tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  var scroll = document.createElement('div');
+  scroll.className = 'tr-scroll'; scroll.tabIndex = 0;
+  scroll.setAttribute('aria-labelledby', 'issue-report-title');
+  table.appendChild(tbody); scroll.appendChild(table); host.appendChild(scroll);
+  var note = document.createElement('p');
+  note.className = 'tr-caption';
+  note.textContent = 'Issue IDs come from branch/PR text and can be misfiled; per-issue work and spend may appear under the wrong issue.';
+  host.appendChild(note);
 }
 
 // --- Wiring -----------------------------------------------------------------

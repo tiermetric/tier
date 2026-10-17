@@ -642,7 +642,7 @@ func TestCheckDistinctTokens(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkDistinctTokens(tc.api, tc.read, tc.metrics)
+			err := checkDistinctTokens(tc.api, tc.read, tc.metrics, "")
 			if (err != nil) != tc.wantErr {
 				t.Errorf("checkDistinctTokens(%q, %q, %q) = %v, wantErr %v", tc.api, tc.read, tc.metrics, err, tc.wantErr)
 			}
@@ -880,7 +880,8 @@ func TestPrintCostReport_IdentifierOrder(t *testing.T) {
 		printCostReport(&buf, events, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
 		var got []string
 		for _, l := range strings.Split(buf.String(), "\n") {
-			if f := strings.Fields(l); len(f) == 7 && slices.Contains(devs, f[0]) {
+			// The pricing qualification is a suffix, not another numeric column.
+			if f := strings.Fields(strings.TrimSuffix(l, " (estimated cost)")); len(f) == 7 && slices.Contains(devs, f[0]) {
 				got = append(got, f[0])
 			}
 		}

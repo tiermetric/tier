@@ -309,7 +309,7 @@ func TestOutcomeReads_SurfaceRowID(t *testing.T) {
 		t.Errorf("OutcomeByMergeCommit ID = %d, want %d", byMerge.ID, want)
 	}
 
-	byIssue, ok, err := db.LatestOutcomeByIssue(ctx, "", "issue-11")
+	byIssue, ok, err := db.LatestOutcomeByIssue(ctx, "", "issue-11", now)
 	if err != nil || !ok {
 		t.Fatalf("LatestOutcomeByIssue: ok=%v err=%v", ok, err)
 	}

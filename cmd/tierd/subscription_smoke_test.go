@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/store"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -73,6 +75,11 @@ func writeCoveredSubscriptionServeConfig(t *testing.T, dir string) string {
 // store.Open → goroutine → a real org_actual_spend row — and the assertion is
 // the ROW, read back out of SQLite, not a log line.
 func TestServeSmoke_SubscriptionFeeReconcilerPostsThroughTheRealBinary(t *testing.T) {
+	// Pin the spawn's env scrub against a poisoned parent, even on clean CI.
+	t.Setenv("TIER_CODEX_ROLLOUT", "1")
+	t.Setenv("TIER_API_TOKEN", "poison")
+	t.Setenv("TIER_LOG_FORMAT", "text")
+
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("locate test binary: %v", err)
@@ -89,9 +96,11 @@ func TestServeSmoke_SubscriptionFeeReconcilerPostsThroughTheRealBinary(t *testin
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
+	// No active_since is seeded, so the startup pass posts only the current UTC month.
+	periodBeforeSpawn := store.CurrentPeriod(time.Now())
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start tierd child: %v", err)
 	}
@@ -125,9 +134,10 @@ func TestServeSmoke_SubscriptionFeeReconcilerPostsThroughTheRealBinary(t *testin
 	if org == "" {
 		t.Fatalf("no org_actual_spend row appeared within 10s — the reconciler did not post through the real binary.\nstderr:\n%s", stderr.String())
 	}
-	if org != "acme" || micro != 100_000_000 || source != "subscription:glm-5.2@ollama.com" {
-		t.Errorf("posted row = (org=%s, period=%s, micro=%d, source=%s), want (acme, <current period>, 100000000, subscription:glm-5.2@ollama.com)",
-			org, period, micro, source)
+	periodAfterRow := store.CurrentPeriod(time.Now())
+	if org != "acme" || (period != periodBeforeSpawn && period != periodAfterRow) || micro != 100_000_000 || source != "subscription:glm-5.2@ollama.com" {
+		t.Errorf("posted row = (org=%s, period=%s, micro=%d, source=%s), want (acme, %s or %s, 100000000, subscription:glm-5.2@ollama.com)",
+			org, period, micro, source, periodBeforeSpawn, periodAfterRow)
 	}
 	if !strings.Contains(stderr.String(), "subscription fee reconciler enabled") {
 		t.Errorf("the enabled log line never appeared; got:\n%s", stderr.String())
@@ -163,7 +173,7 @@ func TestServeSmoke_SubscriptionCoverageGateRefusesBoot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 
@@ -218,7 +228,7 @@ func TestServeSmoke_ReadOnlyNeutralizesSubscriptionFees(t *testing.T) {
 	}, "\n")
 
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {

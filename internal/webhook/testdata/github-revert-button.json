@@ -1,0 +1,69 @@
+{
+  "action": "closed",
+  "pull_request": {
+    "additions": 12,
+    "base": {
+      "repo": {
+        "default_branch": "master"
+      }
+    },
+    "body": "Reverts kubernetes/kubernetes#140664\r\n\r\nAI is pinpointing https://testgrid.k8s.io/sig-node-containerd#ci-node-e2e-containerd-alpha-slow-features failures to this PR.\r\n\r\nFixes https://github.com/kubernetes/kubernetes/issues/142268\r\n\r\nGoing to confirm. If it occurs I think we should revert this fix.",
+    "changed_files": 2,
+    "created_at": "2026-09-30T17:24:59Z",
+    "deletions": 16,
+    "head": {
+      "ref": "revert-140664-pre-quota",
+      "repo": {
+        "full_name": "kannon92/kubernetes"
+      }
+    },
+    "labels": [
+      {
+        "name": "area/test"
+      },
+      {
+        "name": "priority/important-soon"
+      },
+      {
+        "name": "lgtm"
+      },
+      {
+        "name": "sig/node"
+      },
+      {
+        "name": "size/S"
+      },
+      {
+        "name": "release-note-none"
+      },
+      {
+        "name": "approved"
+      },
+      {
+        "name": "cncf-cla: yes"
+      },
+      {
+        "name": "sig/testing"
+      },
+      {
+        "name": "kind/failing-test"
+      },
+      {
+        "name": "triage/accepted"
+      }
+    ],
+    "merge_commit_sha": "4f6984bad6b0b6ac8104203f48177979d0270f0b",
+    "merged": true,
+    "merged_at": "2026-10-02T00:41:16Z",
+    "number": 142567,
+    "title": "Revert \"Don't replace container expected CPU limits with pod limits in e2e-node tests cgroups.VerifyContainerCPULimit helper\"",
+    "user": {
+      "login": "kannon92",
+      "type": "User"
+    }
+  },
+  "repository": {
+    "default_branch": "master",
+    "full_name": "kubernetes/kubernetes"
+  }
+}

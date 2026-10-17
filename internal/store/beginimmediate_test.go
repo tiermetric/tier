@@ -1748,7 +1748,7 @@ func TestRepriceCommitTakesTheUnboundedWriteLock(t *testing.T) {
 	// produces a different number. Without a changed row a commit writes nothing,
 	// and the DEFERRED mutant would sail through on an empty write set for a
 	// reason unrelated to the property under test.
-	if err := db.InsertTokenEvents(ctx, []TokenEvent{{
+	if err := db.InsertTokenEvents(ctx, []TokenEvent{{TokenDerived: true,
 		Developer: "alice",
 		IssueID:   "issue-42",
 		Model:     "claude-sonnet-4",

@@ -19,6 +19,8 @@
 package prderive
 
 import (
+	"encoding/json"
+	"regexp"
 	"strings"
 
 	"github.com/tiermetric/tier/internal/store"
@@ -139,4 +141,20 @@ func WorkTypeFromLabels(labels []string) (workType, source string) {
 		}
 	}
 	return store.WorkTypeFeature, store.WorkTypeSourceDefault
+}
+
+var revertHeadRE = regexp.MustCompile(`^revert-[0-9]+-`)
+
+// RevertEvidence classifies only GitHub's PR-specific revert forms. The push
+// subject detector is intentionally broader and remains independent.
+func RevertEvidence(head, title string) string {
+	if revertHeadRE.MatchString(head) {
+		b, _ := json.Marshal(map[string]string{"head_ref": head})
+		return string(b)
+	}
+	if strings.HasPrefix(title, `Revert "`) {
+		b, _ := json.Marshal(map[string]string{"title": title})
+		return string(b)
+	}
+	return ""
 }

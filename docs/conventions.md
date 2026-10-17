@@ -17,9 +17,10 @@ between meaningful scores and a wall of `unattributed` cost with no explanation.
 > fine, but mapping a size to a *different* weight than rubric.md's calibration
 > (e.g. everyday work as `l`/5 rather than `m`/3) is a **local divergence the
 > stamp cannot see** — two deployments both stamp `rubric.version: 1` while
-> scoring the same work differently. Cross-org `cost_per_point` comparison
-> therefore requires matched `size_labels` on top of matched versions;
-> same-org-over-time is unaffected because one deployment's config is stable.
+> scoring the same work differently. Cross-organisation `cost_per_point`
+> comparison is not supported: matched versions and `size_labels` do not
+> establish equivalence; same-organisation-over-time comparison is the supported
+> reading because one deployment's config is stable.
 
 The **weight** of a merged PR is its size. TIER reads it from a GitHub label. The
 match is case-insensitive and accepts both the `size/` prefix and the bare form:
@@ -47,9 +48,7 @@ effort ≤ 1000  → 5
 otherwise      → 8
 ```
 
-The heuristic is a reasonable default, but explicit labels are more accurate and
-consistent — a two-line change to a critical path and a two-line typo fix get the
-same heuristic weight, which labels let you correct.
+Explicit labels let reviewers apply the rubric using context the diff heuristic lacks. TIER has not established that labels are more accurate or consistent; comparability depends on shared calibration.
 
 ## Issue references → attribution
 
@@ -76,12 +75,18 @@ commit-subject rule (#1069): only the git `%s` subject (first paragraph, folded)
 is read for attribution; the body is excluded.
 
 **Branch precedence:** a tracker key (e.g. `TIER-99`) takes priority over a bare
-numeric segment when both appear in a branch.
+numeric segment when both appear in a branch. The branch rule is looser than
+the table: TIER takes the first plain number segment anywhere in the branch name
+(split on `/`, `-` or `_`, with no leading zero), skipping a 1900–2099 year;
+`docs/guide-2026-10-14` reads as issue 10.
+
+**Issue-id misfiling.** Pull-request points and captured spend do not depend on issue ids. Misfiling can merge or split direct-push credit (one 0.5 per issue per UTC day per repository) or change which outcome a footerless revert penalises, so headline TIER can move and per-issue rows can be wrong. See [the measured rate and how to avoid it](technical-reference.md#51-the-shared-key-is-the-issue-id).
 
 **PR-body precedence:** `closes #N` (highest confidence) > tracker key
 (`PROJ-123`) > bare `#N` (lowest confidence). This lets a Jira/Linear shop that
 references a tracker key in the PR body — with a generic branch name — still get
-attribution, while an explicit `closes #N` always wins when present.
+attribution; within the body, an explicit `closes #N` wins when present.
+A branch-derived ID takes precedence over the entire body.
 
 ### The year guard (a deliberate tradeoff)
 
@@ -129,9 +134,10 @@ If none of the branch, PR body, or commit subjects yields an issue reference:
 - **PR outcome** is skipped — a merged PR with no derivable issue records no
   outcome, so it contributes nothing to the TIER numerator.
 
-The fix is always the same: name branches `<prefix>/<issue-number>-<slug>` (for
-example `fix/127-webhook-guide`) and reference the issue in the PR body with
-`closes #<n>`.
+Name branches `<prefix>/<issue-number>-<slug>` (for example
+`fix/127-webhook-guide`) without tracker-shaped tokens elsewhere in the branch,
+and reference the issue in the PR body with `closes #<n>`; the body is only a
+fallback when the branch yields no ID.
 
 ## Multi-repo organizations
 

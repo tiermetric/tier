@@ -131,10 +131,13 @@ func (d *DB) RecordPushCommit(ctx context.Context, o Outcome, day, commitSHA str
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := d.prepareCorrectionWriteTx(ctx, tx); err != nil {
+		return 0, err
+	}
 
 	var prCaptured bool
 	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM outcomes WHERE merge_commit_sha = ?)`, commitSHA,
+		`SELECT EXISTS (SELECT 1 FROM outcomes WHERE merge_commit_sha = ? UNION ALL SELECT 1 FROM outcome_exclusions WHERE exclusion_merge_commit_sha = ?)`, commitSHA, commitSHA,
 	).Scan(&prCaptured); err != nil {
 		return 0, fmt.Errorf("RecordPushCommit: merge-commit lookup: %w", err)
 	}
@@ -170,6 +173,9 @@ func (d *DB) RecordPushCommit(ctx context.Context, o Outcome, day, commitSHA str
 			if err := rederivePushOwner(ctx, tx, held, pushCause{commitSHA, heldDev}, true); err != nil {
 				return 0, err
 			}
+		}
+		if err := d.refreshEnabledCorrectionsTx(ctx, tx, heldID); err != nil {
+			return 0, err
 		}
 		if err := tx.Commit(); err != nil {
 			return 0, fmt.Errorf("RecordPushCommit: commit: %w", err)
@@ -218,6 +224,9 @@ func (d *DB) RecordPushCommit(ctx context.Context, o Outcome, day, commitSHA str
 	if err := rederivePushOwner(ctx, tx, row, pushCause{commitSHA, o.Developer}, true); err != nil {
 		return 0, err
 	}
+	if err := d.refreshEnabledCorrectionsTx(ctx, tx, row.id); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("RecordPushCommit: commit: %w", err)
 	}
@@ -229,6 +238,8 @@ func (d *DB) RecordPushCommit(ctx context.Context, o Outcome, day, commitSHA str
 // (#849). inserted is false when an outcome with this merge_commit_sha already
 // exists — a redelivery, or a row an earlier writer stored without reconciling —
 // and the ledger is reconciled anyway: that is a no-op once the entry is gone.
+// Correction declarations and pending parent endpoints are attached in this same
+// transaction, including on a replay that fills previously missing evidence.
 // Every PR insert path calls it: the pull_request webhook, `tierd backfill` and
 // POST /api/v1/outcomes.
 //
@@ -246,15 +257,38 @@ func (d *DB) RecordPROutcome(ctx context.Context, o Outcome) (inserted bool, err
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := d.prepareCorrectionWriteTx(ctx, tx); err != nil {
+		return false, err
+	}
 
 	inserted, err = insertOutcomeRow(ctx, tx, o)
 	if err != nil {
 		return false, fmt.Errorf("RecordPROutcome: insert: %w", err)
 	}
+	if inserted {
+		if err := fillPROutcome(ctx, tx, o); err != nil {
+			return false, fmt.Errorf("RecordPROutcome: fill: %w", err)
+		}
+	}
+	if err := attachCorrectionOutcomeTx(ctx, tx, o, d.clock()); err != nil {
+		return false, fmt.Errorf("RecordPROutcome: corrections: %w", err)
+	}
+	touched, err := correctionOutcomeIDsTx(ctx, tx, o)
+	if err != nil {
+		return false, err
+	}
+	pushIDs, err := queryInt64s(ctx, tx, `SELECT outcome_id FROM push_outcome_commits WHERE commit_sha=?`, o.MergeCommitSHA)
+	if err != nil {
+		return false, err
+	}
+	touched = append(touched, pushIDs...)
 	if sha := o.MergeCommitSHA; ValidPushCommitID(sha) {
 		if err := supersedePushCommit(ctx, tx, sha); err != nil {
 			return false, err
 		}
+	}
+	if err := d.refreshEnabledCorrectionsTx(ctx, tx, touched...); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("RecordPROutcome: commit: %w", err)
@@ -352,9 +386,10 @@ func eraseSubjectPushLedger(ctx context.Context, tx *sql.Tx, placeholders string
 		UPDATE push_outcome_audit SET commit_sha = '', commit_developer = ''
 		WHERE commit_developer IN (`+placeholders+`)
 		   OR commit_sha IN (SELECT commit_sha FROM push_outcome_commits WHERE developer IN (`+placeholders+`))
+		   OR commit_sha IN (SELECT exclusion_merge_commit_sha FROM outcome_exclusions WHERE developer IN (`+placeholders+`) OR author_developer IN (`+placeholders+`))
 		   OR commit_sha IN (SELECT merge_commit_sha FROM outcomes
 		                     WHERE merge_commit_sha IS NOT NULL AND developer IN (`+placeholders+`))`,
-		append(append(append([]any{}, args...), args...), args...)...); err != nil {
+		append(append(append(append(append([]any{}, args...), args...), args...), args...), args...)...); err != nil {
 		return 0, 0, fmt.Errorf("blank the subject's commits in push_outcome_audit: %w", err)
 	}
 	ids, err := queryInt64s(ctx, tx,

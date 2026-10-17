@@ -21,6 +21,7 @@ import (
 
 	"github.com/tiermetric/tier/internal/api"
 	"github.com/tiermetric/tier/internal/logsafe"
+	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -39,15 +40,28 @@ var errSealedManifest = errors.New("a sealed month's manifest")
 
 // sealedManifest mirrors api.sealedManifestJSON, decode-side, as reportManifest
 // mirrors the live manifest.
+type manifestSealDisclosure struct {
+	ScoringPolicy          string   `json:"scoring_policy"`
+	CorrectionRuleVersion  string   `json:"correction_rule_version"`
+	RubricVersion          *int     `json:"rubric_version"`
+	CorrectionRevision     *int64   `json:"correction_revision"`
+	SealedAt               string   `json:"sealed_at"`
+	ConfiguredGraceSeconds *float64 `json:"configured_grace_seconds"`
+	GraceStatus            string   `json:"grace_status"`
+	DaysAfterPeriodEnd     float64  `json:"days_after_period_end"`
+	RevertWindowsAtSeal    string   `json:"revert_windows_at_seal"`
+	Note                   string   `json:"note"`
+}
 type sealedManifest struct {
-	Schema         string `json:"manifest_schema"`
-	Period         string `json:"period"`
-	PeriodStart    string `json:"period_start"`
-	PeriodEnd      string `json:"period_end"`
-	SealedAt       string `json:"sealed_at"`
-	NextSealAt     string `json:"next_seal_at"`
-	EarliestPeriod string `json:"earliest_period,omitempty"`
-	LatestPeriod   string `json:"latest_period"`
+	SealDisclosure *manifestSealDisclosure `json:"seal_disclosure,omitempty"`
+	Schema         string                  `json:"manifest_schema"`
+	Period         string                  `json:"period"`
+	PeriodStart    string                  `json:"period_start"`
+	PeriodEnd      string                  `json:"period_end"`
+	SealedAt       string                  `json:"sealed_at"`
+	NextSealAt     string                  `json:"next_seal_at"`
+	EarliestPeriod string                  `json:"earliest_period,omitempty"`
+	LatestPeriod   string                  `json:"latest_period"`
 	Config         struct {
 		Aggregation string `json:"aggregation"`
 		PeriodSize  string `json:"period_size"`
@@ -166,6 +180,23 @@ func verifySealed(ctx context.Context, db *store.DB, m sealedManifest, unknown [
 		sealedField("tool_version", m.ToolVersion, rep.ToolVersion),
 		sealedField("commit", m.Commit, rep.ToolCommit),
 	}
+	if m.SealDisclosure != nil {
+		policy, rule, rubric := "unknown", "unknown", "unknown"
+		if rep.ScoringPolicy != nil {
+			policy = *rep.ScoringPolicy
+		}
+		if rep.CorrectionRuleVersion != nil {
+			rule = *rep.CorrectionRuleVersion
+		}
+		if rep.RubricVersion != nil {
+			rubric = strconv.Itoa(*rep.RubricVersion)
+		}
+		wantRubric := "unknown"
+		if m.SealDisclosure.RubricVersion != nil {
+			wantRubric = strconv.Itoa(*m.SealDisclosure.RubricVersion)
+		}
+		res.Dims = append(res.Dims, sealedField("sealed policy", m.SealDisclosure.ScoringPolicy, policy), sealedField("sealed correction rule", m.SealDisclosure.CorrectionRuleVersion, rule), sealedField("sealed rubric", wantRubric, rubric))
+	}
 	if rep.BodyDigest != bodyDigest {
 		res.Dims[1] = verifyDim{Name: "stored digest", Status: dimChanged, Detail: fmt.Sprintf("the row's "+
 			"body_digest column is %s, but its body hashes to %s", logsafe.Str(rep.BodyDigest), bodyDigest)}
@@ -244,17 +275,28 @@ func recomputeSealed(ctx context.Context, db *store.DB, p api.Period, rep store.
 	if err != nil {
 		return "NOT RUN: " + logsafe.Err(err)
 	}
-	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit))
+	options := []api.Option{api.WithCommit(commit)}
+	provenance := "unknown sealed policy/rubric; legacy recompute"
+	if rep.ScoringPolicy != nil && rep.CorrectionRuleVersion != nil && rep.RubricVersion != nil {
+		policy := scoring.ScoringPolicy{Event3: *rep.ScoringPolicy == "event3", Resolved: true, RuleVersion: *rep.CorrectionRuleVersion}
+		stamp, e := policy.Stamp()
+		if e != nil || stamp.Policy != *rep.ScoringPolicy || stamp.RuleVersion != *rep.CorrectionRuleVersion || stamp.RubricVersion != *rep.RubricVersion {
+			return "NOT RUN: unsupported sealed policy/rubric provenance"
+		}
+		options = append(options, api.WithScoringPolicy(policy))
+		provenance = fmt.Sprintf("sealed policy %s / %s, rubric %d", stamp.Policy, stamp.RuleVersion, stamp.RubricVersion)
+	}
+	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, options...)
 	h.SetAggregation(mode, rep.K)
 	body, err := h.RecomputeSealedBody(ctx, p)
 	if err != nil {
-		return "NOT RUN: " + logsafe.Err(err)
+		return "NOT RUN: " + logsafe.Err(err) + " (" + provenance + ")"
 	}
 	sum := sha256.Sum256(body)
 	if now := "sha256:" + hex.EncodeToString(sum[:]); now != stored {
-		return "a seal computed from today's rows would DIFFER (" + now + ") under the month's sealed level and k, not this install's current config: a row, alias or membership moved after the seal, or this binary computes the month differently"
+		return "a seal computed from today's rows would DIFFER (" + now + ") with " + provenance + " under the month's sealed level and k, not this install's current config: a row, alias or membership moved after the seal, or this binary computes the month differently"
 	}
-	return "a seal computed from today's rows would be IDENTICAL under the month's sealed level and k, not this install's current config"
+	return "a seal computed from today's rows would be IDENTICAL with " + provenance + " under the month's sealed level and k, not this install's current config"
 }
 
 func printSealedVerify(w io.Writer, res sealedVerifyResult) {

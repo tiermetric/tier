@@ -36,9 +36,11 @@ type serveMetrics struct {
 	zeroOutcomeTripwire *metrics.GaugeVec
 	walBytes            *metrics.GaugeVec
 	walStatErrors       *metrics.CounterVec
+	revertAmbiguous     *metrics.CounterVec
 	pushUnattributed    *metrics.CounterVec
 	pushMergeLeak       *metrics.CounterVec
 	pushMissingPushedAt *metrics.CounterVec
+	webhookOversized    *metrics.CounterVec
 	adminPolls          *metrics.CounterVec
 	adminEvents         *metrics.CounterVec
 	adminCostDeltas     *metrics.CounterVec
@@ -268,7 +270,7 @@ func newServeMetrics(version string) *serveMetrics {
 	// per-developer/issue value ever becomes a label.
 	pushUnattributed := reg.NewCounter(
 		"tier_push_unattributed_total",
-		"Direct commits to the default branch that could not be attributed (no issue id, no GitHub author login, or no usable commit id) and were not scored (#196, #849).")
+		"Direct commits to the default branch that could not be attributed (no issue id, no GitHub author login, an author login reserved for the unattributed pseudo-developer (#619), or no usable commit id) and were not scored (#196, #849).")
 	// pushMergeLeak counts default-branch pushes that carried a "Merge pull
 	// request #N" commit AND had other commits captured beside it (#849). Those
 	// commits are the merged PR's branch commits, so the work may count twice
@@ -341,9 +343,11 @@ func newServeMetrics(version string) *serveMetrics {
 		zeroOutcomeTripwire: zeroOutcomeTripwire,
 		walBytes:            walBytes,
 		walStatErrors:       walStatErrors,
+		revertAmbiguous:     reg.NewCounter("tier_revert_ambiguous_total", "Unresolved revert checks by reason; replays count again. Durable cohort counts use distinct revert source_ref.", "reason"),
 		pushUnattributed:    pushUnattributed,
 		pushMergeLeak:       pushMergeLeak,
 		pushMissingPushedAt: pushMissingPushedAt,
+		webhookOversized:    reg.NewCounter("tier_webhook_oversized_total", "Webhook bodies rejected before authentication; event is an allowlisted unauthenticated header (other for unknown types).", "event"),
 		adminPolls:          adminPolls,
 		adminEvents:         adminEvents,
 		adminCostDeltas:     adminCostDeltas,

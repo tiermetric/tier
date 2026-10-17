@@ -223,7 +223,7 @@ func TestPoll_CachedTokensSubtractedFromInput(t *testing.T) {
 		t.Errorf("CacheRead = %d, want 900 (the cached subset)", ev.CacheRead)
 	}
 	if ev.CacheWrite5m != 0 || ev.CacheWrite1h != 0 {
-		t.Errorf("cache writes = %d/%d, want 0/0 (OpenAI has no write SKU)", ev.CacheWrite5m, ev.CacheWrite1h)
+		t.Errorf("cache writes = %d/%d, want 0/0 (current Usage API decoder maps no separate write class)", ev.CacheWrite5m, ev.CacheWrite1h)
 	}
 	// Integer micro assertion: cost equals ComputeCost of exactly the carved split.
 	wantCost := store.ComputeCost("gpt-4o", store.CostUsage{Input: 100, CacheRead: 900})

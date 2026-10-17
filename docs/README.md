@@ -1,6 +1,6 @@
 # TIER documentation
 
-TIER measures the **yield** of AI token spend: outcome per token, not tokens
+TIER measures the **yield** of AI token spend: outcome per dollar of token spend, not tokens
 consumed. This index is grouped by what you are trying to do. Every page is
 written to be a stopping point — you should never have to read two documents to
 get one answer.
@@ -21,6 +21,7 @@ method.
 | [technical-reference.md](technical-reference.md) | The white paper's companion: capture, pricing, outcomes, attribution, privacy, statistics, Spend Leverage accounting, team deployment and the API, in full. |
 | [how-it-works.md](how-it-works.md) | What TIER actually does today, grounded in the code — the engineer's evaluation read. |
 | [interpreting-the-number.md](interpreting-the-number.md) | You have a score. Is it good? What should you change? |
+| [score-series-changes.md](score-series-changes.md) | Shipped scoring, pricing, attribution and eligibility changes, their historical effects and comparison conditions. |
 | [rubric.md](rubric.md) | The canonical v1 rubric — how merged work becomes weighted points. |
 | [pricing-philosophy.md](pricing-philosophy.md) | What the denominator measures, and why list prices rather than your invoice. |
 | [how-tier-relates.md](how-tier-relates.md) | Where TIER sits next to DORA, SPACE, and DX Core 4. |

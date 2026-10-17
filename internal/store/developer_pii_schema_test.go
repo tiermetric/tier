@@ -70,3 +70,18 @@ func TestEveryDeveloperColumnTableIsErasedOrExcluded(t *testing.T) {
 	}
 	t.Logf("checked %d developer-column tables: %v", len(tables), tables)
 }
+
+func TestOutcomeExclusionsAreDeveloperPII(t *testing.T) {
+	covered := false
+	for _, table := range developerPIITables {
+		if table == "outcome_exclusions" {
+			covered = true
+		}
+	}
+	if !covered {
+		t.Fatal("outcome_exclusions must be in developerPIITables for erase and export")
+	}
+	if _, exempt := developerColumnExclusions["outcome_exclusions"]; exempt {
+		t.Fatal("exclusion tombstones carry the PR author and cannot be exempted")
+	}
+}

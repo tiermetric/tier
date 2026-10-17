@@ -346,12 +346,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     streamCapture that forwards bytes to the client unchanged while feeding
 //     an SSE framer. The TokenEvent is emitted at body Close (after the
 //     client finishes reading or disconnects). This path is what captures
-//     Claude Code, which defaults to streaming. (The Responses API streams too,
-//     and is parsed here since #459 task 2 — though never yet against live
-//     traffic, see the package doc; Gemini CLI also streams, and its
-//     /gemini/ route + geminiStreamParser are mounted since #459 task 4, but
-//     unlike Anthropic/OpenAI this path has never carried live traffic — see
-//     the package doc.)
+//     Claude Code, which defaults to streaming. The Responses API streams too
+//     and is parsed here since #459 task 2; Gemini CLI's /gemini/ route and
+//     geminiStreamParser are mounted since #459 task 4. Live accounting remains
+//     unvalidated on all three routes (Anthropic, OpenAI, and Gemini); see the
+//     package doc.
 func (p *Proxy) modifyResponse(resp *http.Response) error {
 	// Only intercept successful API responses.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -714,20 +713,21 @@ func parseAnthropic(body []byte, developer, issueID, host string) *collector.Tok
 		CacheWrite1h: w1h,
 	})
 	return &collector.TokenEvent{
-		Developer:      developer,
-		IssueID:        issueID,
-		Model:          r.Model,
-		InputTok:       r.Usage.InputTokens,
-		OutputTok:      r.Usage.OutputTokens,
-		CacheRead:      r.Usage.CacheReadInputTokens,
-		CacheWrite5m:   w5m,
-		CacheWrite1h:   w1h,
-		CostMicro:      cost,
-		Fidelity:       collector.FidelityRealtime,
-		IdempotencyKey: idempotencyKeyForProxy(ProviderAnthropic, r.ID),
-		Host:           host,
-		BillingMode:    billingMode,
-		Timestamp:      time.Now().UTC(),
+		CacheWriteEvidence: collector.CacheWriteProvenance(r.Usage.CacheCreation != nil),
+		Developer:          developer,
+		IssueID:            issueID,
+		Model:              r.Model,
+		InputTok:           r.Usage.InputTokens,
+		OutputTok:          r.Usage.OutputTokens,
+		CacheRead:          r.Usage.CacheReadInputTokens,
+		CacheWrite5m:       w5m,
+		CacheWrite1h:       w1h,
+		CostMicro:          cost,
+		Fidelity:           collector.FidelityRealtime,
+		IdempotencyKey:     idempotencyKeyForProxy(ProviderAnthropic, r.ID),
+		Host:               host,
+		BillingMode:        billingMode,
+		Timestamp:          time.Now().UTC(),
 	}
 }
 
@@ -876,10 +876,10 @@ func parseOpenAIChat(body []byte, developer, issueID, host string) *collector.To
 //     Be precise about what that does NOT exclude: a reading where cached sits
 //     outside input AND outside total would satisfy both identities too. It is
 //     ruled out by the field's name rather than by the data, so this is strong
-//     evidence, not a proof — exactly the hedge parse.go already makes about its
-//     sibling field ("total == input + output is CONSISTENT with that (it does
-//     not prove it)"). What closes the residual is that the rest of the tree
-//     already PRICES Codex on the inclusive reading (parse.go's deltaFrom) and
+//     evidence, not a proof — parse.go likewise cautions that the total identity
+//     does not prove containment for its sibling cache-write field. What closes
+//     the residual is that the rest of the tree already PRICES Codex on the
+//     inclusive reading (parse.go's deltaFrom) and
 //     the Chat Completions precedent below; this parser agreeing with that
 //     collector is what keeps identical traffic priced identically.
 //
@@ -974,8 +974,8 @@ func openAITokenEvent(developer, issueID, host, id, model string, input, output,
 		cached = input
 	}
 	fresh := input - cached
-	// OpenAI has no cache-write SKU — both 5m and 1h buckets stay zero, and
-	// ComputeCost applies the model's cache-read multiplier to `cached`.
+	// Current OpenAI decoders capture no separate write class; both write
+	// buckets stay zero. ComputeCost applies the model's read multiplier to cached.
 	cost, billingMode := store.ComputeCostHost(host, model, store.CostUsage{
 		Input:     fresh,
 		Output:    output,

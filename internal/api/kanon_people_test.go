@@ -911,3 +911,30 @@ func TestKAnonPeople_ShareCarriersAreJudgedPerGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestKAnonPeople_ExcludedRevertBotDoesNotCount(t *testing.T) {
+	for _, moved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("moved=%v", moved), func(t *testing.T) {
+			h, db := newTestHandler(t)
+			ctx := context.Background()
+			now := time.Now().UTC()
+			for _, dev := range []string{"alice", "bob", "release-agent"} {
+				rosterOnly(t, db, "eng", dev)
+				seedRepoCostAt(t, db, repoAlpha, dev, "issue-42", 10, now)
+			}
+			o := store.Outcome{Developer: "release-agent", AuthorType: "Bot", Repo: repoAlpha, PRNumber: 43, MergeCommitSHA: "revert-merge", IssueID: "issue-42", Timestamp: now, Weight: 1, Quality: 1}
+			if moved {
+				if _, err := db.RecordPROutcome(ctx, o); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.ExcludePROutcome(ctx, o, "head match", "github-webhook"); err != nil {
+				t.Fatal(err)
+			}
+			h.SetAggregation(scoring.AggregationTeam, 3)
+			resp, raw := getScoresBody(t, h, "/api/v1/scores?since="+scoresSince())
+			assertGroupWithheld(t, resp, "eng", 2)
+			assertUncounted(t, raw, "bot", 1)
+		})
+	}
+}

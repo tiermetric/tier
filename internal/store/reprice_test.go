@@ -23,7 +23,7 @@ const repriceModel = "claude-sonnet-4"
 // something to correct. Returns the correct (recomputed) cost for assertions.
 func insertMispricedEvent(t *testing.T, db *DB, dev, issue string, version int, inputTok int, storedCost int64, ts time.Time) int64 {
 	t.Helper()
-	if err := db.InsertTokenEvent(context.Background(), TokenEvent{
+	if err := db.InsertTokenEvent(context.Background(), TokenEvent{TokenDerived: true,
 		Developer:    dev,
 		IssueID:      issue,
 		Model:        repriceModel,
@@ -732,9 +732,11 @@ func TestReprice_SurgicalInverseFromRowAudit(t *testing.T) {
 		UPDATE token_events
 		SET cost_micro = (SELECT old_cost_micro FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?),
 		    price_version = (SELECT old_price_version FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?),
-		    billing_mode = (SELECT old_billing_mode FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?)
+		    billing_mode = (SELECT old_billing_mode FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?),
+            pricing_basis = (SELECT old_pricing_basis FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?),
+            rate_snapshot = (SELECT old_rate_snapshot FROM reprice_row_audit r WHERE r.token_event_id = token_events.id AND r.reprice_id = ?)
 		WHERE id IN (SELECT token_event_id FROM reprice_row_audit WHERE reprice_id = ?)`,
-		res.RepriceID, res.RepriceID, res.RepriceID, res.RepriceID,
+		res.RepriceID, res.RepriceID, res.RepriceID, res.RepriceID, res.RepriceID, res.RepriceID,
 	); err != nil {
 		t.Fatalf("apply surgical inverse: %v", err)
 	}

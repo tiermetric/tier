@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/issueref"
 )
 
 // TestParseBranches pins the git `%D` decorate-field parser against realistic
@@ -343,6 +345,7 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 		{"bare_pr_number", "Merge pull request #909 from feature/rulings", ""},
 		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", ""},
 		{"closes", "fix: attribution (closes #12)", "issue-12"},
+		{"close_with_pr_number", "fix: attribution closes #12 (#909)", "issue-12"},
 		{"fixes", "fix: attribution (fixes #1017)", "issue-1017"},
 		{"resolves", "fix: attribution (resolves #1017)", "issue-1017"},
 		{"close", "fix: attribution (close #1017)", "issue-1017"},
@@ -389,6 +392,18 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 			if commit.IssueID != c.want {
 				t.Errorf("subject %q IssueID = %q, want %q", c.subject, commit.IssueID, c.want)
 			}
+			var wantPR *int
+			if c.want == "" {
+				n := 909
+				wantPR = &n
+			}
+			if (commit.PRNumber == nil) != (wantPR == nil) || (wantPR != nil && *commit.PRNumber != *wantPR) {
+				t.Fatalf("commit pr_number = %v, want %v", commit.PRNumber, wantPR)
+			}
+			events := joinSessionsToCommits([]sessionSummary{{GitBranch: branch, Messages: []messageUsage{{gitBranch: branch, timestamp: commit.Timestamp, model: "claude-sonnet-4", input: 10}}}}, commits, "alice", "acme/widgets")
+			if len(events) != 1 || events[0].Repo != "acme/widgets" || events[0].BranchHash == nil || *events[0].BranchHash != *issueref.BranchHash("acme/widgets", branch) || (events[0].PRNumber == nil) != (wantPR == nil) || (wantPR != nil && *events[0].PRNumber != *wantPR) {
+				t.Fatalf("emitted events = %+v, want pr_number %v", events, wantPR)
+			}
 			resolver, err := NewIssueResolver(context.Background(), repo, since)
 			if err != nil {
 				t.Fatalf("NewIssueResolver: %v", err)
@@ -401,6 +416,72 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 				t.Errorf("Resolve(%q) = %q, want %q", branch, got, want)
 			}
 		})
+	}
+}
+
+func TestResolveMessageAttribution_PRNumberRequiresFullBranch(t *testing.T) {
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	pr := 42
+	for _, tc := range []struct {
+		name, branch, commitBranch, issue string
+		wantPR                            bool
+	}{
+		{"shared_leaf", "feature/topic", "bugfix/topic", "", false},
+		{"shared_leaf_issue_unchanged", "feature/topic", "bugfix/topic", "issue-9", false},
+		{"full_match", "feature/topic", "feature/topic", "", true},
+		{"commit_ref_prefix", "feature/topic", "refs/heads/feature/topic", "", true},
+		{"session_ref_prefix", "refs/heads/feature/topic", "feature/topic", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commits := []gitCommit{{Branches: []string{tc.commitBranch}, Timestamp: ts, PRNumber: &pr, IssueID: tc.issue}}
+			events := joinSessionsToCommits([]sessionSummary{{GitBranch: tc.branch,
+				Messages: []messageUsage{{timestamp: ts, model: "claude-sonnet-4", input: 10}},
+			}}, commits, "alice", "acme/a")
+			if len(events) != 1 {
+				t.Fatalf("events = %v, want one", events)
+			}
+			wantIssue := tc.issue
+			if wantIssue == "" {
+				wantIssue = UnattributedNoIssue
+			}
+			if events[0].IssueID != wantIssue {
+				t.Errorf("issue = %s, want %s", events[0].IssueID, wantIssue)
+			}
+			if got := events[0].PRNumber; (got != nil) != tc.wantPR || (got != nil && *got != pr) {
+				t.Errorf("PRNumber = %v, want present=%t (PR %d)", got, tc.wantPR, pr)
+			}
+		})
+	}
+}
+
+func TestResolveMessageAttribution_PrefixedMainlineHasNoPRNumber(t *testing.T) {
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const subject = "Merge pull request #42 from feature/topic"
+	pr := issueref.FromCommitSubjectPR(subject)
+	if pr == nil || *pr != 42 {
+		t.Fatalf("merge fixture PRNumber = %v, want 42", pr)
+	}
+	for _, branch := range []string{"main", "master"} {
+		for _, commitBranch := range []string{branch, "refs/heads/" + branch} {
+			t.Run(commitBranch, func(t *testing.T) {
+				messageBranch := "refs/heads/" + branch
+				commits := []gitCommit{{Branches: []string{commitBranch}, Timestamp: ts,
+					Subject: subject, PRNumber: pr}}
+				events := joinSessionsToCommits([]sessionSummary{{GitBranch: messageBranch,
+					Messages: []messageUsage{{gitBranch: messageBranch, timestamp: ts,
+						model: "claude-sonnet-4", input: 10}},
+				}}, commits, "alice", "acme/a")
+				if len(events) != 1 {
+					t.Fatalf("events = %v, want one", events)
+				}
+				if got := events[0].PRNumber; got != nil {
+					t.Errorf("PRNumber = %d, want nil for %s", *got, messageBranch)
+				}
+				if got := events[0].IssueID; got != UnattributedMain {
+					t.Errorf("IssueID = %q, want %q", got, UnattributedMain)
+				}
+			})
+		}
 	}
 }
 

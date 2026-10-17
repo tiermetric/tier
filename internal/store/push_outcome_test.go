@@ -52,7 +52,7 @@ func TestUpsertPushOutcome_IdempotentPerIssuePerDay(t *testing.T) {
 		t.Fatalf("second same-(issue,day) upsert reported inserted=true, want false (aggregated, not summed)")
 	}
 
-	got, found, err := db.LatestOutcomeByIssue(ctx, "", "issue-42")
+	got, found, err := db.LatestOutcomeByIssue(ctx, "", "issue-42", ts)
 	if err != nil {
 		t.Fatalf("LatestOutcomeByIssue: %v", err)
 	}

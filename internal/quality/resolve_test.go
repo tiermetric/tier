@@ -1,8 +1,10 @@
 package quality
 
 import (
+	"math"
 	"testing"
 
+	"github.com/tiermetric/tier/internal/qualityrule"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -12,14 +14,15 @@ func ev(eventType, sourceRef string) store.QualityEvent {
 	return store.QualityEvent{EventType: eventType, SourceRef: sourceRef}
 }
 
-// TestResolve mirrors quality-degradation-spec §10 test IDs where noted.
-func TestResolve(t *testing.T) {
+type resolveFixture struct {
+	name   string
+	events []store.QualityEvent
+	want   float64
+}
+
+func resolveFixtures() []resolveFixture {
 	const sha = "abc123"
-	cases := []struct {
-		name   string
-		events []store.QualityEvent
-		want   float64
-	}{
+	return []resolveFixture{
 		// ⚠️ The arms below spell source_refs as "sha:N" — the LEGACY
 		// two-component form. They predate #687 and are left as-is on purpose:
 		// they double as coverage that a pre-#687 event set still resolves the
@@ -110,7 +113,7 @@ func TestResolve(t *testing.T) {
 			// 🔴 PINNING A DECISION, NOT A DISCOVERY. Resolve ignores
 			// run_attempt, so a flaky success also clears a LATER failure of
 			// the same workflow on the same commit. Two reviewers proposed
-			// tightening this; see the long comment on flakyRuns in resolve.go
+			// tightening this; see the flaky-map rationale in qualityrule/resolve.go
 			// for why it was declined (one unchanged commit going fail -> pass
 			// -> fail IS a flaky test). If you are here because you want to
 			// change it, that argument is what you have to answer.
@@ -128,10 +131,33 @@ func TestResolve(t *testing.T) {
 			1.0,
 		},
 	}
-	for _, tc := range cases {
+}
+
+// TestResolve mirrors quality-degradation-spec §10 test IDs where noted.
+func TestResolve(t *testing.T) {
+	for _, tc := range resolveFixtures() {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := Resolve(tc.events); got != tc.want {
 				t.Errorf("Resolve = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolve_ExistingFixturesUnchanged pins the adapter and the pure core to
+// every original fixture, including legacy and workflow-aware flaky decisions.
+func TestResolve_ExistingFixturesUnchanged(t *testing.T) {
+	for _, tc := range resolveFixtures() {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := make([]qualityrule.Event, len(tc.events))
+			for i, e := range tc.events {
+				ref := ParseCIRef(e.SourceRef)
+				facts[i] = qualityrule.Event{EventType: e.EventType, HeadSHA: ref.HeadSHA, WorkflowID: ref.WorkflowID}
+			}
+			for _, got := range []float64{Resolve(tc.events), qualityrule.Resolve(facts).Float64} {
+				if math.Float64bits(got) != math.Float64bits(tc.want) {
+					t.Errorf("quality bits = %x, want %x", math.Float64bits(got), math.Float64bits(tc.want))
+				}
 			}
 		})
 	}

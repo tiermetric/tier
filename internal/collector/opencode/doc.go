@@ -8,43 +8,12 @@
 // container — one JSON blob per row in a `message` table instead of one JSON
 // object per line in a file.
 //
-// # 🔴 READ THIS BEFORE COPYING ANYTHING FROM codexrollout
-//
-// The two sources report reasoning tokens under OPPOSITE conventions, and an
-// ingester written by analogy is not slightly wrong, it is wrong by most of the
-// output-side bill.
-//
-//	Codex     reasoning ⊆ output           checkContainment asserts it; nothing adds it.
-//	Opencode  reasoning BESIDE output      total = input + output + reasoning + cache.read
-//
-// (The check the code actually runs carries a fifth term, `+ cache.write`. It is
-// UNMEASURED — cache.write is 0 on every one of the 9,267 assistant rows in the
-// maintainer's store — and checkAdditiveIdentity explains why it is included
-// anyway rather than assumed away.)
-//
-// Measured over every GLM-5.3 assistant row in the maintainer's store
-// (2026-07-27 → 2026-08-28, 3,943 completed rows):
-//
-//	rows  total == in+out+reasoning+cache_read   reasoning > output
-//	3943            3943  (100%)                       3025  (77%)
-//
-// The consequences of getting it backwards, both measured on that corpus:
-//
-//   - Mapping OutputTok = output alone drops 4,415,226 of 5,203,917 output-side
-//     tokens — 84.8% of the output bill.
-//   - Reusing Codex's `reasoning <= output` containment check REJECTS 77% of the
-//     corpus, because here reasoning routinely exceeds output several-fold.
-//
-// So this package maps OutputTok = output + reasoning (the Gemini
-// `thoughtsTokenCount` convention TokenEvent already documents), and its
-// containment check is the ADDITIVE identity, not a subset assertion.
-//
-// ⚠️ The pricing side of that convention is UNVERIFIED: Z.ai does not publish
-// whether reasoning tokens bill at the output rate. What IS verified is the
-// arithmetic — the tokens exist, they are not inside `output`, and dropping them
-// would under-report. Folding them into Output is the convention this tree
-// already uses for additive reasoning; if Z.ai ever publishes a separate
-// reasoning rate, that is a price-table change, not a change here.
+// Token accounting is defined by internal/tokenacct.Opencode. Read its
+// opposite-of-Codex warning before changing the mapping or validation rule.
+// A rule violation skips one row and is logged at WARN with a counter. Rows
+// are independent per-message facts, so a bad row costs exactly itself;
+// Codex instead fails the whole file because differencing cumulative snapshots
+// lets one bad snapshot poison its neighbours.
 //
 // # Never import the client's cost
 //

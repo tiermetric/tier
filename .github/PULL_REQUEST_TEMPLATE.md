@@ -14,6 +14,7 @@ must pass locally before pushing — there is no hosted CI gating merges yet. --
 - [ ] `make check` passes locally
 - [ ] Added or updated tests for the change
 - [ ] Docs updated if behavior or flags changed
+- [ ] Changes scoring, pricing, attribution or eligibility? Added a row in docs/score-series-changes.md
 
 ## Notes for reviewers
 <!-- Anything reviewers should focus on: correctness risk, a design tradeoff, a

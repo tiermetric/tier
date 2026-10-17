@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/logsafe"
-	"github.com/tiermetric/tier/internal/store"
+	"github.com/tiermetric/tier/internal/tokenacct"
 )
 
 // rolloutSession is one parsed rollout log: the session identity, the working
@@ -123,13 +123,6 @@ const (
 	lineTurnContext = "turn_context"
 	lineEventMsg    = "event_msg"
 	payloadTokenLog = "token_count"
-
-	// maxCumulativeTokens is the absolute sanity ceiling on any single cumulative
-	// count in one session (see checkContainment). 1e12 is ~10^6 times the largest
-	// session observed locally (the biggest of the 31 captured rollouts is well
-	// under 10^6 tokens) and still orders of magnitude below the int64 cost
-	// overflow it exists to prevent, so it can only ever reject a corrupt file.
-	maxCumulativeTokens = store.MaxTokenCount
 )
 
 // parseRollout reads one rollout log and returns its session identity plus one
@@ -275,15 +268,12 @@ func parseRollout(path string, logger *slog.Logger) (*rolloutSession, error) {
 				return nil, fmt.Errorf("token_count event %d: %w", thisOrdinal, err)
 			}
 			if cur.CacheWriteInputTokens != 0 && !cwWarned {
-				// OpenAI publishes no cache-write SKU, so there is no rate to
-				// price these at. The observed shape is that they are already
-				// inside input_tokens — total == input + output is CONSISTENT
-				// with that (it does not prove it; a separately-carried write
-				// count could also satisfy the sum). On that reading they are
-				// billed at the input rate and dropping the field loses nothing.
-				// Warn once so a future Codex/OpenAI change that starts charging
-				// separately is not absorbed silently.
-				logger.Warn("codex-rollout: cache_write_input_tokens is nonzero; billed at the input rate (OpenAI has no cache-write SKU)",
+				// A nonzero write count does not establish its billing meaning
+				// or containment in input_tokens for this route. The identity
+				// total == input + output does not prove containment. Codex
+				// accounting currently omits a separate write class; warn once
+				// per file so that limitation is visible.
+				logger.Warn("codex-rollout: cache_write_input_tokens is nonzero; separate pricing and containment are not yet validated for this route; the current calculation does not account for a separate write class",
 					"path", logsafe.Str(path), "cache_write_input_tokens", cur.CacheWriteInputTokens)
 				cwWarned = true
 			}
@@ -409,67 +399,15 @@ func (l *lastByteReader) Read(p []byte) (int, error) {
 // file reports false; it has no final line to be mid-flush either way.
 func (l *lastByteReader) endedWithNewline() bool { return l.read && l.last == '\n' }
 
-// checkContainment asserts the invariants Codex's own numbers must satisfy,
-// matching score.py from the tiermetric/model-bench repository — the working
-// reference implementation that priced the Codex half of the TIER Model Report.
-// (That working copy is .gitignore'd here, so the citation is to the repo, not
-// to a path that survives a fresh clone.)
-//
-// These are FATAL, not warnings, by explicit design (#464). Every one of them
-// failing means the log is self-contradictory, and any cost we computed from it
-// would be a confident wrong number. No figure beats a wrong figure.
-//
-// FOUR RELATIONAL INVARIANTS PLUS ONE ABSOLUTE ONE. The relational checks below
-// only assert the fields agree with EACH OTHER, so an internally-consistent but
-// absurd snapshot (~4e18 input and output) satisfies every one of them; the
-// ceiling is what bounds magnitude. Without it such a row prices to a clamped
-// MaxInt64 cost_micro (~$9.2 trillion), and two of those overflow SQLite's
-// integer SUM() — which ERRORS rather than saturating, and SUM(cost_micro) backs
-// /api/v1/scores, so one corrupt local file would take down the read plane.
-//
-// CAVEAT worth knowing before trusting a session: total == input + output is the
-// strongest of these (it is the only one that cross-checks the two classes we
-// actually bill), and it is SKIPPED when total_tokens is absent or zero. A Codex
-// build that stopped emitting total_tokens would therefore keep passing while
-// losing the check that matters most — visible only as this comment, since the
-// degradation is deliberate (see below).
+// checkContainment delegates Codex accounting to tokenacct.Codex.
 func checkContainment(u tokenUsage) error {
-	// Absolute sanity ceiling, checked FIRST because it is the only bound on
-	// magnitude and the relational checks below can all pass at any scale.
-	// 1e12 cumulative tokens is ~10^6x the largest observed session and over $1M
-	// at current Codex rates: nothing legitimate approaches it, and anything that
-	// does is a corrupt file, not a bill.
-	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 ||
-		u.ReasoningOutputTokens < 0 || u.TotalTokens < 0 {
-		return fmt.Errorf("implausible usage: a negative token count (input=%d cached=%d output=%d reasoning=%d total=%d)",
-			u.InputTokens, u.CachedInputTokens, u.OutputTokens, u.ReasoningOutputTokens, u.TotalTokens)
-	}
-	if int64(u.InputTokens) > maxCumulativeTokens || int64(u.OutputTokens) > maxCumulativeTokens ||
-		int64(u.CachedInputTokens) > maxCumulativeTokens || int64(u.TotalTokens) > maxCumulativeTokens {
-		return fmt.Errorf("implausible usage: a cumulative count exceeds the %d-token sanity ceiling (input=%d cached=%d output=%d total=%d)",
-			int64(maxCumulativeTokens), u.InputTokens, u.CachedInputTokens, u.OutputTokens, u.TotalTokens)
-	}
-	// total == input + output. Guarded on total != 0 (as score.py is) so a
-	// future Codex build that omits total_tokens degrades to "unverified" rather
-	// than failing every session. cached and reasoning are SUBSETS of input and
-	// output respectively, which is exactly why they are absent from this sum.
-	if u.TotalTokens != 0 && u.TotalTokens != u.InputTokens+u.OutputTokens {
-		return fmt.Errorf("containment broken: total_tokens=%d != input_tokens+output_tokens=%d",
-			u.TotalTokens, u.InputTokens+u.OutputTokens)
-	}
-	// cached ⊆ input. If this ever failed, carving cached out of input would
-	// produce a NEGATIVE fresh-input count.
-	if u.CachedInputTokens > u.InputTokens {
-		return fmt.Errorf("containment broken: cached_input_tokens=%d > input_tokens=%d",
-			u.CachedInputTokens, u.InputTokens)
-	}
-	// reasoning ⊆ output. We never add reasoning on top of output; this asserts
-	// the assumption that makes that correct.
-	if u.ReasoningOutputTokens > u.OutputTokens {
-		return fmt.Errorf("containment broken: reasoning_output_tokens=%d > output_tokens=%d",
-			u.ReasoningOutputTokens, u.OutputTokens)
-	}
-	return nil
+	input, cached, output := int64(u.InputTokens), int64(u.CachedInputTokens), int64(u.OutputTokens)
+	reasoning, total := int64(u.ReasoningOutputTokens), int64(u.TotalTokens)
+	_, err := tokenacct.Codex(tokenacct.RawUsage{
+		Input: &input, CacheRead: &cached, Output: &output,
+		Reasoning: &reasoning, Total: &total,
+	})
+	return err
 }
 
 // deltaFrom derives ONE call's usage by differencing two consecutive cumulative
@@ -531,27 +469,25 @@ func deltaFrom(prev, cur tokenUsage) (rolloutCall, error) {
 			prev.InputTokens, prev.CachedInputTokens, prev.OutputTokens, prev.TotalTokens,
 			cur.InputTokens, cur.CachedInputTokens, cur.OutputTokens, cur.TotalTokens)
 	}
-	dInput := cur.InputTokens - prev.InputTokens
-	dCached := cur.CachedInputTokens - prev.CachedInputTokens
-	dOutput := cur.OutputTokens - prev.OutputTokens
+	dInput := int64(cur.InputTokens) - int64(prev.InputTokens)
+	dCached := int64(cur.CachedInputTokens) - int64(prev.CachedInputTokens)
+	dOutput := int64(cur.OutputTokens) - int64(prev.OutputTokens)
 	// Per-snapshot containment (cached ⊆ input) does NOT imply the same for the
-	// deltas, so assert it here too. Without this a call whose cached growth
-	// outran its input growth would yield a negative fresh-input count and a
-	// negative cost. Verified to hold across all 18 captured sessions.
-	if dCached > dInput {
+	// deltas. Callers differencing cumulative snapshots must pass their deltas here
+	// too: cached growth outrunning input growth would yield negative fresh input
+	// and a negative cost. Verified to hold across all 18 captured Codex sessions.
+	accounted, err := tokenacct.Codex(tokenacct.RawUsage{
+		Input: &dInput, CacheRead: &dCached, Output: &dOutput,
+	})
+	if err != nil {
 		return rolloutCall{}, fmt.Errorf(
-			"containment broken across consecutive snapshots: cached delta=%d exceeds input delta=%d",
-			dCached, dInput)
+			"containment broken across consecutive snapshots: cached delta=%d exceeds input delta=%d: %w",
+			dCached, dInput, err)
 	}
 	return rolloutCall{
-		// Carve cached out of input so the two token classes never overlap —
-		// identical to the proxy's parseOpenAI. Codex's input_tokens is
-		// INCLUSIVE of cached_input_tokens (Responses API semantics), and the
-		// price table applies a separate cache-read multiplier, so leaving them
-		// overlapped would bill the cached prefix at both rates.
-		Input:     dInput - dCached,
-		CacheRead: dCached,
-		Output:    dOutput,
+		Input:     accounted.Input,
+		CacheRead: accounted.CacheRead,
+		Output:    accounted.Output,
 	}, nil
 }
 

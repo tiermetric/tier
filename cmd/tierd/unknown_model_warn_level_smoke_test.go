@@ -299,7 +299,7 @@ func postUnknownModelEvent(t *testing.T, base string) {
 		"timestamp": %q
 	}]`, unknownWarnModel, time.Now().UTC().Format(time.RFC3339))
 
-	resp, err := http.Post(base+"/api/v1/events", "application/json", strings.NewReader(body)) //nolint:noctx // loopback test POST
+	resp, err := smokeClient.Post(base+"/api/v1/events", "application/json", strings.NewReader(body)) //nolint:noctx // loopback test POST
 	if err != nil {
 		t.Fatalf("POST /api/v1/events: %v", err)
 	}

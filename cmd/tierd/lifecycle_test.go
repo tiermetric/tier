@@ -25,7 +25,7 @@ func TestDispatch_ServeReturnsExitCode(t *testing.T) {
 	// resolveSecretFlag) can't kill this test process before the path we mean
 	// to exercise. t.Setenv also restores them after the test.
 	for _, k := range []string{
-		"TIER_API_TOKEN", "TIER_READ_TOKEN", "TIER_METRICS_TOKEN", "TIER_WEBHOOK_SECRET",
+		"TIER_API_TOKEN", "TIER_READ_TOKEN", "TIER_METRICS_TOKEN", "TIER_INGEST_TOKEN", "TIER_WEBHOOK_SECRET",
 		"TIER_PRICES", "TIER_AGGREGATION", "TIER_K_ANONYMITY", "TIER_PUSH_CAPTURE",
 	} {
 		t.Setenv(k, "")
@@ -76,7 +76,7 @@ func TestDispatch_ServeReturnsExitCode(t *testing.T) {
 // → nothing calls the join at all and the line cannot appear.
 func TestServe_ConfigErrorPathJoinsBackgroundWriters(t *testing.T) {
 	for _, k := range []string{
-		"TIER_API_TOKEN", "TIER_READ_TOKEN", "TIER_METRICS_TOKEN", "TIER_WEBHOOK_SECRET",
+		"TIER_API_TOKEN", "TIER_READ_TOKEN", "TIER_METRICS_TOKEN", "TIER_INGEST_TOKEN", "TIER_WEBHOOK_SECRET",
 		"TIER_PRICES", "TIER_AGGREGATION", "TIER_K_ANONYMITY", "TIER_PUSH_CAPTURE",
 		"TIER_CODEX_ROLLOUT",
 	} {

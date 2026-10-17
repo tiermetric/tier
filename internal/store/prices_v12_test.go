@@ -6,8 +6,10 @@ import "testing"
 // v12 (#1047) added. Each figure is the per-million rate on Anthropic's pricing page
 // (platform.claude.com/docs/en/about-claude/pricing, read 2026-10-02), not a product
 // of the table's own multipliers, so a wrong default or a stray override fails here.
+// Cache reads were revised to $0.10/M in v14 (#1206), per the 2026-10-12 read;
+// the other categories retain their original v12 rates.
 var v12Rows = map[string]v10PerCategoryMicro{
-	"claude-sonnet-5-5": {2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000},
+	"claude-sonnet-5-5": {2_000_000, 10_000_000, 100_000, 2_500_000, 4_000_000},
 }
 
 // TestPriceTableV12_PerCategoryRates pins the v12 row's resolved rate for each token
@@ -45,7 +47,8 @@ func TestPriceTableV12_PerCategoryRates(t *testing.T) {
 // TestPriceTableV12_RawIDsResolve pins the model strings that must reach the
 // claude-sonnet-5-5 row: the id Claude Code writes (measured in ~/.claude/projects on
 // 2026-10-02), a dated snapshot, and case/whitespace variants. None may collapse
-// onto claude-sonnet-5; its rates equal this row's, so NormalizeModel is what pins that.
+// onto claude-sonnet-5; its input/output rates equal this row's, but v14 gives
+// Sonnet 5.5 a lower cache-read rate.
 func TestPriceTableV12_RawIDsResolve(t *testing.T) {
 	loadDefaultPriceTable(t)
 	u := CostUsage{Input: 1_000_000, Output: 1_000_000, CacheRead: 1_000_000}

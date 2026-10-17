@@ -220,7 +220,7 @@ func guardDemoDBPath(path string, stderr io.Writer) error {
 // database has rows in NO other user table. Keep this in lockstep with seedDemo;
 // a table seedDemo starts writing must be added here, and the fail-closed default
 // (refuse) makes an omission safe — it over-refuses, never over-deletes.
-var demoSeededTables = []string{"token_events", "outcomes", "actual_spend", "org_hierarchy", "period_membership", "hierarchy_membership"}
+var demoSeededTables = []string{"pricing_observation_audit", "token_events", "outcomes", "actual_spend", "org_hierarchy", "period_membership", "hierarchy_membership"}
 
 func isRecreatableDemoDB(path string) (bool, error) {
 	ctx := context.Background()

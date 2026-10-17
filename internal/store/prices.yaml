@@ -28,7 +28,9 @@
 # cache_write_5m_mult, cache_write_1h_mult (floats, multipliers of the input
 # rate). Omitted / 0 means "use the provider default"; an explicit positive value
 # overrides that class. Provider defaults: anthropic 5m 1.25x / 1h 2.0x / read
-# 0.1x; openai read 0.5x (no write SKU); google/xai/deepseek/zai/meta/self-hosted 1.0x.
+# 0.1x; openai read 0.5x / writes 1.0x; google/xai/deepseek/zai/meta/self-hosted 1.0x.
+# Current OpenAI capture paths leave write buckets at 0. Explicit model write
+# multipliers do not validate a captured write field's billing meaning or containment.
 # zai writes stay at 1.0x input: Z.ai publishes no per-token cache-write rate (its
 # "limited-time free" line is cache storage), so writes bill like input. meta
 # writes do too: Meta publishes no cache-write rate, and its prompt-caching page
@@ -64,7 +66,8 @@
 # whose input-side context (input + all cache classes) EXCEEDS context_threshold
 # is priced at the *_over rates instead of the base rates (ComputeCost picks the
 # tier by the call's token counts). Used for Anthropic's Sonnet 1M beta (>200K =
-# $6/$22.50) and Gemini Pro (>200K premium). All three fields are set together or
+# $6/$22.50), Haiku 5.5 (>100K = $0.50/$2.50), and Gemini Pro (>200K premium).
+# All three fields are set together or
 # none — a partial spec is a parse error. Not valid on a combined entry.
 #
 # The three self-hosted-{large,medium,small} entries are REQUIRED: self-hosted-medium
@@ -167,8 +170,32 @@
 # Mythos 5.1 and Opus 5.5 as exceptions. Batch (-50%) and data residency (1.1x) are
 # not encoded, like every other row. Only this row was validated this pass;
 # effective_date advances to the 2026-10-02 read.
-version: 12
-effective_date: "2026-10-02"
+# v13 (#1202): added claude-haiku-5-5 ($0.10/$0.50 through 100K prompt tokens,
+# $0.50/$2.50 above 100K via the existing long-context tier) and gpt-6.1-sol
+# ($2/$10, cached input $0.10 = 0.05x; writes 1.25x INFERRED from gpt-6-sol).
+# Sources: Anthropic pricing https://platform.claude.com/docs/en/about-claude/pricing
+# and OpenAI's announcement https://openai.com/index/introducing-gpt-6-1-sol/.
+# Haiku inherits the anthropic defaults: reads 0.1x, writes 1.25x/2.0x, per
+# Anthropic's pricing page above and caching docs:
+# https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+# OpenAI's source gives only $2/$10 and $0.10 cached input; both 1.25x write
+# multipliers are INFERRED from gpt-6-sol. Re-check trigger:
+# re-check OpenAI's pricing on 2026-11-21
+# (third parties call these rates promotional through that date). No time-based
+# tier is encoded. Only these two rows were added this pass; effective_date
+# advances to the 2026-10-12 revision; all other rows are carried forward.
+# v14 (#1206): changed claude-sonnet-5-5 cache reads from $0.20/M (0.1x) to
+# $0.10/M (0.05x); input/output and cache writes stay $2/$10 and $2.50/$4.
+# Source: Anthropic's pricing page
+# https://platform.claude.com/docs/en/about-claude/pricing, read 2026-10-12.
+# Footnote 2: "Cache hits and refreshes on Claude Opus 5.5 and Claude Sonnet 5.5
+# are priced at 0.05x the base input price." The same page read 2026-10-02
+# listed Sonnet 5.5 cache reads at $0.20 and named only Fable 5.1, Mythos 5.1
+# and Opus 5.5 as exceptions (see v12 above): this is a vendor price change
+# between 2026-10-02 and 2026-10-12. Only this row changed this pass;
+# effective_date stays 2026-10-12; all other rows are carried forward.
+version: 14
+effective_date: "2026-10-12"
 
 models:
   # Anthropic
@@ -198,9 +225,9 @@ models:
   # whole claim is honest cost-per-outcome, an optimistic-direction error is the
   # dangerous one. (Priority Tier does not cover Opus 5 at all, so there is no
   # priority rate omitted here.) Unlike an unknown model, this path emits no WARN and
-  # no data_quality signal, which is the one gap in #267's no-silent-guess rule —
-  # `usage.speed` is already on the wire and decoded by both capture paths, so
-  # capturing it is a small follow-up rather than a redesign.
+  # no data_quality signal. Neither the Claude Code JSONL collector nor the
+  # Anthropic proxy decodes the billed `usage.speed` modifier; detection and
+  # modifier pricing remain separate follow-up work.
   claude-opus-5: { input_per_m: 5.00, output_per_m: 25.00, provider: anthropic }   # Opus 5
   # Opus 5.5 (v10, #786): Anthropic platform pricing, 2026-09-25. Cache read $0.20 =
   # 0.05x; writes at the anthropic defaults ($5 5m, $8 1h). Fast mode ($8/$40) is a
@@ -227,12 +254,19 @@ models:
   # No 1M-context over-tier: Sonnet 5 ships full 1M at the standard rate (unlike the
   # Sonnet 4.5 beta).
   claude-sonnet-5: { input_per_m: 2.00, output_per_m: 10.00, provider: anthropic }   # Sonnet 5
-  # Sonnet 5.5 (v12, #1047): Anthropic platform pricing, read 2026-10-02. $2/$10, the
+  # Sonnet 5.5 (v12, #1047): Anthropic platform pricing. $2/$10, the
   # same rate as Sonnet 5 but its own row: NormalizeModel does not collapse -5-5
-  # onto -5. Cache read $0.20 (0.1x), writes $2.50 (5m) / $4 (1h): the defaults.
-  claude-sonnet-5-5: { input_per_m: 2.00, output_per_m: 10.00, provider: anthropic }   # Sonnet 5.5
+  # onto -5. Cache read $0.10 (0.05x) as of the 2026-10-12 read (v14, #1206),
+  # down from $0.20 on 2026-10-02; writes $2.50 (5m) / $4 (1h): the defaults.
+  claude-sonnet-5-5: { input_per_m: 2.00, output_per_m: 10.00, cache_read_mult: 0.05, provider: anthropic }   # Sonnet 5.5
   claude-haiku-3.5: { input_per_m: 0.80, output_per_m: 4.00, provider: anthropic }
   claude-haiku-4-5: { input_per_m: 1.00, output_per_m: 5.00, provider: anthropic }   # Haiku 4.5
+  # Haiku 5.5 (v13, #1202): Anthropic pricing, $0.10/$0.50 through 100K prompt
+  # tokens; $0.50/$2.50 above 100K. Cache read $0.01/$0.05 (0.1x); reads and
+  # writes inherit the anthropic defaults, per Anthropic's pricing and caching docs:
+  # https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
+  # https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+  claude-haiku-5-5: { input_per_m: 0.10, output_per_m: 0.50, context_threshold: 100000, input_per_m_over: 0.50, output_per_m_over: 2.50, provider: anthropic }   # Haiku 5.5 (100K tier)
   # OpenAI
   # gpt-4.5 removed: retired, replaced by the GPT-5.x series (RPT §4). Do NOT
   # restore it — a raw gpt-4.5-preview string now normalizes to gpt-4.5, misses
@@ -274,6 +308,13 @@ models:
   # so the write multipliers are inert until one does.
   gpt-6-astra: { input_per_m: 10.00, output_per_m: 50.00, cache_read_mult: 0.10, cache_write_5m_mult: 1.25, cache_write_1h_mult: 1.25, provider: openai }
   gpt-6-sol: { input_per_m: 2.00, output_per_m: 10.00, cache_read_mult: 0.10, cache_write_5m_mult: 1.25, cache_write_1h_mult: 1.25, provider: openai }
+  # GPT-6.1 Sol (v13, #1202): OpenAI's announcement gives $2/$10 and cached input
+  # $0.10 as standard API prices; it gives no cache-write rate. The 1.25x
+  # cache-write multipliers in both classes are INFERRED from gpt-6-sol.
+  # re-check OpenAI's pricing on 2026-11-21
+  # (third parties call these rates promotional through that date).
+  # No time-based tier is encoded.
+  gpt-6.1-sol: { input_per_m: 2.00, output_per_m: 10.00, cache_read_mult: 0.05, cache_write_5m_mult: 1.25, cache_write_1h_mult: 1.25, provider: openai }   # GPT-6.1 Sol
   gpt-6-luna: { input_per_m: 0.10, output_per_m: 0.50, cache_read_mult: 0.10, cache_write_5m_mult: 1.25, cache_write_1h_mult: 1.25, provider: openai }
   # Google — Gemini Pro re-prices above 200K input tokens (RPT §1.2). Gemini 2.5+
   # implicit caching discounts cached input 75% (cache_read_mult 0.25); the 0.25x

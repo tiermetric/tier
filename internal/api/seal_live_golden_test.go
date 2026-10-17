@@ -43,7 +43,8 @@ func seedSealFixture(t *testing.T, db *store.DB) {
 
 // TestScores_AnonymisedLiveOutputUnchanged pins the live anonymised /scores body
 // (price_table masked, as it moves with every price-table release) against the
-// output of e9fee42, the commit before the scoresForWindow split: team k=5 (a
+// numeric output of e9fee42 plus the intentional constant, anonymous pricing
+// policy notice (#1232): team k=5 (a
 // named team plus an emitted residual), division k=5, and team k=6 (a withheld
 // residual).
 func TestScores_AnonymisedLiveOutputUnchanged(t *testing.T) {

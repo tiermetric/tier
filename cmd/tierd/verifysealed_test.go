@@ -287,3 +287,30 @@ func TestVerifySealed_ReproducedLinesAreChecked(t *testing.T) {
 		}
 	}
 }
+
+func TestCorrectionReview_SealedPinnedPolicy(t *testing.T) {
+	path, manifest, m, _ := sealedFixture(t, sealTestDigest(1, "team", 5), false)
+	editSealedRow("trg_sealed_report_no_update", `UPDATE sealed_report SET scoring_policy='legacy',correction_rule_version='legacy-v1',rubric_version=1`)(t, path)
+	m["seal_disclosure"] = map[string]any{"scoring_policy": "legacy", "correction_rule_version": "legacy-v1", "rubric_version": 1}
+	writeSealedManifest(t, manifest, m)
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.ConfigureCorrectionScoring(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rc, out, stderr := runVerify(t, manifest, "--db", path)
+	if rc != 0 || !strings.Contains(out, "IDENTICAL") || !strings.Contains(out, "legacy-v1") || !strings.Contains(out, "rubric 1") {
+		t.Fatal(rc, out, stderr)
+	}
+	m["seal_disclosure"].(map[string]any)["scoring_policy"] = "event3"
+	writeSealedManifest(t, manifest, m)
+	rc, out, stderr = runVerify(t, manifest, "--db", path)
+	if rc != 1 {
+		t.Fatal("incorrect seal provenance accepted", rc, out, stderr)
+	}
+}

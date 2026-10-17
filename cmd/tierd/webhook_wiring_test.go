@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/config"
+	"github.com/tiermetric/tier/internal/corrects"
 	"github.com/tiermetric/tier/internal/store"
 	"github.com/tiermetric/tier/internal/webhook"
 )
@@ -53,7 +54,7 @@ func TestBuildWebhookOptions_GeneratedPathsReachHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &recordingStore{}
-			opts := buildWebhookOptions(true /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, tc.generatedPaths, nil /* sizeLabels */)
+			opts := buildWebhookOptions(true /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, tc.generatedPaths, nil /* sizeLabels */, nil /* revertAmbiguous */)
 			h := webhook.New(st, secret, nil, opts...)
 
 			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
@@ -74,7 +75,7 @@ func TestBuildWebhookOptions_GeneratedPathsReachHandler(t *testing.T) {
 }
 
 // TestBuildWebhookOptions_MissingPushedAtCounterReachesMetrics guards the #938
-// wiring: buildWebhookOptions takes three counters of one type by position, so
+// wiring: buildWebhookOptions takes three capture counters by position, so
 // dropping WithPushMissingPushedAtCounter or swapping it with the merge-leak
 // counter compiles. This builds the server's real metric set, passes it exactly
 // as runServe does, delivers a captured push with no repository.pushed_at, and
@@ -84,7 +85,7 @@ func TestBuildWebhookOptions_MissingPushedAtCounterReachesMetrics(t *testing.T) 
 	const secret = "test-webhook-secret"
 	sm := newServeMetrics("v1.2.3")
 	st := &recordingStore{}
-	opts := buildWebhookOptions(true /* pushCapture */, sm.pushUnattributed, sm.pushMergeLeak, sm.pushMissingPushedAt, nil /* generatedPaths */, nil /* sizeLabels */)
+	opts := buildWebhookOptions(true /* pushCapture */, sm.pushUnattributed, sm.pushMergeLeak, sm.pushMissingPushedAt, nil /* generatedPaths */, nil /* sizeLabels */, nil /* revertAmbiguous */)
 	h := webhook.New(st, secret, nil, opts...)
 
 	body, err := json.Marshal(map[string]any{
@@ -162,7 +163,7 @@ func TestBuildWebhookOptions_SizeLabelsReachHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &recordingStore{}
-			opts := buildWebhookOptions(false /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, nil /* generatedPaths */, tc.sizeLabels)
+			opts := buildWebhookOptions(false /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, nil /* generatedPaths */, tc.sizeLabels, nil /* revertAmbiguous */)
 			h := webhook.New(st, secret, nil, opts...)
 
 			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
@@ -210,7 +211,7 @@ func TestSizeLabelsConfigRoundTripReachesHandler(t *testing.T) {
 	// Mirror runServe's wiring exactly: the config field flows into the 4th argument.
 	sizeLabelsCfg := cfg.Outcomes.SizeLabels
 	st := &recordingStore{}
-	opts := buildWebhookOptions(false /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, nil /* generatedPaths */, sizeLabelsCfg)
+	opts := buildWebhookOptions(false /* pushCapture */, nil /* unattributed */, nil /* mergeLeak */, nil /* missingPushedAt */, nil /* generatedPaths */, sizeLabelsCfg, nil /* revertAmbiguous */)
 	h := webhook.New(st, secret, nil, opts...)
 
 	body := mergedPRBody(t, "size: m", 1 /* additions */, 1 /* deletions */, 0 /* changedFiles */)
@@ -304,7 +305,8 @@ type recordingStore struct {
 	pushOutcomes int
 	// prOutcomes captures the outcomes the merged-PR path records via RecordPROutcome
 	// so a wiring guard can assert the (weight, source) a webhook-delivered PR earns.
-	prOutcomes []store.Outcome
+	prOutcomes    []store.Outcome
+	correctionErr error
 }
 
 func (s *recordingStore) pushOutcomeCount() int {
@@ -342,8 +344,14 @@ func (s *recordingStore) RecordPROutcome(_ context.Context, o store.Outcome) (bo
 	return true, nil
 }
 
-func (s *recordingStore) LatestOutcomeByIssue(context.Context, string, string) (store.Outcome, bool, error) {
-	return store.Outcome{}, false, nil
+func (s *recordingStore) RevertIssueCandidates(context.Context, string, string, time.Time, time.Time) ([]store.Outcome, bool, error) {
+	return nil, false, nil
+}
+
+func (s *recordingStore) RecordCorrectionDeclaration(context.Context, store.Outcome, corrects.Declaration, string, string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return 0, s.correctionErr
 }
 
 func (s *recordingStore) AppendQualityEvent(context.Context, store.QualityEvent) (bool, error) {
@@ -360,4 +368,33 @@ func (s *recordingStore) UpdateQualityForOutcome(context.Context, int64, float64
 
 func (s *recordingStore) InsertWebhookPayload(context.Context, string, string, []byte) error {
 	return nil
+}
+
+func (s *recordingStore) ExcludePROutcome(context.Context, store.Outcome, string, string) error {
+	return nil
+}
+
+func TestRevertAmbiguousMetric_WithoutPushCapture(t *testing.T) {
+	sm := newServeMetrics("test")
+	st := &recordingStore{}
+	const secret = "revert-counter-test"
+	// Revert diagnostics must be wired even while push outcome capture is off.
+	opts := buildWebhookOptions(false, sm.pushUnattributed, sm.pushMergeLeak, sm.pushMissingPushedAt, nil, nil, sm.revertAmbiguous)
+	h := webhook.New(st, secret, nil, opts...)
+	body := []byte(`{"ref":"refs/heads/main","repository":{"default_branch":"main","full_name":"acme/app"},"commits":[{"id":"revert-sha","message":"Revert change (closes #42)"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	var rendered strings.Builder
+	sm.reg.Render(&rendered)
+	if !strings.Contains(rendered.String(), `tier_revert_ambiguous_total{reason="no_candidate"} 1`) {
+		t.Fatalf("missing metric: %s", rendered.String())
+	}
 }

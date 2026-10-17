@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/corrects"
 	"github.com/tiermetric/tier/internal/prderive"
 	"github.com/tiermetric/tier/internal/quality"
 	"github.com/tiermetric/tier/internal/repoid"
@@ -79,7 +80,8 @@ type fakeStore struct {
 	ledger map[string]int64
 	// upsertErrs > 0 fails the next RecordPushCommit calls, decrementing each time —
 	// transient-error injection for the capture-path retry test.
-	upsertErrs int
+	upsertErrs    int
+	correctionErr error
 }
 
 // qualityUpdate records one UpdateQualityForOutcome call (#134). Developer and
@@ -106,6 +108,12 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		byMergeCommit: map[string]store.Outcome{},
 	}
+}
+
+func (r *fakeStore) RecordCorrectionDeclaration(context.Context, store.Outcome, corrects.Declaration, string, string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return 0, r.correctionErr
 }
 
 func (r *fakeStore) InsertOutcome(_ context.Context, o store.Outcome) (bool, error) {
@@ -298,7 +306,7 @@ func (r *fakeStore) UpdateQualityForOutcome(_ context.Context, outcomeID int64, 
 // bad type exactly as the real store would.
 func fakeValidEventType(t string) bool {
 	switch t {
-	case "ci_pass", "ci_fail", "ci_fail_flaky", "revert_quality", "revert_strategic":
+	case "ci_pass", "ci_fail", "ci_fail_flaky", "revert_quality", "revert_strategic", "revert_ambiguous":
 		return true
 	}
 	return false
@@ -324,14 +332,15 @@ func (r *fakeStore) OutcomeByMergeCommit(_ context.Context, sha string) (store.O
 }
 
 // LatestOutcomeByIssue returns the most recently inserted outcome that matches the
-// given (repo, issue id). The fake walks outcomes in reverse to mimic the real
+// given (repo, issue id) at or before notAfter. Reverse iteration mimics the real
 // store's ORDER BY id DESC, and reproduces its TOLERANT repo match (#231): an exact
 // repo match wins, and a row carrying the 'unqualified' sentinel is still reachable
-// so pre-#231 outcomes keep receiving revert penalties.
+// for legacy diagnostic lookups. Revert resolution uses RevertIssueCandidates,
+// which excludes legacy rows from penalty targets.
 //
 // This mirrors the real SQL deliberately. A fake that matched on issue id alone
 // would make every webhook test pass while the store fused two repos' issues.
-func (r *fakeStore) LatestOutcomeByIssue(_ context.Context, repo, issueID string) (store.Outcome, bool, error) {
+func (r *fakeStore) LatestOutcomeByIssue(_ context.Context, repo, issueID string, notAfter time.Time) (store.Outcome, bool, error) {
 	if issueID == "" {
 		return store.Outcome{}, false, nil
 	}
@@ -344,7 +353,7 @@ func (r *fakeStore) LatestOutcomeByIssue(_ context.Context, repo, issueID string
 	var haveFallback bool
 	for i := len(r.outcomes) - 1; i >= 0; i-- {
 		o := r.outcomes[i]
-		if o.IssueID != issueID {
+		if o.IssueID != issueID || o.Timestamp.After(notAfter) {
 			continue
 		}
 		oRepo := o.Repo
@@ -362,6 +371,26 @@ func (r *fakeStore) LatestOutcomeByIssue(_ context.Context, repo, issueID string
 		return fallback, true, nil
 	}
 	return store.Outcome{}, false, nil
+}
+
+func (r *fakeStore) RevertIssueCandidates(_ context.Context, repo, issue string, since, until time.Time) ([]store.Outcome, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []store.Outcome
+	legacy := false
+	for _, o := range r.outcomes {
+		if o.IssueID != issue || o.Timestamp.Before(since) || o.Timestamp.After(until) {
+			continue
+		}
+		if o.Repo == "" || o.Repo == repoid.Unqualified {
+			legacy = true
+			continue
+		}
+		if repo != "" && repo != repoid.Unqualified && o.Repo == repo {
+			out = append(out, o)
+		}
+	}
+	return out, len(out) == 0 && legacy, nil
 }
 
 // outcomeCount returns the number of recorded outcomes under the lock.
@@ -399,7 +428,7 @@ func doPush(t *testing.T, st Store, logger *slog.Logger, commits ...map[string]a
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"ref":        "refs/heads/main",
-		"repository": map[string]any{"default_branch": "main"},
+		"repository": map[string]any{"default_branch": "main", "full_name": "acme/app"},
 		"commits":    commits,
 	})
 	if err != nil {
@@ -482,7 +511,7 @@ func TestHandlePR_RecordsWeightSourceProvenance(t *testing.T) {
 		if code := doPR(t, h, body, "d-labeled", sign(testSecret, body)); code != http.StatusNoContent {
 			t.Fatalf("doPR status = %d, want 204", code)
 		}
-		o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42")
+		o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42", time.Now().UTC())
 		if !ok {
 			t.Fatal("no outcome recorded")
 		}
@@ -504,7 +533,7 @@ func TestHandlePR_RecordsWeightSourceProvenance(t *testing.T) {
 		if code := doPR(t, h, body, "d-heur", sign(testSecret, body)); code != http.StatusNoContent {
 			t.Fatalf("doPR status = %d, want 204", code)
 		}
-		o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42")
+		o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42", time.Now().UTC())
 		if !ok {
 			t.Fatal("no outcome recorded")
 		}
@@ -586,10 +615,10 @@ func TestHandlePR_MultiIssueAttributesToPrimary(t *testing.T) {
 	if n := st.outcomeCount(); n != 1 {
 		t.Fatalf("outcomeCount = %d, want 1 (one merged PR = one outcome)", n)
 	}
-	if _, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-12"); !ok {
+	if _, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-12", time.Now().UTC()); !ok {
 		t.Error("no outcome under the primary issue-12")
 	}
-	if _, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-15"); ok {
+	if _, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-15", time.Now().UTC()); ok {
 		t.Error("secondary issue-15 must NOT get its own outcome (merge_commit_sha is unique)")
 	}
 	// The secondaries are logged, not silently dropped.
@@ -602,16 +631,13 @@ func TestHandlePR_MultiIssueAttributesToPrimary(t *testing.T) {
 // TestHandlePush_RevertResolvedByIssueIDLookup covers the issue-id-in-message
 // path (tier 2 of resolution — runs when no SHA footer is present). The
 // revert subject inherits the original commit's "closes #N", so issueref
-// extracts the issue. We then look up the LATEST outcome for that issue
-// (not the reverter's outcomes) so the penalty lands on the original PR's
-// author — not on whoever pushed the revert. This is the exact semantic
-// that #20 set out to fix.
+// extracts the issue. Exactly one qualified outcome in the occurrence window
+// resolves to the original author; multiple candidates must remain unresolved.
 func TestHandlePush_RevertResolvedByIssueIDLookup(t *testing.T) {
 	st := newFakeStore()
 	// Pre-seed: bob's PR for issue-42 was merged. No merge_commit_sha for
-	// this case — we want the footer path to MISS so the issue-id lookup
-	// runs.
-	_, _ = st.InsertOutcome(context.Background(), store.Outcome{
+	// this case — a footerless revert must use the issue-id lookup.
+	_, _ = st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
 		Developer: "bob",
 		IssueID:   "issue-42",
 		PRNumber:  10,
@@ -641,8 +667,43 @@ func TestHandlePush_RevertResolvedByIssueIDLookup(t *testing.T) {
 	if u.Reason != "revert_quality" {
 		t.Errorf("history reason = %q, want revert_quality", u.Reason)
 	}
-	if strings.Contains(logs, "revert detected but no issue id derivable") {
+	if strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Errorf("issue-id path resolved successfully; should not log fallback; logs=%s", logs)
+	}
+}
+
+func TestHandlePush_FooterlessRevertDoesNotDegradeLaterOutcome(t *testing.T) {
+	st := newFakeStore()
+	revertTS := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	_, _ = st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
+		Developer: "carol", IssueID: "issue-12", Weight: 3, Quality: 1,
+		Timestamp: revertTS.Add(time.Hour),
+	})
+	doPush(t, st, quietLogger(), map[string]any{
+		"id": "rev-before-newer", "message": `Revert "fix (closes #12)"`,
+		"timestamp": revertTS, "author": map[string]any{"username": "alice"},
+	})
+	if len(st.qualityUpdates) != 0 || st.outcomes[0].Quality != 1 {
+		t.Fatalf("later outcome degraded: outcomes=%+v updates=%+v", st.outcomes, st.qualityUpdates)
+	}
+}
+
+func TestHandlePush_FooterlessRevertDegradesOlderOutcomeAtOrBeforeEventTime(t *testing.T) {
+	st := newFakeStore()
+	revertTS := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	for i, dev := range []string{"bob", "carol"} {
+		_, _ = st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
+			Developer: dev, IssueID: "issue-12", Weight: 3, Quality: 1,
+			Timestamp: revertTS.Add(time.Duration(i*2-1) * time.Hour),
+		})
+	}
+	doPush(t, st, quietLogger(), map[string]any{
+		"id": "rev-before-newer", "message": `Revert "fix (closes #12)"`,
+		"timestamp": revertTS, "author": map[string]any{"username": "alice"},
+	})
+	if len(st.qualityUpdates) != 1 || st.qualityUpdates[0].Developer != "bob" ||
+		st.outcomes[0].Quality != 0.1 || st.outcomes[1].Quality != 1 {
+		t.Fatalf("revert must degrade only bob: outcomes=%+v updates=%+v", st.outcomes, st.qualityUpdates)
 	}
 }
 
@@ -664,7 +725,7 @@ func TestHandlePush_RevertWithIssueIDButNoOriginalOutcome(t *testing.T) {
 		t.Errorf("expected 0 quality updates when no original outcome exists, got %d: %+v",
 			len(st.qualityUpdates), st.qualityUpdates)
 	}
-	if !strings.Contains(logs, "revert detected but no issue id derivable") {
+	if !strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Errorf("expected fallback slog.Info, logs=%s", logs)
 	}
 }
@@ -709,7 +770,7 @@ This reverts commit abcdef0123456789abcdef0123456789abcdef01.`,
 	if u.Developer != "bob" || u.IssueID != "issue-7" || u.Quality != 0.1 {
 		t.Errorf("quality update = %+v, want {bob, issue-7, 0.1}", u)
 	}
-	if strings.Contains(logs, "revert detected but no issue id derivable") {
+	if strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Errorf("tier-2 path resolved successfully; should not log fallback; logs=%s", logs)
 	}
 }
@@ -730,7 +791,7 @@ func TestHandlePush_RevertNoIssueIDLogsAndContinues(t *testing.T) {
 	if len(st.qualityUpdates) != 0 {
 		t.Errorf("expected 0 quality updates, got %d", len(st.qualityUpdates))
 	}
-	if !strings.Contains(logs, "revert detected but no issue id derivable") {
+	if !strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Errorf("expected fallback slog.Info, logs=%s", logs)
 	}
 	if !strings.Contains(logs, "rev3") {
@@ -755,7 +816,7 @@ This reverts commit 0000000000000000000000000000000000000000.`,
 	if len(st.qualityUpdates) != 0 {
 		t.Errorf("expected 0 quality updates (unknown SHA), got %d", len(st.qualityUpdates))
 	}
-	if !strings.Contains(logs, "revert detected but no issue id derivable") {
+	if !strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Errorf("expected fallback slog.Info, logs=%s", logs)
 	}
 }
@@ -806,7 +867,7 @@ func TestHandlePush_MalformedFooterFallsThrough(t *testing.T) {
 			if len(st.qualityUpdates) != 0 {
 				t.Errorf("expected 0 quality updates, got %d", len(st.qualityUpdates))
 			}
-			if !strings.Contains(logs, "revert detected but no issue id derivable") {
+			if !strings.Contains(logs, "revert detected but no outcome resolvable") {
 				t.Errorf("expected fallback slog.Info, logs=%s", logs)
 			}
 		})
@@ -900,7 +961,7 @@ func wfRunPayloadFor(headSHA, branch, conclusion string, attempt int, workflowID
 	return map[string]any{
 		"action":       "completed",
 		"workflow_run": wr,
-		"repository":   map[string]any{"default_branch": "main"},
+		"repository":   map[string]any{"default_branch": "main", "full_name": "acme/app"},
 	}
 }
 
@@ -1346,6 +1407,8 @@ func TestHandlePush_RevertOnlyOnDefaultBranch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newFakeStore()
 			seedMergedOutcome(t, st)
+			// pushCommit serializes seconds; keep the merge before that occurrence.
+			st.outcomes[0].Timestamp = time.Now().UTC().Add(-time.Hour)
 			h := newTestHandler(st)
 			dispatchPush(t, h, tc.ref, tc.defaultBranch,
 				pushCommit("revsha1", "Revert \"feat: add foo\"\n\nThis reverts commit "+wfMergeSHA+".", "alice", time.Now().UTC()))
@@ -1771,7 +1834,7 @@ func TestServeHTTP_SameGUIDDifferentEventBothProcessed(t *testing.T) {
 	st := newFakeStore()
 	// Seed an outcome so the push's revert lookup resolves (within the 60d
 	// revert window so the quality event applies).
-	_, _ = st.InsertOutcome(context.Background(), store.Outcome{
+	_, _ = st.InsertOutcome(context.Background(), store.Outcome{Repo: "acme/app",
 		Developer: "bob", IssueID: "issue-42", PRNumber: 1, Weight: 5, Quality: 1.0,
 		Timestamp: time.Now().UTC(),
 	})
@@ -1779,7 +1842,7 @@ func TestServeHTTP_SameGUIDDifferentEventBothProcessed(t *testing.T) {
 
 	pushBody, err := json.Marshal(map[string]any{
 		"ref":        "refs/heads/main",
-		"repository": map[string]any{"default_branch": "main"},
+		"repository": map[string]any{"default_branch": "main", "full_name": "acme/app"},
 		"commits": []map[string]any{{
 			"id":      "rev1",
 			"message": `Revert "feat: add foo (closes #42)"`,
@@ -1999,7 +2062,7 @@ func dispatchPush(t *testing.T, h *Handler, ref, defaultBranch string, commits .
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"ref":        ref,
-		"repository": map[string]any{"default_branch": defaultBranch},
+		"repository": map[string]any{"default_branch": defaultBranch, "full_name": "acme/app"},
 		"commits":    commits,
 	})
 	if err != nil {
@@ -2267,7 +2330,7 @@ func TestHandlePR_RecordsWorkType(t *testing.T) {
 			if code := doPR(t, h, body, "d-"+c.name, sign(testSecret, body)); code != http.StatusNoContent {
 				t.Fatalf("doPR status = %d, want 204", code)
 			}
-			o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", c.issue)
+			o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", c.issue, time.Now().UTC())
 			if !ok {
 				t.Fatal("no outcome recorded")
 			}
@@ -2452,7 +2515,7 @@ func TestHandlePush_GeneratedSkipLogNotForgeable(t *testing.T) {
 // A push payload's commit author username and commit id are attacker-controlled
 // JSON: GitHub signs the delivery, but a malicious contributor fully controls
 // their own git author name and can embed a newline in it. The "revert detected
-// but no issue id derivable" diagnostic (#20) logs the commit id, subject, and
+// but no outcome resolvable" diagnostic (#20) logs the commit id, subject, and
 // author verbatim, so a raw author name (or id) carrying a newline could forge a
 // second, standalone log record ("<forged>\ntime=... level=ERROR msg=...") that an
 // operator or a line-oriented SIEM reads as genuine. logSafeStr must strip the
@@ -2481,13 +2544,13 @@ func TestHandlePush_RevertLogNotForgeable(t *testing.T) {
 
 	// A revert commit whose message names no issue and carries no "This reverts
 	// commit <sha>" footer: neither resolution tier matches, so it reaches the
-	// "no issue id derivable" log - the sink that emits commit id, subject, author.
+	// "no outcome resolvable" log - the sink that emits commit id, subject, author.
 	dispatchPush(t, h, "refs/heads/main", "main",
 		pushCommit(forgedID, `Revert "a change with no issue reference"`, forgedAuthor, ts))
 
 	logs := buf.String()
 	// The diagnostic must survive - sanitization must not destroy it.
-	if !strings.Contains(logs, "revert detected but no issue id derivable") {
+	if !strings.Contains(logs, "revert detected but no outcome resolvable") {
 		t.Fatalf("revert-no-issue diagnostic was not logged; lost:\n%s", logs)
 	}
 	// The forged record must never appear on its own line: the embedded newline in
@@ -2687,7 +2750,7 @@ func TestHandlePR_ConfiguredSizeLabel_EndToEnd(t *testing.T) {
 	if code := doPR(t, h, body, "d-custom-label", sign(testSecret, body)); code != http.StatusNoContent {
 		t.Fatalf("doPR status = %d, want 204", code)
 	}
-	o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42")
+	o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42", time.Now().UTC())
 	if !ok {
 		t.Fatal("no outcome recorded")
 	}
@@ -2727,7 +2790,7 @@ func TestHandlePR_CustomTableShadowsBuiltinLabel_EndToEnd(t *testing.T) {
 	if code := doPR(t, h, body, "d-builtin-shadowed", sign(testSecret, body)); code != http.StatusNoContent {
 		t.Fatalf("doPR status = %d, want 204", code)
 	}
-	o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42")
+	o, ok, _ := st.LatestOutcomeByIssue(context.Background(), "", "issue-42", time.Now().UTC())
 	if !ok {
 		t.Fatal("no outcome recorded")
 	}
@@ -2905,4 +2968,8 @@ func TestWorkflowRun_NonPositiveRunAttemptWarns(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (s *fakeStore) ExcludePROutcome(context.Context, store.Outcome, string, string) error {
+	return nil
 }

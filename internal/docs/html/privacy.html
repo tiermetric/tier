@@ -66,6 +66,25 @@ footer.site a { color: var(--muted); }
 your prompts. This document states exactly what TIER reads, what it stores, and
 what it never touches — each claim grounded in the code so a security reviewer
 can audit it.</p>
+<p>JSONL token events store a branch only as nullable <code>branch_hash</code>, a pseudonymised SHA-256 of
+canonical <code>repo + &#34;\x00&#34; + full branch name</code> with <code>refs/heads/</code> removed. Raw branch names are
+never stored in <code>token_events</code>. Local watcher checkpoints keep the raw branch name in the
+plaintext JSON fields <code>GitBranch</code> and <code>LastRealBranch</code>. Default/unknown branches and unknown
+repositories produce NULL hashes. This is not
+anonymisation: guessable branch names can be reversed by hashing candidates with the known
+repo. Merged-PR outcomes store the same pseudonymised hash as <code>head_branch_hash</code>, never
+raw <code>head.ref</code>, plus nullable PR <code>created_at</code> and <code>merged_at</code>. Webhooks and backfill use
+head refs when available; API outcomes lack head refs and leave the hash NULL. Main,
+master, HEAD and a payload-supplied repository default branch have NULL hashes.
+Recognised revert exclusions retain the matching raw head ref or quoted title as
+audit evidence in <code>outcome_exclusions</code>, under the PR author&#39;s access and erasure scope.</p>
+<p>Branch credit fires only for still-unattributed events in the same repo and head-branch
+hash inside <code>[max(previous merge on that repo and head branch, PR opened − 7 days), merge]</code>.
+It never changes existing attribution or sealed months; overlapping recorded claims are
+skipped. Reusing a branch bounds the next PR&#39;s credit at the previous merge; unrecorded
+merges cannot be considered. Missing head/open/merge evidence disables branch credit.
+The hash does not conceal guessable names. Existing webhook audit payloads retain their
+original body under the separate audit retention policy below.</p>
 <h2 id="the-core-guarantee">The core guarantee</h2>
 <blockquote>
 <p><strong>TIER never stores prompt or completion content, and never sends it anywhere
@@ -165,6 +184,18 @@ client asked to have compressed arrives uncompressed.)</p>
 <p>Because the parsers are allowlists, adding no new fields is the default —
 capturing content would require deliberately adding a content field, which does
 not exist.</p>
+<h2 id="captured-dollar-diagnostics">Captured-dollar diagnostics</h2>
+<p>In developer mode, <code>GET /api/v1/diagnostics/captured-dollars</code> reads stored cwd,
+session id and session-file path from <code>watcher_checkpoint</code> to group session-level
+origin and working-directory evidence. The server also reads on-disk git worktree
+metadata at those stored cwd paths: <code>.git</code> directories, worktree admin <code>gitdir</code>
+files and linked checkout <code>.git</code> backlinks. It does not reopen session transcripts
+or run git maintenance commands. It emits counts and captured-dollar shares,
+never stored paths or session ids. Parent and subagent checkpoints sharing a
+session id produce session-level origin, not per-event subagent attribution.
+These live checks are separate from <code>/scores</code> and report manifests. Doctor reads
+and formats the server&#39;s receipt; the endpoint returns no receipt in team or
+division modes. See the <a href="technical-reference.html#captured-dollar-diagnostics" rel="nofollow">diagnostic limitations</a>.</p>
 <h2 id="worktree-attribution-off-by-default">Worktree attribution (off by default)</h2>
 <p><strong>Why it exists.</strong> Claude Code writes, on every line of a session file, the
 folder the session started in (<code>cwd</code>) and that folder&#39;s git branch
@@ -250,7 +281,8 @@ fails its check is not trusted, and the path falls back to today&#39;s rule.</li
 <p><strong>What it stores.</strong></p>
 <ul>
 <li>For every Claude Code event it records, one fixed label naming the rule that
-chose the issue: <code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code> or <code>carry</code>
+chose the issue: <code>branch</code>, <code>worktree-cwd</code>, <code>worktree-toolpath</code>, <code>carry</code>
+or <code>pr-number-at-insert</code> (#1074: server-assigned, never client-sent)
 (<code>token_events.attribution_rule</code>, see <a href="#what-is-stored" rel="nofollow">What IS stored</a>). It
 is <strong>never path text</strong>: TIER refuses or drops any other value.</li>
 <li>Spend in a worktree of a repository you did not configure (not one of the
@@ -291,6 +323,29 @@ was first stored with while its token counts rise. A message held back when an
 erasure runs can be stored after it: see the erasure limits under
 <a href="#data-subject-rights-access-and-erasure-gdpr-art-15--art-17" rel="nofollow">Data-subject rights</a>.
 <code>tierd ship</code> reads each file whole in one pass and holds nothing back.</p>
+<h2 id="shipper-credential-and-identity-limits-1144">Shipper credential and identity limits (#1144)</h2>
+<p>The recommended credential for <code>tierd ship</code> is the server&#39;s <code>--ingest-token</code>
+(<code>TIER_INGEST_TOKEN</code>, config <code>http.ingest_token</code>, or <code>@/path/to/file</code>). Supply it
+on the laptop through <code>ship --api-token @/path/to/ingest-token</code> or
+<code>TIER_API_TOKEN=@/path/to/ingest-token</code>. The admin token still works. The ingest
+token opens only <code>POST /api/v1/events</code>; it cannot read scores or exports, post
+outcomes, erase data, or use the provider proxies.</p>
+<p><strong>Limits until per-developer binding (#1145, gated on #826):</strong> a holder can post
+events under any developer id, rostered or not: there is no roster check, and
+this can pad a k-anonymity group.
+A holder can also pre-claim an idempotency key a teammate would later use,
+suppressing that row. The token does not identify a developer.
+A holder who knows a key can replay it under the same developer with larger
+counts, raising that row&#39;s token counts and cost (recomputed at the row&#39;s original
+rates, #1231). Replaying a teammate&#39;s key this way raises that teammate&#39;s cost
+(the TIER denominator); keys are visible to read-token holders via
+<code>GET /api/v1/events</code> in developer mode.</p>
+<p>A later cross-developer collision is rejected and reported as
+<code>rejected_cross_developer</code> in the response, with the original row unchanged.
+The server logs a WARN and the shipper prints the rejected count, without
+failing the ship or retrying. Same-developer replays still deduplicate, with a
+zero rejection count. Global idempotency stays unchanged; the guard cannot
+reverse a pre-claim that was inserted first.</p>
 <h2 id="what-is-stored">What IS stored</h2>
 <p>TIER stores, in a <strong>single local SQLite file</strong> with <strong>no external
 transmission</strong>:</p>
@@ -345,7 +400,8 @@ that were stored without a key.</li>
 whose usage poller the server runs; <strong>NULL</strong> on every other row.</li>
 <li><strong>Attribution rule</strong> (<code>token_events.attribution_rule</code>, #823) — which rule
 assigned the row&#39;s issue id: one of the fixed labels <code>branch</code>, <code>worktree-cwd</code>,
-<code>worktree-toolpath</code> or <code>carry</code>, <strong>never path text</strong>. It is <strong>NULL</strong> on older
+<code>worktree-toolpath</code>, <code>carry</code> or <code>pr-number-at-insert</code> (#1074: server-assigned,
+never client-sent), <strong>never path text</strong>. It is <strong>NULL</strong> on older
 rows and on rows no rule was recorded for, is written only when the row is
 first inserted, is included in the data-subject export, and is erased with the
 row.</li>
@@ -446,8 +502,9 @@ rewritten, except that a link&#39;s end is set once; an erasure deletes rows.</l
 below, which also covers the audit ledgers and the operator-identifying fields
 they carry (<code>actor</code>, <code>reason</code>, <code>forgotten_by</code>).</p>
 <p>None of this is prompt text, completion text, code, file contents, or diffs, with
-one exception: the free text in a raw webhook payload (for example PR titles, descriptions
-and commit messages, above) is stored as written, with whatever was pasted into it. The <code>session_id</code> above is likewise an <strong>opaque UUID</strong> — it groups a
+these exceptions: free text in raw webhook payloads (for example PR titles,
+descriptions and commit messages) and the matching raw head ref or quoted title
+in <code>outcome_exclusions</code> are stored as written, with whatever was pasted into them. The <code>session_id</code> above is likewise an <strong>opaque UUID</strong> — it groups a
 session&#39;s events without persisting anything the session said or produced. Two of the entries above are conditional and hold data an auditor
 should note. An ordinary watcher tail-state row is <strong>derived operational state,
 safe to delete</strong> — the watcher rebuilds it from the live file on the next change.
@@ -457,9 +514,10 @@ start and store the erased session again. The tail-state contains no prompt or
 completion text and no file contents; its <code>cwd</code>, its path key and (with worktree
 attribution on) its worktree path are absolute <em>paths</em> (filesystem locations, not
 the contents of any file), which can reveal an OS username or an internal project
-name. The raw webhook
-payloads are the one place TIER holds third-party personal data (contributor names
-and emails) <strong>at rest</strong>, bounded to ~90 days. Because of both, operators should
+name. Raw webhook payloads hold third-party personal data (contributor names and
+emails) <strong>at rest</strong>, bounded to ~90 days. Revert exclusion evidence retains a
+matching raw branch or title, which can also contain third-party identifiers;
+it persists until the author&#39;s erasure or database deletion. Operators should
 treat the local database file (mode <code>0600</code>, single-tenant) accordingly — and may
 decline the webhook path entirely to store none of the webhook PII.</p>
 <h2 id="data-subject-rights-access-and-erasure-gdpr-art-15--art-17">Data-subject rights: access and erasure (GDPR Art. 15 / Art. 17)</h2>
@@ -489,6 +547,10 @@ stored under the canonical id <em>or</em> any raw login that aliases to it, acro
 <tr>
 <td><code>outcomes</code></td>
 <td>per-developer PR/issue outcomes, weight, quality</td>
+</tr>
+<tr>
+<td><code>outcome_exclusions</code></td>
+<td>recognised revert PR tombstones and whole moved outcomes, PR author, classification evidence (the matching raw head ref or quoted title), source actor and timestamp; included in access exports and hard-deleted on erasure</td>
 </tr>
 <tr>
 <td><code>actual_spend</code></td>
@@ -747,7 +809,13 @@ data accuracy (Art. 5(1)(d)). What <em>is</em> bounded is <strong>reach</strong>
 it, so an override can only ever touch a manually imported row.
 Automatically captured spend cannot be corrected through this endpoint at
 all.</p>
-<p>The erasure endpoint returns per-table deleted-row counts; the
+<p>The erasure endpoint returns per-table affected-row counts under the historical
+JSON names <code>deleted</code> and <code>total_deleted</code>, not physical row deletions. The
+correction counts are rows scrubbed: <code>correction_declarations</code> includes both
+the subject&#39;s declarations subsequently deleted and shared declarations retained
+with text cleared; <code>corrective_relations</code> and <code>correction_audit</code> count retained
+rows with identifiers and shared text cleared. <code>total_deleted</code> sums these
+affected-row counts, including retained rows. The
 <code>watcher_checkpoint</code> count (and so <code>total_deleted</code>) is rows tombstoned plus
 rows deleted. It is
 <strong>idempotent</strong> (a second call, or a call for an unknown developer, deletes
@@ -841,7 +909,9 @@ the clock and the price table, and then <code>GET /api/v1/report_manifest</code>
 check whether sealing is stalled — only when you pass <code>--server</code>;</li>
 <li><code>tierd seal --status --server</code>, which sends one
 <code>GET /api/v1/report_manifest</code> to the <code>tierd</code> you name, to read why sealing is
-stalled — only when you pass <code>--server</code>; and</li>
+stalled — only when you pass <code>--server</code>;</li>
+<li><code>tierd issues --server</code>, which sends one <code>GET /api/v1/issues</code> to the <code>tierd</code>
+you name — only when you run it; and</li>
 <li><code>tierd ship</code> forwarding <strong>captured usage events</strong> (the fields listed above,
 never content) to a central <code>tierd</code> you operate — from Claude Code sessions by
 default, from Codex rollout logs when <code>--codex-rollout</code> is passed, from the
@@ -864,6 +934,84 @@ guidance — works-council prerequisites, DPIA pointers, and a team-only vs
 per-developer decision table by jurisdiction — see
 <a href="legal-and-privacy.html" rel="nofollow">legal-and-privacy.md</a>. (Positioning guidance, not legal
 advice.)</p>
+<h2 id="corrective-work-evidence">Corrective work evidence</h2>
+<p><code>correction_declarations</code>, <code>corrective_relations</code>, and <code>correction_audit</code> are
+personal data covered by access/export and erasure. Each endpoint includes
+nullable declaration and outcome ids, developer login, canonical repository and
+PR number (<code>repo#PR</code>), merge SHA, and occurrence timestamps. Bounded supporting text,
+disposition and appeal reasons, audit reason text and reviewer rationale are
+subject-bearing content, bounded to 4,096 bytes per text field. Audit actor and
+role are self-asserted; they do not establish authenticated identity.</p>
+<p>The admin (<code>api-token</code>) scope opens <code>GET /api/v1/corrections/{kind}</code> for
+<code>relations</code>, <code>assessments</code>, <code>allocations</code> and <code>audit</code>, as keyset-paginated JSON or
+CSV. It includes all stored evidence fields described here, including free text,
+actor/reviewer identities and exact allocation values. Read tokens cannot open
+this route; it is absent from read-only demo mode and refused in team/division
+aggregation modes.</p>
+<p>Data-subject access exports all stored columns for either endpoint, including
+shared declaration text and the counterparty&#39;s identifiers on shared relations.
+For a reviewer who is neither endpoint, access returns only audit rows where
+they are the actor and assessments where they are the reviewer; it does not
+return other developers&#39; allocations, relations or declarations.
+Canonical repo/PR matching includes excluded outcomes under either
+their original developer or trusted author, even when no outcome row remains.
+Erasure resolves aliases, scrubs the subject&#39;s copied identifiers and
+indirect declaration links, and clears shared text and audit actors before deleting
+the subject&#39;s declarations and outcomes, including their declaration stats and
+recorded timestamps. Relations and audit rows remain without the erased endpoint;
+surviving evidence is retained. Evidence capture alone does not enable scoring.
+When the operator enables Event 3 scoring, resolved allocations affect live
+points as described below. Public GitHub can still link the surviving endpoint
+to the erased subject through its PR history; this residual linkage is accepted by design.
+Erasing a reviewer who is neither endpoint clears only matching actor/reviewer
+identity columns. It preserves roles, reasons, supporting/disposition text and
+reviewed sizing, and never freezes or reallocates the parties&#39; allocations.
+Schema version 8 prevents older erasers leaving this data behind.
+Canonical declaration replays preserve the first evidence. A replay with an edited
+declaration state or parent set returns the existing declaration id and the distinct
+<code>unchanged-ignored</code> status (<code>ErrCorrectionDeclarationIgnored</code>) to the store caller;
+it leaves declarations, relations, and audit rows unchanged. An identical state
+and parent set is a successful no-op, including reordered parents.
+The identifier-free API diff-stat cutover marker remains: pre-upgrade all-zero
+API evidence is conservatively unavailable, including genuine zeros recorded by
+the pointer-aware version-7 API writer, because the marker cannot distinguish
+those from older omitted stats stored as zeros.</p>
+<p>Event 3 also stores <code>correction_assessments</code> and <code>correction_allocations</code> as
+endpoint-linked personal evidence. Assessments include reviewed original/own and
+before/after cumulative sizes, comparison commit identities, bounded scope and
+rationale, reviewer identity and review time. Allocations retain raw size, own
+quality, share, final allocated points and marginal growth as distinct exact
+rational values, plus pending/provisional/disputed and ranking eligibility state.
+Export includes only rows where the subject&#39;s outcome (including aliases) is an
+endpoint or participant, the subject is the reviewer, or the relation is a direct
+subject relation. Export does not traverse the connected chain. Erasure deletes
+the subject&#39;s own assessment and allocation rows, scrubs comparison identities,
+scope, rationale, reviewer and review time from direct subject evidence, and
+freezes every connected surviving allocation after severing its relation and
+parent links. Reviews of unrelated survivors remain intact. Only survivors&#39;
+numeric allocations remain unchanged; they cannot be upgraded or reallocated
+after any party is erased. Counts for these tables include rows deleted,
+scrubbed or frozen. These rows do not enable scoring: the stored policy defaults off. Historical sealed bodies and
+digests are preserved; the reserved policy/rubric columns remain NULL for old seals.</p>
+<p>See <a href="technical-reference.html#enable-event-3-scoring" rel="nofollow">Enable Event 3 scoring</a> for configuration, rollback and startup behavior.</p>
+<h3 id="enabled-evidence-and-disputed-state">Enabled evidence and disputed state</h3>
+<p>Enabling scoring uses the stored reviewed assessments and allocations: reviewed
+cumulative growth is separate from individual allocated share. A pure repair can
+receive points transferred from the original without adding growth. Eligible
+unconfirmed same-author pairs use a provisional churn/file-count approximation;
+unconfirmed cross-author declarations cannot debit the other author. These
+figures are evidence with stated limits, not independently verified scope.</p>
+<p>Actor and role are self-asserted local CLI input, not authentication. A
+single-operator installation confirms its own pairs. Requiring an actor label
+different from the declarer is advisory; it does not prove a separate reviewer.
+A dispute or withdrawal after confirmation keeps the previous treatment until
+operator settlement. Disputed state remains visible in developer/operator
+views, authorized exports, the corrective digest and new seals; team/division
+views return <code>not_shown</code> for the diagnostics. This suppression does not conceal
+the underlying rows from an operator who can read the database. Existing sealed
+reports and digests never change after enablement, disputes, settlement, erasure,
+or late evidence.</p>
+<p>See <a href="technical-reference.html#event-3-coverage" rel="nofollow">Event 3 coverage</a> for recorded declarations and limits.</p>
 
 </main></div>
 <footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>

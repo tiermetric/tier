@@ -493,3 +493,17 @@ func TestContentionOutranksAPermanentClassification(t *testing.T) {
 		t.Error("503 carries no Retry-After — the client is left guessing whether to retry at all")
 	}
 }
+
+func (contendedStore) InsertTokenEventsWithResult(context.Context, []store.TokenEvent) (store.TokenEventsInsertResult, error) {
+	return store.TokenEventsInsertResult{}, contentionErr()
+}
+
+func TestPostEventsPricingPromotionContentionIsRetryable(t *testing.T) {
+	h := &Handler{store: contendedStore{}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(`[{"developer":"alice","issue_id":"1231","idempotency_key":"pricing-busy","timestamp":"2026-10-14T00:00:00Z","model":"claude-sonnet-4","input_tokens":100,"source":"jsonl","fidelity":"realtime"}]`))
+	rec := httptest.NewRecorder()
+	h.handlePostEvents(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("contention status=%d retry=%q body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+}

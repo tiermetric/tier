@@ -46,6 +46,7 @@ type storeAdapter struct {
 func (a *storeAdapter) Ingest(ctx context.Context, ev collector.TokenEvent) error {
 	ev = a.rules.Apply(ev)
 	return a.s.InsertTokenEvent(ctx, store.TokenEvent{
+		TokenDerived: true, CacheWriteEvidence: ev.CacheWriteEvidence, PricingBasis: ev.PricingBasis,
 		Developer:       ev.Developer,
 		IssueID:         ev.IssueID,
 		Model:           ev.Model,
@@ -59,6 +60,8 @@ func (a *storeAdapter) Ingest(ctx context.Context, ev collector.TokenEvent) erro
 		Fidelity:        ev.Fidelity,
 		IdempotencyKey:  ev.IdempotencyKey,
 		Repo:            ev.Repo,
+		PRNumber:        ev.PRNumber,
+		BranchHash:      ev.BranchHash,
 		SessionID:       ev.SessionID,
 		Host:            ev.Host,
 		BillingMode:     ev.BillingMode,

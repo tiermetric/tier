@@ -56,8 +56,8 @@ func ScoreLog(path string, logger *slog.Logger) (collector.ScoreLogSession, erro
 				Input:     c.Input,
 				Output:    c.Output,
 				CacheRead: c.CacheRead,
-				// OpenAI has no cache-write SKU, so both write buckets stay
-				// zero, matching buildEvents' live pricing call exactly.
+				// Current Codex accounting omits a separate write class;
+				// both buckets stay zero, matching buildEvents' live pricing.
 			},
 		})
 	}

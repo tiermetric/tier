@@ -36,10 +36,15 @@ type developerFidelityJSON struct {
 	// FidelityLevels maps fidelity level -> 30d event count. A developer capturing
 	// only "estimated"/"daily" (no "realtime") is running a degraded capture path.
 	FidelityLevels map[string]int64 `json:"fidelity_levels"`
-	// UnknownModelCostShare is the fraction (0..1) of this developer's 30d spend
-	// billed at the unknown-model pricing guess (#267) — high share means TIER is
-	// pricing their spend at a rate it cannot audit.
+	// UnknownModelCostShare is the fraction (0..1) of this developer's 30d stored
+	// spend whose host/model has no exact entry in the current table (#267).
+	// Today's lookup does not establish the original basis of historical dollars.
 	UnknownModelCostShare float64 `json:"unknown_model_cost_share"`
+	// UnknownPricingTokenShare is a read-time fraction of 30d recorded tokens;
+	// different price versions count as basis-unknown even with an exact entry today.
+	UnknownPricingTokenShare      float64 `json:"unknown_pricing_token_share"`
+	UnknownPricingTokenShareLabel string  `json:"unknown_pricing_token_share_label"`
+	CostLabel                     string  `json:"cost_label,omitempty"`
 }
 
 // handleGetFidelity serves the capture-fidelity signals (#236). It reads the raw
@@ -106,6 +111,8 @@ func (h *Handler) handleGetFidelity(w http.ResponseWriter, r *http.Request) {
 		}
 		m.unknownMicro += s.UnknownCostMicro30d
 		m.totalMicro += s.TotalCostMicro30d
+		m.pricingTokens.Total += s.PricingTokens30d.Total
+		m.pricingTokens.Unknown += s.PricingTokens30d.Unknown
 	}
 
 	developers := make([]developerFidelityJSON, 0, len(merged))
@@ -129,13 +136,14 @@ func (h *Handler) handleGetFidelity(w http.ResponseWriter, r *http.Request) {
 // internally so the max-per-source merge and the exact-integer cost-share ratio are
 // computed before any lossy formatting; toJSON renders the wire shape once at the end.
 type mergedFidelity struct {
-	developer    string
-	count7d      int64
-	count30d     int64
-	lastBySrc    map[string]time.Time
-	fidLevels    map[string]int64
-	unknownMicro int64
-	totalMicro   int64
+	developer     string
+	count7d       int64
+	count30d      int64
+	lastBySrc     map[string]time.Time
+	fidLevels     map[string]int64
+	unknownMicro  int64
+	totalMicro    int64
+	pricingTokens store.PricingTokenCounts
 }
 
 func (m *mergedFidelity) toJSON() developerFidelityJSON {
@@ -148,11 +156,14 @@ func (m *mergedFidelity) toJSON() developerFidelityJSON {
 		share = float64(m.unknownMicro) / float64(m.totalMicro)
 	}
 	return developerFidelityJSON{
-		Developer:             m.developer,
-		EventCount7d:          m.count7d,
-		EventCount30d:         m.count30d,
-		LastEventBySource:     last,
-		FidelityLevels:        m.fidLevels,
-		UnknownModelCostShare: share,
+		Developer:                     m.developer,
+		EventCount7d:                  m.count7d,
+		EventCount30d:                 m.count30d,
+		LastEventBySource:             last,
+		FidelityLevels:                m.fidLevels,
+		UnknownModelCostShare:         share,
+		UnknownPricingTokenShare:      m.pricingTokens.Share(),
+		UnknownPricingTokenShareLabel: store.UnknownPricingTokenShareLabel,
+		CostLabel:                     m.pricingTokens.CostLabel(),
 	}
 }

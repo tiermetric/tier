@@ -282,12 +282,12 @@ func TestScanSpansMultipleBatches(t *testing.T) {
 		rows = append(rows, buildRow(t, msgSpec{
 			ID: fmt.Sprintf("msg_%02d", i), SessionID: "ses_batch", Cwd: cwd,
 			Created: completed - 100, Completed: &completed, TimeUpdated: completed,
-			Tokens: autoTotal(100, 10, 5, 50, 0),
+			Tokens: autoTotal(100, 10, 5, 50, 15),
 		}))
 	}
 	dbPath := newFixtureDB(t, dbSpec{Migrations: 3, Rows: rows})
 
-	logger, _ := newTestLogger()
+	logger, cap := newTestLogger()
 	c, err := New(Config{
 		DBPath: dbPath, Repos: []RepoTarget{{Path: repo}}, DeveloperID: "alice",
 		Logger: logger, Now: fixedClock(testNow),
@@ -314,6 +314,15 @@ func TestScanSpansMultipleBatches(t *testing.T) {
 		if count != 1 {
 			t.Errorf("event %s emitted %d times; the overlap is re-emitting within a single pass", k, count)
 		}
+	}
+	// The scan summary reports st.emittedTokens, including every billable class
+	// across all batches (Output includes reasoning).
+	summary := cap.find(slog.LevelInfo, "opencode scan complete")
+	if len(summary) != 1 {
+		t.Fatalf("want one pass summary, got %d. Records:%s", len(summary), cap.dump())
+	}
+	if got, want := attrOf(summary[0], "tokens"), fmt.Sprint(n*(100+10+5+50+15)); got != want {
+		t.Errorf("st.emittedTokens = %s, want %s", got, want)
 	}
 }
 

@@ -52,6 +52,7 @@ func TestStore_ForwardsAllFields(t *testing.T) {
 	ing := Store(rec)
 	now := time.Now().UTC().Truncate(time.Second)
 
+	n, hash := 42, "35e85223b771502072fff7aa9c2abb8f009cc96fbcadb3f637357da565de8976"
 	ev := collector.TokenEvent{
 		Developer:       "alice",
 		IssueID:         "issue-42",
@@ -66,6 +67,8 @@ func TestStore_ForwardsAllFields(t *testing.T) {
 		Fidelity:        "realtime",
 		IdempotencyKey:  "deadbeef-key",
 		Repo:            "tiermetric/tier",
+		PRNumber:        &n,
+		BranchHash:      &hash,
 		SessionID:       "sess-forward",
 		Host:            "openrouter.ai",
 		BillingMode:     "self_hosted_amortized",
@@ -86,6 +89,7 @@ func TestStore_ForwardsAllFields(t *testing.T) {
 		got.CostMicro != ev.CostMicro ||
 		got.Source != ev.Source || got.Fidelity != ev.Fidelity ||
 		got.IdempotencyKey != ev.IdempotencyKey || got.Repo != ev.Repo ||
+		got.PRNumber == nil || *got.PRNumber != n || got.BranchHash == nil || *got.BranchHash != hash ||
 		got.SessionID != ev.SessionID ||
 		got.Host != ev.Host || got.BillingMode != ev.BillingMode ||
 		got.AttributionRule != ev.AttributionRule ||

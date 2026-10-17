@@ -127,16 +127,35 @@ configurable; this applies to *size* labels only.
 
 - **Signature:** `X-Hub-Signature-256: sha256=<hmac>` — required; a mismatch is
   `403`.
+- **Body bounds (before authentication):** `push` bodies may be up to 25 MiB;
+  all other event types are limited to 1 MiB. These limits also apply to chunked
+  requests. Larger bodies return `413`, are not processed or stored, and increment
+  `tier_webhook_oversized_total{event}`. The event label is `push`, `pull_request`,
+  `workflow_run`, or `other`; both the event and delivery headers are
+  unauthenticated, even on a signed body. The ERROR log includes the bounded
+  event label, sanitized delivery identifier and size class. One push at a time
+  may grow beyond 1 MiB; contention returns `503` with `Retry-After: 1`. The slot
+  remains held through signature verification and processing.
 - **Dedup:** replays are deduped by the `X-GitHub-Delivery` GUID (combined with
   the event type), and merged-PR outcomes carry a durable merge-commit-SHA
   guard, so a redelivery is a safe no-op.
 - **Failures:** a successful (including duplicate) delivery returns `204`. A
   failed one returns `503` (the database stayed locked past its 5-second wait)
   or `500` (any other error, which can also be a lock held past that wait), or
-  times out with no response. Redeliver it either way: **GitHub does not
+  times out with no response. After resolving the cause, manually redeliver
+  transient failures: **GitHub does not
   redeliver a failed delivery on its own**, so that event is lost until you
   redeliver it — see
-  [Redelivering a failed delivery](#redelivering-a-failed-delivery).
+  [Redelivering a failed delivery](#redelivering-a-failed-delivery). Redelivering
+  the same oversized body repeats `413`; it does not recover the event.
+
+These local bounds do not establish complete delivery. GitHub documents a
+separate **25 MB** provider payload cap: events exceeding it produce no webhook
+payload. Push payloads include at most **2,048 commits**. TIER cannot observe
+omitted payloads or commits through this endpoint; retrying a local `413` does
+not recover provider omissions. See GitHub's
+[webhook payload limits](https://docs.github.com/en/webhooks/webhook-events-and-payloads#payload-cap)
+and [push payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads#push).
 
 ## Redelivering a failed delivery
 
@@ -176,8 +195,13 @@ default `gh auth login` does not grant: add it with
 You can compute a signature by hand and post a synthetic merged-PR payload
 (the key file must be the same file given to `tierd serve --webhook-secret`):
 
+This writes an outcome for the fake login `__tier_webhook_test__` and issue
+`WEBHOOKTEST-000000` into the receiving server's store. The row persists there
+and can affect reports; this is not a dry run. Use a test server if you do not
+want synthetic data in your live store.
+
 ```sh
-PAYLOAD='{"action":"closed","pull_request":{"number":42,"merged":true,"merge_commit_sha":"abc123","user":{"login":"alice"},"body":"closes #42","labels":[{"name":"size/m"}],"additions":10,"deletions":2,"changed_files":3}}'
+PAYLOAD='{"action":"closed","pull_request":{"number":999999999,"merged":true,"merge_commit_sha":"tier-webhook-test-not-a-real-merge","user":{"login":"__tier_webhook_test__"},"body":"closes WEBHOOKTEST-000000","labels":[{"name":"size/m"}],"additions":10,"deletions":2,"changed_files":3}}'
 SIG="sha256=$(printf '%s' "$PAYLOAD" | perl -MDigest::SHA=hmac_sha256_hex -e '
   local $/;
   open my $fh, "<", "$ENV{HOME}/.tier/webhook-secret" or die $!;

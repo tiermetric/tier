@@ -92,6 +92,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "issues":
+		return runIssues(args[1:], stdout, stderr)
 	case "score":
 		runScore(args[1:])
 	// "score-log": price ONE session log file in isolation — no store, no
@@ -106,6 +108,10 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return runSealCmd(args[1:], os.Stdin, stdout, stderr)
 	case "ship":
 		runShip(args[1:])
+	case "outcomes":
+		return runOutcomesCmd(args[1:], stdout, stderr)
+	case "corrections":
+		return runCorrectionsCmd(args[1:], stdout, stderr)
 	case "backfill":
 		return runBackfillCmd(args[1:], stdout, stderr)
 	case "backup":
@@ -169,8 +175,11 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 // exit 0), so the two callers stay in lockstep as subcommands are added (#378).
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "usage: tierd <command> [flags]")
+	_, _ = fmt.Fprintln(w, "  outcomes     plan and apply recognised-revert exclusions for existing PR outcomes")
+	_, _ = fmt.Fprintln(w, "  corrections  inspect and adjudicate corrective relations (self-asserted operator)")
 	_, _ = fmt.Fprintln(w, "  score    compute TIER from local Claude Code JSONL files")
 	_, _ = fmt.Fprintln(w, "  score-log price ONE session log file (claude|codex) as JSON, no store/daemon/network (#465)")
+	_, _ = fmt.Fprintln(w, "  issues   per-issue attributed cost, points and TIER from a developer-mode server")
 	_, _ = fmt.Fprintln(w, "  serve    run the TIER HTTP server (proxy + webhook + dashboard)")
 	_, _ = fmt.Fprintln(w, "  seal     arm sealing: seal the first month and pin it (irreversible, #913)")
 	_, _ = fmt.Fprintln(w, "  ship     forward locally captured JSONL events to a central tierd (#126)")
@@ -556,12 +565,13 @@ func scoreClosingTip() string {
 // in identifier order: never ranked, and stable from run to run.
 func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time) {
 	type row struct {
-		inputTok     int
-		outputTok    int
-		cacheRead    int
-		cacheWrite5m int
-		cacheWrite1h int
-		costMicro    int64
+		inputTok      int
+		outputTok     int
+		cacheRead     int
+		cacheWrite5m  int
+		cacheWrite1h  int
+		costMicro     int64
+		pricingTokens store.PricingTokenCounts
 	}
 	byDev := map[string]*row{}
 	for _, e := range events {
@@ -575,6 +585,7 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 		r.cacheWrite5m += e.CacheWrite5m
 		r.cacheWrite1h += e.CacheWrite1h
 		r.costMicro += e.CostMicro
+		addScorePricingTokens(&r.pricingTokens, e)
 	}
 
 	_, _ = fmt.Fprintf(w, "\nTIER Cost Attribution — since %s\n", since.Format("2006-01-02"))
@@ -592,14 +603,42 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 	}
 	sort.Strings(devs)
 	var totalCostMicro int64
+	var totalPricingTokens store.PricingTokenCounts
 	for _, dev := range devs {
 		r := byDev[dev]
-		_, _ = fmt.Fprintf(w, "%-20s  %10d  %10d  %10d  %10d  %10d  %10.4f\n",
-			dev, r.inputTok, r.outputTok, r.cacheRead, r.cacheWrite5m, r.cacheWrite1h, store.MicroToDollars(r.costMicro))
+		_, _ = fmt.Fprintf(w, "%-20s  %10d  %10d  %10d  %10d  %10d  %10.4f%s\n",
+			dev, r.inputTok, r.outputTok, r.cacheRead, r.cacheWrite5m, r.cacheWrite1h, store.MicroToDollars(r.costMicro), scoreCostLabel(r.pricingTokens))
 		totalCostMicro += r.costMicro
+		totalPricingTokens.Total += r.pricingTokens.Total
+		totalPricingTokens.Unknown += r.pricingTokens.Unknown
 	}
 	_, _ = fmt.Fprintln(w, "───────────────────────────────────────────────────────────────────────────────────────────")
-	_, _ = fmt.Fprintf(w, "%-20s  %78.4f\n", "TOTAL", store.MicroToDollars(totalCostMicro))
+	_, _ = fmt.Fprintf(w, "%-20s  %78.4f%s\n", "TOTAL", store.MicroToDollars(totalCostMicro), scoreCostLabel(totalPricingTokens))
+	percentage := 100 * totalPricingTokens.Share()
+	shareText := fmt.Sprintf("%.2f%%", percentage)
+	if percentage > 0 && percentage < 0.01 {
+		shareText = "<0.01%"
+	}
+	_, _ = fmt.Fprintf(w, "%s: %s (%d/%d recorded tokens)\n", store.UnknownPricingTokenShareLabel,
+		shareText, totalPricingTokens.Unknown, totalPricingTokens.Total)
+}
+
+func addScorePricingTokens(counts *store.PricingTokenCounts, e collector.TokenEvent) {
+	// score re-reads JSONL and prices it with the active table on every run. These
+	// are freshly priced events, so they have no legacy stored price-version basis.
+	tokens := int64(e.InputTok) + int64(e.OutputTok) + int64(e.CacheRead) + int64(e.CacheWrite5m) + int64(e.CacheWrite1h)
+	basis := e.PricingBasis
+	if basis == "" {
+		basis = "token_derived"
+	}
+	counts.Add(e.Host, e.Model, store.ActivePriceTableInfo().Version, basis, tokens)
+}
+
+func scoreCostLabel(counts store.PricingTokenCounts) string {
+	if label := counts.CostLabel(); label != "" {
+		return " (" + label + ")"
+	}
+	return ""
 }
 
 // printIssueCosts prints the per-issue cost breakdown.
@@ -612,8 +651,9 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 // 2026-08-04).
 func printIssueCosts(w io.Writer, events []collector.TokenEvent) {
 	type row struct {
-		costMicro int64
-		model     string
+		costMicro     int64
+		model         string
+		pricingTokens store.PricingTokenCounts
 	}
 	byIssue := map[string]*row{}
 	for _, e := range events {
@@ -622,6 +662,7 @@ func printIssueCosts(w io.Writer, events []collector.TokenEvent) {
 		}
 		r := byIssue[e.IssueID]
 		r.costMicro += e.CostMicro
+		addScorePricingTokens(&r.pricingTokens, e)
 		if r.model == "" {
 			r.model = store.NormalizeModel(e.Model)
 		}
@@ -663,7 +704,7 @@ func printIssueCosts(w io.Writer, events []collector.TokenEvent) {
 		// exempt for a different measured reason — see collector.Collect's
 		// developer parameter, which is a single per-run operator-supplied value,
 		// never session content.
-		_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10.4f\n", issueLabel(issue), logsafe.Str(r.model), store.MicroToDollars(r.costMicro))
+		_, _ = fmt.Fprintf(w, "%-34s  %-20s  %10.4f%s\n", issueLabel(issue), logsafe.Str(r.model), store.MicroToDollars(r.costMicro), scoreCostLabel(r.pricingTokens))
 	}
 }
 
@@ -808,6 +849,7 @@ func applyRepeatableConfigList(dst *repeatableStringSlice, values []string, conf
 //   - pushCapture (outcomes.push_capture, #196) toggles WithPushCapture, and with
 //     it WithPushMergeLeakCounter (#849) and WithPushMissingPushedAtCounter (#938)
 //     — all three counters only move under capture.
+//   - revertAmbiguous counts unresolved reverts even when capture is disabled.
 //   - generatedPaths (outcomes.generated_paths, #240) is nil when the config key
 //     is absent → the option is omitted so the handler keeps its built-in
 //     defaultGeneratedPaths. A non-nil slice — including an explicit empty `[]`,
@@ -819,8 +861,8 @@ func applyRepeatableConfigList(dst *repeatableStringSlice, values []string, conf
 //     A non-nil map is plumbed into WithSizeLabels, which itself no-ops on an empty
 //     map so an explicit `{}` preserves the defaults too — matching the documented
 //     `{}`/absent = defaults, custom = replace semantics.
-func buildWebhookOptions(pushCapture bool, unattributed, mergeLeak, missingPushedAt webhook.PushUnattributedCounter, generatedPaths []string, sizeLabels map[string]float64) []webhook.Option {
-	var opts []webhook.Option
+func buildWebhookOptions(pushCapture bool, unattributed, mergeLeak, missingPushedAt webhook.PushUnattributedCounter, generatedPaths []string, sizeLabels map[string]float64, revertAmbiguous webhook.PushUnattributedCounter) []webhook.Option {
+	opts := []webhook.Option{webhook.WithRevertAmbiguousCounter(revertAmbiguous)}
 	if pushCapture {
 		opts = append(opts, webhook.WithPushCapture(unattributed), webhook.WithPushMergeLeakCounter(mergeLeak),
 			webhook.WithPushMissingPushedAtCounter(missingPushedAt))
@@ -872,6 +914,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	apiToken := fs.String("api-token", "", "API token: Bearer on POST writes and score GETs, X-Tier-Token on the proxies; empty disables auth and restricts the bind to loopback (#59). When the flag is not given, TIER_API_TOKEN is used; when that is empty too, the config file's http.api_token. Prefer TIER_API_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	readToken := fs.String("read-token", "", "Read-only viewer token (#190): Bearer accepted on every read-scoped GET route (the /scores family, the report manifest, the bulk data exports, fidelity, and, in developer mode only, /metrics; exact list: registerReadRoutes in internal/api/handler.go) but rejected on all writes and the proxies. Must differ from --api-token; alone it does NOT permit a non-loopback bind. When the flag is not given, TIER_READ_TOKEN is used; when that is empty too, the config file's http.read_token. Prefer TIER_READ_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	metricsToken := fs.String("metrics-token", "", "Metrics scrape token (#944): Bearer accepted on GET /metrics and NO other route. In team/division mode the read token cannot scrape /metrics, so scrape with this token (or --api-token). Operator-only, never a viewer credential: docs/security.md, 'The metrics token'. Must differ from --api-token and --read-token; alone it does NOT permit a non-loopback bind. When the flag is not given, TIER_METRICS_TOKEN is used; when that is empty too, the config file's http.metrics_token. Prefer TIER_METRICS_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
+	ingestToken := fs.String("ingest-token", "", "Ingest upload token (#1144): Bearer accepted on POST /api/v1/events and NO other route, including the proxies. Recommended credential for tierd ship. Must differ from --api-token, --read-token and --metrics-token; alone it does NOT permit a non-loopback bind. When the flag is not given, TIER_INGEST_TOKEN is used; when that is empty too, the config file's http.ingest_token. Prefer TIER_INGEST_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	anthropicTarget := fs.String("anthropic-target", "https://api.anthropic.com", "upstream Anthropic API URL")
 	openaiTarget := fs.String("openai-target", "https://api.openai.com", "upstream OpenAI-compatible API URL")
 	geminiTarget := fs.String("gemini-target", "https://generativelanguage.googleapis.com", "upstream Gemini API URL (#459 task 4); the /gemini/ proxy route. Set to \"\" to disable")
@@ -880,6 +923,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	authFailureWindow := fs.Duration("auth-failure-window", rlDefault.Window, "sliding window over which --auth-max-failures is counted (#36)")
 	authLockout := fs.Duration("auth-lockout", rlDefault.Lockout, "how long an IP stays locked out (429) after tripping --auth-max-failures (#36)")
 	zeroOutcomeWindowDays := fs.Int("zero-outcome-window-days", 7, "zero-outcome tripwire look-back window in days (#189): serve fails loud (WARN log + tier_zero_outcome_tripwire metric) when cost accrued in this window but zero outcomes were recorded. Config key: zero_outcome_window_days. Must be >= 1")
+	event3Scoring := fs.Bool("event3-scoring", envBool("TIER_EVENT3_SCORING"), "score corrective work; OFF by default. Precedence: CLI > TIER_EVENT3_SCORING > outcomes.event3_scoring > false")
 	pushCapture := fs.Bool("push-capture", envBool("TIER_PUSH_CAPTURE"), "capture a qualifying direct commit to the default branch as a degraded (0.5, per-issue-per-UTC-day) outcome so trunk-based teams aren't scored ~0 (#196). OFF by default. Env TIER_PUSH_CAPTURE, config key outcomes.push_capture. Precedence: CLI > env > config > default")
 	var trustedProxyCIDRs repeatableStringSlice
 	fs.Var(&trustedProxyCIDRs, "trusted-proxy-cidr", "CIDR of a trusted reverse proxy/TLS terminator (repeatable). When the direct peer is inside a trusted CIDR, the failed-auth lockout keys on the client IP from X-Forwarded-For (rightmost untrusted hop) instead of the peer address. Default: unset — X-Forwarded-For is never trusted (#131)")
@@ -896,6 +940,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	secretEnvFallback(fs, apiToken, "api-token", "TIER_API_TOKEN")
 	secretEnvFallback(fs, readToken, "read-token", "TIER_READ_TOKEN")
 	secretEnvFallback(fs, metricsToken, "metrics-token", "TIER_METRICS_TOKEN")
+	secretEnvFallback(fs, ingestToken, "ingest-token", "TIER_INGEST_TOKEN")
 
 	// Build the configured logger first thing after flag parse and make it the
 	// process default, so EVERY line below — including the config-resolution
@@ -982,7 +1027,9 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			"api-token":      os.Getenv("TIER_API_TOKEN") != "",
 			"read-token":     os.Getenv("TIER_READ_TOKEN") != "",
 			"metrics-token":  os.Getenv("TIER_METRICS_TOKEN") != "",
+			"ingest-token":   os.Getenv("TIER_INGEST_TOKEN") != "",
 			"push-capture":   os.Getenv("TIER_PUSH_CAPTURE") != "",
+			"event3-scoring": os.Getenv("TIER_EVENT3_SCORING") != "",
 		}
 		maps.Copy(envVarSet, sf.envSet())
 		applyStringFromConfig(fs, setFlags, envVarSet, "addr", cfg.HTTP.Addr)
@@ -991,11 +1038,13 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		applyStringFromConfig(fs, setFlags, envVarSet, "api-token", cfg.HTTP.APIToken)
 		applyStringFromConfig(fs, setFlags, envVarSet, "read-token", cfg.HTTP.ReadToken)
 		applyStringFromConfig(fs, setFlags, envVarSet, "metrics-token", cfg.HTTP.MetricsToken)
+		applyStringFromConfig(fs, setFlags, envVarSet, "ingest-token", cfg.HTTP.IngestToken)
 		applyStringFromConfig(fs, setFlags, envVarSet, "anthropic-target", cfg.Proxy.AnthropicTarget)
 		applyStringFromConfig(fs, setFlags, envVarSet, "openai-target", cfg.Proxy.OpenAITarget)
 		applyStringFromConfig(fs, setFlags, envVarSet, "gemini-target", cfg.Proxy.GeminiTarget)
 		applyIntFromConfig(fs, setFlags, envVarSet, "zero-outcome-window-days", cfg.ZeroOutcomeWindowDays)
 		applyBoolFromConfig(fs, setFlags, envVarSet, "push-capture", cfg.Outcomes.PushCapture)
+		applyBoolFromConfig(fs, setFlags, envVarSet, "event3-scoring", cfg.Outcomes.Event3Scoring)
 		// Auth-lockout knobs (#85). No env-var layer exists for these, so their
 		// envVarSet keys are simply absent (false). The resolved flag values flow
 		// into the existing >0 validation below, so a config-sourced combo is
@@ -1080,12 +1129,13 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	resolveOrExit("api-token", apiToken)
 	resolveOrExit("read-token", readToken)
 	resolveOrExit("metrics-token", metricsToken)
+	resolveOrExit("ingest-token", ingestToken)
 	resolveOrExit("webhook-secret", webhookSecret)
 
-	// Token guardrails (#190, #944), checked after @file/env/config resolution so
+	// Token guardrails (#190, #944, #1144), checked after @file/env/config resolution so
 	// they see the effective values regardless of source. Two equal tokens would
 	// classify as the broader scope and silently grant it — refuse to start.
-	if err := checkDistinctTokens(*apiToken, *readToken, *metricsToken); err != nil {
+	if err := checkDistinctTokens(*apiToken, *readToken, *metricsToken, *ingestToken); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -1097,6 +1147,10 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	}
 	if *metricsToken != "" && *apiToken == "" {
 		logger.Warn("--metrics-token is set but --api-token is empty: auth is disabled and the metrics token has no effect; a non-loopback bind still requires --api-token (#944)")
+	}
+
+	if *ingestToken != "" && *apiToken == "" {
+		logger.Warn("--ingest-token is set but --api-token is empty: auth is disabled and the ingest token has no effect; a non-loopback bind still requires --api-token (#1144)")
 	}
 
 	// Resolve + validate the Anthropic Admin poller config (#138) BEFORE store.Open
@@ -1269,6 +1323,11 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		_, _ = fmt.Fprintln(os.Stderr, n)
 	}
 
+	if err := configureServeCorrectionScoring(context.Background(), db, *event3Scoring, *readOnly); err != nil {
+		fmt.Fprintf(os.Stderr, "configure Event 3 scoring: %v\n", err)
+		return 1
+	}
+
 	mux := http.NewServeMux()
 
 	// Shared watcher health state. Only allocated when --watch-repo is set;
@@ -1313,7 +1372,14 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		Window:         *authFailureWindow,
 		Lockout:        *authLockout,
 		TrustedProxies: trustedProxies,
-	}, api.WithCommit(commit), api.WithPolledProviders(startedPollerProviders(adminSettings, openaiSettings)...))
+	}, api.WithCaptureEngines(map[string]bool{
+		"claude-code":     len(watchRepos) > 0 && !*readOnly,
+		"codex-rollout":   codexSettings != nil && !*readOnly,
+		"opencode":        opencodeSettings != nil && !*readOnly,
+		"muse":            museSettings != nil && !*readOnly,
+		"anthropic-admin": adminSettings != nil && !*readOnly,
+		"openai-usage":    openaiSettings != nil && !*readOnly,
+	}), api.WithStoredScoringPolicy(), api.WithCommit(commit), api.WithPolledProviders(startedPollerProviders(adminSettings, openaiSettings)...))
 	apiHandler.SetMetricsRegistry(srvMetrics.reg)
 	// Wire the unjoined-identity gauge (#125), same write-once-before-serve seam
 	// as the registry above; /scores Sets it per read, nil-safe elsewhere.
@@ -1327,6 +1393,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	apiHandler.SetReadToken(*readToken)
 	// Scrape-only metrics token (#944), same seam; opens GET /metrics only.
 	apiHandler.SetMetricsToken(*metricsToken)
+	apiHandler.SetIngestToken(*ingestToken)
 	// Reporting mode + k-anonymity floor (#185), same write-once-before-serve seam.
 	// In team mode the served /scores, the dashboard it feeds, and /scores/{developer}
 	// never name an individual developer.
@@ -1359,7 +1426,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	logger.Info("API auth scopes",
 		"write_armed", *apiToken != "",
 		"read_armed", *readToken != "",
-		"metrics_armed", *metricsToken != "")
+		"metrics_armed", *metricsToken != "",
+		"ingest_armed", *ingestToken != "")
 	// Announce the RESOLVED failed-login lockout state (#36). Config parity (#85)
 	// newly lets an operator disable the brute-force throttle by committing
 	// http.auth.max_failures: 0 into a repo YAML — a persistent, invisible loss of
@@ -1394,7 +1462,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		// enabled the handler also captures qualifying direct commits to the default
 		// branch as degraded outcomes; unattributed commits are counted so the drop
 		// is observable in /metrics.
-		whOpts := buildWebhookOptions(*pushCapture, srvMetrics.pushUnattributed, srvMetrics.pushMergeLeak, srvMetrics.pushMissingPushedAt, generatedPathsCfg, sizeLabelsCfg)
+		whOpts := buildWebhookOptions(*pushCapture, srvMetrics.pushUnattributed, srvMetrics.pushMergeLeak, srvMetrics.pushMissingPushedAt, generatedPathsCfg, sizeLabelsCfg, srvMetrics.revertAmbiguous)
+		whOpts = append(whOpts, webhook.WithOversizedCounter(srvMetrics.webhookOversized))
 		if *pushCapture {
 			logger.Info("push-to-default-branch outcome capture is ENABLED (#196): direct commits to the default branch earn degraded 0.5, per-issue-per-UTC-day outcomes")
 		}
@@ -1443,14 +1512,14 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		p := proxy.New(t, proxy.ProviderAnthropic, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
 		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
 		registerProxy(mux, "/anthropic", p, apiHandler.ProxyAuth, logger)
-		logger.Info("Anthropic proxy", "path", "/anthropic/", "target", *anthropicTarget)
+		logger.Info("Anthropic proxy (live accounting unvalidated; no live-dogfood evidence)", "path", "/anthropic/", "target", *anthropicTarget)
 	}
 	if t := parseProxyTarget(*openaiTarget, logger); t != nil {
 		anyProxyMounted = true
 		p := proxy.New(t, proxy.ProviderOpenAI, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
 		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
 		registerProxy(mux, "/openai", p, apiHandler.ProxyAuth, logger)
-		logger.Info("OpenAI proxy", "path", "/openai/", "target", *openaiTarget)
+		logger.Info("OpenAI proxy (experimental; live accounting unvalidated)", "path", "/openai/", "target", *openaiTarget)
 		// Double-count hazard (#459 task 2) — see codexProxyDoubleCountWarn.
 		if w := codexProxyDoubleCountWarn(codexSettings != nil, true); w != "" {
 			logger.Warn(w, "proxy_path", "/openai/", "collector", collector.SourceCodexRollout)
@@ -1465,7 +1534,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		p := proxy.New(t, proxy.ProviderGemini, collector.SourceProxy, eventSink, srvMetrics.proxyWrites, srvMetrics.proxyUncaptured, logger)
 		p.SetUnattributedRecorder(srvMetrics.proxyUnattributed)
 		registerProxy(mux, "/gemini", p, apiHandler.ProxyAuth, logger)
-		logger.Info("Gemini proxy", "path", "/gemini/", "target", *geminiTarget)
+		logger.Info("Gemini proxy (experimental; live accounting unvalidated)", "path", "/gemini/", "target", *geminiTarget)
 	}
 
 	srv := &http.Server{
@@ -2748,20 +2817,28 @@ func validateBind(addr, apiToken string, syntheticDemo bool) error {
 }
 
 // checkDistinctTokens refuses any two equal, non-empty tokens among the write,
-// read and metrics tokens (#190, #944): an equal pair would classify as one
+// read, metrics and ingest tokens (#190, #944, #1144): an equal pair would classify as one
 // scope and silently grant the other token's routes.
-func checkDistinctTokens(apiToken, readToken, metricsToken string) error {
+func checkDistinctTokens(apiToken, readToken, metricsToken, ingestToken string) error {
 	if err := checkReadToken(apiToken, readToken); err != nil {
 		return err
 	}
-	if metricsToken == "" {
-		return nil
+	if metricsToken != "" {
+		if metricsToken == apiToken {
+			return fmt.Errorf("--metrics-token must differ from --api-token: a metrics token equal to the write token would grant write access (#944)")
+		}
+		if metricsToken == readToken {
+			return fmt.Errorf("--metrics-token must differ from --read-token: the read token must not scrape /metrics in team or division mode (#944)")
+		}
 	}
-	if metricsToken == apiToken {
-		return fmt.Errorf("--metrics-token must differ from --api-token: a metrics token equal to the write token would grant write access (#944)")
-	}
-	if metricsToken == readToken {
-		return fmt.Errorf("--metrics-token must differ from --read-token: the read token must not scrape /metrics in team or division mode (#944)")
+	if ingestToken != "" {
+		for _, other := range []struct{ name, value string }{
+			{"api-token", apiToken}, {"read-token", readToken}, {"metrics-token", metricsToken},
+		} {
+			if ingestToken == other.value {
+				return fmt.Errorf("--ingest-token must differ from --%s: the ingest token must open POST /api/v1/events only (#1144)", other.name)
+			}
+		}
 	}
 	return nil
 }
@@ -2798,7 +2875,7 @@ func secretEnvFallback(fs *flag.FlagSet, p *string, name, envVar string) {
 }
 
 // resolveSecretFlag supports `@/path/to/file` indirection for secret-valued
-// flags — --api-token, --read-token, --metrics-token, and --webhook-secret (#37). Passing a secret as a literal
+// flags — --api-token, --read-token, --metrics-token, --ingest-token, and --webhook-secret (#37). Passing a secret as a literal
 // flag value leaks it to `ps aux`, shell history, and process-accounting logs on
 // a multi-user host. A value beginning with '@' is instead read from the file at
 // the remaining path (a single trailing newline is trimmed), so the secret never
@@ -3187,4 +3264,18 @@ func defaultDBPath() string {
 		return "tier.db"
 	}
 	return filepath.Join(home, ".tier", "tier.db")
+}
+
+func configureServeCorrectionScoring(ctx context.Context, db *store.DB, requested, readOnly bool) error {
+	if !readOnly {
+		return db.ConfigureCorrectionScoring(ctx, requested)
+	}
+	policy, err := db.CorrectionScoringPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if policy.Enabled != requested {
+		return fmt.Errorf("requested Event 3 scoring (%t) disagrees with stored policy (%t) in read-only mode", requested, policy.Enabled)
+	}
+	return nil
 }

@@ -641,3 +641,46 @@ func TestPostOutcome_ReconcilesThePushLedger(t *testing.T) {
 		t.Errorf("ledger still holds %d entries", len(exp.PushOutcomeCommits))
 	}
 }
+
+func TestPostOutcome_ExcludedInsertionAndReplay(t *testing.T) {
+	h, db := newTestHandler(t)
+	ctx := context.Background()
+	sha := "excluded-api"
+	// The already-recorded API row is moved, and both its replay and a forged
+	// repo/PR/developer tuple with the same SHA are refused by the store boundary.
+	if code, _ := postOutcome(t, h, validOutcome(sha, nil)); code != http.StatusCreated {
+		t.Fatalf("seed status=%d", code)
+	}
+	if err := db.ExcludePROutcome(ctx, store.Outcome{Developer: "alice", PRNumber: 7, MergeCommitSHA: sha, Timestamp: time.Now()}, "title matches ^Revert quoted", "github-webhook"); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []map[string]any{validOutcome(sha, nil), validOutcome(sha, map[string]any{"repo": "other/repo", "pr_number": 99, "developer": "mallory"})} {
+		for i := 0; i < 2; i++ {
+			code, resp := postOutcome(t, h, body)
+			if code != http.StatusOK {
+				t.Fatalf("excluded status=%d %s", code, resp)
+			}
+			var r outcomeResponse
+			if err := json.Unmarshal(resp, &r); err != nil {
+				t.Fatal(err)
+			}
+			if r.Status != "duplicate" || r.Weight != 0 {
+				t.Fatalf("excluded response=%+v", r)
+			}
+			if _, found, err := db.OutcomeByMergeCommit(ctx, sha); err != nil || found {
+				t.Fatalf("excluded SHA reinserted=%v %v", found, err)
+			}
+		}
+	}
+	// Tombstone-only exclusion blocks the first API insert too.
+	if err := db.ExcludePROutcome(ctx, store.Outcome{Developer: "alice", PRNumber: 8, MergeCommitSHA: "never-scored", Timestamp: time.Now()}, "head match", "backfill"); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := postOutcome(t, h, validOutcome("never-scored", nil)); code != http.StatusOK {
+		t.Fatalf("tombstone insert=%d", code)
+	}
+	exp, err := db.ExportDeveloper(ctx, "alice")
+	if err != nil || len(exp.OutcomeExclusions) != 2 {
+		t.Fatalf("exclusion export=%+v %v", exp, err)
+	}
+}

@@ -30,7 +30,7 @@ func TestServeSmoke_MuseWithoutWatchRepoRefusesToStart(t *testing.T) {
 		// deliberately NO --watch-repo
 	}, "\n")
 	cmd := exec.Command(self)
-	cmd.Env = append(os.Environ(), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
+	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+childArgs)
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {

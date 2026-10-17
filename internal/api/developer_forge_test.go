@@ -598,7 +598,7 @@ func TestOrgPollerPathStillWritesTheSentinel(t *testing.T) {
 	for _, c := range costs {
 		if c.Developer == collector.UnattributedIssueID {
 			found = true
-			if got, want := c.TotalCostMicro, store.DollarsToMicro(12.34); got != want {
+			if got, want := c.TotalCostMicro, store.ComputeCost(ev.Model, store.CostUsage{Input: ev.InputTok, Output: ev.OutputTok}); got != want {
 				t.Errorf("poller row cost = %d micro, want %d", got, want)
 			}
 		}

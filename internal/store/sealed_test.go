@@ -109,7 +109,7 @@ func TestSealedRollup_UpdateAborts(t *testing.T) {
 	assertRefused(t, db, `UPDATE sealed_rollup SET sample_n = 1`, probe, int64(6))
 	assertRefused(t, db, `INSERT OR REPLACE INTO sealed_rollup
 		SELECT report_id, label, weighted_points, total_cost_usd, actual_paid_usd, realtime_usd, 1, flagged_outcomes,
-		has_points, has_cost, has_realtime, has_non_realtime, has_paid, contributes FROM sealed_rollup`, probe, int64(6))
+		has_points, has_cost, has_realtime, has_non_realtime, has_paid, contributes, outcome_n FROM sealed_rollup`, probe, int64(6))
 	assertRefused(t, db, `INSERT OR REPLACE INTO sealed_rollup (rowid, report_id, label, weighted_points, total_cost_usd, actual_paid_usd, realtime_usd, sample_n, flagged_outcomes)
 		SELECT rowid, report_id, 'other', 0, 0, 0, 0, 1, 0 FROM sealed_rollup`, probe, int64(6))
 }

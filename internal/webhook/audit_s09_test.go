@@ -113,10 +113,10 @@ func TestAuditS091_MergedAtObservationWindows(t *testing.T) {
 	}
 }
 
-// #1113 / 6eaae499: an unresolved SHA must not turn a bare PR number or a
-// body-only issue reference into a penalty against the latest issue outcome.
+// #1113 subject grammar remains covered without a footer. #1228 additionally
+// makes an unresolved footer terminal even when the subject names an issue.
 func TestAudit1113_RevertCommitSubjectFallback(t *testing.T) {
-	unknown := "ffffffffffffffffffffffffffffffffffffffff"
+	unknown := ""
 	for _, tc := range []struct {
 		name, message, targetSHA, issue string
 		want                            float64
@@ -142,7 +142,11 @@ func TestAudit1113_RevertCommitSubjectFallback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r.push(t, pushCommit("revert-sha", tc.message+"\n\nThis reverts commit "+tc.targetSHA+".", "bob", now))
+			message := tc.message
+			if tc.targetSHA != "" {
+				message += "\n\nThis reverts commit " + tc.targetSHA + "."
+			}
+			r.push(t, pushCommit("revert-sha", message, "bob", now))
 			o, found, err := r.db.OutcomeByMergeCommit(context.Background(), wfMergeSHA)
 			if err != nil || !found || o.Quality != tc.want {
 				t.Fatalf("quality = %v, want %v; found=%v err=%v", o.Quality, tc.want, found, err)

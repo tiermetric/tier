@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
+
+var branchHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const (
 	// MaxEventsBody caps the request body at 1 MiB, matching the other write
@@ -64,14 +67,15 @@ const (
 // the stateless shipper's replay safety rests entirely on the key colliding
 // with the partial unique index on re-ship.
 type eventRequest struct {
-	Developer    string `json:"developer"`
-	IssueID      string `json:"issue_id"`
-	Model        string `json:"model"`
-	InputTok     int    `json:"input_tokens"`
-	OutputTok    int    `json:"output_tokens"`
-	CacheRead    int    `json:"cache_read_tokens"`
-	CacheWrite5m int    `json:"cache_write_5m_tokens"`
-	CacheWrite1h int    `json:"cache_write_1h_tokens"`
+	CacheWriteEvidence string `json:"cache_write_evidence,omitempty"`
+	Developer          string `json:"developer"`
+	IssueID            string `json:"issue_id"`
+	Model              string `json:"model"`
+	InputTok           int    `json:"input_tokens"`
+	OutputTok          int    `json:"output_tokens"`
+	CacheRead          int    `json:"cache_read_tokens"`
+	CacheWrite5m       int    `json:"cache_write_5m_tokens"`
+	CacheWrite1h       int    `json:"cache_write_1h_tokens"`
 	// CostUSD is the client's LOCALLY-computed cost. As of #233 the server is the
 	// single pricing authority: it re-prices the raw token counts with its own
 	// table and stores THAT, keeping this value only as a cross-check (a divergence
@@ -88,7 +92,9 @@ type eventRequest struct {
 	// pre-#231 client already behaves, so adding this field breaks no existing
 	// integration. Supplying it is what lets a multi-repo org stop fusing issues
 	// that share a number. The reserved sentinel may not be supplied explicitly.
-	Repo string `json:"repo"`
+	Repo       string  `json:"repo"`
+	PRNumber   *int    `json:"pr_number,omitempty"`
+	BranchHash *string `json:"branch_hash,omitempty"`
 	// Host is the OPTIONAL serving host this cost was incurred against (#300,
 	// carried on this wire by #719). Omitted -> "" -> the model-only rate, which is
 	// exactly how every pre-#719 client already behaves, so adding this field
@@ -130,22 +136,22 @@ type eventRequest struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// eventsResponse is the 201 body: how many events the batch carried. With
-// the MAX-on-conflict UPSERT a replayed event is silently absorbed, so
-// "accepted" counts events processed, not rows newly created.
+// eventsResponse is the 201 body. Accepted includes same-developer replays,
+// not just new rows, but excludes reported cross-developer key collisions.
 type eventsResponse struct {
-	Accepted int `json:"accepted"`
+	Accepted               int `json:"accepted"`
+	RejectedCrossDeveloper int `json:"rejected_cross_developer"`
 }
 
 // handlePostEvents ingests a JSON array of collector token events. Wrapped by
-// requireAuth in Register, sharing the #36 failed-auth lockout with every
+// requireIngest in Register, sharing the #36 failed-auth lockout with every
 // other bearer-gated route.
 //
 // The batch is all-or-nothing: every element is validated first, any invalid
 // element 400s naming its index and nothing is inserted; a valid batch rides
-// store.InsertTokenEvents (one transaction, MAX-on-conflict UPSERT per row),
+// store.InsertTokenEvents (one bounded transaction, coherent promotion per row),
 // so a re-shipped batch is a no-op and a partially-new batch lands only its
-// new rows.
+// new rows. Cross-developer collisions are skipped and reported (#1144).
 func (h *Handler) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, MaxEventsBody)
 	dec := json.NewDecoder(body)
@@ -201,10 +207,20 @@ func (h *Handler) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 		events = append(events, ev)
 	}
 
-	if err := h.store.InsertTokenEvents(r.Context(), events); err != nil {
+	result, err := h.store.InsertTokenEventsWithResult(r.Context(), events)
+	if errors.Is(err, store.ErrWriteLockUnavailable) {
+		writeStoreContention(w)
+		return
+	}
+	if err != nil {
 		h.logger.Error("insert token events batch", "err", err, "count", len(events))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
+	}
+
+	if result.RejectedCrossDeveloper > 0 {
+		h.logger.Warn("events batch rejected cross-developer idempotency collisions",
+			"rejected_cross_developer", result.RejectedCrossDeveloper)
 	}
 
 	// Observe pricing divergence AFTER a successful insert so the metric + WARN
@@ -217,9 +233,12 @@ func (h *Handler) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 	// logged (never the model / developer / issue strings) per the log-safety
 	// discipline; the model is passed as dedup-key material only, never logged.
 	for i := range events {
+		if !result.Applied[i] {
+			continue
+		}
 		h.observePricingDivergence(events[i].Model, events[i].CostMicro, store.DollarsToMicro(reqs[i].CostUSD))
 	}
-	writeJSON(w, http.StatusCreated, eventsResponse{Accepted: len(events)})
+	writeJSON(w, http.StatusCreated, eventsResponse{Accepted: len(events) - result.RejectedCrossDeveloper, RejectedCrossDeveloper: result.RejectedCrossDeveloper})
 }
 
 // validateEventRequest applies the element-level rules and converts to the
@@ -242,6 +261,9 @@ func (h *Handler) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 // Both allowlists are exact-match by design (mirrors the /costs switches):
 // "Jsonl" / " realtime" fall through to rejection.
 func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, error) {
+	if err := store.ValidateCacheWriteEvidence(req.CacheWriteEvidence, req.CacheWrite1h); err != nil {
+		return store.TokenEvent{}, err
+	}
 	var zero store.TokenEvent
 	if req.Developer == "" || req.IssueID == "" || req.Model == "" {
 		return zero, fmt.Errorf("developer, issue_id, and model are required")
@@ -272,6 +294,12 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 	// forging as effective as honesty.
 	if err := validateDeveloper(req.Developer); err != nil {
 		return zero, err
+	}
+	if req.PRNumber != nil && *req.PRNumber <= 0 {
+		return zero, fmt.Errorf("pr_number must be >= 1")
+	}
+	if req.BranchHash != nil && !branchHashRE.MatchString(*req.BranchHash) {
+		return zero, fmt.Errorf("branch_hash must be exactly 64 lower-case hex characters")
 	}
 	if req.IdempotencyKey == "" {
 		return zero, fmt.Errorf("events require idempotency_key; replay safety depends on it")
@@ -395,6 +423,7 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 	})
 	// Capture continues: the insert path clamps over-ceiling cost and records the mark.
 	return store.TokenEvent{
+		TokenDerived: true, CacheWriteEvidence: req.CacheWriteEvidence,
 		Developer:    req.Developer,
 		IssueID:      req.IssueID,
 		Model:        req.Model,
@@ -417,6 +446,8 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 		Fidelity:        req.Fidelity,
 		IdempotencyKey:  req.IdempotencyKey,
 		Repo:            repo,
+		PRNumber:        req.PRNumber,
+		BranchHash:      req.BranchHash,
 		SessionID:       req.SessionID,
 		AttributionRule: rule,
 		Timestamp:       ts.UTC(),

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/tiermetric/tier/internal/corrects"
 )
 
 // Year-guard window. A bare 4-digit branch segment inside this inclusive range
@@ -23,6 +25,7 @@ const issueTerminator = `(?:$|[\s\p{P}])`
 
 var (
 	mainlineRE = regexp.MustCompile(mainlineBranches)
+	commitPRRE = regexp.MustCompile(`(?:^|[\s(])#([1-9]\d*)` + issueTerminator)
 	// closesRE matches "closes #42", "fixes #99", "resolves #7" (case-insensitive).
 	// The captured number uses [1-9]\d* so a leading zero or bare "#0" never
 	// yields a bogus issue id — GitHub issue numbers are >= 1 and never
@@ -122,6 +125,24 @@ func FromCommitSubject(subject string) string {
 	return prefixedIssueRE.FindString(subject)
 }
 
+// FromCommitSubjectPR returns the first bare PR number only when no close
+// directive or tracker key attributes the subject. Overflow is ignored.
+func FromCommitSubjectPR(subject string) *int {
+	subject = corrects.StripDeclarationLines(subject)
+	if FromCommitSubject(subject) != "" {
+		return nil
+	}
+	m := commitPRRE.FindStringSubmatch(subject)
+	if len(m) != 2 {
+		return nil
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
 // FromPRBody extracts an issue ID from a PR description body.
 //
 //	"closes #42"          → "issue-42"
@@ -141,7 +162,9 @@ func FromCommitSubject(subject string) string {
 // issue; ClosedIssues enumerates the rest so the un-credited issues are logged,
 // not silently lost. One outcome per PR (never one per issue) is mandatory
 // because outcomes.merge_commit_sha is UNIQUE (#60) — see ClosedIssues.
+// Corrects declaration lines, including malformed ones, never attribute issues.
 func FromPRBody(body string) string {
+	body = corrects.StripDeclarationLines(body)
 	// 1. Explicit close directive — highest confidence.
 	if m := closesRE.FindStringSubmatch(body); len(m) == 2 {
 		return "issue-" + m[1]
@@ -192,7 +215,9 @@ func FromBranchOrBody(branch, body string) string {
 // "one merged PR = one outcome" exact. This deliberately covers only close
 // DIRECTIVES ("closes/fixes/resolves #N"), not bare "#N" mentions or tracker keys:
 // the concern is which issues a merge actually CLOSES, which is what fans out.
+// Corrects declaration lines are ignored even if they contain close directives.
 func ClosedIssues(body string) []string {
+	body = corrects.StripDeclarationLines(body)
 	var out []string
 	seen := map[string]bool{}
 	for _, clause := range closeClauseRE.FindAllStringSubmatch(body, -1) {

@@ -54,7 +54,7 @@ func TestPostEvents_AcceptsRule(t *testing.T) {
 // clean 400 naming the row and the allowed set, never echoing the refused value,
 // and that the valid sibling does not land.
 func TestPostEvents_RejectsUnknownRule(t *testing.T) {
-	for _, bad := range []string{"legacy", "Branch", "carry ", "/Users/alice/secret-wt-9f3a"} {
+	for _, bad := range []string{"branch-at-merge", "pr-number-at-insert", "legacy", "Branch", "carry ", "/Users/alice/secret-wt-9f3a"} {
 		t.Run(bad, func(t *testing.T) {
 			h, db := newTestHandler(t)
 			e := validEvent("k-bad-rule")

@@ -1,7 +1,7 @@
 # TIER Quality Multiplier — Degradation Rules Specification
 ## Deterministic State Machine for Post-Merge Quality Assessment
 
-> ⚠️ **Implementation status (as of 2026-07-12, `main`).** This document
+> ⚠️ **Implementation status (v0.6.0 release, 2026-10-17).** This document
 > specifies the **full, target** 8-event quality model. `tierd` implements a
 > **subset** of it today (#134). Quality is **derived, not mutated**: each signal
 > is appended to an append-only `quality_events` log and the outcome's quality is
@@ -20,8 +20,12 @@
 >   to **`0.8`**, within the 60-day window (from the `push` webhook, on the
 >   repository's **default branch only**).
 >
+> **Event 3 is implemented under its separately adopted corrective-work design,**
+> off by default and active when the operator enables scoring. Its declaration
+> and reviewed-allocation rules are in the [rubric](rubric.md#rubric-2-corrective-work-operator-opt-in);
+> the file-overlap detector described below is not shipped.
+>
 > **NOT yet implemented** (specified below, but no code enforces them):
-> - **Event 3** — follow-up fix (`-0.15`)
 > - **Event 5** — partial revert (`1.0 - 0.9·fraction`)
 > - **Event 6** — production-incident correlation
 > - **Event 7** — hotfix-branch detection (`0.4`)
@@ -31,17 +35,17 @@
 >   phase state machine / dashboard provisional indicator (the 48h/60d bounds ARE
 >   applied as event windows, but the lifecycle state is not materialized).
 >
-> Treat Sections 3–12 as the intended design; the bullets above are what the tool
-> measures today. (Ref: readiness review finding C2 — publishing this spec
+> Treat Sections 3–12, except the implemented Event 3 subsection, as the intended
+> design; the bullets above are what the tool measures today. (Ref: readiness review finding C2 — publishing this spec
 > as-if-fully-implemented would misrepresent what the tool measures.)
 
 **Specification dated:** March 26, 2026 — the date this design was written. See the implementation-status banner above for what the code enforces today.
 
 **Author:** TIER maintainers
 
-**Status:** Complete specification, partially implemented. The design below is settled and not a draft; `tierd` enforces the subset itemized in the banner above. "Final" here describes the specification, not the shipped behavior.
+**Status:** historical design, partially implemented. The implementation-status banner defines supported behavior. Unimplemented rules are not product commitments; corrective-work accounting is governed by its separately adopted design. Event 3 is built and off by default; it affects live scores when the operator enables it on their installation. See [enabled operation](how-it-works.md#event-3-enabled-operation).
 
-**Design constraint:** 100% automated. Zero human input. The quality multiplier is a pure function of observable system events.
+**Design constraint:** Supported CI and revert rules derive from recorded events. Corrective-work confirmation can require human review.
 
 ---
 
@@ -183,6 +187,10 @@ Flaky Registry Rules:
 ---
 
 ### Event 3: Follow-Up Fix Commit Touches Same Files Within N Days
+
+**Historical detector proposal, not shipped.** Enabled Event 3 instead uses captured
+`Corrects:` declarations and operator review; the [rubric](rubric.md#rubric-2-corrective-work-operator-opt-in)
+governs its arithmetic and windows.
 
 **Trigger signal:** A new commit on the target branch that:
 1. Modifies at least one file that was also modified by the original PR, AND
@@ -1169,7 +1177,7 @@ This specification directly addresses the following adversarial analysis finding
 | Finding | Resolution |
 |---------|------------|
 | G-04: Quality Score Manipulation (30-day window too short) | Extended to 60-day window with two phases |
-| G-04: Follow-up-as-new-issue pattern | Event 3 detects follow-ups via file overlap even without explicit issue references |
+| G-04: Follow-up-as-new-issue pattern | The original design proposed file-overlap detection without explicit issue references; superseded by the adopted declared-and-confirmed design. |
 | O-02: Quality Multiplier Override Abuse | No human override mechanism exists. Flaky CI is handled deterministically |
 | P-04: Speed-Quality Tradeoff Exploitation | Graduated penalty scale (not binary cliffs). Partial reverts scale linearly |
 | M-05: Retroactive Score Changes | Two-phase observation with "provisional" labeling and finalization at T+60d |

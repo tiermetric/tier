@@ -86,6 +86,9 @@ type Config struct {
 	BackoffBase time.Duration
 }
 
+// Old-server incompatibility is remembered per endpoint for this process only.
+var unsupportedPRFields sync.Map
+
 // Client ships collector token events to a central tierd. It implements
 // collector.Ingester, so it plugs directly into JSONLCollector.Run as the
 // HTTP-backed alternative to the local ingester.Store adapter.
@@ -101,10 +104,12 @@ type Client struct {
 	maxAttempts int
 	backoffBase time.Duration
 
-	mu      sync.Mutex
-	buf     []wireEvent
-	shipped int
-	rules   collector.SinkRules
+	omitPRFields           bool // a recognized additive-field 400 has omitted at least one field
+	mu                     sync.Mutex
+	buf                    []wireEvent
+	shipped                int
+	rejectedCrossDeveloper int
+	rules                  collector.SinkRules
 }
 
 // wireEvent is the JSON shape of one POST /api/v1/events element — the
@@ -113,18 +118,19 @@ type Client struct {
 // store.MicroToDollars / DollarsToMicro is exact for any realistic magnitude
 // (micro values are integers well below 2^53).
 type wireEvent struct {
-	Developer      string  `json:"developer"`
-	IssueID        string  `json:"issue_id"`
-	Model          string  `json:"model"`
-	InputTok       int     `json:"input_tokens"`
-	OutputTok      int     `json:"output_tokens"`
-	CacheRead      int     `json:"cache_read_tokens"`
-	CacheWrite5m   int     `json:"cache_write_5m_tokens"`
-	CacheWrite1h   int     `json:"cache_write_1h_tokens"`
-	CostUSD        float64 `json:"cost_usd"`
-	Source         string  `json:"source"`
-	Fidelity       string  `json:"fidelity"`
-	IdempotencyKey string  `json:"idempotency_key"`
+	CacheWriteEvidence string  `json:"cache_write_evidence,omitempty"`
+	Developer          string  `json:"developer"`
+	IssueID            string  `json:"issue_id"`
+	Model              string  `json:"model"`
+	InputTok           int     `json:"input_tokens"`
+	OutputTok          int     `json:"output_tokens"`
+	CacheRead          int     `json:"cache_read_tokens"`
+	CacheWrite5m       int     `json:"cache_write_5m_tokens"`
+	CacheWrite1h       int     `json:"cache_write_1h_tokens"`
+	CostUSD            float64 `json:"cost_usd"`
+	Source             string  `json:"source"`
+	Fidelity           string  `json:"fidelity"`
+	IdempotencyKey     string  `json:"idempotency_key"`
 	// Host is the serving host this cost was incurred against (#300), mirroring
 	// the server's eventRequest.Host.
 	//
@@ -162,8 +168,10 @@ type wireEvent struct {
 	// api.validateRepo treats an explicit "" and an absent key identically, so
 	// dropping omitempty changes nothing observable. wireRepo below is the
 	// load-bearing part — see its comment.
-	Repo      string `json:"repo,omitempty"`
-	Timestamp string `json:"timestamp"`
+	Repo       string  `json:"repo,omitempty"`
+	PRNumber   *int    `json:"pr_number,omitempty"`
+	BranchHash *string `json:"branch_hash,omitempty"`
+	Timestamp  string  `json:"timestamp"`
 	// AttributionRule mirrors the server's eventRequest.AttributionRule (#823).
 	// omitempty, so an event with no rule is byte-identical to what a pre-#823
 	// shipper sent and cannot trip an older server's DisallowUnknownFields. The
@@ -307,21 +315,24 @@ func (c *Client) Ingest(ctx context.Context, ev collector.TokenEvent) error {
 	// the server refuses that bucket with any repo.
 	ev = c.rules.Apply(ev)
 	c.buf = append(c.buf, wireEvent{
-		Developer:      ev.Developer,
-		IssueID:        ev.IssueID,
-		Model:          ev.Model,
-		InputTok:       ev.InputTok,
-		OutputTok:      ev.OutputTok,
-		CacheRead:      ev.CacheRead,
-		CacheWrite5m:   ev.CacheWrite5m,
-		CacheWrite1h:   ev.CacheWrite1h,
-		CostUSD:        store.MicroToDollars(ev.CostMicro),
-		Source:         ev.Source,
-		Fidelity:       ev.Fidelity,
-		IdempotencyKey: ev.IdempotencyKey,
-		SessionID:      ev.SessionID,
-		Host:           ev.Host,
-		Repo:           wireRepo(ev.Repo),
+		CacheWriteEvidence: ev.CacheWriteEvidence,
+		Developer:          ev.Developer,
+		IssueID:            ev.IssueID,
+		Model:              ev.Model,
+		InputTok:           ev.InputTok,
+		OutputTok:          ev.OutputTok,
+		CacheRead:          ev.CacheRead,
+		CacheWrite5m:       ev.CacheWrite5m,
+		CacheWrite1h:       ev.CacheWrite1h,
+		CostUSD:            store.MicroToDollars(ev.CostMicro),
+		Source:             ev.Source,
+		Fidelity:           ev.Fidelity,
+		IdempotencyKey:     ev.IdempotencyKey,
+		SessionID:          ev.SessionID,
+		Host:               ev.Host,
+		Repo:               wireRepo(ev.Repo),
+		PRNumber:           ev.PRNumber,
+		BranchHash:         ev.BranchHash,
 		// RFC3339Nano keeps sub-second precision; the server parses it
 		// with the RFC3339 layout (Go accepts fractional seconds there).
 		Timestamp:       ev.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -352,12 +363,25 @@ func (c *Client) Shipped() int {
 	return c.shipped
 }
 
+// RejectedCrossDeveloper reports terminal collisions skipped by the server.
+func (c *Client) RejectedCrossDeveloper() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rejectedCrossDeveloper
+}
+
+type eventsReceipt struct {
+	Accepted               *int `json:"accepted"`
+	RejectedCrossDeveloper int  `json:"rejected_cross_developer"`
+}
+
 // flushLocked drains the buffer in count- and byte-bounded chunks, POSTing each
 // and dropping it on success. Caller must hold c.mu. On failure the unsent
 // remainder is retained: the CLI exits non-zero and the next stateless run
 // re-ships everything anyway.
 func (c *Client) flushLocked(ctx context.Context) error {
 	for len(c.buf) > 0 {
+		c.stripUnsupportedFields()
 		n := min(len(c.buf), c.batchSize)
 		var body []byte
 		for {
@@ -375,10 +399,31 @@ func (c *Client) flushLocked(ctx context.Context) error {
 			}
 			n /= 2
 		}
-		if err := c.postBatch(ctx, body); err != nil {
+		receipt, err := c.postBatch(ctx, body)
+		var unsupported *unknownPRFieldError
+		retriedFields := make(map[string]bool)
+		for errors.As(err, &unsupported) {
+			key := c.endpoint + "\x00" + unsupported.field
+			unsupportedPRFields.LoadOrStore(key, true)
+			if retriedFields[unsupported.field] {
+				break
+			}
+			retriedFields[unsupported.field] = true
+			c.stripUnsupportedFields()
+			body, err = json.Marshal(c.buf[:n])
+			if err == nil {
+				receipt, err = c.postBatch(ctx, body)
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("ship batch of %d events: %w", n, err)
 		}
-		c.shipped += n
+		accepted := n - receipt.RejectedCrossDeveloper
+		if receipt.Accepted != nil {
+			accepted = *receipt.Accepted
+		}
+		c.shipped += accepted
+		c.rejectedCrossDeveloper += receipt.RejectedCrossDeveloper
 		c.buf = c.buf[n:]
 	}
 	return nil
@@ -389,17 +434,18 @@ func (c *Client) flushLocked(ctx context.Context) error {
 // fails immediately (client-side validation bug — retrying cannot fix it and
 // skipping it would silently drop spend data). Context cancellation aborts
 // both the request and any pending backoff sleep.
-func (c *Client) postBatch(ctx context.Context, body []byte) error {
+func (c *Client) postBatch(ctx context.Context, body []byte) (eventsReceipt, error) {
 	var lastErr error
 	delay := c.backoffBase
 	for attempt := 1; ; attempt++ {
-		lastErr = c.postOnce(ctx, body)
+		var receipt eventsReceipt
+		receipt, lastErr = c.postOnce(ctx, body)
 		if lastErr == nil {
-			return nil
+			return receipt, nil
 		}
 		var re *retryableError
 		if !errors.As(lastErr, &re) || attempt >= c.maxAttempts {
-			return lastErr
+			return eventsReceipt{}, lastErr
 		}
 		// Capped exponential backoff, interruptible by ctx so SIGINT does
 		// not hang the CLI mid-sleep.
@@ -407,13 +453,39 @@ func (c *Client) postBatch(ctx context.Context, body []byte) error {
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return ctx.Err()
+			return eventsReceipt{}, ctx.Err()
 		case <-t.C:
 		}
 		if delay *= 2; delay > maxBackoff {
 			delay = maxBackoff
 		}
 	}
+}
+
+// stripUnsupportedFields preserves every field the receiver has not rejected.
+func (c *Client) stripUnsupportedFields() {
+	for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence"} {
+		if _, unsupported := unsupportedPRFields.Load(c.endpoint + "\x00" + field); !unsupported {
+			continue
+		}
+		c.omitPRFields = true
+		for i := range c.buf {
+			switch field {
+			case "pr_number":
+				c.buf[i].PRNumber = nil
+			case "branch_hash":
+				c.buf[i].BranchHash = nil
+			case "cache_write_evidence":
+				c.buf[i].CacheWriteEvidence = ""
+			}
+		}
+	}
+}
+
+// unknownPRFieldError is the only compatibility signal; never cache other failures.
+type unknownPRFieldError struct {
+	error
+	field string
 }
 
 // retryableError marks failures worth retrying (transport errors, 5xx).
@@ -425,10 +497,10 @@ func (e *retryableError) Unwrap() error { return e.err }
 // postOnce performs a single POST attempt. 201 is success; 5xx and transport
 // failures return a retryableError; anything else (4xx, unexpected 2xx/3xx)
 // is terminal and carries the server's error body for diagnosis.
-func (c *Client) postOnce(ctx context.Context, body []byte) error {
+func (c *Client) postOnce(ctx context.Context, body []byte) (eventsReceipt, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return eventsReceipt{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiToken != "" {
@@ -436,21 +508,45 @@ func (c *Client) postOnce(ctx context.Context, body []byte) error {
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return &retryableError{fmt.Errorf("POST %s: %w", c.endpoint, err)}
+		return eventsReceipt{}, &retryableError{fmt.Errorf("POST %s: %w", c.endpoint, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusCreated {
-		// Drain so the transport can reuse the connection.
+		// The additive receipt is absent on older servers. Rejected collisions
+		// are terminal for these rows: warn once, finish successfully, never retry.
+		var receipt eventsReceipt
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxErrorBodyBytes)).Decode(&receipt); err != nil && !errors.Is(err, io.EOF) {
+			slog.Warn("ship: could not read events receipt; rejection count unavailable")
+			receipt = eventsReceipt{}
+		} else if receipt.RejectedCrossDeveloper > 0 {
+			slog.Warn("ship: server rejected cross-developer idempotency collisions; rows skipped",
+				"rejected_cross_developer", receipt.RejectedCrossDeveloper)
+		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return nil
+		return receipt, nil
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	err = fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	// Error envelopes JSON-escape quotes; also accept an old server's plain body.
+	message := string(msg)
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(msg, &envelope) == nil && envelope.Error != "" {
+		message = envelope.Error
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence"} {
+			if strings.Contains(message, `json: unknown field "`+field+`"`) {
+				return eventsReceipt{}, &unknownPRFieldError{err, field}
+			}
+		}
+	}
 	if resp.StatusCode >= 500 {
-		return &retryableError{err}
+		return eventsReceipt{}, &retryableError{err}
 	}
 	// Every 4xx (including 429) is deliberately terminal. The only 429 source
 	// is the server's #36 failed-auth lockout, which fires on a wrong token —
 	// retrying cannot fix it and re-hammering would extend the lockout.
-	return err
+	return eventsReceipt{}, err
 }

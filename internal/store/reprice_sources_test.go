@@ -19,7 +19,8 @@ import (
 // repriceableBySource is the EXPLICIT classification of every token-event source:
 // true = its cost_micro is derived by the server from token counts, so a reprice
 // may legitimately re-derive it; false = its cost is caller-authoritative and
-// re-deriving it would destroy the figure.
+// re-deriving it would destroy the figure. Completed poller rows are also frozen
+// by R-2026-10-05-11, even though their original costs are server-derived.
 //
 // This map is the point of the test. repriceExcludedWhereSQL is an open DENYLIST
 // (`source = 'api'`), which fails DESTRUCTIVE: a future source whose cost is
@@ -34,20 +35,15 @@ import (
 var repriceableBySource = map[string]bool{
 	// Server-derived: every one of these prices raw token counts with the
 	// server's own table (the collectors via ComputeCost/ComputeCostHost, the
-	// org pollers likewise, and POST /api/v1/events re-prices what a shipper
+	// POST /api/v1/events re-prices what a shipper
 	// posts rather than trusting its cost_usd, #233).
 	collector.SourceJSONL:          true,
 	collector.SourceProxy:          true,
 	collector.SourceCodexRollout:   true,
 	collector.SourceOpencode:       true,
 	collector.SourceMuse:           true,
-	collector.SourceAnthropicAdmin: true,
-	collector.SourceOpenAIUsage:    true,
-	// Declared constant with no producer in the tree yet. Classified in advance
-	// precisely so it cannot land on the destructive side by default: whatever
-	// eventually writes it must revisit this line if it imports a
-	// provider-reported dollar figure rather than deriving cost from tokens.
-	collector.SourceCopilotAPI: true,
+	collector.SourceAnthropicAdmin: false,
+	collector.SourceOpenAIUsage:    false,
 	// The one caller-authoritative source: POST /api/v1/costs carries a finance
 	// figure (an invoice number), and its token counts are optional.
 	"api": false,
@@ -62,6 +58,9 @@ var repriceableBySource = map[string]bool{
 //     source is exercised against a real DB and the behaviour is compared to the
 //     map, so the map cannot rot into a comment that merely claims things.
 func TestRepriceClassifiesEverySource(t *testing.T) {
+	// Removing an unused collector declaration does not change how existing
+	// rows bearing its old source value are repriced.
+	assertRepriceable(t, "copilot-api", true)
 	known := append(collector.AllSources(), "api")
 	for _, src := range known {
 		want, classified := repriceableBySource[src]

@@ -99,7 +99,7 @@ Treat this token like a CI deploy key, **not** a per-user credential. Any holder
 of the write token can:
 
 - **Read every developer's spend and scores** — the score and export GETs
-  return organization-wide data to any valid token.
+  return organization-wide data to a valid read or write token.
 - **Forge cost attribution.** `POST /api/v1/costs` accepts an arbitrary
   `developer` field in the request body (code: `internal/api/handler.go`,
   `handlePostCosts`), and the reverse proxy attributes spend from a
@@ -115,10 +115,11 @@ of the write token can:
 There is no per-developer authorization today: TIER cannot restrict a token to
 one developer's own data. Per-viewer read tokens for `developer` mode (the
 developer, their declared manager, and an optional skip-level) are planned
-(#826); until they land, in `developer` mode any valid token reads every
+(#826); until they land, in `developer` mode any read or write token reads every
 developer's data. The server does not check that the developer named in a write
-is the token holder; that stays deferred to a possible
-enterprise tier (#65). **Consequence:** if forged attribution matters to you, do
+is the token holder; per-developer ingest binding is tracked in #1145,
+gated on #826's identity decision (broader write authorization: #65).
+**Consequence:** if forged attribution matters to you, do
 not hand the write token to individual developers. Front `tierd` with your own
 authenticating proxy that sets attribution from an authenticated identity, and
 keep the TIER token server-side.
@@ -140,7 +141,7 @@ non-loopback bind: the bind check is gated on the write token alone (code:
 `cmd/tierd/main.go`, `validateBind`).
 
 **Rotation** is a restart with a new token — there is no session state to
-invalidate. All three tokens support `@/path/to/file` indirection and env-var
+invalidate. All four tokens support `@/path/to/file` indirection and env-var
 sourcing so the secret stays out of `ps` output and shell history (code:
 `cmd/tierd/main.go`, secret `@file` resolution; #37). If an `@file` secret is
 readable by group or other users, `tierd` logs one WARN naming the setting and
@@ -150,6 +151,49 @@ mode, never the path or the contents, and still starts, since container secret m
 the mount's file mode (`mode`/`defaultMode`) instead, only as far as `tierd`'s
 user can still read it. A WARN on a mount `tierd` reads as another user is
 expected (#920).
+
+### Token scopes
+
+| Server flag / environment / config | Credential grants |
+| --- | --- |
+| `--api-token` / `TIER_API_TOKEN` / `http.api_token` | Admin writes, reads, exports, erasure and provider proxies |
+| `--read-token` / `TIER_READ_TOKEN` / `http.read_token` | Read-scoped routes; `/metrics` in developer mode only |
+| `--metrics-token` / `TIER_METRICS_TOKEN` / `http.metrics_token` | `GET /metrics` only |
+| `--ingest-token` / `TIER_INGEST_TOKEN` / `http.ingest_token` | `POST /api/v1/events` only |
+
+All non-empty tokens must differ; startup refuses any equal pair. The shared
+constant-time classification and failed-auth lockout cover all four scopes.
+Auth is enabled by the admin token; the other tokens alone do not permit a
+non-loopback bind or enable auth. Public health/version routes remain open.
+
+### The ingest token (#1144)
+
+Since v0.6.0, configure `serve --ingest-token` for laptop shippers. It uses the
+same precedence as the other secrets: CLI > environment > config, with
+`@/path/to/file` support.
+On the laptop, pass that value using `ship --api-token @/path/to/ingest-token`
+or `TIER_API_TOKEN=@/path/to/ingest-token`; the shipper still sends Bearer on
+`POST /api/v1/events`. The admin token also works, but the ingest token is the
+recommended shipper credential. It is refused on every other gated route and
+on `ProxyAuth`, so it grants no read, outcome, export, erasure or proxy access.
+
+**Limits until per-developer binding (#1145, gated on #826):** an ingest-token
+holder can post events under any developer id, rostered or not: there is no
+roster check, and this can pad a k-anonymity group. A holder can also pre-claim
+an idempotency key a teammate would later use, suppressing that teammate's row.
+The credential has no bound developer identity, and these limits still apply.
+A holder who knows a key can replay it under the same developer with larger
+counts, raising that row's token counts and cost (recomputed at the row's original
+rates, #1231). Replaying a teammate's key this way raises that teammate's cost
+(the TIER denominator); keys are visible to read-token holders via
+`GET /api/v1/events` in developer mode.
+
+A collision with an existing key under a different developer is now rejected:
+the original row stays unchanged, the response reports
+`rejected_cross_developer`, and the server logs a WARN. `ship` prints a warning
+naming the count without failing or retrying the batch. Same-developer replays
+still deduplicate; the global idempotency index is unchanged. Rejecting the
+later collision does not undo a holder's earlier pre-claim.
 
 ### The metrics token (#944)
 
@@ -409,7 +453,8 @@ commitment are in [SECURITY.md](../SECURITY.md).
 For accuracy, these are **not** current capabilities — do not rely on them:
 
 - **Per-viewer read tokens** for `developer` mode (#826), and **per-developer
-  authorization of writes** on the API token (#65). Today one token reads and
-  forges all attribution; see section 2.
+  authorization of writes** (#65), including ingest-token developer binding
+  (#1145, gated on #826). Today the ingest token can claim any developer on
+  `/events`; the admin token can read and forge all attribution. See section 2.
 - **Multi-tenant isolation.** TIER is single-tenant; developer identifiers are
   global (see the scope note at the top).

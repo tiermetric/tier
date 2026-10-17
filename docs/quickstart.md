@@ -24,13 +24,16 @@
 
 ## 1. Install
 
+Building v0.6.0 requires **Go 1.27.2 or newer**. Download a release
+archive below if you do not have a Go toolchain.
+
 ```sh
 go install github.com/tiermetric/tier/cmd/tierd@latest
 ```
 
 `@latest` resolves to the newest tagged release — it does **not** track `main`,
 so you always get a published, reproducible version. Pin an exact tag instead
-(`@v0.5.2`, the release used as the example below) when you need a build that never moves, e.g. in CI.
+(`@v0.6.0`, the release used as the example below) when you need a build that never moves, e.g. in CI.
 
 `go install` puts the binary in `$(go env GOPATH)/bin` — usually `~/go/bin` —
 or in `GOBIN` if you have set it. If the next command says `command not found`,
@@ -45,12 +48,12 @@ Each release carries one archive per platform, named
 each with a `.sha256` checksum beside it. The archive unpacks to a folder of the
 same name holding a single file, `tierd` (`tierd.exe` on Windows); move it
 somewhere on your `PATH`. `<version>` is the newest tag on the Releases page —
-`v0.5.2` at the time of writing, used below as the example:
+`v0.6.0` at the time of writing, used below as the example:
 
 ```sh
-tar -xzf tierd-v0.5.2-darwin-arm64.tar.gz
-sudo mv tierd-v0.5.2-darwin-arm64/tierd /usr/local/bin/
-# optional: gh attestation verify tierd-v0.5.2-darwin-arm64.tar.gz --repo tiermetric/tier
+tar -xzf tierd-v0.6.0-darwin-arm64.tar.gz
+sudo mv tierd-v0.6.0-darwin-arm64/tierd /usr/local/bin/
+# optional: gh attestation verify tierd-v0.6.0-darwin-arm64.tar.gz --repo tiermetric/tier
 ```
 
 **macOS:** if you downloaded the archive with a web browser, macOS marks the
@@ -166,7 +169,13 @@ session files still on your disk.
 - No `--api-token` is needed if the server has no token. `serve` takes its
   token from the `TIER_API_TOKEN` variable when `--api-token` is not passed,
   so if that variable was exported in the step 2 terminal, the server has one:
-  export the same value here before running `ship`.
+  create a distinct credential using the [README “The ingest token” umask recipe](../README.md#the-ingest-token-tier_ingest_token---ingest-token--recommended-for-shippers),
+  restart `serve` with `--ingest-token @$HOME/.tier/ingest-token`
+  (`TIER_INGEST_TOKEN` or `http.ingest_token` also works), and pass that ingest
+  credential to `ship --api-token @$HOME/.tier/ingest-token`
+  (or the laptop's `TIER_API_TOKEN`). Since v0.6.0 (#1144), the ingest token is
+  the recommended shipper credential and opens only `POST /api/v1/events`.
+  The admin token also works.
 - A server with no token is safe only on a single-user machine: anyone who can
   reach `127.0.0.1:8080` can use every route, including erase. If anyone else
   can reach it, such as other users of a shared machine, or anyone coming
@@ -261,13 +270,14 @@ Two things to know:
 on the shipper — it is off by default there too:
 
 > `https://<your-server>` stands for your central server's address, and
-> `@$HOME/.tier/api-token` is the file holding that server's API token — the
-> value you started `serve --api-token` with. Both are explained in the README
+> `@$HOME/.tier/ingest-token` holds the server's recommended shipper credential —
+> the value you configured with `serve --ingest-token`. The admin token also works.
+> Both are explained in the README
 > under [What you need before you start](../README.md#what-you-need-before-you-start).
 
 ```sh
 tierd ship --server https://<your-server> --repo ~/src/your-repo \
-  --codex-rollout --api-token @$HOME/.tier/api-token
+  --codex-rollout --api-token @$HOME/.tier/ingest-token
 ```
 
 Without that flag, a central deployment records the laptop's Codex **outcomes**
@@ -309,7 +319,7 @@ The shipper mirrors it, off by default there too:
 
 ```sh
 tierd ship --server https://<your-server> --repo ~/src/your-repo \
-  --opencode --api-token @$HOME/.tier/api-token
+  --opencode --api-token @$HOME/.tier/ingest-token
 ```
 
 ⚠️ **Do not also route Opencode through TIER's reverse proxy.** Its spend would be
@@ -420,11 +430,11 @@ read token's file also works). With no token, drop the
 `printf … |` line and `-H @-`. `tierd doctor` does not check Muse.
 
 The shipper mirrors it, off by default there too. `https://<your-server>` and
-`@$HOME/.tier/api-token` mean what the note in [§6](#6-capturing-openai-codex-spend) says:
+`@$HOME/.tier/ingest-token` mean what the note in [§6](#6-capturing-openai-codex-spend) says:
 
 ```sh
 tierd ship --server https://<your-server> --repo ~/src/your-repo \
-  --muse --api-token @$HOME/.tier/api-token
+  --muse --api-token @$HOME/.tier/ingest-token
 ```
 
 Its summary prints a `muse (all repos): events_shipped=<n>` line. A run still

@@ -391,3 +391,25 @@ func TestRunShip_DefaultRepoTargetsCWD(t *testing.T) {
 		t.Errorf("costs after default-repo ship = %v, want one row for alice", costs)
 	}
 }
+
+func TestRunShip_CrossDeveloperRejectionSummary(t *testing.T) {
+	t.Setenv("TIER_CODEX_ROLLOUT", "")
+	t.Setenv("TIER_OPENCODE", "")
+	t.Setenv("TIER_MUSE", "")
+	loadDeterministicPrices(t)
+	repo := initGitRepo(t)
+	claudeDir := t.TempDir()
+	writeSessionFixture(t, claudeDir, repo)
+	srv, _ := newShipTestServer(t, "ship-1144")
+	ship := func(developer string) string {
+		return captureStdout(t, func() {
+			runShip([]string{"--server", srv.URL, "--api-token", "ship-1144", "--repo", repo, "--claude-dir", claudeDir, "--since", "2026-01-01", "--developer", developer})
+		})
+	}
+	if out := ship("alice"); !strings.Contains(out, "Shipped 1 events to ") {
+		t.Fatalf("first ship: %s", out)
+	}
+	if out := ship("bob"); !strings.Contains(out, "Shipped 0 events (1 rejected as cross-developer) to ") {
+		t.Fatalf("rejected ship: %s", out)
+	}
+}

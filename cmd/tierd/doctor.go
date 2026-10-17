@@ -33,6 +33,7 @@ import (
 	"github.com/tiermetric/tier/internal/collector/anthropicadmin"
 	"github.com/tiermetric/tier/internal/collector/openaiusage"
 	"github.com/tiermetric/tier/internal/config"
+	"github.com/tiermetric/tier/internal/diagnostics"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -80,12 +81,15 @@ const (
 	statusOK checkStatus = iota
 	statusWarn
 	statusFail
+	statusInfo
 )
 
 func (s checkStatus) label() string {
 	switch s {
 	case statusOK:
 		return "OK"
+	case statusInfo:
+		return "INFO"
 	case statusWarn:
 		return "WARN"
 	default:
@@ -105,6 +109,9 @@ type checkResult struct {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "cost-consistency" {
+		return runCostConsistency(args[1:], stdout, stderr)
+	}
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", ".", "path to the git repository whose Claude Code sessions to check")
@@ -699,7 +706,10 @@ func checkServer(ctx context.Context, client *http.Client, server, token string,
 		}}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if readErr != nil || len(body) > 1<<20 {
+		return []checkResult{{name: "server response", status: statusWarn, detail: "scores response unavailable or exceeds 1 MiB"}}
+	}
 	var sealed404 struct {
 		Aggregation string `json:"aggregation"`
 		Period      string `json:"period"`
@@ -719,6 +729,12 @@ func checkServer(ctx context.Context, client *http.Client, server, token string,
 	}
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
 		out = append(out, checkSealStall(ctx, client, server, token)...)
+	}
+	if resp.StatusCode == http.StatusOK {
+		var stamp scoresResponse
+		if json.Unmarshal(body, &stamp) == nil && stamp.PriceTable.Version != 0 && stamp.Aggregation == "" {
+			out = append(out, readCapturedDollars(ctx, client, server, token)...)
+		}
 	}
 	return out
 }
@@ -741,7 +757,8 @@ func parseServerDate(dateHdr string) (time.Time, bool) {
 // the price-table provenance stamp every response carries (#233), plus the
 // data-quality signals that reveal a broken cost<->outcome join (#496).
 type scoresResponse struct {
-	PriceTable struct {
+	Aggregation string `json:"aggregation"`
+	PriceTable  struct {
 		Version int `json:"version"`
 	} `json:"price_table"`
 	Total struct {
@@ -749,6 +766,8 @@ type scoresResponse struct {
 		TotalCostUSD   float64 `json:"total_cost_usd"`
 	} `json:"total"`
 	DataQuality struct {
+		JoinReadiness             *doctorJoinReadiness         `json:"join_readiness"`
+		CapturedDollarDiagnostics *diagnostics.CapturedDollars `json:"-"`
 		// AttributedOutcomeShare is the fraction of outcomes whose canonical
 		// (developer, repo, issue) has ANY matching spend (#351).
 		//
@@ -1234,6 +1253,7 @@ func evalServerResponse(resp *http.Response, body []byte, localNow time.Time, em
 	// Identity join (#496) — only when this is genuinely a tierd /scores body.
 	if isTierdScores {
 		out = append(out, checkIdentityJoin(stamp)...)
+		out = append(out, checkJoinReadiness(stamp)...)
 		// Runs after the join check by design: the join check explains why some
 		// outcomes have no matching spend, and the horizon is the most common
 		// structural reason for it (#512). Ordering them the other way would

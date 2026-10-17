@@ -199,7 +199,7 @@ func TestOpen_V1ToV2UpgradeIsOneWayAndAnnounced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
 		t.Errorf("v1 open: UpgradeNotice = %q, want every one-way notice %q", n, want)
 	}
 	_ = db.Close()
@@ -240,7 +240,7 @@ func TestOpen_UnstampedLegacyDBIsAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
 		t.Errorf("unstamped legacy open: UpgradeNotice = %q, want every one-way notice %q", n, want)
 	}
 }
@@ -269,7 +269,7 @@ func TestOpen_V2ToV3NoticeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
 		t.Errorf("v2 open: UpgradeNotice = %q, want %q", n, want)
 	}
 	_ = db.Close()
@@ -284,5 +284,36 @@ func TestOpen_V2ToV3NoticeOnce(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	if n := db.UpgradeNotice(); n != "" {
 		t.Errorf("second open: UpgradeNotice = %q, want empty (printed once)", n)
+	}
+}
+
+func TestOpen_PricingLedgerRefusesOlderBinaries(t *testing.T) {
+	for _, version := range []int{7, 8} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "pricing-ledger.db")
+			db, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = db.Close()
+			setUserVersion(t, path, version)
+
+			db, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantNotice := UpgradeNoticePricingObservations + "\n" + UpgradeNoticeCorrectionProjection
+			if version < 8 {
+				wantNotice = UpgradeNoticeCorrections + "\n" + wantNotice
+			}
+			if got := db.UpgradeNotice(); got != wantNotice {
+				t.Errorf("upgrade notice = %q, want %q", got, wantNotice)
+			}
+			_ = db.Close()
+			// The refuse-if-newer guard in either older binary must reject it.
+			if stored := readUserVersion(t, path); stored <= version {
+				t.Fatalf("schema-%d binary would open PII ledger: stored version=%d", version, stored)
+			}
+		})
 	}
 }

@@ -1,6 +1,51 @@
 package issueref
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestCorrectsDeclaration_CloseClauseBarrier(t *testing.T) {
+	for _, c := range []struct {
+		body    string
+		primary string
+		closed  []string
+	}{
+		{"closes\nCorrects: none\n#42\nfixes #7", "issue-7", []string{"issue-7"}},
+		{"closes #42\nCorrects: #99\n#7 x", "issue-42", []string{"issue-42"}},
+	} {
+		t.Run(c.body, func(t *testing.T) {
+			if got := FromPRBody(c.body); got != c.primary {
+				t.Errorf("primary = %q, want %q", got, c.primary)
+			}
+			if got := ClosedIssues(c.body); !reflect.DeepEqual(got, c.closed) {
+				t.Errorf("closed = %v, want %v", got, c.closed)
+			}
+		})
+	}
+}
+
+func TestCorrectsDeclaration_MarkdownAttribution(t *testing.T) {
+	for _, body := range []string{"**Corrects:** #7", "- Corrects: #7", "Corrects #7", "Corrects：#7", "Corrects： #7"} {
+		t.Run(body, func(t *testing.T) {
+			if got := FromPRBody(body); got != "" {
+				t.Errorf("declaration attributed issue %q", got)
+			}
+			if got := ClosedIssues(body); len(got) != 0 {
+				t.Errorf("declaration closed issues %v", got)
+			}
+		})
+	}
+}
+
+func TestFromCommitSubjectPR_StrippedDeclaration(t *testing.T) {
+	if got := FromCommitSubjectPR("Corrects: #7"); got != nil {
+		t.Errorf("declaration yielded PR %d, want nil", *got)
+	}
+	if got := FromCommitSubjectPR("Corrects: #7\nMerge pull request #42"); got == nil || *got != 42 {
+		t.Errorf("subject PR = %v, want 42", got)
+	}
+}
 
 func TestCloseDirectiveTerminators(t *testing.T) {
 	for _, keyword := range []string{"close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"} {

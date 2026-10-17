@@ -1,4 +1,4 @@
-# The canonical TIER rubric (v1)
+# The canonical TIER rubric (v1 and opt-in v2)
 
 This document is the **versioned, normative rubric** for TIER's outcome weights
 and work-type taxonomy. It is the weight-side analogue of the
@@ -6,7 +6,7 @@ and work-type taxonomy. It is the weight-side analogue of the
 **dollars**, this rubric pins the **weighted points**, and a TIER number is only
 comparable across two measurements when **both** stamps match.
 
-- **Rubric version:** `1` (the `scoring.RubricVersion` constant).
+- **Rubric version:** disabled Event 3 policy uses `1` (the legacy `scoring.RubricVersion` constant); enabled, fully resolved stored policy uses `2`.
 - **Where it is stamped:** every `GET /api/v1/scores` response carries a top-level
   `rubric: {version}` block next to `price_table: {version, effective_date}`.
 - **When it must change:** any edit to the weight scale or the work-type taxonomy
@@ -17,13 +17,12 @@ comparable across two measurements when **both** stamps match.
 > **There is no absolute "good" TIER.** This rubric deliberately defines **no**
 > reference cohort and **no** good/ok/poor band. A weighted point is org-local by
 > construction; a bare TIER of 40 is neither good nor bad on its own. What *is*
-> defensible is a **self-relative** comparison — the same org over time, or two
-> parties under a *matched* rubric + price version — expressed through
+> defensible is a **self-relative** comparison — the same org over time, subject to matched measurement definitions — expressed through
 > `cost_per_point`. See [What you may and may not compare](#what-you-may-and-may-not-compare).
 
 ## Why the rubric is versioned (the exploit it closes)
 
-TIER's numerator is `Σ(weight × quality)`. The weight comes from a size label (or
+With Event 3 scoring disabled, TIER's numerator is `Σ(weight × quality)`. Enabled scoring uses the allocated points in [rubric 2](#rubric-2-corrective-work-operator-opt-in). The weight comes from a size label (or
 a heuristic fallback — see [conventions.md](./conventions.md)). If the label→weight
 mapping is merely a "convention", two orgs can apply it with different generosity:
 a generous-labeling org calls the same change `size/l` (5) that a strict org calls
@@ -34,10 +33,10 @@ thing it must not do.
 
 Two distinct mechanisms address this — do not conflate them:
 
-- **Normativity** (this document's worked examples) is what makes a strict org and
-  a generous org score the *same real work* the same way. Both are expected to
-  calibrate against this canonical rubric rather than their house habits. This is
-  the actual cross-org generosity guard.
+- **Normativity** (this document's worked examples) provides common definitions.
+  It does not establish that two organisations calibrate labels equally, and
+  TIER neither validates nor enforces inter-rater equivalence. Two organisations
+  do not compare, even when their version stamps match.
 - **The version stamp** (`rubric.version` on the wire) is *provenance*: it makes a
   change to the rubric **definition** detectable over time, so a self-over-time or
   matched-version comparison can confirm the weighting did not drift. It does
@@ -45,10 +44,7 @@ Two distinct mechanisms address this — do not conflate them:
   same binary stamp the same version however each labels — nor a local
   `size_labels` remap (see the caveat under [Size → weight](#size--weight)).
 
-So: a `rubric.version` **mismatch** makes a comparison non-comparable and visibly
-so; a `rubric.version` **match** is necessary but not sufficient — it must be
-paired with shared normative calibration (and matched `size_labels`) before a
-cross-org `cost_per_point` reading is defensible.
+A `rubric.version` mismatch identifies a definition change. Matching versions do not establish shared calibration or comparable capture and task mix; a cross-organisation `cost_per_point` reading remains unsupported.
 
 ## Size → weight
 
@@ -79,10 +75,9 @@ to a critical path is not a two-line typo fix).
 > *different* weight than this document's calibration (e.g. treating everyday
 > work as `l`/5 rather than `m`/3) is a **divergence the operator owns**: the
 > stamp cannot detect it, so such an org must not read its `cost_per_point`
-> against another party's until the calibrations are reconciled. A
-> config-fingerprint stamp is a possible future refinement; today the honest rule
-> is "matched `rubric.version` is necessary, not sufficient, across orgs with
-> customized labels."
+> against another party's. A config-fingerprint stamp is a possible future
+> refinement; cross-organisation comparison remains unsupported even with
+> matched versions and reconciled labels.
 
 ### Worked examples (per size)
 
@@ -138,7 +133,7 @@ A developer merges, in one window: a `size/m` `feature` ($9 cost), a `size/s`
 | `security` | 5      | $20.00 | $4.00 / point  |
 
 Each `cost_per_point` is meaningful **only against the same segment** in another
-window or (under a matched rubric + price version) another party. A pooled
+window. A pooled
 `cost_per_point` across the three is **not** a supported comparison — the
 `/scores` `work_types` array is the authoritative surface, and the pooled
 top-level rows are a back-compat summary, not a cross-type ranking (`#187`).
@@ -165,8 +160,11 @@ point. It is the **inverse-unit dual** of TIER (numerically `1000 / tier` when
 both are defined) and is the unit TIER should be *benchmarked and trended* on:
 
 - It reads as money a CFO already understands ("$2.40 per weighted point").
-- Paired with the `price_table.version` stamp, it is a **constant-dollar**
-  self-comparison over time.
+- Constant-price self-comparison requires matching resolved price fingerprints,
+  the original pricing basis of stored rows (or an explicit common reprice),
+  rubric, release and population. A loaded `price_table.version` alone does not
+  establish that older rows used the same rates; see
+  [technical reference §2.1](technical-reference.md#21-the-formula).
 - It is guarded on the points denominator: a zero-point row reports `null`
   (rendered `—`), never a divide-by-zero and never a `0` that would read as
   the most efficient row (`#472`). (A `$0`-cost row with points reports a
@@ -174,8 +172,8 @@ both are defined) and is the unit TIER should be *benchmarked and trended* on:
 
 ### Self-relative interval (not an absolute rank)
 
-`/scores` also returns `cost_per_point_ci_low/high`: the 95% percentile-bootstrap
-interval for a ranked developer's `cost_per_point`, derived by reciprocal
+`/scores` also returns `cost_per_point_ci_low/high`: the nominal 95% percentile-bootstrap bounds (coverage unvalidated)
+for a ranked developer's `cost_per_point`, derived by reciprocal
 transform from the same TIER bootstrap (`#133`) — it expresses `cost_per_point`
 against **that developer's own resampled outcome history**, the honest thing a
 single window supports. It is **not** a percentile rank against other developers
@@ -186,11 +184,11 @@ Compare a team with its own past.
 
 | Comparison | Allowed? | Unit | Condition |
 |------------|----------|------|-----------|
-| Same developer/team over time | **Yes** | `cost_per_point` | Same `rubric.version` **and** same `price_table.version`. A `price_table` bump is a constant-dollar break; a `rubric` bump is a weighting break. |
-| Same developer/team, within one `work_type`, over time | **Yes** | `cost_per_point` (per segment) | As above; compare a segment only to the same segment. |
-| Two parties, matched versions | **Cautiously** | `cost_per_point` | Same `rubric.version` **and** `price_table.version`, **and** matched `outcomes.size_labels` (a remap diverges from canonical calibration — the stamp cannot see it), **and** comparable cache-share context (see [pricing-philosophy.md §4](./pricing-philosophy.md)). Different cache-hit rates change cost independent of yield. |
+| Same developer/team over time | **Conditional** | `cost_per_point` | Match resolved price fingerprints, historical row pricing or an explicit common reprice, rubric, release, population and capture. Matching loaded version numbers alone is insufficient. |
+| Same developer/team, within one `work_type`, over time | **Conditional** | `cost_per_point` (per segment) | As above; compare a segment only to the same segment. |
+| Two organisations | **No cross-organisation comparison** | `cost_per_point` | Matching stamps do not establish shared calibration, capture or task mix. Within one organisation, a comparison remains a question to investigate under the technical reference §2.1 conditions. |
 | Two parties, mismatched `rubric.version` or `price_table.version` | **No** | — | Non-comparable by construction. This is the guard, not a limitation. |
-| Raw `tier` across parties | **No** | — | The numerator is org-local; use `cost_per_point` under matched versions instead. |
+| Raw `tier` across parties | **No cross-organisation comparison** | — | Neither `tier` nor `cost_per_point` makes differently calibrated organisations comparable; matched stamps do not establish equivalence. |
 | Cross-type (`feature` vs `security`) | **No** | — | A category error (`#187`). Compare within a `work_type` only. |
 | Against an absolute "good" value | **No** | — | No such value exists. TIER has no reference cohort baked in, by design. |
 
@@ -201,6 +199,85 @@ Compare a team with its own past.
 - [reference-price-table.md](./reference-price-table.md) — the dollar side of the
   pair; its `version` co-stamps every comparison.
 - [pricing-philosophy.md](./pricing-philosophy.md) — cache-share context (§4),
-  required for any cross-party `cost_per_point` reading.
+  required when interpreting `cost_per_point` over time.
 - [api-compatibility.md](./api-compatibility.md) — the `/scores` wire contract for
   `cost_per_point`, its CI, and the `rubric` stamp.
+
+Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage. Inference is not established.
+
+
+## Rubric 2: corrective work (operator opt-in)
+
+The size scale and work-type taxonomy above are unchanged. The default-off
+`outcomes.event3_scoring` switch selects the correction rule and rubric together
+from persisted state. One transaction resolves every outcome's complete chain
+and pins rubric 2; unresolved enabled state refuses scores and new seals.
+Disabling restores legacy scoring and rubric 1. Lifecycle confirmation alone
+never enables scoring.
+
+Rubric 2 retains the quality floors above and adds this step when an enabled
+correction occurs within the inclusive 14-day window after its parent merged:
+
+| Parent's own quality before correction | Corrected quality |
+|---|---|
+| Clean: 1 | 17/20 (0.85) |
+| CI failure: 0.7 | 11/20 (0.55) |
+| Other quality values | Unchanged |
+
+This step applies once to the parent's own quality, including when the parent
+is itself a follow-up. An unconfirmed cross-author declaration does not enable it.
+
+Under rubric 2, an original receives
+`max(0.1 * W_original, q_original_corrected * W_original + sum(credit) - sum(revised_weight))`.
+Here `q_original_corrected` is the original's own quality after the correction step above; it never reads a follow-up's quality.
+A follow-up receives its allocated share multiplied by **its own** quality, never
+its parent's quality. Repairing a repair runs the allocation on the parent's
+share and replaces it. Stored rational inputs use exact `math/big.Rat` values in
+lowest terms. Raw activity (`outcome_n`) remains separate from eligible growth
+(`sample_n`); repair-only activity cannot inflate the ranking evidence floor.
+Same-author declarations are provisional until operator review. Cross-author
+credit requires confirmation; multi-root foreign relations remain pending. An
+own-root multi-root declaration takes the least-favourable own-root result.
+Disputes and withdrawals after confirmation retain credit until operator
+settlement. Team/division diagnostics are `not_shown`.
+
+Rubrics 1 and 2 each verify under their own rule; this change does not move the
+weight scale. Unknown rubric versions remain a changed-definition signal.
+Sealed comparisons reject differing rubric versions, and existing seals retain
+their original bytes and digest. A shared rubric still does not establish
+comparable calibration, capture completeness, or task mix.
+
+See [Enable Event 3 scoring](technical-reference.md#enable-event-3-scoring) for configuration, rollback and startup behavior.
+
+### Reviewed allocation and review limits
+
+Reviewed cumulative scope before and after the correction determines marginal
+growth; an explicit pure repair has zero marginal growth. This differs from the
+follow-up's reviewed own size and its individual allocated share. The original
+is charged first, retaining its floor; the remaining budget goes to follow-ups
+in canonical order, capped at their reviewed own sizes. Their shares then take
+their own quality. For a clean original of weight 5, corrected quality 0.85 and a
+clean pure repair of size 1, the original receives 3.25 points and the fixer
+receives 1: total 4.25, with zero added growth and no repair-only SampleN credit.
+
+Growth is read on the same 0.5–8 scale, so it stops at the top bucket. When
+the chain's cumulative scope before a follow-up already sizes at 8, whether
+reviewed or bucketed from churn, the follow-up adds zero growth however much new
+scope it delivers. For a confirmed or same-author pair, its share is then charged
+against the original; either way it adds no SampleN credit. New scope merged as
+its own PR that declares no parent (`Corrects: none`) is sized and credited on
+its own.
+
+Unconfirmed eligible same-author pairs use recorded churn and file counts as a
+provisional approximation, not reviewed delivered growth. Missing sizing can
+remain pending; unconfirmed foreign roots cannot move another author's points.
+Reviewed per-root shares for multiple originals are planned, not shipped.
+Actor/role are self-asserted local CLI input, not
+authentication; single-operator installations confirm their own pairs. The
+required distinct actor label is advisory and does not prove independent review.
+Disputed status appears in developer/operator views, exports, the corrective
+digest and new seals, while team/division views return `not_shown`. Disputes and
+withdrawals after confirmation retain prior treatment until operator settlement.
+Existing sealed reports never change.
+
+See [Event 3 coverage](technical-reference.md#event-3-coverage) for recorded declarations and limits.

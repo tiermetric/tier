@@ -528,8 +528,15 @@
       gap: 0.5rem; margin-bottom: 0.9rem; padding-bottom: 0.6rem;
       border-bottom: 1px solid var(--border);
     }
-    .panel-title { font-size: 0.98rem; font-weight: 600; text-transform: capitalize; }
+    .panel-title { margin: 0; font-size: 0.98rem; font-weight: 600; text-transform: capitalize; }
     .panel-count { font-size: 0.72rem; color: var(--text-muted); }
+    .segment-reconciliation {
+      margin-top: 0.9rem; padding-top: 0.6rem; border-top: 1px solid var(--border);
+      font-size: 0.76rem; color: var(--text-muted); overflow-wrap: anywhere;
+    }
+    .segment-reconciliation h3 { margin: 0.5rem 0 0; font-size: inherit; }
+    .segment-reconciliation p { margin: 0.5rem 0 0; }
+    .segment-reconciliation ul { margin: 0.5rem 0 0; padding-left: 1.2rem; }
 
     /* --- Horizontal yield bars (#133), listed by identifier, never ranked (#830) --- */
     .ybar-row {
@@ -747,9 +754,8 @@
       border-radius: 4px; overflow: visible;
     }
     /* The connecting segment between the A and B dots (left/width set inline from
-       the two positions). Accent + solid when the move is significant; faint +
-       dashed when it is not (within-CI or below-floor), so a non-significant move
-       never reads as a confident change. */
+       the two positions). Developer comparisons use a neutral segment; team
+       comparisons use a faint dashed segment. Neither asserts validated inference. */
     .cmp-db-connect {
       position: absolute; top: 50%; height: 3px; transform: translateY(-50%);
       background: var(--accent); border-radius: 2px; pointer-events: none;
@@ -759,9 +765,8 @@
       border-top: 2px dashed var(--text-faint);
     }
     /* The two dots. A = before (hollow, neutral reference); B = after (filled).
-       B is green when the move is a SIGNIFICANT improvement (yield up), danger
-       when a significant regression, accent when present-but-not-significant,
-       and muted when below the evidence floor. Positioned inline via left. */
+       B stays neutral when ranked and muted when below the evidence floor.
+       Positioned inline via left; colour never asserts validated inference. */
     .cmp-db-dot {
       position: absolute; top: 50%; width: 12px; height: 12px;
       border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;
@@ -799,9 +804,8 @@
     .cmp-db-delta.up { color: var(--yield); }
     .cmp-db-delta.down { color: var(--danger); }
     .cmp-db-delta.flat { color: var(--text-muted); }
-    /* Significance / status tag: muted, small, never a colour that competes with
-       the yield/danger delta. "not significant", "below evidence floor", "only in
-       <window>", or "aggregate — not tested" (team mode). */
+    /* Status tag: muted and small. "inference not established", "below evidence
+       floor", "only in <window>", or "aggregate — not tested" (team mode). */
     .cmp-db-tag { font-size: 0.66rem; color: var(--text-faint); line-height: 1.1; }
     .cmp-db-ab {
       font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono);
@@ -861,11 +865,12 @@
     }
 
     /* --- Cost-composition panel (#234) -------------------------------- */
-    #cost-comp {
+    #cost-comp, #correction-context {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 10px; padding: 1.1rem 1.15rem 1.25rem;
       box-shadow: 0 1px 2px var(--shadow); margin-bottom: 1.5rem;
     }
+    #correction-context { overflow-wrap: anywhere; }
     .cc-head {
       display: flex; align-items: baseline; justify-content: space-between;
       gap: 0.5rem; margin-bottom: 0.9rem; padding-bottom: 0.6rem;
@@ -921,7 +926,7 @@
        by length. Four columns so it fits a 390px screen without scrolling; each
        figure carries its share of the org total on a second line. The TIER cell
        stays neutral --text: green is yield, and this column is context. */
-    #team-rollups {
+    #team-rollups, #issue-report {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 10px; padding: 1.1rem 1.15rem 1.25rem;
       box-shadow: 0 1px 2px var(--shadow); margin-bottom: 1.5rem;
@@ -1003,6 +1008,7 @@
     <button id="refresh-btn" type="button">Refresh</button>
   </div>
   <p id="seal-note" class="subtitle" style="display:none"></p>
+  <p id="seal-disclosure" class="subtitle" style="display:none"></p>
 
   <!-- Compare baseline row (#278): the "compared to" window (window A / "before").
        The primary controls row above is the selected period (window B / "after");
@@ -1092,6 +1098,7 @@
       <div>
         <h3 id="attr-coverage-title" class="dq-title"></h3>
         <div id="attr-coverage-sub" class="dq-sub"></div>
+        <a id="attr-coverage-help" hidden href="/docs/technical-reference.html#captured-dollar-diagnostics"></a>
       </div>
     </div>
 
@@ -1124,6 +1131,8 @@
     </div>
   </div>
 
+    <div id="aggregate-pricing" role="note" style="display:none; color:var(--trust); margin:1rem 0"></div>
+
   <!-- KPI tiles: the org-level instrument reading. Org TIER is the headline
        yield; AI spend and spend leverage are the CFO framing; capture fidelity
        is the amber trust meter that tells you how much to believe the rest. -->
@@ -1151,10 +1160,9 @@
       <span class="kpi-label">Capture Fidelity</span>
       <span class="kpi-value num" id="kpi-fidelity">&mdash;</span>
       <div class="meter-track"><div class="meter-fill" id="kpi-fidelity-meter" style="width:0%"></div></div>
-      <!-- Static caption (no server data): pins that this meter is recorded-vs-
-           estimated CAPTURE, not the attribution coverage shown in the banner
-           above -- the two must never be read as the same number (#351/#354). -->
-      <span class="kpi-sub" id="kpi-fidelity-sub">recorded vs. estimated spend &mdash; not attribution</span>
+      <!-- Static caption (no server data): describes how captured spend was
+           recorded, not how much spend was captured or attributed (#1228). -->
+      <span class="kpi-sub" id="kpi-fidelity-sub">Request-level share of captured spend &mdash; not capture completeness, not attribution</span>
     </div>
   </div>
 
@@ -1244,6 +1252,8 @@
     </div>
   </div>
 
+  <p class="note">Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. Bounds exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage. Inference not established.</p>
+
   <!-- Per-work-type small multiples (#187): the JS builds one self-contained
        panel per work type here. There is deliberately NO single cross-type
        leaderboard -- comparing a security TIER to a feature TIER is a category
@@ -1254,6 +1264,7 @@
   </p>
   <div id="segments"></div>
   <p id="segments-note" style="display:none">Panels are scoped per work type and each has its own scale &mdash; comparing TIER <em>across</em> types (e.g. security vs. feature) is unsupported by design. <span id="segments-order-note"></span></p>
+  <div id="issue-report" role="region" aria-labelledby="issue-report-title" style="display:none"></div>
 
   <!-- Compare view (#278): the before/after two-window comparison. Built by
        renderCompare via textContent; shown only in compare mode (the single-window
@@ -1285,6 +1296,8 @@
     </div>
     <pre id="detail-json" class="num"></pre>
   </div>
+
+  <section id="correction-context" style="display:none" aria-labelledby="correction-context-title"></section>
 
   <p id="status-msg" class="loading-msg" role="status" aria-live="polite">Loading&hellip;</p>
 

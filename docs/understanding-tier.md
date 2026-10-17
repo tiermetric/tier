@@ -33,11 +33,7 @@ Compare a team with its own history, not with other teams. The kind of work a
 team takes on moves the number, and the number cannot tell the kind of work
 apart from the skill of the people doing it.
 
-**What it is for.** TIER is built to coach the practice, not the person. It
-shows where AI spend turned into finished work and where it did not, so a team
-can change how it works. It is not for pay, promotion or performance reviews.
-That is a rule for the people who use TIER. The software cannot enforce it.
-Points follow the size of the finished work, not how hard it was: someone who
+**What it is for.** TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is **grade the work, not the worker**, by policy, not by mechanism. Points follow the size of the finished work, not how hard it was: someone who
 spends a lot of AI effort on a small fix to a hard problem scores lower than
 someone making routine changes of the same size. A low number describes the
 work, not the developer's ability.
@@ -74,15 +70,13 @@ merges, which comes later. So a period that ended very recently reads too low,
 and a period that starts before TIER began recording spend reads too high.
 Layer 2 explains both.
 
-**A real example.** On TIER's own repository, over the 30 days to 2026-07-21,
-TIER measured **221** outcome points per $1,000 across 152 merged pieces of
-work. In the same period, **72.1%** of the spend could not be linked to a
-specific piece of work. (These are the figures the project's
-[README](../README.md) publishes.) "Could not be linked" is not the same as
-"wasted". The unlinked spend is still counted in the bottom of the fraction.
-What it lacks is a label saying which task it went to.
+**Historical self-measurement; original inputs and run settings are not publicly reproducible.** The maintainer reported **221** points per $1,000 across 152 merged PRs, trailing 30 days to 2026-07-21, and **72.1%** of spend unlinked. It was computed from backfilled history; no quality events were recorded for it, so it is size-weighted only. It illustrates the dashboard, not independent validation. Unlinked spend remains in the denominator.
 
-**Try it.** Install TIER with Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories)
+The maintainer has exercised TIER's CI and revert rules in manual test runs; the project's automated webhook tests exercise the same rules. The inspected historical 221 figure has no recorded quality-event receipt.
+
+Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for the subscription routes used here. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated and TIER scores read high. If Claude's logs undercount more than Codex's, Claude looks relatively cheaper.
+
+**Try it.** Install TIER with Go 1.27.2 or newer
 (`go install github.com/tiermetric/tier/cmd/tierd@latest`), or download a
 release; [quickstart.md §1](quickstart.md#1-install) covers both. Then run
 `tierd demo` and open `http://127.0.0.1:8080` in a browser. The demo fills the
@@ -200,10 +194,7 @@ same five weights.
 The weights are **locked**. You can rename the labels in the config file, but
 TIER refuses any weight not on this scale. The lock keeps your own history
 comparable: a weight change would silently rescale every earlier period. Fixed
-weights are also one precondition for ever comparing two installations, but
-only one. Both would also need the same price-table version, the same version
-of the scoring rules, and the same labelling habits. Until you have all of
-that, compare a team with its own history.
+weights do not establish shared calibration; cross-installation comparison is not supported; compare a team with its own history.
 
 Each pull request's weight is then multiplied by a **quality multiplier**
 between 0.1 and 1.0 when it comes from GitHub (an outcome sent through the
@@ -215,7 +206,7 @@ hours lowers it to 0.7, unless a re-run of the same check soon passes. A revert
 within 60 days lowers it to 0.8 when the revert was a business decision, or to
 0.1 when it was a code problem. TIER tells the two apart from keywords in the
 revert's human-written commit message, and treats a revert as a code problem
-unless the message gives only business reasons. The worst of these wins. Failed checks *before* the merge do not count. A revert
+unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.0 the matcher requires the recorded merge SHA and default branch, but enforces no lower event-time bound; a matching failure timestamped before merge can count. A revert
 can arrive weeks after the merge, so a past period's score can still move. The
 numerator is `Σ(weight × quality)`.
 
@@ -291,7 +282,7 @@ today, read [how-it-works.md](how-it-works.md) alongside it.
 This is the single-developer path. Each step is in
 [quickstart.md](quickstart.md) with its full output.
 
-1. **Install.** Go 1.26.9 or newer (or 1.27.2+; Go 1.27.0–1.27.1 carry the same advisories), or a release download:
+1. **Install.** Go 1.27.2 or newer, or a release download:
    [quickstart.md §1](quickstart.md#1-install).
 2. **Check capture.** In your repository's folder, run `tierd doctor --repo .`.
    It reports what TIER can read on this machine and how much of your spend it

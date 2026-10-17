@@ -291,9 +291,10 @@ func TestWireEventMatchesServerContract(t *testing.T) {
 	// Every key api.eventRequest accepts. Keep sorted; see events.go.
 	want := []string{
 		"attribution_rule", // #823, omitempty
+		"branch_hash",
 		"cache_read_tokens",
-		"cache_write_1h_tokens",
-		"cache_write_5m_tokens",
+		"cache_write_1h_tokens", "cache_write_5m_tokens",
+		"cache_write_evidence",
 		"cost_usd",
 		"developer",
 		"fidelity",
@@ -307,6 +308,7 @@ func TestWireEventMatchesServerContract(t *testing.T) {
 		"issue_id",
 		"model",
 		"output_tokens",
+		"pr_number",
 		"repo",
 		"session_id",
 		"source",

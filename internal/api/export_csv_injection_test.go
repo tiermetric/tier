@@ -61,8 +61,8 @@ func TestExportCSVFormulaInjection(t *testing.T) {
 				{
 					"outcomes", "developer issue_id weight_source merge_commit_sha source work_type work_type_source repo push_day",
 					"id pr_number additions deletions changed_files", "weight quality",
-					func(w http.ResponseWriter) { h.writeOutcomesCSV(w, outcomes, "") },
-					func(w http.ResponseWriter) { h.writeOutcomesJSON(w, outcomes, "") },
+					func(w http.ResponseWriter) { h.writeOutcomesCSV(w, outcomes, "", h.scoringPolicy) },
+					func(w http.ResponseWriter) { h.writeOutcomesJSON(w, outcomes, "", h.scoringPolicy) },
 				},
 				{
 					"quality_events", "developer issue_id event_type source_ref", "id outcome_id", "",

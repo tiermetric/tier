@@ -87,6 +87,7 @@ var serveSecretEnv = map[string]string{
 	"api-token":      "TIER_API_TOKEN",
 	"read-token":     "TIER_READ_TOKEN",
 	"metrics-token":  "TIER_METRICS_TOKEN",
+	"ingest-token":   "TIER_INGEST_TOKEN",
 	"webhook-secret": "TIER_WEBHOOK_SECRET",
 }
 
@@ -96,6 +97,7 @@ var serveSecretConfigKey = map[string]string{
 	"api-token":      "api_token",
 	"read-token":     "read_token",
 	"metrics-token":  "metrics_token",
+	"ingest-token":   "ingest_token",
 	"webhook-secret": "webhook_secret",
 }
 

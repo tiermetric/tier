@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -348,97 +349,62 @@ func TestPipeline_CostToScoreToRevertToLeverage(t *testing.T) {
 	}
 }
 
-// TestPipeline_RevertResolvedByIssueID_RealStore drives the tier-2 revert path —
-// a footerless, issue-named revert — end to end over HTTP into the REAL store: the
-// surviving gap #149 names. The store SQL itself is already covered by
-// internal/store/repo_qualify_test.go, but nothing drove it through the webhook
-// wire; the only tier-2 test (webhook.TestHandlePush_RevertResolvedByIssueIDLookup)
-// runs against the fake store and proves nothing about the real query behind HTTP.
-//
-// Two merged PRs land on issue-42 in the SAME repo (acme/app): alice first, then
-// bob. A revert whose message NAMES the issue ("closes #42") but carries NO
-// "This reverts commit <sha>" footer forces tier 1 (SHA lookup) to miss and tier 2
-// (LatestOutcomeByIssue) to fire. The repo-qualified
-// `ORDER BY (repo = ?) DESC, id DESC` must resolve to bob — the most-recent outcome
-// — so the penalty lands on him and alice is untouched. If it lands on alice the
-// recency semantics broke; if neither degrades the tier-2 wire broke — exactly the
-// regressions the finding predicts.
-//
-// #231: keep ALL THREE payloads on one repository.full_name. The query is
-// repo-scoped, so a mismatched or absent repo on the revert push would exercise the
-// sentinel-tolerance branch instead of the intended exact-repo leg — a different
-// assertion. No revert keyword → EventRevertQuality (the conservative default) →
-// quality floors to 0.1, so the degraded developer lands at 3 × 0.1 = 0.3.
+// TestPipeline_RevertResolvedByIssueID_RealStore pins ambiguity and the exactly-one
+// positive control through HTTP and the real SQLite candidate query.
 func TestPipeline_RevertResolvedByIssueID_RealStore(t *testing.T) {
-	srv := newServer(t)
-	const repo = "acme/app"
-
-	// 1. Both developers spend on issue-42 so both appear in /scores.
-	for _, dev := range []string{"alice", "bob"} {
-		postJSON(t, srv.URL+"/api/v1/costs", map[string]any{
-			"developer": dev, "issue_id": "issue-42", "model": "claude-sonnet-4",
-			"input_tokens": 1000, "output_tokens": 500, "cost_usd": 2.50,
-		}, http.StatusCreated)
-	}
-
-	// 2. Merged PR #1 — alice, feature/42-foo, size/M → weight 3, quality 1.0.
-	postWebhook(t, srv.URL, "pull_request", "delivery-pr-issueid-1", map[string]any{
-		"action": "closed",
-		"pull_request": map[string]any{
-			"number": 7, "merged": true,
-			"merge_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			"head":             map[string]any{"ref": "feature/42-foo"},
-			"user":             map[string]any{"login": "alice"},
-			"labels":           []map[string]any{{"name": "size/M"}},
-		},
-		"repository": map[string]any{"full_name": repo},
-	})
-
-	// 3. Merged PR #2 — bob, feature/42-bar (SAME issue-42), distinct SHA + number.
-	//    bob's outcome is inserted LAST, so it holds the higher id — the tier-2
-	//    recency winner the revert must resolve to.
-	postWebhook(t, srv.URL, "pull_request", "delivery-pr-issueid-2", map[string]any{
-		"action": "closed",
-		"pull_request": map[string]any{
-			"number": 8, "merged": true,
-			"merge_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			"head":             map[string]any{"ref": "feature/42-bar"},
-			"user":             map[string]any{"login": "bob"},
-			"labels":           []map[string]any{{"name": "size/M"}},
-		},
-		"repository": map[string]any{"full_name": repo},
-	})
-
-	// Both start at a clean weight-3, quality-1.0 outcome.
-	sr := getScores(t, srv.URL)
-	if a := devByName(t, sr, "alice"); !approxEq(a.WeightedPoints, 3.0) {
-		t.Fatalf("alice pre-revert points = %.2f, want 3.00", a.WeightedPoints)
-	}
-	if b := devByName(t, sr, "bob"); !approxEq(b.WeightedPoints, 3.0) {
-		t.Fatalf("bob pre-revert points = %.2f, want 3.00", b.WeightedPoints)
-	}
-
-	// 4. Footerless, issue-named revert: no "This reverts commit <sha>" footer, so
-	//    tier 1 misses and tier 2 resolves the target through the real SQL. The
-	//    subject names issue #42 via a close directive so issueref recovers issue-42.
-	postWebhook(t, srv.URL, "push", "delivery-push-issueid-1", map[string]any{
-		"ref": "refs/heads/main",
-		"commits": []map[string]any{{
-			"id":      "cccccccccccccccccccccccccccccccccccccccc",
-			"message": `Revert "feat: add bar (closes #42)"`,
-			"author":  map[string]any{"username": "dave"},
-		}},
-		"repository": map[string]any{"full_name": repo, "default_branch": "main"},
-	})
-
-	// 5. The penalty landed on bob (the most-recent outcome for issue-42), through
-	//    the REAL `ORDER BY (repo = ?) DESC, id DESC` SQL; alice is untouched.
-	sr = getScores(t, srv.URL)
-	if b := devByName(t, sr, "bob"); !approxEq(b.WeightedPoints, 0.3) {
-		t.Fatalf("bob post-revert points = %.2f, want 0.30 (3 × 0.1) — tier-2 wire or recency broke", b.WeightedPoints)
-	}
-	if a := devByName(t, sr, "alice"); !approxEq(a.WeightedPoints, 3.0) {
-		t.Fatalf("alice post-revert points = %.2f, want 3.00 — penalty leaked onto the wrong developer", a.WeightedPoints)
+	for _, count := range []int{1, 2} {
+		t.Run(fmt.Sprintf("candidates=%d", count), func(t *testing.T) {
+			srv, db := newServerWithStore(t)
+			const repo = "acme/app"
+			developers := []string{"alice", "bob"}[:count]
+			for i, dev := range developers {
+				postJSON(t, srv.URL+"/api/v1/costs", map[string]any{
+					"developer": dev, "issue_id": "issue-42", "model": "claude-sonnet-4",
+					"input_tokens": 1000, "output_tokens": 500, "cost_usd": 2.50,
+				}, http.StatusCreated)
+				postWebhook(t, srv.URL, "pull_request", fmt.Sprintf("pr-%d", i), map[string]any{
+					"action": "closed",
+					"pull_request": map[string]any{
+						"number": i + 7, "merged": true, "merge_commit_sha": fmt.Sprintf("%040x", i+1),
+						"head":   map[string]any{"ref": "feature/42-fix"},
+						"user":   map[string]any{"login": dev},
+						"labels": []map[string]any{{"name": "size/M"}},
+					},
+					"repository": map[string]any{"full_name": repo},
+				})
+			}
+			before := getScores(t, srv.URL)
+			for _, dev := range developers {
+				if d := devByName(t, before, dev); !approxEq(d.WeightedPoints, 3) {
+					t.Fatalf("%s pre-revert points=%v", dev, d.WeightedPoints)
+				}
+			}
+			for replay := 0; replay < 2; replay++ {
+				postWebhook(t, srv.URL, "push", fmt.Sprintf("revert-%d", replay), map[string]any{
+					"ref":        "refs/heads/main",
+					"commits":    []map[string]any{{"id": "cccccccccccccccccccccccccccccccccccccccc", "message": `Revert "feat: fix (closes #42)"`, "author": map[string]any{"username": "dave"}}},
+					"repository": map[string]any{"full_name": repo, "default_branch": "main"},
+				})
+			}
+			after := getScores(t, srv.URL)
+			for i, dev := range developers {
+				wantPoints, wantQuality, wantType, wantStatus := 3.0, 1.0, "revert_ambiguous", "unknown"
+				if count == 1 {
+					wantPoints, wantQuality, wantType, wantStatus = 0.3, 0.1, "revert_quality", ""
+				}
+				if d := devByName(t, after, dev); !approxEq(d.WeightedPoints, wantPoints) {
+					t.Fatalf("%s post-revert points=%v, want %v", dev, d.WeightedPoints, wantPoints)
+				}
+				o, found, err := db.OutcomeByMergeCommit(context.Background(), fmt.Sprintf("%040x", i+1))
+				if err != nil || !found || o.Quality != wantQuality || o.QualityStatus != wantStatus {
+					t.Fatalf("stored outcome=%+v found=%v err=%v", o, found, err)
+				}
+				events, err := db.QualityEventsForOutcome(context.Background(), o.ID)
+				if err != nil || len(events) != 1 || events[0].EventType != wantType {
+					t.Fatalf("stored events=%+v err=%v", events, err)
+				}
+			}
+		})
 	}
 }
 

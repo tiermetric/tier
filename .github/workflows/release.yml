@@ -192,9 +192,9 @@ jobs:
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # TIER's Dockerfile declares only ARG VERSION (FROM lines are pinned; no
-          # GO_VERSION/BASE_IMAGE/COMMIT args), so pass only VERSION. It stamps
-          # main.version via -ldflags, matching `tierd version` / /api/v1/livez.
+          # TIER's Dockerfile declares ARG VERSION and ARG COMMIT (FROM lines are
+          # pinned; no GO_VERSION/BASE_IMAGE args). They stamp main.version and
+          # main.commit via -ldflags for `tierd version` / /api/v1/livez.
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
@@ -371,8 +371,15 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
+          release_flags=()
+          # A SemVer suffix after the patch marks a prerelease, never latest.
+          if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            release_flags=(--prerelease --latest=false)
+          fi
           if ! gh release view "${version}" >/dev/null 2>&1; then
-            gh release create "${version}" --title "${version}" --generate-notes
+            gh release create "${version}" --title "${version}" --generate-notes "${release_flags[@]}"
+          elif [[ "${#release_flags[@]}" -gt 0 ]]; then
+            gh release edit "${version}" --prerelease --latest=false
           fi
 
   binaries:
@@ -419,7 +426,8 @@ jobs:
           # in scripts/image-cve-rescan.sh enforces it (via `make check`) -- a
           # comment asking people to remember is what #683 already cost us:
           #   go.mod  ·  tools/docgen/go.mod  ·  Dockerfile  ·  this line
-          # (README.md's badge + prerequisite are user-facing copies, also checked.)
+          # (README.md's badge + prerequisite and docs/{quickstart,understanding-tier,
+          # technical-reference,whitepaper}.md's source prerequisites are also checked.)
           #
           # 1.26.6 closes the eight fixable HIGH stdlib CVEs in FUTURE builds (#694);
           # it does NOT fix the already-published image, which stays vulnerable until
@@ -430,13 +438,17 @@ jobs:
           # encoder race crash), -6613, -6612, -6611, -6610, -6605, -6603 (net/http),
           # -6608 (net/textproto), -6607 (crypto/tls); all fixed in 1.26.9.
           #
-          # ⛔ NEVER loosen this to "1.26". The EXACT three-part version is what makes
-          # the pin authoritative: setup-go resolves "1.26.9" by semver EQUALITY, so
-          # nothing else can match. "1.26" becomes the range >=1.26.0 <1.27.0-0, and
-          # any cached 1.26.x on the runner then satisfies it -- which is precisely
-          # how 1.26.5 comes back. check-latest:false only skips a manifest
+          # Raised 1.26.9 -> 1.27.2 after v0.5.2 (#1140), in lockstep with the
+          # module floors and Docker builder. Go 1.27.0–1.27.1 carry those advisories.
+          #
+          # ⛔ NEVER loosen this to "1.27" (or "1.26"). The EXACT three-part version
+          # makes the pin authoritative: setup-go resolves "1.27.2" by semver
+          # EQUALITY, so nothing else can match. "1.27" becomes the range
+          # >=1.27.0 <1.28.0-0, and any cached 1.27.0/1.27.1 on the runner then
+          # satisfies it -- re-admitting the advisories 1.27.2 fixes (the same way
+          # 1.26.5 came back under #683). check-latest:false only skips a manifest
           # round-trip; it is NOT what holds the pin.
-          go-version: "1.26.9"
+          go-version: "1.27.2"
           check-latest: false
 
       # Same tool as Makefile lint; install for the runner before setting the

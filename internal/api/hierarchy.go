@@ -104,7 +104,7 @@ type endMembershipResponse struct {
 // handlePutHierarchy upserts one developer's org placement (#232). Wrapped by
 // requireAuth in Register (write scope): the read-only viewer token (#190) is
 // rejected 403. Validation mirrors handlePostDeveloperAlias (MaxBytesReader,
-// DisallowUnknownFields, requireJSONEOF single-object rejection, required + 256-char
+// DisallowUnknownFields, requireJSONEOF single-object rejection, required + 256-byte
 // capped fields). The path developer is canonicalized through the alias map
 // before the write so the row keys match the score join (#125). Returns 200 with
 // the stored row, echoing the canonical developer so the caller sees what was
@@ -136,7 +136,7 @@ func (h *Handler) handlePutHierarchy(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, err := h.resolveCanon(r.Context())
 	if err != nil {
-		h.logger.Error("resolve alias map for hierarchy upsert", "err", err)
+		h.logger.Error("resolve alias map for hierarchy upsert", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
 	}
@@ -216,7 +216,7 @@ func (h *Handler) handleBulkHierarchy(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, err := h.resolveCanon(r.Context())
 	if err != nil {
-		h.logger.Error("resolve alias map for hierarchy import", "err", err)
+		h.logger.Error("resolve alias map for hierarchy import", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
 	}
@@ -273,7 +273,7 @@ func (h *Handler) handleBulkHierarchy(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetHierarchy(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.store.ListHierarchy(r.Context())
 	if err != nil {
-		h.logger.Error("list hierarchy", "err", err)
+		h.logger.Error("list hierarchy", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
 	}
@@ -294,7 +294,11 @@ func (h *Handler) handleEndMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(developer) > maxIdentifierLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("developer must be <= %d chars", maxIdentifierLen))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("developer must be <= %d bytes", maxIdentifierLen))
+		return
+	}
+	if err := validateDeveloper(developer); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	body := http.MaxBytesReader(w, r.Body, MaxHierarchyBody)
@@ -314,7 +318,7 @@ func (h *Handler) handleEndMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Org) > maxIdentifierLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("org must be <= %d chars", maxIdentifierLen))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("org must be <= %d bytes", maxIdentifierLen))
 		return
 	}
 	// Validate the period at the trust boundary (YYYY-MM, sane year range,
@@ -326,7 +330,7 @@ func (h *Handler) handleEndMembership(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, err := h.resolveCanon(r.Context())
 	if err != nil {
-		h.logger.Error("resolve alias map for end membership", "err", err)
+		h.logger.Error("resolve alias map for end membership", "err", logSafeErr(err))
 		writeError(w, http.StatusInternalServerError, "store error")
 		return
 	}
@@ -386,7 +390,7 @@ func validateHierarchyRow(developer, team, division, org string) (store.Hierarch
 	}
 	if len(developer) > maxIdentifierLen || len(team) > maxIdentifierLen ||
 		len(division) > maxIdentifierLen || len(org) > maxIdentifierLen {
-		return zero, fmt.Errorf("developer, team, division, and org must each be <= %d chars", maxIdentifierLen)
+		return zero, fmt.Errorf("developer, team, division, and org must each be <= %d bytes", maxIdentifierLen)
 	}
 	// 🔴 #619 RED, and the one the first pass MISSED. This looks like org-structure
 	// admin rather than a spend write, which is exactly why it was overlooked — but

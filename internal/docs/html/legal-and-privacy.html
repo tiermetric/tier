@@ -86,13 +86,7 @@ exposure of per-developer measurement; TIER&#39;s posture under GDPR Article 22
 indicated; the works-council consultation prerequisites; and a
 jurisdiction-by-jurisdiction decision table for choosing a deployment mode.</p>
 <h2 id="tiers-stance-in-writing">TIER&#39;s stance, in writing</h2>
-<p><strong>TIER is for coaching and diagnosis, never for appraisal.</strong> It answers two
-questions: what shipped work are we getting for our AI spend, and how can our
-people use AI better — which model for which job, what context to give it,
-which spend pays off. It does not grade individuals. Team-level roll-ups are a
-main view, and the project&#39;s position is that TIER numbers <strong>must never be an
-input to pay, promotion, performance reviews, performance improvement plans,
-discipline or dismissal</strong> — not as the only input, and not as one of several.</p>
+<p>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER sets weighted merged work beside captured AI usage for coaching conversations; its positioning is <strong>grade the work, not the worker</strong>, by policy rather than by mechanism. Team reporting and access controls reduce disclosure but do not validate individual figures.</p>
 <p>Two independent reasons make this the right posture:</p>
 <ol>
 <li><strong>Legal.</strong> In co-determined jurisdictions (below), using a measurement system
@@ -113,8 +107,7 @@ and their manager read together, seeing the same numbers. Today anyone with
 read or dashboard access sees every developer&#39;s numbers; per-viewer access is
 planned (#826). Either way, a tool that shows named people&#39;s numbers can be
 used to monitor individual performance, whatever you intend, so the rest of
-this document applies to it in full. <strong>TIER cannot enforce the &#34;never for
-appraisal&#34; line.</strong> It shows numbers; it cannot stop someone from copying one
+this document applies to it in full. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER cannot enforce that stance. It shows numbers; it cannot stop someone from copying one
 into a review. Only your written policy, or a works agreement where one
 applies, can.</p>
 <p><strong>What limits exist today, and what is planned.</strong> Today, in <code>developer</code> mode:</p>
@@ -256,8 +249,7 @@ diagnosis. It does not
 automatically discipline, rank-and-yank, deny promotion, or alter compensation.</li>
 <li><strong>Keep a human in the loop and keep TIER out of appraisal.</strong> Article 22&#39;s
 strongest protections attach when an automated output <em>solely</em> drives a
-significant decision about a person. TIER&#39;s stance (above) — that its numbers
-are not an appraisal input — is what keeps a deployment out of that box. If an
+significant decision about a person. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The coaching stance does not itself establish a deployment&#39;s legal classification. If an
 adopter <em>does</em> wire TIER outputs into individual HR decisions, they change the
 legal analysis and likely trigger Article 22 (and the co-determination regimes
 above) in full.</li>
@@ -295,10 +287,8 @@ counsel:</p>
 <ol>
 <li><strong>Engage early.</strong> Bring the works council in at the design/decision stage, not
 after deployment. In Germany the co-determination right precedes introduction.</li>
-<li><strong>Limit the purpose in writing.</strong> State plainly that TIER is used to coach
-how people work with AI and to diagnose spend, name what it measures, and
-commit in writing that it is <strong>never used in personnel decisions</strong>: not for pay, promotion, performance reviews, performance
-improvement plans, discipline or dismissal, and never to rank people.</li>
+<li><strong>Limit the purpose in writing.</strong> TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.
+State the coaching purpose, what is measured, and the methodological limits.</li>
 <li><strong>Describe the data.</strong> Provide the <a href="privacy.html" rel="nofollow">docs/privacy.md</a> field list:
 what is stored, the no-content guarantee, retention bounds, and the
 conditional PII stores (watcher state, raw webhook payloads).</li>
@@ -399,7 +389,7 @@ so run one instance per cohort and follow the works-council / DPIA steps below.<
 <tr>
 <td><strong>US (at-will, non-union)</strong></td>
 <td>Per-developer possible</td>
-<td>Internal policy; transparency; still keep TIER out of appraisal</td>
+<td>Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</td>
 <td>Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties.</td>
 </tr>
 <tr>
@@ -419,8 +409,7 @@ individual name, and sub-k cohorts collapse into &#34;other&#34;. Pair that with
 restriction (a read-only viewer token, #190) and separate instances per cohort.
 Per-developer deployment in a co-determined jurisdiction should not go live until
 both (a) the required works-council instrument is in place and (b) a DPIA has
-been completed — and even then, only for coaching and diagnosis, never as an
-appraisal input.</p>
+been completed. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</p>
 <h2 id="summary">Summary</h2>
 <ul>
 <li>TIER stores <strong>no prompt/completion content, no code, no file contents</strong>,
@@ -444,10 +433,7 @@ reconcile and says so. <code>aggregation</code> is a required
 setting with no silent default; the local <code>tierd score</code> CLI is not gated.</li>
 <li>TIER is <strong>single-tenant with no org isolation</strong> — separate cohorts by running
 separate instances; do not claim built-in data segregation.</li>
-<li>TIER&#39;s position, in writing: <strong>coach the practice, not the person.</strong> TIER
-numbers must never be an input to pay, promotion, performance reviews,
-performance improvement plans, discipline or dismissal. TIER cannot enforce that; your policy or works
-agreement must.</li>
+<li>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER cannot enforce an organisation&#39;s policy.</li>
 <li><strong>None of the above is legal advice.</strong> Consult your counsel, DPO, and works
 council.</li>
 </ul>

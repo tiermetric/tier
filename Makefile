@@ -13,7 +13,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse HEAD 2>/dev/null || echo "")
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: build lint test check check-full clean docker seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest e2e-summary e2e-summary-selftest go-test-timeout-selftest expect-head vet-386
+.PHONY: build lint test check check-full clean docker event3-replay seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest e2e-summary e2e-summary-selftest go-test-timeout-selftest expect-head vet-386
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/tierd
@@ -185,6 +185,9 @@ check-full: check
 	# level, with every skip's specific reason, instead of requiring -v on
 	# the whole suite to notice.
 	$(MAKE) e2e-summary
+	# U5 makes the adjudicated Event 3 replay mandatory (R-2026-10-15-2(a)).
+	# Keep this a bare recursive make so replay failures fail check-full.
+	$(MAKE) event3-replay
 	# seam-exercise runs LAST — after the integration tests. Ordering rationale:
 	# a compile/test failure should surface as itself, not as a seam-exercise
 	# build failure; the exercise is the final "the real current-format Claude
@@ -257,3 +260,9 @@ cve-rescan:
 # trusting a green from the target above.
 cve-rescan-selftest:
 	"$(CURDIR)/scripts/image-cve-rescan.sh" --selftest
+
+# P2 ruling R-2026-10-15-2(a): U5 makes replay a mandatory check-full gate.
+# U1-U4 are merged; all adjudicated cases and assertions must pass without skips.
+# Standalone local-review receipt too; the fast check target stays unchanged.
+event3-replay: expect-head
+	GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) "$(CURDIR)/scripts/event3-replay.sh"

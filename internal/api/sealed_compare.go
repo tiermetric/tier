@@ -50,6 +50,7 @@ type sealedSide struct {
 	rep    store.SealedReport
 	inputs []scoring.LabelInput
 	stored struct {
+		Rubric      rubricJSON       `json:"rubric"`
 		DataQuality *dataQualityJSON `json:"data_quality"`
 		Total       *teamScoreJSON   `json:"total"`
 	}
@@ -86,9 +87,11 @@ func (h *Handler) loadSealedSide(ctx context.Context, p Period) (sealedSide, err
 // stated per window on /compare.
 func (s sealedSide) window() compareWindowMeta {
 	start, end := s.p.Bounds()
-	w := compareWindowMeta{Since: start.Format("2006-01-02"), Until: end.Format("2006-01-02")}
+	d := sealDisclosureOf(s.rep)
+	w := compareWindowMeta{Since: start.Format("2006-01-02"), Until: end.Format("2006-01-02"), SealDisclosure: &d}
 	if dq := s.stored.DataQuality; dq != nil {
 		w.DataQuality = &dataQualityJSON{
+			AggregatePricing:          dq.AggregatePricing,
 			ZeroTokenOutcomeCount:     dq.ZeroTokenOutcomeCount,
 			AttributionCoverage:       dq.AttributionCoverage,
 			ExcludesUnattributedSpend: dq.ExcludesUnattributedSpend,
@@ -188,6 +191,8 @@ func (h *Handler) serveSealedCompare(w http.ResponseWriter, r *http.Request) {
 	sa, sb := sides[0], sides[1]
 	var refusal string
 	switch {
+	case sa.stored.Rubric.Version != sb.stored.Rubric.Version:
+		refusal = "sealed months have differing rubrics and cannot be compared"
 	case sa.rep.ConfigDigest != sb.rep.ConfigDigest:
 		refusal = fmt.Sprintf("%s and %s were sealed under different configs, which split the population "+
 			"differently, so they are never compared (#913); compare two months sealed under one config", a, b)

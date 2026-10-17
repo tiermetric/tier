@@ -61,6 +61,12 @@ const DefaultBootstrapSamples = 1000
 // Complexity: O(b·n) float ops and O(b) space; the caller runs this per ranked
 // developer per request. Each call owns its rng, so distinct calls are race-free.
 func BootstrapCI(contribs, outcomeCostUSD []float64, fixedCostUSD float64, b int, rng *rand.Rand) (lo, hi float64) {
+	return BootstrapCIWithFixedPoints(contribs, outcomeCostUSD, 0, fixedCostUSD, b, rng)
+}
+
+// BootstrapCIWithFixedPoints retains non-observation repair points and costs
+// while resampling only eligible growth observations.
+func BootstrapCIWithFixedPoints(contribs, outcomeCostUSD []float64, fixedPoints, fixedCostUSD float64, b int, rng *rand.Rand) (lo, hi float64) {
 	n := len(contribs)
 	if b <= 0 || n == 0 || n != len(outcomeCostUSD) || rng == nil {
 		return 0, 0
@@ -76,7 +82,8 @@ func BootstrapCI(contribs, outcomeCostUSD []float64, fixedCostUSD float64, b int
 
 	tiers := make([]float64, 0, b)
 	for i := 0; i < b; i++ {
-		var num, cost float64
+		num := fixedPoints
+		var cost float64
 		for j := 0; j < n; j++ {
 			k := rng.IntN(n)
 			num += contribs[k]

@@ -136,7 +136,7 @@ func TestOpen_V5ToV6AddsSourceWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := db.UpgradeNotice(); n != UpgradeNoticeSourceWatermark || !strings.Contains(n, "schema version 6") {
+	if n := db.UpgradeNotice(); n != UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection || !strings.Contains(n, "schema version 6") {
 		t.Errorf("v5 open: UpgradeNotice = %q, want the source-watermark notice alone", n)
 	}
 	ctx := context.Background()
@@ -144,8 +144,8 @@ func TestOpen_V5ToV6AddsSourceWatermark(t *testing.T) {
 		t.Fatalf("register on the upgraded database: %v", err)
 	}
 	_ = db.Close()
-	if v := readUserVersion(t, path); v != 6 {
-		t.Errorf("user_version after the upgrade = %d, want 6 so a version-5 binary refuses it", v)
+	if v := readUserVersion(t, path); v != schemaVersion {
+		t.Errorf("user_version after the upgrade = %d, want the current schema so a version-5 binary refuses it", v)
 	}
 	db, err = Open(path)
 	if err != nil {

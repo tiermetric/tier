@@ -33,7 +33,7 @@ func TestMakePathsWithSpaces(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Makefile"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, script := range []string{"e2e-summary.sh", "image-cve-rescan.sh", "seam-exercise.sh", "vet-386.sh"} {
+	for _, script := range []string{"e2e-summary.sh", "event3-replay.sh", "image-cve-rescan.sh", "seam-exercise.sh", "vet-386.sh"} {
 		stub := "#!/bin/sh\nprintf 'ran %s\\npath <%s>\\n' \"$*\" \"$0\"\n"
 		if err := os.WriteFile(filepath.Join(dir, "scripts", script), []byte(stub), 0o755); err != nil {
 			t.Fatal(err)
@@ -62,7 +62,7 @@ func TestMakePathsWithSpaces(t *testing.T) {
 		}
 	}
 
-	for _, target := range []string{"expect-head", "e2e-summary", "e2e-summary-selftest", "cve-rescan", "cve-rescan-selftest", "lint", "seam-exercise", "check-full"} {
+	for _, target := range []string{"expect-head", "e2e-summary", "e2e-summary-selftest", "event3-replay", "cve-rescan", "cve-rescan-selftest", "lint", "seam-exercise", "check-full"} {
 		t.Run(target, func(t *testing.T) {
 			cmd := exec.Command("make", target)
 			cmd.Dir = dir
@@ -86,7 +86,8 @@ func TestMakePathsWithSpaces(t *testing.T) {
 			}
 			scripts := map[string][]string{
 				"seam-exercise": {"seam-exercise.sh"},
-				"check-full":    {"image-cve-rescan.sh", "e2e-summary.sh", "seam-exercise.sh"},
+				"event3-replay": {"event3-replay.sh"},
+				"check-full":    {"image-cve-rescan.sh", "e2e-summary.sh", "event3-replay.sh", "seam-exercise.sh"},
 			}
 			for _, script := range scripts[target] {
 				if !strings.Contains(out, "path <"+filepath.Join(physicalDir, "scripts", script)+">") &&
@@ -103,6 +104,24 @@ func TestMakePathsWithSpaces(t *testing.T) {
 			}
 		})
 	}
+
+	// A failing replay must stop check-full before the final seam exercise.
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "event3-replay.sh"), []byte("#!/bin/sh\necho EVENT3_REPLAY=TEST_RED\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("check-full-replay-failure", func(t *testing.T) {
+		cmd := exec.Command("make", "check-full")
+		cmd.Dir = dir
+		cmd.Env = append(baseEnv(dir), "MAKEFLAGS=", "MAKELEVEL=", "MFLAGS=", "GO_TEST_TIMEOUT_ALLOW_EMPTY_E2E_FIXTURE=1", "PATH="+filepath.Join(dir, "stub-bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, code := runCmd(t, cmd)
+		// GNU make returns 2 for a failed recipe, including a child's exit 7.
+		if code != 2 || !strings.Contains(out, "EVENT3_REPLAY=TEST_RED") {
+			t.Fatalf("check-full lost replay failure: rc=%d\n%s", code, out)
+		}
+		if strings.Contains(out, "path <./scripts/seam-exercise.sh>") || strings.Contains(out, "path <"+filepath.Join(physicalDir, "scripts", "seam-exercise.sh")+">") {
+			t.Fatalf("check-full continued after replay failure:\n%s", out)
+		}
+	})
 }
 
 // Keep the stub list explicit, but diagnose recipe drift before running make.

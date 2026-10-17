@@ -3,6 +3,7 @@ package openaiusage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,6 +39,7 @@ func (i *retryIngester) Ingest(ctx context.Context, ev collector.TokenEvent) err
 	}
 	return i.db.InsertTokenEvent(ctx, store.TokenEvent{
 		Developer: ev.Developer, IssueID: ev.IssueID, Model: ev.Model,
+		TokenDerived: true, PricingBasis: ev.PricingBasis, CacheWriteEvidence: ev.CacheWriteEvidence,
 		InputTok: ev.InputTok, OutputTok: ev.OutputTok, CacheRead: ev.CacheRead,
 		CacheWrite5m: ev.CacheWrite5m, CacheWrite1h: ev.CacheWrite1h,
 		CostMicro: ev.CostMicro, Source: ev.Source, Fidelity: ev.Fidelity,
@@ -189,7 +191,10 @@ func TestPollerRetryRecoversMixedDayAfterPriceUpdate(t *testing.T) {
 		t.Error("mixed-day retry re-emitted stored priced model")
 	}
 
-	updated := strings.Replace(string(original), "version: 12", "version: 1000012", 1) +
+	// Derive the override version so an embedded-table bump cannot leave this
+	// fixture using the embedded version for different rates.
+	version := store.ActivePriceTableInfo().Version
+	updated := strings.Replace(string(original), fmt.Sprintf("\nversion: %d\n", version), fmt.Sprintf("\nversion: %d\n", version+1_000_000), 1) +
 		"\n  gpt-retry-unpriced: { input_per_m: 7.00, output_per_m: 21.00, provider: openai }\n"
 	if err := os.WriteFile(pricesPath, []byte(updated), 0600); err != nil {
 		t.Fatal(err)

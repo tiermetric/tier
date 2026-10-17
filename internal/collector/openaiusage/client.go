@@ -25,7 +25,8 @@
 //   - The Costs API `amount.value` is denominated in DOLLARS (the currency's
 //     main unit), NOT cents — unlike Anthropic's cents-string. reconcileCost
 //     converts dollars→micro directly.
-//   - OpenAI has no cache-write SKU, so CacheWrite5m/CacheWrite1h are always 0.
+//   - This Usage API decoder captures no separate cache-write count, so
+//     CacheWrite5m/CacheWrite1h stay 0; this is a capture boundary, not a SKU claim.
 //
 // Double-count safety is the load-bearing property (see poller.go): the Usage
 // API reports ALL org OpenAI usage including calls the proxy/JSONL already
@@ -237,8 +238,8 @@ type usageBucket struct {
 // CACHED-TOKEN SEMANTICS (the one OpenAI-specific correctness point, #139 /
 // P0-01 / A1): InputTokens is INCLUSIVE of InputCachedTokens — the cached count
 // is a SUBSET of the input count, not additive. poller.go carves it out so the
-// stored InputTok excludes cache and the classes never overlap. OpenAI has no
-// cache-write SKU, so there is no write-token field to map.
+// stored InputTok excludes cache and the classes never overlap. This decoder
+// maps no separate write-token field; it does not establish billing semantics.
 type usageResult struct {
 	Model             string `json:"model"`
 	InputTokens       int    `json:"input_tokens"`

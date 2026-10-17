@@ -64,7 +64,7 @@ footer.site a { color: var(--muted); }
 <h1 id="tier-quality-multiplier--degradation-rules-specification">TIER Quality Multiplier — Degradation Rules Specification</h1>
 <h2 id="deterministic-state-machine-for-post-merge-quality-assessment">Deterministic State Machine for Post-Merge Quality Assessment</h2>
 <blockquote>
-<p>⚠️ <strong>Implementation status (as of 2026-07-12, <code>main</code>).</strong> This document
+<p>⚠️ <strong>Implementation status (v0.6.0 release, 2026-10-17).</strong> This document
 specifies the <strong>full, target</strong> 8-event quality model. <code>tierd</code> implements a
 <strong>subset</strong> of it today (#134). Quality is <strong>derived, not mutated</strong>: each signal
 is appended to an append-only <code>quality_events</code> log and the outcome&#39;s quality is
@@ -83,9 +83,12 @@ performed: a <strong>quality</strong> revert floors to <strong><code>0.1</code><
 to <strong><code>0.8</code></strong>, within the 60-day window (from the <code>push</code> webhook, on the
 repository&#39;s <strong>default branch only</strong>).</li>
 </ul>
+<p><strong>Event 3 is implemented under its separately adopted corrective-work design,</strong>
+off by default and active when the operator enables scoring. Its declaration
+and reviewed-allocation rules are in the <a href="rubric.html#rubric-2-corrective-work-operator-opt-in" rel="nofollow">rubric</a>;
+the file-overlap detector described below is not shipped.</p>
 <p><strong>NOT yet implemented</strong> (specified below, but no code enforces them):</p>
 <ul>
-<li><strong>Event 3</strong> — follow-up fix (<code>-0.15</code>)</li>
 <li><strong>Event 5</strong> — partial revert (<code>1.0 - 0.9·fraction</code>)</li>
 <li><strong>Event 6</strong> — production-incident correlation</li>
 <li><strong>Event 7</strong> — hotfix-branch detection (<code>0.4</code>)</li>
@@ -95,14 +98,14 @@ cross-PR flaky registry, and the persisted provisional → observing → final
 phase state machine / dashboard provisional indicator (the 48h/60d bounds ARE
 applied as event windows, but the lifecycle state is not materialized).</li>
 </ul>
-<p>Treat Sections 3–12 as the intended design; the bullets above are what the tool
-measures today. (Ref: readiness review finding C2 — publishing this spec
+<p>Treat Sections 3–12, except the implemented Event 3 subsection, as the intended
+design; the bullets above are what the tool measures today. (Ref: readiness review finding C2 — publishing this spec
 as-if-fully-implemented would misrepresent what the tool measures.)</p>
 </blockquote>
 <p><strong>Specification dated:</strong> March 26, 2026 — the date this design was written. See the implementation-status banner above for what the code enforces today.</p>
 <p><strong>Author:</strong> TIER maintainers</p>
-<p><strong>Status:</strong> Complete specification, partially implemented. The design below is settled and not a draft; <code>tierd</code> enforces the subset itemized in the banner above. &#34;Final&#34; here describes the specification, not the shipped behavior.</p>
-<p><strong>Design constraint:</strong> 100% automated. Zero human input. The quality multiplier is a pure function of observable system events.</p>
+<p><strong>Status:</strong> historical design, partially implemented. The implementation-status banner defines supported behavior. Unimplemented rules are not product commitments; corrective-work accounting is governed by its separately adopted design. Event 3 is built and off by default; it affects live scores when the operator enables it on their installation. See <a href="how-it-works.html#event-3-enabled-operation" rel="nofollow">enabled operation</a>.</p>
+<p><strong>Design constraint:</strong> Supported CI and revert rules derive from recorded events. Corrective-work confirmation can require human review.</p>
 <hr>
 <h2 id="1-governing-principles">1. Governing Principles</h2>
 <ol>
@@ -215,6 +218,9 @@ the failing run&#34; always meant.</p>
 <p><strong>Why 0.7 specifically:</strong> The adversarial analysis (P-04) notes the steep cliff between CI failure (0.7) and regression (0.3). The 0.7 value represents a 30% reduction -- significant enough to incentivize pre-merge CI hygiene, but not catastrophic. A CI failure is a &#34;you should have caught this&#34; signal, not a &#34;you broke production&#34; signal. The 30% penalty is calibrated to roughly offset the weight-1 bonus of a trivial task, ensuring that a CI failure on a trivial task effectively zeroes its contribution.</p>
 <hr>
 <h3 id="event-3-follow-up-fix-commit-touches-same-files-within-n-days">Event 3: Follow-Up Fix Commit Touches Same Files Within N Days</h3>
+<p><strong>Historical detector proposal, not shipped.</strong> Enabled Event 3 instead uses captured
+<code>Corrects:</code> declarations and operator review; the <a href="rubric.html#rubric-2-corrective-work-operator-opt-in" rel="nofollow">rubric</a>
+governs its arithmetic and windows.</p>
 <p><strong>Trigger signal:</strong> A new commit on the target branch that:</p>
 <ol>
 <li>Modifies at least one file that was also modified by the original PR, AND</li>
@@ -1168,7 +1174,7 @@ TEST 25: Phase transition timing
 </tr>
 <tr>
 <td>G-04: Follow-up-as-new-issue pattern</td>
-<td>Event 3 detects follow-ups via file overlap even without explicit issue references</td>
+<td>The original design proposed file-overlap detection without explicit issue references; superseded by the adopted declared-and-confirmed design.</td>
 </tr>
 <tr>
 <td>O-02: Quality Multiplier Override Abuse</td>

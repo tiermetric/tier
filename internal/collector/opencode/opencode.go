@@ -22,6 +22,7 @@ import (
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
+	"github.com/tiermetric/tier/internal/tokenacct"
 
 	_ "modernc.org/sqlite" // the same pure-Go driver internal/store uses
 )
@@ -682,7 +683,7 @@ func (c *Collector) readBatch(ctx context.Context, db *sql.DB, cur rowCursor, ta
 		// would return an error for the WHOLE batch — so one bad row would stop
 		// every row after it from ever being ingested, on every pass, forever.
 		// That contradicts the per-row posture the rest of this scan takes (see
-		// checkAdditiveIdentity's note on row independence): a bad row must cost
+		// the package doc's note on row independence): a bad row must cost
 		// exactly itself.
 		var id, sessionID, data sql.NullString
 		var timeUpdated sql.NullInt64
@@ -784,8 +785,6 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 		st.skippedZeroToken++
 		return zero, false
 	}
-	// Tokens but no `total` to check them against. NOT silently trusted: we would
-	// be pricing a shape we cannot verify.
 	// A row its cwd places outside every watched repo was never ours to lose.
 	lose := func() {
 		if collector.MatchScopes(scopes, m.Path.Cwd) >= 0 {
@@ -795,6 +794,8 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 			st.lose(updatedMS, sinceMS)
 		}
 	}
+	// Tokens but no `total` to check them against. NOT silently trusted: we would
+	// be pricing a shape we cannot verify.
 	if !u.TotalPresent {
 		lose()
 		st.skippedUnverifiable++
@@ -802,7 +803,8 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 			"message_id", logsafe.Str(id), "model", logsafe.Str(m.ModelID))
 		return zero, false
 	}
-	if err := checkAdditiveIdentity(u); err != nil {
+	billable, err := tokenacct.Opencode(u.rawUsage())
+	if err != nil {
 		lose()
 		st.skippedIdentity++
 		c.logger.Warn("opencode: a message's token counts do not satisfy the additive identity; skipping it (its spend is NOT captured)",
@@ -840,24 +842,20 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 		return zero, false
 	}
 
-	// 🔴 OutputTok = output + reasoning. The whole point of this collector; see
-	// the package doc for the measurement and for why copying Codex is wrong.
-	outputTok := u.Output + u.Reasoning
-
 	// Host is the providerID VERBATIM, and that is not a shortcut — it is what a
 	// host-qualified price row is keyed on ("<model>@zai-coding-plan"); with none,
 	// the built-in model-only glm-5.3 row prices it per token (#786). Opencode
 	// records no hostname at all, and a hostname could not distinguish the Z.ai
 	// coding plan from the metered API.
 	cost, billingMode := store.ComputeCostHost(m.ProviderID, m.ModelID, store.CostUsage{
-		Input:     int(u.Input),
-		Output:    int(outputTok),
-		CacheRead: int(u.CacheRead),
+		Input:     billable.Input,
+		Output:    billable.Output,
+		CacheRead: billable.CacheRead,
 		// No Opencode row has ever reported a cache write (measured: 0 of 9,267).
 		// Passing it through anyway is correct if one ever appears: it prices at
 		// the row's write multiplier, 1.0x input for both the embedded zai rows and
 		// a self-hosted override row, since Z.ai publishes no cache-write rate.
-		CacheWrite5m: int(u.CacheWrite),
+		CacheWrite5m: billable.CacheWrite,
 	})
 	// NEVER TRUST A ZERO. The client writes `cost: 0` on every row and this
 	// collector does not even decode that field — but the same failure can arrive
@@ -869,12 +867,12 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 		st.zeroCostWithTokens++
 		c.logger.Warn("opencode: a message with real tokens priced to ZERO micro-dollars; it will be stored as free spend. Check that the price table carries a row for this model@provider",
 			"message_id", logsafe.Str(id), "model", logsafe.Str(m.ModelID), "provider", logsafe.Str(m.ProviderID),
-			"input", u.Input, "output", outputTok, "cache_read", u.CacheRead)
+			"input", u.Input, "output", int64(billable.Output), "cache_read", u.CacheRead)
 	}
 
 	t := targets[idx]
 	st.emitted++
-	st.emittedTokens += u.Input + outputTok + u.CacheRead + u.CacheWrite
+	st.emittedTokens += int64(billable.Input) + int64(billable.Output) + int64(billable.CacheRead) + int64(billable.CacheWrite)
 	st.emittedCostMicro += cost
 	return collector.TokenEvent{
 		Developer: developer,
@@ -894,10 +892,10 @@ func (c *Collector) eventFor(id, sessionID, data string, updatedMS int64, target
 		// developer's denominator.
 		IssueID:        (*collector.IssueResolver)(nil).Resolve("", ts),
 		Model:          m.ModelID,
-		InputTok:       int(u.Input),
-		OutputTok:      int(outputTok),
-		CacheRead:      int(u.CacheRead),
-		CacheWrite5m:   int(u.CacheWrite),
+		InputTok:       billable.Input,
+		OutputTok:      billable.Output,
+		CacheRead:      billable.CacheRead,
+		CacheWrite5m:   billable.CacheWrite,
 		CostMicro:      cost,
 		Source:         collector.SourceOpencode,
 		Fidelity:       collector.FidelityRealtime,

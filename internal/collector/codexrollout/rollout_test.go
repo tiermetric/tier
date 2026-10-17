@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/logsafe"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,7 +339,7 @@ func TestEmittedEventShape(t *testing.T) {
 			t.Errorf("event %d CostMicro = %d, want a positive priced cost", i, e.CostMicro)
 		}
 		if e.CacheWrite5m != 0 || e.CacheWrite1h != 0 {
-			t.Errorf("event %d has cache writes (%d/%d) — OpenAI has no cache-write SKU",
+			t.Errorf("event %d has cache writes (%d/%d) — current Codex accounting omits a separate write class",
 				i, e.CacheWrite5m, e.CacheWrite1h)
 		}
 		if e.Host != "" {
@@ -850,9 +852,92 @@ func TestName(t *testing.T) {
 // what an operator would (or must not) see. A TEXT handler is deliberate: unlike
 // JSONHandler it does not escape control bytes on its own, so a log-injection
 // test can see whether OUR sanitizer ran.
-func captureLogger() (*slog.Logger, *bytes.Buffer) {
+// An optional records slice captures structured records without matching prose.
+func captureLogger(records ...*[]slog.Record) (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
-	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+	var handler slog.Handler = slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	if len(records) != 0 {
+		handler = recordCaptureHandler{Handler: handler, records: records[0]}
+	}
+	return slog.New(handler), &buf
+}
+
+type recordCaptureHandler struct {
+	slog.Handler
+	records *[]slog.Record
+}
+
+func (h recordCaptureHandler) Handle(ctx context.Context, record slog.Record) error {
+	*h.records = append(*h.records, record.Clone())
+	return h.Handler.Handle(ctx, record)
+}
+
+func TestCacheWriteWarningAndAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fixture  string
+		warnings int
+	}{
+		{"nonzero writes", "rollout-cache-write-session.jsonl", 1},
+		{"zero writes", "rollout-zero-cache-write-session.jsonl", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := initGitRepo(t, t.TempDir())
+			sessions := t.TempDir()
+			path := stageFixture(t, sessions, tc.fixture, repo, testBranch)
+			var records []slog.Record
+			logger, _ := captureLogger(&records)
+			c := newTestCollector(t, sessions, RepoTarget{Path: repo})
+			c.logger = logger
+			events, err := c.Collect(context.Background(), testSince)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			warnings := 0
+			for _, record := range records {
+				var hasWriteCount bool
+				var recordPath string
+				record.Attrs(func(attr slog.Attr) bool {
+					switch attr.Key {
+					case "cache_write_input_tokens":
+						hasWriteCount = true
+						if attr.Value.Int64() <= 0 {
+							t.Errorf("cache-write diagnostic count = %d, want positive", attr.Value.Int64())
+						}
+					case "path":
+						recordPath = attr.Value.String()
+					}
+					return true
+				})
+				if hasWriteCount {
+					warnings++
+					if record.Level != slog.LevelWarn {
+						t.Errorf("cache-write diagnostic level = %v, want %v", record.Level, slog.LevelWarn)
+					}
+					if recordPath != logsafe.Str(path) {
+						t.Errorf("cache-write diagnostic path = %q, want %q", recordPath, logsafe.Str(path))
+					}
+				}
+			}
+			if warnings != tc.warnings {
+				t.Errorf("cache-write diagnostic records = %d, want %d per file", warnings, tc.warnings)
+			}
+			if len(events) != 2 {
+				t.Fatalf("emitted %d events, want 2", len(events))
+			}
+			for i, event := range events {
+				if event.CacheWrite5m != 0 || event.CacheWrite1h != 0 {
+					t.Errorf("event %d write buckets = (%d, %d), want (0, 0)", i, event.CacheWrite5m, event.CacheWrite1h)
+				}
+				// Fixture deltas: (1000 input, 100 output), then (2000, 300).
+				// gpt-6-sol costs $2/M input and $10/M output in prices.yaml.
+				wantCost := []int64{3000, 7000}[i]
+				if event.CostMicro != wantCost {
+					t.Errorf("event %d CostMicro = %d, want %d from input + output only", i, event.CostMicro, wantCost)
+				}
+			}
+		})
+	}
 }
 
 // newLoggingCollector is newTestCollector with a capturing logger.
@@ -1354,5 +1439,18 @@ func TestScanCursorDoesNotAdvanceOnIngestFailure(t *testing.T) {
 	c.runPass(context.Background(), ok)
 	if len(got) != 2 {
 		t.Errorf("after a failed ingest the next pass produced %d events, want all 2 — the cursor advanced over spend that was never stored", len(got))
+	}
+}
+
+func TestDeltaFromWrapsAccountingError(t *testing.T) {
+	prev := tokenUsage{InputTokens: 1000, CachedInputTokens: 100, TotalTokens: 1000}
+	cur := tokenUsage{InputTokens: 1100, CachedInputTokens: 1000, TotalTokens: 1100}
+	_, err := deltaFrom(prev, cur)
+	if err == nil || !strings.Contains(err.Error(), "cached delta=900 exceeds input delta=100") {
+		t.Fatalf("deltaFrom() error = %v, want cached delta diagnostic", err)
+	}
+	cause := errors.Unwrap(err)
+	if cause == nil || cause.Error() != "containment broken: cached_input_tokens=900 > input_tokens=100" {
+		t.Fatalf("deltaFrom() cause = %v, want tokenacct containment error", cause)
 	}
 }
