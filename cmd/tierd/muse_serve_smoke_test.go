@@ -25,7 +25,7 @@ func TestServeSmoke_MuseWithoutWatchRepoRefusesToStart(t *testing.T) {
 		"serve",
 		"--addr", freeLoopbackPort(t),
 		"--db", filepath.Join(t.TempDir(), "muse-smoke.db"),
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--muse",
 		// deliberately NO --watch-repo
 	}, "\n")

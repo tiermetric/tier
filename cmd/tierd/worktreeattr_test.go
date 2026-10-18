@@ -80,6 +80,35 @@ func TestResolveWorktreeAttribution_Precedence(t *testing.T) {
 	}
 }
 
+func TestWorktreeAttributionHelp_RequiredDisclosures(t *testing.T) {
+	for _, command := range []string{"ship", "serve"} {
+		t.Run(command, func(t *testing.T) {
+			code, out := runSecretEnvChild(t, nil, command, "--help")
+			if code != 0 {
+				t.Fatalf("%s --help exited %d: %s", command, code, out)
+			}
+			_, help, found := strings.Cut(out, "  -"+worktreeAttrFlag)
+			if !found {
+				t.Fatalf("%s help missing --%s: %s", command, worktreeAttrFlag, out)
+			}
+			_, help, _ = strings.Cut(help, "\n")
+			help, _, _ = strings.Cut(help, "\n  -")
+			for _, want := range []string{
+				"v0.5.2 rule (before this change)",
+				"carry 63.3% overall (parent 6.9%, subagent 99.8%)",
+				"86 correct, 13 wrong and 1 undeterminable",
+				"Stored attributions remain permanent.",
+				"No new accuracy figures have been measured.",
+				"Preview the effect with tierd score --worktree-attribution.",
+			} {
+				if !strings.Contains(help, want) {
+					t.Errorf("%s --%s help missing %q: %s", command, worktreeAttrFlag, want, help)
+				}
+			}
+		})
+	}
+}
+
 // wtShipFixture is a repo with a linked worktree on feature/44-wt and one
 // transcript whose session sits in the main checkout on "main" while its one
 // message reads a file in the worktree, two hours from now (past the reflog's
@@ -355,7 +384,8 @@ func TestRunScore_WorktreeAttributionAudit(t *testing.T) {
 		"changed attribution (issue or repo): 1",
 		"only with the flag off (booked to another target): 0",
 		"unattributed:foreign-repo: 0",
-		"    worktree-toolpath                  1",
+		"    carry                              0  $0.000000",
+		"    worktree-toolpath                  1  $0.010500",
 		`session "sess-wt"  "unqualified" unattributed: main/master -> "unqualified" issue-44 (worktree-toolpath)`,
 	} {
 		if !strings.Contains(out, want) {
@@ -374,7 +404,7 @@ func TestPrintWorktreeAudit_CountsAndSampleBound(t *testing.T) {
 	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	ev := func(key, repo, issue string, rule store.AttributionRule, n int) collector.TokenEvent {
 		return collector.TokenEvent{IdempotencyKey: key, Repo: repo, IssueID: issue, AttributionRule: rule,
-			SessionID: "s", Timestamp: at.Add(time.Duration(n) * time.Minute)}
+			SessionID: "s", Timestamp: at.Add(time.Duration(n) * time.Minute), CostMicro: int64(n+1) * 10001}
 	}
 	var off, on []collector.TokenEvent
 	for i := range 25 {
@@ -397,7 +427,7 @@ func TestPrintWorktreeAudit_CountsAndSampleBound(t *testing.T) {
 		"only with the flag off (booked to another target): 1",
 		"only with the flag on: 1",
 		"unattributed:foreign-repo: 1",
-		"    branch                             1\n    carry                              25\n    worktree-toolpath                  1\n",
+		"    branch                             1  $0.310031\n    carry                              25  $3.250325\n    worktree-toolpath                  1  $0.330033\n",
 		"    \"o/r\"                              26\n    \"unqualified\"                      1\n",
 		"changed messages (the first 20 of 25 by time):",
 		"2026-09-01T00:19:00Z",

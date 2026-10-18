@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -88,7 +89,7 @@ var eventsCSVHeader = []string{
 	// attribution_rule APPENDED at the end (#823), same append-only contract,
 	// rendered by exportAttributionRule.
 	"attribution_rule",
-	"pricing_basis", "rate_snapshot", "cache_write_evidence",
+	"pricing_basis", "rate_snapshot", "cache_write_evidence", "issue_rule",
 }
 
 // Export renderings of a stored attribution_rule (#823).
@@ -137,7 +138,7 @@ var outcomesCSVHeader = []string{
 	// Arrives in its own new column so a consumer pinned to the pre-#242 order is unbroken.
 	"push_day",
 	"quality_status",
-	"raw_additions", "raw_deletions", "raw_changed_files", "diff_stats_available", "reviewed_own_weight", "marginal_credit", "credited_weight", "projected_quality", "allocated_points", "ranking_eligibility", "correction_status", "correction_pending_reason", "correction_rule_version", "correction_provisional", "correction_disputed", "correction_frozen",
+	"raw_additions", "raw_deletions", "raw_changed_files", "diff_stats_available", "reviewed_own_weight", "marginal_credit", "credited_weight", "projected_quality", "allocated_points", "ranking_eligibility", "correction_status", "correction_pending_reason", "correction_rule_version", "correction_provisional", "correction_disputed", "correction_frozen", "issue_rule",
 }
 
 // exportParams is the parsed, validated query surface shared by bulk exports.
@@ -296,6 +297,7 @@ type eventExportJSON struct {
 	BillingMode        string `json:"billing_mode"`
 	BilledTo           string `json:"billed_to"`
 	AttributionRule    string `json:"attribution_rule"`
+	IssueRule          string `json:"issue_rule"`
 }
 
 // eventsExportResponse is the JSON page body. NextCursor is the opaque cursor for
@@ -370,6 +372,7 @@ func (h *Handler) writeEventsJSON(w http.ResponseWriter, events []store.TokenEve
 			BillingMode:     e.BillingMode,
 			BilledTo:        e.BilledTo,
 			AttributionRule: exportAttributionRule(e.AttributionRule),
+			IssueRule:       exportIssueRule(e.IssueRule),
 			PricingBasis:    e.PricingBasis, RateSnapshot: e.RateSnapshot, CacheWriteEvidence: e.CacheWriteEvidence,
 		}
 	}
@@ -427,6 +430,7 @@ func (h *Handler) writeEventsCSV(w http.ResponseWriter, events []store.TokenEven
 		rec[21] = csvText(e.PricingBasis)
 		rec[22] = csvText(e.RateSnapshot)
 		rec[23] = csvText(e.CacheWriteEvidence)
+		rec[24] = csvText(exportIssueRule(e.IssueRule))
 		if err := cw.Write(rec); err != nil {
 			h.logger.Error("write events csv row", "err", err)
 			return
@@ -476,6 +480,7 @@ type outcomeExportJSON struct {
 	// "" for a non-push row.
 	PushDay       string `json:"push_day"`
 	QualityStatus string `json:"quality_status,omitempty"`
+	IssueRule     string `json:"issue_rule"`
 }
 
 // outcomesExportResponse is the JSON page body for the outcomes export.
@@ -556,6 +561,7 @@ func (h *Handler) writeOutcomesJSON(w http.ResponseWriter, outcomes []store.Outc
 			WorkTypeSource: o.WorkTypeSource,
 			Repo:           o.Repo,
 			PushDay:        o.PushDay,
+			IssueRule:      exportIssueRule(o.IssueRule),
 		}
 	}
 	w.Header().Set(nextCursorHeader, next)
@@ -569,7 +575,7 @@ func (h *Handler) writeOutcomesCSV(w http.ResponseWriter, outcomes []store.Outco
 	cw := csv.NewWriter(w)
 	header := outcomesCSVHeader
 	if !policy.Event3 {
-		header = header[:18]
+		header = append(append([]string(nil), header[:18]...), "issue_rule")
 	}
 	if err := cw.Write(header); err != nil {
 		h.logger.Error("write outcomes csv header", "err", err)
@@ -612,7 +618,12 @@ func (h *Handler) writeOutcomesCSV(w http.ResponseWriter, outcomes []store.Outco
 				rec[22+i] = csvText(v)
 			}
 		}
-		if err := cw.Write(rec[:len(header)]); err != nil {
+		rec[len(rec)-1] = csvText(exportIssueRule(o.IssueRule))
+		row := rec
+		if !policy.Event3 {
+			row = append(append([]string(nil), rec[:18]...), rec[len(rec)-1])
+		}
+		if err := cw.Write(row); err != nil {
 			h.logger.Error("write outcomes csv row", "err", err)
 			return
 		}
@@ -640,7 +651,7 @@ func (h *Handler) writeOutcomesCSV(w http.ResponseWriter, outcomes []store.Outco
 var qualityEventsCSVHeader = []string{
 	"id", "outcome_id", "developer", "issue_id",
 	"event_type", "source_ref", "event_ts", "recorded_at",
-	"reason", "status", "evidence",
+	"reason", "status", "evidence", "trigger_event",
 }
 
 // qualityHistoryCSVHeader is the STABLE, documented CSV column order for GET
@@ -654,17 +665,18 @@ var qualityHistoryCSVHeader = []string{
 // Field order mirrors qualityEventsCSVHeader. event_ts / recorded_at are RFC3339Nano
 // UTC strings, matching the ts formatting of the events/outcomes exports.
 type qualityEventExportJSON struct {
-	ID         int64  `json:"id"`
-	OutcomeID  int64  `json:"outcome_id"`
-	Developer  string `json:"developer"`
-	IssueID    string `json:"issue_id"`
-	EventType  string `json:"event_type"`
-	SourceRef  string `json:"source_ref"`
-	EventTS    string `json:"event_ts"`
-	RecordedAt string `json:"recorded_at"`
-	Reason     string `json:"reason"`
-	Status     string `json:"status"`
-	Evidence   bool   `json:"evidence"`
+	TriggerEvent *string `json:"trigger_event"`
+	ID           int64   `json:"id"`
+	OutcomeID    int64   `json:"outcome_id"`
+	Developer    string  `json:"developer"`
+	IssueID      string  `json:"issue_id"`
+	EventType    string  `json:"event_type"`
+	SourceRef    string  `json:"source_ref"`
+	EventTS      string  `json:"event_ts"`
+	RecordedAt   string  `json:"recorded_at"`
+	Reason       string  `json:"reason"`
+	Status       string  `json:"status"`
+	Evidence     bool    `json:"evidence"`
 }
 
 // qualityEventsExportResponse is the JSON page body. NextCursor is the opaque cursor
@@ -738,7 +750,7 @@ func (h *Handler) writeQualityEventsJSON(w http.ResponseWriter, events []store.Q
 			Developer: e.Developer,
 			IssueID:   e.IssueID,
 			EventType: e.EventType,
-			Reason:    e.Reason, Status: e.Status(), Evidence: e.IsEvidence(),
+			Reason:    e.Reason, Status: e.Status(), Evidence: e.IsEvidence(), TriggerEvent: e.TriggerEvent,
 			SourceRef:  e.SourceRef,
 			EventTS:    e.EventTS.UTC().Format(time.RFC3339Nano),
 			RecordedAt: e.RecordedAt.UTC().Format(time.RFC3339Nano),
@@ -768,6 +780,10 @@ func (h *Handler) writeQualityEventsCSV(w http.ResponseWriter, events []store.Qu
 		rec[6] = e.EventTS.UTC().Format(time.RFC3339Nano)
 		rec[7] = e.RecordedAt.UTC().Format(time.RFC3339Nano)
 		rec[8], rec[9], rec[10] = csvText(e.Reason), e.Status(), strconv.FormatBool(e.IsEvidence())
+		rec[11] = ""
+		if e.TriggerEvent != nil {
+			rec[11] = csvText(*e.TriggerEvent)
+		}
 		if err := cw.Write(rec); err != nil {
 			h.logger.Error("write quality_events csv row", "err", err)
 			return
@@ -857,5 +873,18 @@ func (h *Handler) writeQualityHistoryCSV(w http.ResponseWriter, history []store.
 	cw.Flush()
 	if err := cw.Error(); err != nil {
 		h.logger.Error("flush quality_history csv", "err", err)
+	}
+}
+
+// exportIssueRule renders absent extractor evidence as legacy and out-of-set
+// stored values as unknown, so exports never echo arbitrary stored text.
+func exportIssueRule(r issueref.Rule) string {
+	switch {
+	case r == "":
+		return "legacy"
+	case slices.Contains(issueref.Rules(), r):
+		return string(r)
+	default:
+		return "unknown"
 	}
 }

@@ -47,6 +47,12 @@ curl -sS -X POST "https://<your-server>/api/v1/outcomes" \
 
 ## Request body
 
+`issue_rule` is server-set provenance from webhook/backfill extraction. This endpoint rejects it as an unknown field; explicit API issue IDs store NULL provenance, exported as `legacy` on `/outcomes`.
+The developer access export preserves JSON `null`. The schema-12
+`issue_rule_cutover` singleton records the UTC migration time and maximum
+outcome/event IDs, so `legacy` alone does not imply a pre-upgrade row
+([cutover details](technical-reference.md#4-where-the-outcomes-come-from-prs-weights-quality-floors-direct-commits-outcomes-api)).
+
 | Field              | Type    | Required | Notes |
 |--------------------|---------|----------|-------|
 | `developer`        | string  | yes      | The developer's name as the **cost** side records it (OS username or `ship --developer`), or one you have alias-mapped to it — otherwise the outcome never joins any spend. ≤ 256 chars. |

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/api"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
@@ -2000,5 +2001,104 @@ func TestVerifyReport_CaptureEngineDiagnosticsReproduce(t *testing.T) {
 	code, out, errb := runVerify(t, f.manifestPath, "--db", f.dbPath)
 	if code != rcReproduced {
 		t.Fatalf("rc=%d, want rcReproduced; stdout=%s stderr=%s", code, out, errb)
+	}
+}
+
+func seedRecoverableVerifyDB(t *testing.T) verifyFixture {
+	t.Helper()
+	f := seedVerifyDB(t)
+	db, err := store.Open(f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	at := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	opened, merged := at.Add(-time.Hour), at.Add(time.Hour)
+	hash := issueref.BranchHash("acme/tier", "feature/attested")
+	if err := db.InsertTokenEvent(t.Context(), store.TokenEvent{Developer: "alice", Repo: "acme/tier", IssueID: store.UnattributedIssueID, BranchHash: hash, CostMicro: 10000000, InputTok: 2000, Source: "jsonl", Fidelity: "realtime", Timestamp: at}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertOutcome(t.Context(), store.Outcome{Developer: "alice", Repo: "acme/tier", IssueID: "issue-attested", PRNumber: 999, HeadBranchHash: hash, CreatedAt: &opened, MergedAt: &merged, Timestamp: merged, Source: "backfill", Weight: 4, Quality: 1}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.EffectiveAttributionsWindow(t.Context(), at.Add(-time.Hour), merged.Add(time.Hour), store.FleetWide)
+	if err != nil || len(events) != 1 || events[0].Layer != store.AttributionRecovery {
+		t.Fatalf("fixture must contain a recoverable event: %+v, %v", events, err)
+	}
+	return f
+}
+
+func TestVerifyReport_LiveRecoverableScoresMatch(t *testing.T) {
+	f := serveFixtureManifest(t, seedRecoverableVerifyDB(t), "since="+verifyWindowSince+"&until="+verifyWindowUntil)
+	if scores := readFixtureManifest(t, f.manifestPath).Results.Scores; !bytes.Contains(scores, []byte(`"read_time_recovery"`)) {
+		t.Fatalf("saved /scores response has no recovery provenance: %s", scores)
+	}
+	code, out, errb := runVerify(t, f.manifestPath, "--db", f.dbPath)
+	if code != rcReproduced || !strings.Contains(out, "REPRODUCED: the recomputed report is identical to the manifest's") {
+		t.Fatalf("live saved /scores must MATCH: exit=%d stdout=%s stderr=%s", code, out, errb)
+	}
+	t.Log("verify-report: results MATCH; exit=0")
+}
+
+func TestDigestAttestedHistoricalFiguresIgnoreRecoveryBranchEdits(t *testing.T) {
+	f := seedRecoverableVerifyDB(t)
+	db, err := store.Open(f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	since, until := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	w := manifestWindow{Since: since, Until: until, SinceQuery: "2026-08-01", UntilQuery: "2026-09-01"}
+	// Legacy anonymized windows predate sealed reads and retain stored attribution.
+	before, err := rerunScores(t.Context(), db, w, "", scoring.AggregationTeam, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsBefore, outcomesBefore, err := db.ReportDigests(t.Context(), since, until, store.FleetWide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveBefore := serveJSON(t, f.dbPath, "/api/v1/scores?since=2026-08-01&until=2026-09-01")
+	manifestBefore := serveJSON(t, f.dbPath, "/api/v1/report_manifest?since=2026-08-01&until=2026-09-01")
+	raw, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`UPDATE token_events SET branch_hash=NULL WHERE branch_hash IS NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+	after, err := rerunScores(t.Context(), db, w, "", scoring.AggregationTeam, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsAfter, outcomesAfter, err := db.ReportDigests(t.Context(), since, until, store.FleetWide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventsBefore != eventsAfter || outcomesBefore != outcomesAfter {
+		t.Fatal("branch edit changed input digests")
+	}
+	liveAfter := serveJSON(t, f.dbPath, "/api/v1/scores?since=2026-08-01&until=2026-09-01")
+	if bytes.Equal(liveBefore, liveAfter) {
+		t.Fatal("control: live recovery did not respond to branch edit")
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("unchanged digests attested changed figures:\nbefore %s\nafter %s", before, after)
+	}
+	manifestAfter := serveJSON(t, f.dbPath, "/api/v1/report_manifest?since=2026-08-01&until=2026-09-01")
+	var a, b map[string]any
+	if err := json.Unmarshal(manifestBefore, &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(manifestAfter, &b); err != nil {
+		t.Fatal(err)
+	}
+	delete(a, "as_of")
+	delete(b, "as_of")
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	if !bytes.Equal(aj, bj) {
+		t.Fatalf("manifest figures changed after branch edit:\n%s\n%s", aj, bj)
 	}
 }

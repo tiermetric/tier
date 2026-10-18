@@ -13,6 +13,7 @@ import (
 func seedExclusionIdentity(t *testing.T, db *DB) (Outcome, PRExclusionIdentity) {
 	t.Helper()
 	o := excludedPR()
+	o.IssueRule = "branch_first_numeric"
 	if _, err := db.RecordPROutcome(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}

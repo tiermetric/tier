@@ -44,14 +44,9 @@ type CorrectionDiagnostics struct {
 	ClaimLimit            string                 `json:"claim_limit"`
 }
 
-// IsCIOrRevertEvidence is deliberately closed over the original five types.
-// Neither corrective_relations nor an unresolved revert check is quality evidence.
-func IsCIOrRevertEvidence(kind string) bool {
-	switch kind {
-	case "ci_pass", "ci_fail", "ci_fail_flaky", "revert_quality", "revert_strategic":
-		return true
-	}
-	return false
+// Only resolved push CI and recognised reverts are quality evidence.
+func IsCIOrRevertEvidence(kind string, trigger *string) bool {
+	return (QualityEvent{EventType: kind, TriggerEvent: trigger}).IsEvidence()
 }
 func (r reader) CorrectionDiagnosticsWindow(ctx context.Context, since, until, now time.Time, scope RepoScope) (CorrectionDiagnostics, error) {
 	d := CorrectionDiagnostics{Status: "shown", DeclarationCoverage: "incomplete", HistoryCoverage: "not_established", CapturedSpendFidelity: "reported_separately", Relations: []CorrectionDiagnostic{}, RepairsPerformed: map[string]int{}, RepairsReceived: map[string]int{}, ClaimLimit: "Declarations cover captured outcomes only. History coverage and captured-spend fidelity are separate; missing declarations or pending relations prevent a complete declaration claim. Allocation figures are per outcome; relation rows repeat them and must not be summed."}
@@ -170,17 +165,18 @@ func (r reader) CorrectionDiagnosticsWindow(ctx context.Context, since, until, n
 
 		d.Relations = append(d.Relations, c)
 	}
-	evidence, err := r.q.QueryContext(ctx, `SELECT DISTINCT q.event_type FROM quality_events q JOIN outcomes o ON o.id=q.outcome_id WHERE `+outcomeWhere+` AND (?='' OR o.repo=?)`, append(args, repo, repo)...)
+	evidence, err := r.q.QueryContext(ctx, `SELECT DISTINCT q.event_type,q.trigger_event FROM quality_events q JOIN outcomes o ON o.id=q.outcome_id WHERE `+outcomeWhere+` AND (?='' OR o.repo=?)`, append(args, repo, repo)...)
 	if err != nil {
 		return d, err
 	}
 	defer func() { _ = evidence.Close() }()
 	for evidence.Next() {
 		var kind string
-		if err = evidence.Scan(&kind); err != nil {
+		var trigger *string
+		if err = evidence.Scan(&kind, &trigger); err != nil {
 			return d, err
 		}
-		d.CIOrRevertEvidence = d.CIOrRevertEvidence || IsCIOrRevertEvidence(kind)
+		d.CIOrRevertEvidence = d.CIOrRevertEvidence || IsCIOrRevertEvidence(kind, trigger)
 	}
 	return d, evidence.Err()
 }

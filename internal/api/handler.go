@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tiermetric/tier/internal/collector"
 	"github.com/tiermetric/tier/internal/health"
 	"github.com/tiermetric/tier/internal/metrics"
 	"github.com/tiermetric/tier/internal/repoid"
@@ -204,6 +205,7 @@ type Store interface {
 	// so they pin the CONCRETE implementation only; a second implementation would
 	// ship unguarded, and this paragraph is the whole of its specification.
 	AllOutcomesWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.Outcome, error)
+	QualityEvidenceWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.QualityEvidenceRead, error)
 	// OutcomeTokenTotals returns per-(developer, issue) token totals over each
 	// outcome's attributable window, keyed by the raw token_events developer, for
 	// the zero-token tripwire (#136). The caller canonicalizes the key (#125)
@@ -340,6 +342,7 @@ type Store interface {
 // WatcherState and registers it into the health Registry (#48), so the
 // Handler holds no per-subsystem health pointer at all — only the Registry.
 type Handler struct {
+	issueRules       collector.SinkRules
 	engineEnablement map[string]string
 	store            Store
 	logger           *slog.Logger
@@ -936,12 +939,13 @@ func (h *Handler) requireRead(next http.HandlerFunc) http.HandlerFunc {
 		// Constant policy also covers CSV/array views and old sealed bytes without
 		// exposing a private window's population or changing its stored body.
 		w.Header().Set("X-TIER-Aggregate-Pricing", store.AggregatePricingPolicyNotice)
-		if h.apiToken == "" {
-			next(w, r)
+		if h.apiToken != "" && !h.authorize(w, r, bearerCandidate(r), readScopes, "invalid token") {
 			return
 		}
-		if !h.authorize(w, r, bearerCandidate(r), readScopes, "invalid token") {
-			return
+		if !h.sealedRead() && r.URL.Path != "/api/v1/report_manifest" {
+			if notice := store.RecoveryDisclosure(r.Context(), time.Now()); notice != "" {
+				w.Header().Set("X-TIER-Attribution", notice)
+			}
 		}
 		next(w, r)
 	}
@@ -2151,6 +2155,8 @@ type rubricJSON struct {
 }
 
 type scoresResponse struct {
+	AttributionLayer      string                       `json:"attribution_layer,omitempty"`
+	QualityEvidence       any                          `json:"quality_evidence,omitempty"`
 	CorrectionDiagnostics any                          `json:"correction_diagnostics,omitempty"`
 	CorrectionPolicy      *scoring.CorrectionRuleStamp `json:"correction_policy,omitempty"`
 
@@ -2387,8 +2393,10 @@ type developerCostReconciliationJSON struct {
 // only the zero-token outcomes; it is a struct (not an inline slice) so future
 // data-quality signals can be added without another top-level key.
 type dataQualityJSON struct {
-	JoinReadiness    *joinReadinessJSON                `json:"join_readiness,omitempty"`
-	AggregatePricing *store.AggregatePricingDisclosure `json:"aggregate_pricing,omitempty"`
+	PartitionDiagnostics any                               `json:"partition_diagnostics,omitempty"`
+	IntervalStatus       string                            `json:"interval_status,omitempty"`
+	JoinReadiness        *joinReadinessJSON                `json:"join_readiness,omitempty"`
+	AggregatePricing     *store.AggregatePricingDisclosure `json:"aggregate_pricing,omitempty"`
 	// ZeroTokenOutcomes lists the flagged (developer, issue) pairs in
 	// per-developer mode. It is omitempty because team-aggregation mode (#185)
 	// suppresses it entirely — the per-developer/issue identities would defeat
@@ -2723,7 +2731,9 @@ func newCostCompositionJSON(c store.CostComposition) *costCompositionJSON {
 }
 
 type developerScoreJSON struct {
-	OutcomeN *int `json:"outcome_n,omitempty"`
+	CINote          string               `json:"ci_note"`
+	QualityEvidence *qualityEvidenceJSON `json:"quality_evidence,omitempty"`
+	OutcomeN        *int                 `json:"outcome_n,omitempty"`
 
 	Developer       string  `json:"developer"`
 	TIER            float64 `json:"tier"`
@@ -2751,7 +2761,7 @@ type developerScoreJSON struct {
 	// SampleN, CILow, CIHigh, and Ranked expose the ranking floor and bootstrap
 	// CI (#133). The contract is the `ranked` flag: the server does NOT pre-sort
 	// the array — both renderers apply the two-tier order themselves. CIs are 0
-	// for unranked rows.
+	// for rows below either the evidence or row attribution floor.
 	SampleN int     `json:"sample_n"`
 	CILow   float64 `json:"ci_low"`
 	CIHigh  float64 `json:"ci_high"`
@@ -3039,7 +3049,7 @@ func projectedCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.J
 
 // developerWindowCI returns the 95% percentile-bootstrap TIER interval for one
 // developer within a window (#133), or (0, 0) for an unranked row where an interval
-// is meaningless. It is the SINGLE derivation of a developer's CI shared by the
+// is meaningless, or below the row attribution floor. It is the SINGLE derivation of a developer's CI shared by the
 // /scores developer branch and the /scores/compare significance test (#277): a fresh
 // PRNG seeded with the fixed bootstrapSeed1/2 makes the interval a pure function of
 // the developer's own outcomes and their per-issue cost (#495) — identical on /scores
@@ -3048,7 +3058,7 @@ func projectedCIInputs(dev string, outcomes []scoring.Outcome, costIndex store.J
 // per-outcome denominator). Bootstrap cost is ~b×n float ops per ranked developer, no
 // caching — revisit if a deployment exceeds ~10k outcomes/dev/window.
 func developerWindowCI(byDev map[string][]scoring.Outcome, costIndex store.JoinIndex, s scoring.DeveloperScore) (lo, hi float64) {
-	if !s.Ranked {
+	if intervalNote(s, byDev[s.Developer], costIndex) != intervalAttributionNote {
 		return 0, 0
 	}
 	contribs, costs, fixedPoints, fixedCost := projectedCIInputs(s.Developer, byDev[s.Developer], costIndex, s.TotalCostUSD)
@@ -3155,6 +3165,7 @@ type windowReader interface {
 	SourceCoverageStart(ctx context.Context, scope store.RepoScope) (map[string]time.Time, error)
 	DistinctPriceVersionsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]int, error)
 	AllOutcomesWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.Outcome, error)
+	QualityEvidenceWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.QualityEvidenceRead, error)
 	OutcomeTokenTotals(ctx context.Context, outcomes []store.Outcome, scope store.RepoScope) (map[store.DevIssue]int64, error)
 	ActualSpendAllWindow(ctx context.Context, since, until time.Time) (map[string]float64, error)
 	ActualSpendByPeriodWindow(ctx context.Context, since, until time.Time) ([]store.PeriodSpend, error)
@@ -3651,6 +3662,8 @@ func (h *Handler) scoresForWindow(ctx context.Context, r windowReader, q scoresQ
 // scoresWindowData owns all inputs needed to assemble a scores response. It
 // retains no reader: live requests can release their snapshot after loading it.
 type scoresWindowData struct {
+	qualityEvidence     store.QualityEvidenceRead
+	evidenceAt          time.Time
 	corrections         any
 	win                 windowScores
 	costComposition     store.CostComposition
@@ -3664,6 +3677,7 @@ type scoresWindowData struct {
 }
 
 func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scoresQuery) (scoresWindowData, error) {
+	evidenceAt := time.Now().UTC()
 	since, until, scope := q.since, q.until, q.scope
 	// Load + canonicalize + join the window into per-developer scores. This is the
 	// shared scores path (#277): loadWindow does exactly the store reads, alias
@@ -3794,6 +3808,11 @@ func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scores
 			return scoresWindowData{}, err
 		}
 	}
+	data.evidenceAt = evidenceAt
+	data.qualityEvidence, err = h.loadQualityEvidence(ctx, r, win)
+	if err != nil {
+		return scoresWindowData{}, err
+	}
 	return data, nil
 }
 
@@ -3875,11 +3894,19 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	census := data.census
 	activePrices := store.ActivePriceTableInfo()
 	resp := scoresResponse{
+		AttributionLayer:      recoveryLayer(win, h.aggregation),
 		CorrectionDiagnostics: data.corrections,
 		Since:                 since.Format("2006-01-02"),
 		PriceTable:            priceTableStamp(activePrices),
 		Rubric:                rubricJSON{Version: rubricVersionFor(data.win.policy)},
 		CorrectionPolicy:      correctionStampFor(data.win.policy),
+	}
+	var developerEvidence map[string]qualityEvidenceJSON
+	if h.aggregation.Anonymized() {
+		resp.QualityEvidence = map[string]string{"status": "not_shown"}
+	} else {
+		resp.QualityEvidence = evidenceForWindow(win, data.qualityEvidence, data.evidenceAt, "")
+		developerEvidence = evidenceByDeveloper(win, data.qualityEvidence, data.evidenceAt)
 	}
 	if h.aggregation.Anonymized() {
 		// Anonymized mode — team (#185) or division (#270): NEVER emit an individual
@@ -3920,9 +3947,12 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	} else {
 		for _, s := range win.devScores {
 			// CI via the shared derivation so /scores and /scores/compare never
-			// diverge on a developer's interval (#277); (0,0) for an unranked row.
+			// diverge on a developer's interval (#277); withheld bounds are (0,0).
 			ciLow, ciHigh := developerWindowCI(win.byDev, win.issueCostIndex, s)
 			row := newDeveloperScoreJSON(s, ciLow, ciHigh, data.win.policy.Event3)
+			row.CINote = intervalNote(s, win.byDev[s.Developer], win.issueCostIndex)
+			evidence := developerEvidence[s.Developer]
+			row.QualityEvidence = &evidence
 			// Per-developer exploratory-overhead share (#refocus, Option B): main-branch
 			// no-issue micros / this developer's total window micros. Keyed on the same
 			// canonical identity as the score row and the folded maps.
@@ -3972,6 +4002,13 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 			resp.DataQuality = &dataQualityJSON{}
 		}
 		return resp.DataQuality
+	}
+
+	if h.aggregation.Anonymized() {
+		attachDataQuality().PartitionDiagnostics = "not_shown"
+		attachDataQuality().IntervalStatus = "not_shown"
+	} else if len(win.outcomes) > 0 || win.hasSpend() {
+		attachDataQuality().PartitionDiagnostics = partitionDiagnostics(win)
 	}
 
 	if !h.aggregation.Anonymized() && (len(win.issueCosts) > 0 || len(win.outcomes) > 0) {
@@ -4314,16 +4351,10 @@ func (h *Handler) buildWorkTypeSegments(
 
 		seg := workTypeSegmentJSON{WorkType: wt}
 		for _, s := range devScores {
-			var ciLow, ciHigh float64
-			if s.Ranked {
-				// Segment-scoped joint CI (#495): the segment's own per-issue cost
-				// index (totalIndex) and TotalCostUSD, so the fixed remainder is this
-				// work-type's non-outcome cost.
-				contribs, costs, fixedPoints, fixedCost := projectedCIInputs(s.Developer, devMap[s.Developer], totalIndex, s.TotalCostUSD)
-				rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
-				ciLow, ciHigh = scoring.BootstrapCIWithFixedPoints(contribs, costs, fixedPoints, fixedCost, scoring.DefaultBootstrapSamples, rng)
-			}
-			seg.Developers = append(seg.Developers, newDeveloperScoreJSON(s, ciLow, ciHigh, policy.Event3))
+			ciLow, ciHigh := developerWindowCI(devMap, totalIndex, s)
+			row := newDeveloperScoreJSON(s, ciLow, ciHigh, policy.Event3)
+			row.CINote = intervalNote(s, devMap[s.Developer], totalIndex)
+			seg.Developers = append(seg.Developers, row)
 		}
 		if len(devScores) > 0 {
 			total := newTeamScoreJSON(scoring.RollupTeam("", devScores))
@@ -4657,6 +4688,7 @@ func buildSegmentReconciliation(
 // --- GET /api/v1/scores/{developer} ---
 
 type developerDetailResponse struct {
+	CINote           string                       `json:"ci_note"`
 	CorrectionPolicy *scoring.CorrectionRuleStamp `json:"correction_policy,omitempty"`
 	OutcomeN         *int                         `json:"outcome_n,omitempty"`
 
@@ -4715,7 +4747,8 @@ type developerDetailResponse struct {
 }
 
 type issueDetailJSON struct {
-	Projection *store.OutcomeProjection `json:"projection,omitempty"`
+	AttributionLayer string                   `json:"attribution_layer,omitempty"`
+	Projection       *store.OutcomeProjection `json:"projection,omitempty"`
 
 	IssueID  string  `json:"issue_id"`
 	Weight   float64 `json:"weight"`
@@ -4917,10 +4950,13 @@ func (h *Handler) developerScoreWindow(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	canonDetailCost := map[store.DevIssue]int64{}
+	recoveredDetailEvents := map[store.DevIssue]int64{}
 	for _, ic := range detailIssueCosts {
+		recoveredDetailEvents[store.DevIssue{Developer: canon(ic.Developer), Repo: ic.Repo, IssueID: ic.IssueID}] += ic.ReadTimeRecoveryEvents
 		canonDetailCost[store.DevIssue{Developer: canon(ic.Developer), Repo: ic.Repo, IssueID: ic.IssueID}] += ic.TotalCostMicro
 	}
 	detailCostIndex := store.BuildJoinIndex(canonDetailCost)
+	recoveredDetailIndex := store.BuildJoinIndex(recoveredDetailEvents)
 
 	var sOutcomes []scoring.Outcome
 	var issues []issueDetailJSON
@@ -4932,26 +4968,26 @@ func (h *Handler) developerScoreWindow(w http.ResponseWriter, r *http.Request, s
 			return
 		}
 		sOutcomes = append(sOutcomes, so)
+		layer := ""
+		if recoveredDetailIndex.Sum(target, o.Repo, o.IssueID) > 0 {
+			layer = string(store.AttributionRecovery)
+		}
 		issues = append(issues, issueDetailJSON{
-			Projection: detailProjectionFor(policy, o),
-			IssueID:    o.IssueID,
-			Weight:     o.Weight,
-			Quality:    o.Quality,
-			PRNumber:   o.PRNumber,
-			ZeroToken:  zeroToken,
+			AttributionLayer: layer,
+			Projection:       detailProjectionFor(policy, o),
+			IssueID:          o.IssueID,
+			Weight:           o.Weight,
+			Quality:          o.Quality,
+			PRNumber:         o.PRNumber,
+			ZeroToken:        zeroToken,
 		})
 	}
 
 	s := scoring.ComputeDeveloper(target, sOutcomes,
 		store.MicroToDollars(totalMicro), store.MicroToDollars(realtimeMicro), actualPaid)
-	// Bootstrap CI for a ranked developer only (#133); unranked → 0,0. Fixed seed
-	// keeps repeated fetches reproducible (see bootstrapSeed1/2).
-	var ciLow, ciHigh float64
-	if s.Ranked {
-		ciContribs, ciCosts, ciPoints, ciFixed := projectedCIInputs(target, sOutcomes, detailCostIndex, s.TotalCostUSD)
-		rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
-		ciLow, ciHigh = scoring.BootstrapCIWithFixedPoints(ciContribs, ciCosts, ciPoints, ciFixed, scoring.DefaultBootstrapSamples, rng)
-	}
+	// Bootstrap CI is (0,0) whenever intervalNote withholds the interval.
+	// The fixed bootstrapSeed1/2 keep repeated fetches reproducible.
+	ciLow, ciHigh := developerWindowCI(map[string][]scoring.Outcome{target: sOutcomes}, detailCostIndex, s)
 	cppLow, cppHigh := scoring.CostPerPointCI(ciLow, ciHigh)
 	disc, err := h.buildScopeDisclosure(r.Context(), reader, since, until, scope)
 	if err != nil {
@@ -4960,6 +4996,7 @@ func (h *Handler) developerScoreWindow(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	writeJSON(w, http.StatusOK, developerDetailResponse{
+		CINote:             intervalNote(s, sOutcomes, detailCostIndex),
 		CorrectionPolicy:   correctionStampFor(policy),
 		Developer:          s.Developer,
 		TIER:               s.TIER,

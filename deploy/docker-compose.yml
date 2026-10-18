@@ -18,8 +18,9 @@ services:
     # container will exit 1 and restart-loop until you set the token — that is
     # the intended safe failure, not a bug.
     # --aggregation is REQUIRED and has no default; it is set explicitly here so
-    # the container never fails to start on a missing reporting mode. Change to
-    # `developer` only where per-individual measurement is lawful and consented.
+    # the container never fails to start on a missing reporting mode. Choose
+    # team or division; developer is reserved for the synthetic `tierd demo`
+    # until #826; real-data startup is refused.
     command: ["serve", "--addr", "0.0.0.0:8080", "--db", "/data/tier.db", "--aggregation", "team"]
 
     # Secrets come from the interpolation env file (--env-file above), never a

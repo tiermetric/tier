@@ -48,7 +48,10 @@ named in the struct is dropped by the JSON decoder before it exists in memory:
   call's input, whatever the tool, and keeps one path per call for seven tools;
   the rest of the input and every command line are skipped unread (code:
   `internal/collector/toolpath.go`; detail in
-  [privacy.md](privacy.md#worktree-attribution-off-by-default)).
+  [privacy.md](privacy.md#worktree-attribution-off-by-default)). Parents never use
+  carry; only `isSidechain:true` groups can carry (#1016). The feature stays off
+  by default; activation requires recorded gates, operator security rulings and
+  an explicit operator decision. No new accuracy figures have been measured.
 - Reverse proxies: the response parsers extract only `id`, `model`, and `usage`
   from provider response bodies (code: `internal/proxy/proxy.go`).
 - Seam-capture fixtures enforce the same allowlist for any captured test data
@@ -112,11 +115,15 @@ of the write token can:
   any developer's TIER score — not just the cost denominator. This is the same
   capability the webhook HMAC protects against for the GitHub path (see below).
 
+**Who this release is for (from v0.6.1).** This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every ingest/admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt. Solo users can run `tierd score` for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.
+
+The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.
+
 There is no per-developer authorization today: TIER cannot restrict a token to
 one developer's own data. Per-viewer read tokens for `developer` mode (the
 developer, their declared manager, and an optional skip-level) are planned
-(#826); until they land, in `developer` mode any read or write token reads every
-developer's data. The server does not check that the developer named in a write
+(#826); from v0.6.1 until they land, non-synthetic developer-mode startup is refused.
+The synthetic demo still shows every invented developer row. The server does not check that the developer named in a write
 is the token holder; per-developer ingest binding is tracked in #1145,
 gated on #826's identity decision (broader write authorization: #65).
 **Consequence:** if forged attribution matters to you, do

@@ -172,18 +172,19 @@ func TestCorrectionSeal_OlderWriterCannotBypassProtection(t *testing.T) {
 		t.Fatal("old writer sealed enabled policy without provenance")
 	}
 	var version int
-	if err := db.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
+	if err := db.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatal(version, err)
 	}
 }
 func TestCorrectionEvidence_ClosedCIOrRevertPredicate(t *testing.T) {
+	push := "push"
 	for _, kind := range []string{"ci_pass", "ci_fail", "ci_fail_flaky", "revert_quality", "revert_strategic"} {
-		if !IsCIOrRevertEvidence(kind) {
+		if !IsCIOrRevertEvidence(kind, &push) {
 			t.Fatal(kind)
 		}
 	}
 	for _, kind := range []string{"corrective_relations", "declared", "confirmed", "event3-v2", "revert_ambiguous", ""} {
-		if IsCIOrRevertEvidence(kind) {
+		if IsCIOrRevertEvidence(kind, &push) {
 			t.Fatal(kind)
 		}
 	}

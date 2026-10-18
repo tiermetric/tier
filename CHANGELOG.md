@@ -7,6 +7,92 @@ reaches v1.
 
 ## Unreleased
 
+## 0.6.1 - 2026-10-18
+
+**ONE-WAY UPGRADE — upgrading from v0.6.0.** Before upgrading, run
+`mkdir -p ~/.tier/backups` and
+`tierd backup --db ~/.tier/tier.db --out ~/.tier/backups/tier-$(date +%F).db`
+(use the --db path you gave serve if it differs)
+with **either binary** (see [README backups](README.md#operations)). Backup
+runs no migrations with either binary. Check that the reported backup size is
+not ~4096 bytes. On first writable open by v0.6.1, the database moves from
+schema version 10 through 11 (quality triggers, #1230) to 12 (issue extraction
+provenance), even with Event 3 scoring off. v0.6.0 and older binaries refuse the
+upgraded database. These schema upgrades cannot be rolled back in place: to
+roll back, stop `tierd`, move `tier.db`, `tier.db-wal` and `tier.db-shm` aside,
+then copy the backup taken before upgrading to `tier.db` (use the `--db` path's
+name for the database and its `-wal`/`-shm` files). That backup does not contain
+data recorded after the upgrade; re-running the shipper recovers only what
+local session files still hold. The schema 11 to 12 issue extraction provenance
+change adds nullable `issue_rule` columns to outcomes and token events,
+preserving the field in existing outcome exclusion snapshots. Existing rows
+stay NULL.
+
+We run TIER on TIER's own development every day, and we use what it shows us to decide how we work with AI tools and where the money goes.
+
+### Added
+
+- Recover live historical unattributed spend from unique recorded merged-PR
+  branch/PR evidence at read time, with bounded windows, stored-fill precedence,
+  recovery provenance and an “as of / may be revised” disclosure. Add read-only
+  `tierd attribution recovery-receipt` with disjoint count/micro-dollar accounting
+  and eleven overlapping reason tags, including `claimant_without_issue`. Stored
+  assignments, sealed reports and raw exports remain unchanged (#489).
+
+- Developer/operator scores show a size-weighted quality-evidence share,
+  trigger-recording cutover and observation-window counts; completeness remains
+  unknown (#1230).
+
+### Changed (breaking)
+
+- **BREAKING — strict issue-reference grammar.** Branch attribution uses only the first slot, with date/year guards and release, bot and revert exclusions. PR bodies require a close directive, a structured configured tracker key, or an explicit relation reference; bare `#N` and unconfigured tracker-shaped tokens no longer count. Commit subjects retain close directives and configured keys. Configure comma-separated prefixes with `--tracker-keys`, `TIER_TRACKER_KEYS`, or `attribution.tracker_keys` (CLI > env > config > empty); OP is built in. Invalid entries stop startup. Serve and doctor report configured keys and suggest stored unconfigured prefixes. Existing outcome and token-event attribution is unchanged; new `issue_rule` values record the strict extraction paths.
+
+- Merge-queue `merge_group` runs are dropped because their queue ref is not the
+  default branch (#1230).
+
+- `tierd serve` refuses non-synthetic `--aggregation developer` with exit 1,
+  including loopback and read-only operation, until #826.
+- `tierd demo --db` is refused; demo always creates a private synthetic database.
+- `tierd score` prints the issue-attributed share of Claude Code spend (no outcome
+  join), with the caveat that it covers Claude Code spend only and cannot evaluate
+  server ranking's outcome requirements.
+
+- **#1233 — partition diagnostics and interval floor.** Developer score reads
+  disclose issue multiplicity, weight buckets, weight-8 PR shares by count and
+  points, and points per PR beside points per $1,000. Team/division diagnostics
+  are `not_shown`; no automatic penalty is added. Intervals below each row's
+  own 50% attributed-cost share use the existing numeric-zero withholding
+  convention, with a reason; `significant` is false when withheld. Shown
+  intervals say "excludes uncertainty from unattributed spend". Fixed-input
+  replay reports 2.5× same-issue and cross-issue splitting amplification;
+  scoring is unchanged. Documentation distinguishes default repair credit
+  from the existing operator opt-in Event 3 rule.
+
+### Changed
+
+- Matched default-branch CI now changes quality only for
+  push-triggered runs; matched scheduled and dispatched runs remain audit-only
+  (#1230).
+- Legacy CI effects stay in place with a "CI trigger unknown"
+  label until an operator approves `quality resolve-triggers` recovery (#1230).
+- Team/division views suppress exact evidence diagnostics. Existing
+  sealed outputs are untouched (#1230).
+- Before the strict grammar cutover, webhook/backfill outcomes recorded
+  server-derived legacy rules; events accepted closed-set client assertions
+  and exports rendered absent rules as `legacy`. That provenance change
+  preceded the strict grammar cutover described above.
+
+- Share token-event effective attribution across live issue costs, score inputs,
+  attribution diagnostics and token eligibility; preserve stored assignments,
+  pooled totals and sealed bytes (#1306).
+
+- Worktree attribution carry now applies only to subagent message groups labelled
+  `isSidechain:true`; parents use their own cwd and tool paths, then the branch
+  rule (#1016). The dry-run audit reports separate tool-path and carry counts
+  and USD costs. The feature remains opt-in and off by default. Activation
+  requires recorded gates, operator security rulings and an explicit operator
+  decision. No new accuracy figures have been measured.
+
 ## 0.6.0 - 2026-10-17
 
 **ONE-WAY UPGRADE — upgrading from v0.5.2.** Before upgrading, run
@@ -513,8 +599,8 @@ local session files still hold.
     gates: carry in a parent session (any top-level session, interactive ones included) was wrong
     in 12 of 14 hand-checked messages, while attribution from a tool-call path held up. A stored
     attribution is permanent, so read `docs/how-it-works.md`, "Measured accuracy" (the three
-    gates and their results), before turning it on. Limiting carry to subagent session files is
-    #1016.
+    gates and their results), before turning it on. Limiting carry to sub-agent
+    (`isSidechain:true`) message groups is #1016.
   - **Upgrade `tierd` (the server) before turning the switch on for `tierd ship`.** (A server's
     own watcher writes its own store, so `serve`'s switch needs no upgrade order.) Check the
     server with `tierd version` on its machine, or `GET /api/v1/version`. A `tierd` without

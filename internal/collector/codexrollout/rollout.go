@@ -68,6 +68,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
@@ -166,6 +167,7 @@ type RepoTarget struct {
 // the nil Logger alone panics on the first walk warning. Same shape as
 // anthropicadmin.Poller and openaiusage.Poller.
 type Collector struct {
+	grammar issueref.Grammar
 	// sessionsDir is the ~/.codex/sessions root (or a test/operator override).
 	sessionsDir string
 	// repos are the repositories in scope. A session whose cwd matches none of
@@ -230,6 +232,7 @@ type failedFile struct {
 
 // Config configures a Collector. Repos is required; everything else defaults.
 type Config struct {
+	Grammar     issueref.Grammar
 	SessionsDir string
 	Repos       []RepoTarget
 	DeveloperID string
@@ -266,6 +269,7 @@ func New(cfg Config) (*Collector, error) {
 		developerID: cfg.DeveloperID,
 		interval:    cfg.Interval,
 		logger:      cfg.Logger,
+		grammar:     cfg.Grammar,
 		settled:     cfg.Settled,
 		lost:        cfg.Lost,
 		failed:      make(map[string]failedFile),
@@ -488,7 +492,8 @@ type scanTarget struct {
 // foreign. lost names each log whose spend was not all recorded: every failing
 // file, every damaged one not positively placed in another repo, and every
 // in-scope session with a call refused beyond the clock horizon.
-func (c *Collector) scanOnce(ctx context.Context, w scanWindow) (_ []collector.TokenEvent, incomplete bool, lost []lostLog, _ error) {
+func (c *Collector) scanOnce(ctx context.Context, w scanWindow) (result []collector.TokenEvent, incomplete bool, lost []lostLog, _ error) {
+	defer func() { collector.LogRevertBranchEvents(c.logger, result) }()
 	targets, targetErrs := c.resolveTargets(ctx, w.gitFloor)
 	if len(targets) == 0 {
 		// Every target failed to resolve; there is nothing to attribute to.
@@ -779,7 +784,7 @@ func (c *Collector) resolveTargets(ctx context.Context, since time.Time) ([]scan
 	targets := make([]scanTarget, 0, len(c.repos))
 	var errs []error
 	for i, r := range c.repos {
-		resolver, err := collector.NewIssueResolver(ctx, r.Path, since)
+		resolver, err := collector.NewIssueResolver(ctx, r.Path, since, c.grammar)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("codex-rollout: repo %q is not attributable this pass (skipped; other repos still scanned): %w", r.Path, err))
 			continue
@@ -871,6 +876,7 @@ func (c *Collector) buildEvents(s *rolloutSession, t *scanTarget, developer stri
 			// write buckets stay zero. parseRollout warns on a nonzero write
 			// count; separate pricing and containment remain unvalidated.
 		})
+		issueRef := t.resolver.ResolveRef(s.Branch, ts)
 		events = append(events, collector.TokenEvent{
 			Developer: developer,
 			// Attribution uses the session's git branch (recorded by Codex in
@@ -878,14 +884,16 @@ func (c *Collector) buildEvents(s *rolloutSession, t *scanTarget, developer stri
 			// rule the Claude Code join uses. A rollout log with no git info
 			// resolves to a labeled unattributed bucket, so the spend still
 			// lands in the developer's denominator instead of vanishing.
-			IssueID:   t.resolver.Resolve(s.Branch, ts),
-			Model:     call.Model,
-			InputTok:  call.Input,
-			OutputTok: call.Output,
-			CacheRead: call.CacheRead,
-			CostMicro: cost,
-			Source:    collector.SourceCodexRollout,
-			Fidelity:  collector.FidelityRealtime,
+			IssueID:      issueRef.ID,
+			RevertBranch: issueref.IsRevertBranch(s.Branch),
+			IssueRule:    issueRef.Rule,
+			Model:        call.Model,
+			InputTok:     call.Input,
+			OutputTok:    call.Output,
+			CacheRead:    call.CacheRead,
+			CostMicro:    cost,
+			Source:       collector.SourceCodexRollout,
+			Fidelity:     collector.FidelityRealtime,
 			// Keyed by (session id, event ordinal). The ordinal is the
 			// token_count event's position in the file, which is stable across
 			// re-scans of an append-only log — including across the skipped

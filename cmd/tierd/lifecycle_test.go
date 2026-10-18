@@ -40,7 +40,7 @@ func TestDispatch_ServeReturnsExitCode(t *testing.T) {
 		"serve",
 		"--db", db,
 		"--addr", "127.0.0.1:0",
-		"--aggregation", "developer", // required (#185); pass explicitly
+		"--aggregation", "team", // required (#185); pass explicitly
 		"--watch-repo", notARepo, // fails resolveWatchRepos after store.Open
 	}, &out, &errOut)
 
@@ -130,7 +130,7 @@ func TestServe_ConfigErrorPathJoinsBackgroundWriters(t *testing.T) {
 		"serve",
 		"--db", filepath.Join(dir, "tier.db"),
 		"--addr", "127.0.0.1:0",
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--prices", prices,
 		"--config", cfgPath,
 		"--watch-repo", repo,
@@ -420,7 +420,7 @@ func (b *delayedLogBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-// TestServe_WedgedWriterIsJoinedOnce pins the join-once structure in a local
+// TestJoinOnceModel_WedgedWriterIsJoinedOnce pins the join-once structure in a local
 // model of runServeWithOptions. A wedged writer logs on every join, so the
 // orderly path and deferred abrupt-exit path must together join exactly once.
 //
@@ -438,7 +438,7 @@ func (b *delayedLogBuffer) Write(p []byte) (int, error) {
 // `if shutdownJoined { return }` early return or `shutdownJoined = true`
 // assignment) produces two timeout logs on the orderly path. This test never
 // calls runServeWithOptions and stays green if main.go's production flag is removed.
-func TestServe_WedgedWriterIsJoinedOnce(t *testing.T) {
+func TestJoinOnceModel_WedgedWriterIsJoinedOnce(t *testing.T) {
 	const drain = 120 * time.Millisecond
 	orig := watcherDrainTimeout
 	watcherDrainTimeout = drain

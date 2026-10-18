@@ -45,7 +45,7 @@ func runWTServe(t *testing.T, extra ...string) ([]string, string) {
 	}
 	addr := freeLoopbackPort(t)
 	dbPath := filepath.Join(t.TempDir(), "wt.db")
-	args := append([]string{"serve", "--addr", addr, "--db", dbPath, "--aggregation", "developer",
+	args := append([]string{"serve", "--addr", addr, "--db", dbPath, "--aggregation", "team",
 		"--log-format", "json", "--watch-repo", filepath.Base(repo)}, extra...)
 	cmd := exec.Command(self)
 	cmd.Dir = filepath.Dir(repo)
@@ -151,7 +151,7 @@ func TestSmoke_MalformedWorktreeAttributionEnvFailsEveryCommand(t *testing.T) {
 	for _, args := range [][]string{
 		{"ship", "--server", "http://127.0.0.1:1", "--repo", dir, "--claude-dir", dir, "--worktree-attribution"},
 		{"score", "--repo", dir, "--claude-dir", dir, "--worktree-attribution"},
-		{"serve", "--addr", freeLoopbackPort(t), "--db", filepath.Join(dir, "x.db"), "--aggregation", "developer", "--worktree-attribution"},
+		{"serve", "--addr", freeLoopbackPort(t), "--db", filepath.Join(dir, "x.db"), "--aggregation", "team", "--worktree-attribution"},
 	} {
 		t.Run(args[0], func(t *testing.T) {
 			cmd := exec.Command(self)

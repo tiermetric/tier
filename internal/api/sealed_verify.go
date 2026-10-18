@@ -98,6 +98,7 @@ func RefoldSealed(rep store.SealedReport, rollups []store.SealedRollup, persons 
 // nothing: a verifier reports whether a seal today would differ, never changes
 // what was sealed.
 func (h *Handler) RecomputeSealedBody(ctx context.Context, p Period) ([]byte, error) {
+	ctx = store.WithReadTimeRecovery(ctx, false)
 	start, end := p.Bounds()
 	var resp scoresResponse
 	err := h.store.ReadSnapshot(ctx, func(snap *store.Snapshot) error {

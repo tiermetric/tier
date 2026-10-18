@@ -73,9 +73,10 @@ works council or employee representative body.</strong> Nothing here creates a
 compliance guarantee.</p>
 </blockquote>
 <h2 id="why-this-document-exists">Why this document exists</h2>
-<p>TIER attributes AI token spend to outcomes. In <code>developer</code> mode, which an
-operator has to choose on purpose, it reports that attribution <strong>per named
-developer</strong>. In several of TIER&#39;s target markets, measuring the performance of
+<p>TIER attributes AI token spend to outcomes. <code>developer</code> mode reports that
+attribution <strong>per named developer</strong> (developer: synthetic demo only until #826).
+v0.6.1 refuses developer-mode startup on real data, including loopback
+and read-only operation. Use <code>team</code> or <code>division</code> for real data. In several of TIER&#39;s target markets, measuring the performance of
 named employees is legally constrained — sometimes requiring prior
 co-determination or works-council
 agreement, sometimes restricted outright under data-protection law. Adopters
@@ -98,11 +99,11 @@ tied to a person&#39;s evaluation. TIER measures <em>spend efficiency of a body 
 work</em>, which is a team-and-portfolio property, not a fair proxy for
 individual worth.</li>
 </ol>
-<p>Use a per-developer view for coaching (a developer and their manager looking at
+<p>The planned per-developer view is for coaching (a developer and their manager looking at
 how that person works with AI) and for engineering diagnosis (for example,
 &#34;which spend is missing an issue reference?&#34;). Make organizational decisions
 from <strong>team-level</strong> numbers.</p>
-<p><strong>What <code>developer</code> mode is.</strong> It is meant as a coaching view that a developer
+<p><strong>What <code>developer</code> mode is (synthetic demo only until #826).</strong> It is meant as a coaching view that a developer
 and their manager read together, seeing the same numbers. Today anyone with
 read or dashboard access sees every developer&#39;s numbers; per-viewer access is
 planned (#826). Either way, a tool that shows named people&#39;s numbers can be
@@ -110,7 +111,9 @@ used to monitor individual performance, whatever you intend, so the rest of
 this document applies to it in full. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER cannot enforce that stance. It shows numbers; it cannot stop someone from copying one
 into a review. Only your written policy, or a works agreement where one
 applies, can.</p>
-<p><strong>What limits exist today, and what is planned.</strong> Today, in <code>developer</code> mode:</p>
+<p><strong>What limits exist today, and what is planned.</strong> Real-data developer-mode
+startup is refused until #826; the synthetic demo only shows invented data.
+The demo view illustrates these remaining limits:</p>
 <ul>
 <li>anyone who can read the API or the dashboard can see every developer&#39;s
 numbers;</li>
@@ -131,8 +134,8 @@ default, at most 365 days, enough for a full annual coaching cycle), with
 org-level history kept in a roll-up that names nobody;</li>
 <li>a developer list with no TIER order.</li>
 </ul>
-<p>Until those ship, restrict who can reach the API and the dashboard, and set
-retention by policy.</p>
+<p>Until those ship, use <code>team</code> or <code>division</code> on real data; <code>developer</code> startup is
+refused. Restrict who can reach the API and database, and set retention by policy.</p>
 <h2 id="what-tier-measures-and-stores-and-what-it-never-touches">What TIER measures and stores (and what it never touches)</h2>
 <p>The single most important fact for a privacy review: <strong>TIER never stores
 prompt or completion content, source code, or file contents</strong>, outside the free
@@ -153,6 +156,7 @@ but the live watcher&#39;s checkpoint row keeps the absolute path of the worktre
 is carrying, and spend in another repository&#39;s worktree is stored as
 <code>unattributed:foreign-repo</code>, without that repository&#39;s name or path; the full
 list is in <a href="privacy.html#worktree-attribution-off-by-default" rel="nofollow">privacy.md</a>.</p>
+<p>Parents no longer carry (#1016); only message groups labelled <code>isSidechain:true</code> can use carry. Worktree attribution stays opt-in and <strong>off by default</strong>. Activation requires recorded gates, the operator&#39;s security rulings and an explicit operator decision. No new accuracy figures have been measured.</p>
 <p>Full, code-grounded detail is in <strong><a href="privacy.html" rel="nofollow">docs/privacy.md</a></strong> (guarantee
 verified against the code on 2026-07-04). In summary, TIER stores in a single
 local SQLite file, with no external transmission by default:</p>
@@ -281,6 +285,7 @@ the natural place to record the retention bounds and the conditional
 personal-data stores documented in <a href="privacy.html" rel="nofollow">docs/privacy.md</a>.</li>
 </ul>
 <h2 id="works-council-consultation-prerequisites-checklist">Works-council consultation prerequisites (checklist)</h2>
+<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
 <p>Where a works council or equivalent body exists, treat the following as
 prerequisites <strong>before</strong> per-developer TIER goes live. Adapt to local law with
 counsel:</p>
@@ -312,11 +317,12 @@ information-and-consultation record (FR), or OR consent (NL) — before go-live.
 (the location of the <em>employees measured</em>, not the company HQ). &#34;Team-only&#34; here
 means reporting that never surfaces an individual developer&#39;s performance.</p>
 <blockquote>
-<p><strong>Availability note (accurate as of 2026-10-02):</strong> TIER now ships a dedicated
+<p><strong>Availability note (accurate as of 2026-10-18):</strong> TIER now ships a dedicated
 <strong>team-only aggregation mode</strong> with a k-anonymity floor (issue <strong>#185</strong>). It is
-selected by a <strong>REQUIRED</strong> <code>--aggregation team|division|developer</code> setting on
+selected by a <strong>REQUIRED</strong> <code>--aggregation team|division</code> setting on
 <code>tierd serve</code> (env <code>TIER_AGGREGATION</code>, config key <code>aggregation</code>): there is <strong>no
-silent default</strong> — <code>tierd serve</code> refuses to start until you choose, so an
+silent default</strong>. <code>developer</code> is reserved for the synthetic <code>tierd demo</code> until
+#826; real-data startup is refused. <code>tierd serve</code> refuses to start until you choose, so an
 existing deployment can never change its reporting posture on upgrade by
 accident. In <code>team</code> or <code>division</code> mode <code>GET /api/v1/scores</code>, the dashboard, and
 <code>GET /api/v1/scores/{developer}</code> <strong>never</strong> return an individual developer name:
@@ -382,13 +388,13 @@ so run one instance per cohort and follow the works-council / DPIA steps below.<
 </tr>
 <tr>
 <td><strong>UK</strong></td>
-<td>Team-only preferred; per-developer only with safeguards</td>
+<td>Team-only. Per-developer: not available in v0.6.1 (#826)</td>
 <td>UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance</td>
 <td>No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring.</td>
 </tr>
 <tr>
 <td><strong>US (at-will, non-union)</strong></td>
-<td>Per-developer possible</td>
+<td>Team-only. Per-developer: not available in v0.6.1 (#826)</td>
 <td>Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</td>
 <td>Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties.</td>
 </tr>
@@ -406,8 +412,8 @@ aggregate reporting plus advance consultation</strong>. Run <code>tierd serve</c
 level higher (#270), so named per-developer views are technically
 suppressed — the API, dashboard, and per-developer endpoint never return an
 individual name, and sub-k cohorts collapse into &#34;other&#34;. Pair that with access
-restriction (a read-only viewer token, #190) and separate instances per cohort.
-Per-developer deployment in a co-determined jurisdiction should not go live until
+restriction (a read-only viewer token, #190) and separate instances per cohort.</p>
+<p>Per-developer deployment in a co-determined jurisdiction should not go live until
 both (a) the required works-council instrument is in place and (b) a DPIA has
 been completed. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.</p>
 <h2 id="summary">Summary</h2>

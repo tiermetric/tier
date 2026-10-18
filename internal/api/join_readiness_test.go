@@ -41,6 +41,10 @@ func TestRepoJoin_MismatchAndScope(t *testing.T) {
 	resp, _ := getScoresRaw(t, h, "?since="+scoresSince())
 
 	typed := getScores(t, h, "/api/v1/scores?since="+scoresSince())
+	// Evidence diagnostics do not change the base score-field contract.
+	for i := range typed.Developers {
+		typed.Developers[i].QualityEvidence = nil
+	}
 	got, err := json.MarshalIndent(struct {
 		Developers []developerScoreJSON `json:"developers"`
 		Total      *teamScoreJSON       `json:"total"`
@@ -48,7 +52,7 @@ func TestRepoJoin_MismatchAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Recorded from unmodified origin/main 038dc40f, before #972/U97.
+	// The golden pins score fields, including the #1233 interval disclosure.
 	baseline, err := os.ReadFile("testdata/join_readiness_score_fields.golden.json")
 	if err != nil {
 		t.Fatal(err)

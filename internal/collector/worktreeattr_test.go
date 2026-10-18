@@ -94,12 +94,14 @@ func wantVerdicts(t *testing.T, got []string, want ...string) {
 func TestWorktreeResolver_CWDArm(t *testing.T) {
 	f := newWTFixture(t)
 	r := f.resolver()
-	got := verdict(t, r.resolve(f.g(filepath.Join(f.wtB, "b.go")), f.wtA, "feature/11-a"), f.repo)
+	seed := f.g(filepath.Join(f.wtB, "b.go"))
+	seed.Sidechain = true
+	got := verdict(t, r.resolve(seed, f.wtA, "feature/11-a"), f.repo)
 	if got != "worktree-cwd feature/11-a" {
 		t.Errorf("cwd in a worktree = %q, want %q", got, "worktree-cwd feature/11-a")
 	}
-	if got := verdict(t, r.resolve(f.g(), f.wtA, "feature/33-c"), f.repo); got != "carry feature/22-b" {
-		t.Errorf("cwd whose reflog disagrees with the transcript branch = %q, want the carry's verdict", got)
+	if got := verdict(t, r.resolve(f.g(), f.wtA, "feature/33-c"), f.repo); got != "" {
+		t.Errorf("cwd whose reflog disagrees with the transcript branch = %q, want today's rule for a parent group", got)
 	}
 	for _, branch := range []string{"feature/33-c", "", "HEAD", "worktree-agent-a1b2c3"} {
 		got := verdict(t, r.resolve(f.g(filepath.Join(f.wtB, "b.go")), f.wtA, branch), f.repo)
@@ -107,9 +109,12 @@ func TestWorktreeResolver_CWDArm(t *testing.T) {
 			t.Errorf("cwd with branch %q = %q, want the tool path's verdict", branch, got)
 		}
 	}
+	side := f.g()
+	side.Sidechain = true
+	wantVerdicts(t, f.run(t, r, side), "carry feature/22-b")
 	for _, cwd := range []string{f.repo, f.scratch, ""} {
-		if got := verdict(t, r.resolve(f.g(), cwd, "feature/33-c"), f.repo); got != "carry feature/22-b" {
-			t.Errorf("cwd %q outside a worktree = %q, want the carry's verdict", cwd, got)
+		if got := verdict(t, r.resolve(f.g(), cwd, "feature/33-c"), f.repo); got != "" {
+			t.Errorf("cwd %q outside a worktree = %q, want today's rule for a parent group", cwd, got)
 		}
 	}
 }
@@ -119,11 +124,16 @@ func TestWorktreeResolver_CWDArm(t *testing.T) {
 func TestWorktreeResolver_CWDNeverMovesTheCarry(t *testing.T) {
 	f := newWTFixture(t)
 	r := f.resolver()
+	seed := f.g(filepath.Join(f.wtA, "a.go"))
+	seed.Sidechain = true
 	wantVerdicts(t, []string{
-		verdict(t, r.resolve(f.g(filepath.Join(f.wtA, "a.go")), "", ""), f.repo),
+		verdict(t, r.resolve(seed, "", ""), f.repo),
 		verdict(t, r.resolve(f.g(), f.wtB, "feature/22-b"), f.repo),
 		verdict(t, r.resolve(f.g(), "", ""), f.repo),
-	}, "worktree-toolpath feature/11-a", "worktree-cwd feature/22-b", "carry feature/11-a")
+	}, "worktree-toolpath feature/11-a", "worktree-cwd feature/22-b", "")
+	side := f.g()
+	side.Sidechain = true
+	wantVerdicts(t, f.run(t, r, side), "carry feature/11-a")
 	if got := verdict(t, f.resolver().resolve(f.g(), "/"+f.wtB, "feature/22-b"), f.repo); got != "" {
 		t.Errorf("network cwd = %q, want today's rule", got)
 	}
@@ -185,8 +195,15 @@ func TestWorktreeResolver_BranchMustAgreeAcrossMessage(t *testing.T) {
 		{"straddles a checkout", []messageGroup{span(1015, 1025), span(1041, 1041)}, []string{"", ""}},
 	} {
 		r := &worktreeResolver{index: x, now: reflogNow, carry: c}
+		for _, g := range tc.gs {
+			if got := r.resolve(g, "", ""); got != (messageAttribution{}) {
+				t.Errorf("parent %s: %+v, want no verdict", tc.name, got)
+			}
+		}
+		r = &worktreeResolver{index: x, now: reflogNow, carry: c}
 		var got []string
 		for _, g := range tc.gs {
+			g.Sidechain = true
 			got = append(got, verdict(t, r.resolve(g, "", ""), "repo"))
 		}
 		if !slices.Equal(got, tc.want) {
@@ -203,12 +220,12 @@ func TestWorktreeResolver_ToolPathArm(t *testing.T) {
 		"worktree-toolpath feature/11-a")
 }
 
-// Pins arm 3 and arm 4: later messages carry the last worktree referenced; a
-// message before any reference, with no signal, is today's rule.
+// Pins: parent messages without paths use today's rule before and after a
+// direct worktree reference.
 func TestWorktreeResolver_CarryArm(t *testing.T) {
 	f := newWTFixture(t)
 	wantVerdicts(t, f.run(t, f.resolver(), f.g(), f.g(filepath.Join(f.wtA, "a.go")), f.g(), f.g(filepath.Join(f.wtA, "b.go")), f.g()),
-		"", "worktree-toolpath feature/11-a", "carry feature/11-a", "worktree-toolpath feature/11-a", "carry feature/11-a")
+		"", "worktree-toolpath feature/11-a", "", "worktree-toolpath feature/11-a", "")
 }
 
 // Pins every reset: after the trigger message the carry is gone. The trigger's
@@ -236,12 +253,19 @@ func TestWorktreeResolver_CarryResets(t *testing.T) {
 		{"message spans a time the reflog cannot answer", messageGroup{ID: "msg_x", First: f.at, Last: f.at.Add(-time.Hour * 24 * 40)}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wantVerdicts(t, f.run(t, f.resolver(), f.g(a), tc.trigger, f.g()),
+			groups := []messageGroup{f.g(a), tc.trigger, f.g()}
+			for i := range groups {
+				groups[i].Sidechain = true
+			}
+			wantVerdicts(t, f.run(t, f.resolver(), groups...),
 				"worktree-toolpath feature/11-a", tc.want, "")
 		})
 	}
-	// A message whose lines span an hour on one branch still carries.
-	wantVerdicts(t, f.run(t, f.resolver(), f.g(a), late), "worktree-toolpath feature/11-a", "carry feature/11-a")
+	// A parent message whose lines span an hour still cannot use carry.
+	wantVerdicts(t, f.run(t, f.resolver(), f.g(a), late), "worktree-toolpath feature/11-a", "")
+	seed := f.g(a)
+	seed.Sidechain, late.Sidechain = true, true
+	wantVerdicts(t, f.run(t, f.resolver(), seed, late), "worktree-toolpath feature/11-a", "carry feature/11-a")
 }
 
 // Pins the Foreign verdict: a message whose only non-neutral paths are in a
@@ -258,11 +282,16 @@ func TestWorktreeResolver_ForeignWorktreeVerdict(t *testing.T) {
 		"worktree-toolpath feature/11-a", "", "")
 	for _, branch := range []string{"feature/44-f", "", "HEAD", "worktree-agent-a1b2c3"} {
 		r := f.resolver()
+		seed := f.g(a)
+		seed.Sidechain = true
 		wantVerdicts(t, []string{
-			verdict(t, r.resolve(f.g(a), "", ""), f.repo),
+			verdict(t, r.resolve(seed, "", ""), f.repo),
 			verdict(t, r.resolve(f.g(), f.foreignWT, branch), f.repo),
 			verdict(t, r.resolve(f.g(), "", ""), f.repo),
-		}, "worktree-toolpath feature/11-a", "worktree-cwd foreign-repo", "carry feature/11-a")
+		}, "worktree-toolpath feature/11-a", "worktree-cwd foreign-repo", "")
+		side := f.g()
+		side.Sidechain = true
+		wantVerdicts(t, f.run(t, r, side), "carry feature/11-a")
 	}
 	if got := verdict(t, f.resolver().resolve(f.g(), "/"+f.foreignWT, "feature/44-f"), f.repo); got != "" {
 		t.Errorf("network cwd in the unconfigured worktree = %q, want today's rule", got)
@@ -323,7 +352,12 @@ func TestWorktreeResolver_RelativePathIsNeutral(t *testing.T) {
 	f := newWTFixture(t)
 	neutral := []string{"repo/m.go", "wtB/b.go", f.repo + "/../wtB/b.go", filepath.Join(f.scratch, "n.go")}
 	wantVerdicts(t, f.run(t, f.resolver(), f.g(neutral...), f.g(filepath.Join(f.wtA, "a.go")), f.g(neutral...)),
-		"", "worktree-toolpath feature/11-a", "carry feature/11-a")
+		"", "worktree-toolpath feature/11-a", "")
+	groups := []messageGroup{f.g(neutral...), f.g(filepath.Join(f.wtA, "a.go")), f.g(neutral...)}
+	for i := range groups {
+		groups[i].Sidechain = true
+	}
+	wantVerdicts(t, f.run(t, f.resolver(), groups...), "", "worktree-toolpath feature/11-a", "carry feature/11-a")
 }
 
 // Pins: a subagent file carries from its own first reference across the whole
@@ -346,17 +380,28 @@ func TestWorktreeResolver_SubagentCarriesAcrossWholeFile(t *testing.T) {
 	wantVerdicts(t, got, want...)
 }
 
-// Pins: the resolver never reads a group's stream label; the same sequence
-// with every label changed gives the same verdicts.
-func TestWorktreeResolver_IgnoresStreamLabel(t *testing.T) {
+// Pins: only isSidechain permits carry; an agent id alone does not.
+func TestWorktreeResolver_CarryRequiresSidechain(t *testing.T) {
 	f := newWTFixture(t)
-	seq := []messageGroup{f.g(filepath.Join(f.wtA, "a.go")), f.g(), f.g(filepath.Join(f.repo, "m.go")), f.g()}
-	base := f.run(t, f.resolver(), seq...)
-	for i := range seq {
-		seq[i].Sidechain, seq[i].Agent = i%2 == 0, fmt.Sprintf("agent-%d", i)
+	for _, tc := range []struct {
+		name      string
+		sidechain bool
+		agent     string
+		carry     string
+	}{
+		{"parent", false, "", ""},
+		{"parent with agent id", false, "agent-1", ""},
+		{"sidechain", true, "", "carry feature/11-a"},
+		{"sidechain with agent id", true, "agent-1", "carry feature/11-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := []messageGroup{f.g(filepath.Join(f.wtA, "a.go")), f.g(), f.g(filepath.Join(f.repo, "m.go")), f.g()}
+			for i := range seq {
+				seq[i].Sidechain, seq[i].Agent = tc.sidechain, tc.agent
+			}
+			wantVerdicts(t, f.run(t, f.resolver(), seq...), "worktree-toolpath feature/11-a", tc.carry, "", "")
+		})
 	}
-	wantVerdicts(t, f.run(t, f.resolver(), seq...), base...)
-	wantVerdicts(t, base, "worktree-toolpath feature/11-a", "carry feature/11-a", "", "")
 }
 
 // Pins the join: a group attributes only the usage event with its non-empty
@@ -374,7 +419,7 @@ func TestWorktreeAttribution_JoinsByMessageIDOnly(t *testing.T) {
 		[]messageUsage{{parseOrder: 0}, {messageID: "msg_1"}, {messageID: "msg_2"}, {messageID: "msg_3"}, {messageID: "msg_4"}},
 		pathClassification{},
 	)
-	want := map[string]string{"msg_1": "carry feature/11-a", "msg_2": "worktree-toolpath feature/55-r2", "msg_3": "", "msg_4": "carry feature/22-b"}
+	want := map[string]string{"msg_1": "", "msg_2": "worktree-toolpath feature/55-r2", "msg_3": "", "msg_4": ""}
 	if len(got) != len(want) {
 		t.Errorf("attribution has %d ids, want %d: %+v", len(got), len(want), got)
 	}
@@ -443,7 +488,7 @@ func TestWorktreeAttribution_ResolvesInFileOrder(t *testing.T) {
 	for _, id := range []string{"msg_m1", "msg_s1", "msg_s2", "msg_m2"} {
 		verdicts = append(verdicts, verdict(t, got[id], f.repo))
 	}
-	wantVerdicts(t, verdicts, "", "worktree-toolpath feature/11-a", "carry feature/11-a", "carry feature/11-a")
+	wantVerdicts(t, verdicts, "", "worktree-toolpath feature/11-a", "carry feature/11-a", "")
 }
 
 // wtJSONLLine is a Claude Code assistant line; content is a message content
@@ -459,11 +504,20 @@ func wtJSONLLine(id string, at time.Time, cwd, branch, content string, output in
 		at.UTC().Format(time.RFC3339Nano), branch, cwd, idField, content, output)
 }
 
+// wtStreamLine is an assistant line carrying the specified JSONL stream label.
+func wtStreamLine(side bool, id string, at time.Time, cwd, branch, content string, output int) string {
+	line := wtJSONLLine(id, at, cwd, branch, content, output)
+	if side {
+		return sidechain(line)
+	}
+	return line
+}
+
 func wtRead(p string) string {
 	return `[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":` + fmt.Sprintf("%q", p) + `}}]`
 }
 
-// wtSession writes one transcript exercising every rule and returns a
+// wtSession writes one parent transcript and returns a
 // collector for f.repo reading it.
 func wtSession(t *testing.T, f *wtFixture) *JSONLCollector {
 	t.Helper()
@@ -506,47 +560,69 @@ func issuesAndRules(events []TokenEvent) []string {
 	return out
 }
 
-// Pins the stamping end to end, and the enum: with the option on, the four
-// rules emitted are exactly the closed set, each spelled as ruled.
+// Pins the stamping end to end: sidechain messages can emit all four rules;
+// parent messages emit only branch, cwd and tool-path rules.
 func TestJSONLCollector_WorktreeAttributionStampsEachRule(t *testing.T) {
-	f := newWTFixture(t)
-	c := wtSession(t, f)
-	c.worktrees = f.x
-	events := wtCollect(t, f, c)
-	wantVerdicts(t, issuesAndRules(events),
-		"issue-11 worktree-toolpath", // the tool call arrived on a later line of msg_1
-		"issue-11 carry",
-		"issue-22 worktree-cwd",
-		"unattributed:main branch", // the main checkout reset the carry
-		"unattributed:main branch", // ID-less: attributes nothing, sets the carry
-		"issue-11 carry",
-	)
-	seen := map[store.AttributionRule]bool{}
-	for _, e := range events {
-		branch := "main"
-		if e.IssueID == "issue-11" {
-			branch = "feature/11-a"
-		}
-		if e.IssueID == "issue-22" {
-			branch = "feature/22-b"
-		}
-		want := issueref.BranchHash(e.Repo, branch)
-		if (e.BranchHash == nil) != (want == nil) || (want != nil && *e.BranchHash != *want) {
-			t.Fatalf("worktree branch hash: %+v, want %v", e, want)
-		}
-		seen[e.AttributionRule] = true
-	}
-	wantSet := []store.AttributionRule{"branch", "worktree-cwd", "worktree-toolpath", "carry"}
-	if len(seen) != len(wantSet) || !reflect.DeepEqual(wantSet, store.AttributionRules()) {
-		t.Errorf("rules emitted %v, want exactly %v (store.AttributionRules() = %v)", seen, wantSet, store.AttributionRules())
-	}
-	for _, r := range wantSet {
-		if !seen[r] {
-			t.Errorf("rule %q never emitted", r)
-		}
-	}
-	if events[0].OutputTok != 500 {
-		t.Errorf("msg_1 OutputTok = %d, want 500 (the largest-usage line)", events[0].OutputTok)
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sidechain=%t", side), func(t *testing.T) {
+			f := newWTFixture(t)
+			c := wtSession(t, f)
+			if side {
+				path := filepath.Join(c.ClaudeDir, "projects", "p", "s.jsonl")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, path, strings.ReplaceAll(string(raw), `"isSidechain":false`, `"isSidechain":true`))
+			}
+			c.worktrees = f.x
+			events := wtCollect(t, f, c)
+			carry := "unattributed:main branch"
+			if side {
+				carry = "issue-11 carry"
+			}
+			wantVerdicts(t, issuesAndRules(events),
+				"issue-11 worktree-toolpath", // the tool call arrived on a later line of msg_1
+				carry,
+				"issue-22 worktree-cwd",
+				"unattributed:main branch", // the main checkout reset the carry
+				"unattributed:main branch", // ID-less: attributes nothing, sets the carry
+				carry,
+			)
+			seen := map[store.AttributionRule]bool{}
+			for _, e := range events {
+				branch := "main"
+				if e.IssueID == "issue-11" {
+					branch = "feature/11-a"
+				}
+				if e.IssueID == "issue-22" {
+					branch = "feature/22-b"
+				}
+				want := issueref.BranchHash(e.Repo, branch)
+				if (e.BranchHash == nil) != (want == nil) || (want != nil && *e.BranchHash != *want) {
+					t.Fatalf("worktree branch hash: %+v, want %v", e, want)
+				}
+				seen[e.AttributionRule] = true
+			}
+			wantSet := []store.AttributionRule{"branch", "worktree-cwd", "worktree-toolpath", "carry"}
+			if !reflect.DeepEqual(wantSet, store.AttributionRules()) {
+				t.Errorf("rules emitted %v, want exactly %v (store.AttributionRules() = %v)", seen, wantSet, store.AttributionRules())
+			}
+			if !side {
+				wantSet = wantSet[:3]
+			}
+			if len(seen) != len(wantSet) {
+				t.Errorf("rules emitted %v, want %v (store.AttributionRules() = %v)", seen, wantSet, store.AttributionRules())
+			}
+			for _, r := range wantSet {
+				if !seen[r] {
+					t.Errorf("rule %q never emitted", r)
+				}
+			}
+			if events[0].OutputTok != 500 {
+				t.Errorf("msg_1 OutputTok = %d, want 500 (the largest-usage line)", events[0].OutputTok)
+			}
+		})
 	}
 }
 
@@ -609,18 +685,81 @@ func TestJSONLCollector_WorktreeAttributionSubagentFileHasOwnCarry(t *testing.T)
 			wtJSONLLine("msg_p2", at(2), f.repo, "main", text, 2),
 		},
 		filepath.Join("sess-823", "subagents", "agent-x.jsonl"): {
-			wtJSONLLine("msg_s1", at(3), f.repo, "main", text, 3),
-			wtJSONLLine("msg_s2", at(4), f.repo, "main", wtRead(filepath.Join(f.wtB, "b.go")), 4),
-			wtJSONLLine("msg_s3", at(5), f.repo, "main", text, 5),
+			sidechain(wtJSONLLine("msg_s1", at(3), f.repo, "main", text, 3)),
+			sidechain(wtJSONLLine("msg_s2", at(4), f.repo, "main", wtRead(filepath.Join(f.wtB, "b.go")), 4)),
+			sidechain(wtJSONLLine("msg_s3", at(5), f.repo, "main", text, 5)),
 		},
 	})
 	c.worktrees = f.x
 	want := map[int]string{
-		1: "issue-11 worktree-toolpath", 2: "issue-11 carry",
+		1: "issue-11 worktree-toolpath", 2: "unattributed:main branch",
 		3: "unattributed:main branch", 4: "issue-22 worktree-toolpath", 5: "issue-22 carry",
 	}
 	if got := byOutput(wtCollect(t, f, c)); !reflect.DeepEqual(got, want) {
 		t.Errorf("verdicts = %v, want %v", got, want)
+	}
+}
+
+// Pins: each group's JSONL label governs carry in a file with interleaved
+// parent and sidechain streams, independently of agent ids or file location.
+// There is no parent-at-spawn inheritance; parent paths leave sidechain carry alone.
+func TestJSONLCollector_WorktreeAttributionMixedStreams(t *testing.T) {
+	f := newWTFixture(t)
+	line := func(side bool, id string, n int, content string) string {
+		return wtStreamLine(side, id, f.wtAt(n), f.repo, "main", content, n)
+	}
+	c := wtCollector(t, f, "claude-mixed", map[string][]string{"s.jsonl": {
+		line(false, "msg_p1", 1, wtRead(filepath.Join(f.wtA, "a.go"))),
+		line(true, "msg_s1", 2, wtText),
+		line(false, "msg_p2", 3, wtText),
+		line(true, "msg_s2", 4, wtText),
+		strings.Replace(line(false, "msg_p3", 5, wtText), `"isSidechain":false`, `"agentId":"agent-1"`, 1),
+		strings.Replace(line(false, "msg_p4", 6, wtText), `"isSidechain":false`, `"isSidechain":"true"`, 1),
+		line(true, "msg_s3", 7, wtRead(filepath.Join(f.wtB, "b.go"))),
+		line(false, "msg_p5", 8, wtRead(filepath.Join(f.repo, "m.go"))),
+		line(true, "msg_s4", 9, wtText),
+		line(false, "msg_p6", 10, wtRead(filepath.Join(f.wtA, "a.go"))),
+		line(true, "msg_s5", 11, wtText),
+		line(false, "msg_p7", 12, wtRead(filepath.Join(f.foreignWT, "f.go"))),
+		line(true, "msg_s6", 13, wtText),
+	}})
+	c.worktrees = f.x
+	want := map[int]string{
+		1: "issue-11 worktree-toolpath", 2: "unattributed:main branch",
+		3: "unattributed:main branch", 4: "unattributed:main branch",
+		5: "unattributed:main branch", 6: "unattributed:main branch",
+		7: "issue-22 worktree-toolpath", 8: "unattributed:main branch",
+		9: "issue-22 carry", 10: "issue-11 worktree-toolpath", 11: "issue-22 carry",
+		12: "unattributed:foreign-repo worktree-toolpath", 13: "issue-22 carry",
+	}
+	if got := byOutput(wtCollect(t, f, c)); !reflect.DeepEqual(got, want) {
+		t.Errorf("mixed streams = %v, want %v", got, want)
+	}
+}
+
+// Parent tool-path branches that yield no verdict leave sidechain carry unchanged,
+// whether the parent's cwd decides or the tool-path arm decides.
+func TestJSONLCollector_WorktreeAttributionMixedStreamsParentHarnessPreservesCarry(t *testing.T) {
+	f := newWTFixture(t)
+	h := addWorktree(t, f.repo, filepath.Join(f.base, "harness"), "worktree-agent-a1b2c3")
+	for _, tc := range []struct {
+		name, cwd, branch, wantParent string
+	}{
+		{"toolpath", f.repo, "main", "unattributed:main branch"},
+		{"cwd", f.wtB, "feature/22-b", "issue-22 worktree-cwd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := wtCollector(t, f, "claude-parent-harness-"+tc.name, map[string][]string{"s.jsonl": {
+				wtStreamLine(true, "msg_s1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 1),
+				wtStreamLine(false, "msg_p1", f.wtAt(2), tc.cwd, tc.branch, wtRead(filepath.Join(h, "b.go")), 2),
+				wtStreamLine(true, "msg_s2", f.wtAt(3), f.repo, "main", wtText, 3),
+			}})
+			c.worktrees = f.x
+			want := map[int]string{1: "issue-11 worktree-toolpath", 2: tc.wantParent, 3: "issue-11 carry"}
+			if got := byOutput(wtCollect(t, f, c)); !reflect.DeepEqual(got, want) {
+				t.Errorf("mixed streams = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -644,9 +783,8 @@ func TestParseSessionFileAttributed_SkipsSessionsBeforeSince(t *testing.T) {
 	}
 }
 
-// Pins: with the option off (the zero JSONLCollector), output is today's: no
-// rule on any event, and every issue from the transcript branch. With it on,
-// IssueID, AttributionRule and the branch hash may differ.
+// With worktree attribution off, AttributionRule is absent and issues come
+// from the transcript branch. Enabling it can change issue metadata only.
 func TestJSONLCollector_WorktreeAttributionOffIsTodaysOutput(t *testing.T) {
 	f := newWTFixture(t)
 	off := wtCollect(t, f, wtSession(t, f))
@@ -659,9 +797,18 @@ func TestJSONLCollector_WorktreeAttributionOffIsTodaysOutput(t *testing.T) {
 		t.Fatalf("on %d events, off %d", len(on), len(off))
 	}
 	for i := range on {
-		on[i].IssueID, on[i].AttributionRule, on[i].BranchHash = off[i].IssueID, off[i].AttributionRule, off[i].BranchHash
+		for _, ev := range []TokenEvent{on[i], off[i]} {
+			wantRule := issueref.Rule("")
+			if !store.IsUnattributed(ev.IssueID) {
+				wantRule = issueref.RuleBranchFirstSlot
+			}
+			if ev.IssueRule != wantRule {
+				t.Errorf("event %d issue=%s rule=%s want %s", i, ev.IssueID, ev.IssueRule, wantRule)
+			}
+		}
+		on[i].IssueID, on[i].AttributionRule, on[i].BranchHash, on[i].IssueRule = off[i].IssueID, off[i].AttributionRule, off[i].BranchHash, off[i].IssueRule
 		if on[i] != off[i] {
-			t.Errorf("event %d differs beyond IssueID and AttributionRule:\n on %+v\noff %+v", i, on[i], off[i])
+			t.Errorf("event %d differs beyond issue attribution:\n on %+v\noff %+v", i, on[i], off[i])
 		}
 	}
 }

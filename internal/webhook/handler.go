@@ -49,6 +49,7 @@ import (
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/prderive"
 	"github.com/tiermetric/tier/internal/quality"
+	"github.com/tiermetric/tier/internal/qualityrule"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -217,6 +218,7 @@ func WithSizeLabels(m map[string]float64) Option {
 
 // Handler processes GitHub webhook events.
 type Handler struct {
+	grammar    issueref.Grammar
 	store      Store
 	secret     string // HMAC-SHA256 secret; empty means fail-closed (#60)
 	logger     *slog.Logger
@@ -647,7 +649,8 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 		}, evidence, store.OutcomeSourceGitHubWebhook)
 	}
 
-	issueID := issueref.FromBranchOrBody(p.PullRequest.Head.Ref, p.PullRequest.Body)
+	issueRef := h.grammar.FromBranchOrBodyRef(p.PullRequest.Head.Ref, p.PullRequest.Body)
+	issueID := issueRef.ID
 	if issueID == "" {
 		h.logger.Debug("PR merged but no issue ID found", "pr", p.PullRequest.Number)
 		return nil
@@ -722,6 +725,7 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 	o := store.Outcome{
 		Developer:      p.PullRequest.User.Login,
 		IssueID:        issueID,
+		IssueRule:      issueRef.Rule,
 		PRNumber:       p.PullRequest.Number,
 		Quality:        1.0,
 		MergeCommitSHA: p.PullRequest.MergeCommitSHA,
@@ -738,6 +742,7 @@ func (h *Handler) handlePR(ctx context.Context, body []byte) error {
 		defaultBranch = p.Repository.DefaultBranch
 	}
 	if strings.EqualFold(p.PullRequest.Head.Repo.FullName, o.Repo) &&
+		!issueref.IsRevertBranch(p.PullRequest.Head.Ref) &&
 		strings.TrimPrefix(p.PullRequest.Head.Ref, "refs/heads/") != defaultBranch {
 		o.HeadBranchHash = issueref.BranchHash(o.Repo, p.PullRequest.Head.Ref)
 	}
@@ -907,7 +912,7 @@ func logSafeStr(s string) string {
 // arriving after its window is a stale/latent event and is ignored — the
 // original author is not penalised for a break surfacing months later.
 const (
-	ciObservationWindow     = 48 * time.Hour
+	ciObservationWindow     = qualityrule.CIObservationWindow
 	revertObservationWindow = 60 * 24 * time.Hour
 	// flakyRerunWindow is the "30-minute re-run rule" (spec §3 Event 2): a
 	// success that RE-RAN an earlier failure — same merge commit, same
@@ -923,6 +928,7 @@ const (
 type workflowRunPayload struct {
 	Action      string `json:"action"` // process only "completed"
 	WorkflowRun struct {
+		Event      string    `json:"event"`
 		HeadSHA    string    `json:"head_sha"`
 		HeadBranch string    `json:"head_branch"`
 		Conclusion string    `json:"conclusion"` // "success" | "failure" | others ignored
@@ -952,7 +958,8 @@ type workflowRunPayload struct {
 //     the target branch" — CI on unmerged PR heads is the common noise case)
 //   - Conclusion ∈ {success, failure}
 //
-// A failure appends ci_fail (floor 0.7). A success appends ci_fail_flaky (which
+// Only push-triggered CI changes quality; other matched triggers are audit-only.
+// A push failure appends ci_fail (floor 0.7). A push success appends ci_fail_flaky (which
 // neutralises the failure in Resolve) only when it is a RE-RUN OF THE FAILING
 // WORKFLOW — same head SHA, same workflow_id, a strictly later run_attempt,
 // inside flakyRerunWindow (#687); any other success appends ci_pass (audit
@@ -1053,9 +1060,11 @@ func (h *Handler) handleWorkflowRun(ctx context.Context, body []byte) error {
 	// costs nothing.
 	switch wr.Conclusion {
 	case "success":
-		return h.appendAndResolveCISuccess(ctx, origin, sourceRef, eventTS)
+		return h.appendAndResolveCISuccess(ctx, origin, sourceRef, eventTS, store.NormalizeCITrigger(wr.Event))
 	case "failure":
-		return h.appendAndResolve(ctx, origin, quality.EventCIFail, sourceRef, eventTS)
+		h.qualityMu.Lock()
+		defer h.qualityMu.Unlock()
+		return h.appendAndResolveLocked(ctx, origin, quality.EventCIFail, sourceRef, eventTS, store.NormalizeCITrigger(wr.Event))
 	default:
 		return fmt.Errorf("workflow_run: unclassifiable conclusion %q reached the classifier — the guard above and this switch have drifted", wr.Conclusion)
 	}
@@ -1115,7 +1124,7 @@ func (h *Handler) isFlakyRerunLocked(ctx context.Context, outcomeID int64, succe
 		return false, fmt.Errorf("workflow_run: read events for flaky check: %w", err)
 	}
 	for _, e := range events {
-		if e.EventType != quality.EventCIFail {
+		if e.EventType != quality.EventCIFail || (e.TriggerEvent != nil && *e.TriggerEvent != "push") {
 			continue
 		}
 		failed := quality.ParseCIRef(e.SourceRef)
@@ -1182,32 +1191,41 @@ func (h *Handler) appendAndResolve(ctx context.Context, origin store.Outcome, ev
 // adjacent parameters that must agree is a transposition waiting to happen — one
 // that compiles and then silently classifies every success against the wrong
 // commit or workflow, i.e. as ci_pass.
-func (h *Handler) appendAndResolveCISuccess(ctx context.Context, origin store.Outcome, sourceRef string, eventTS time.Time) error {
+func (h *Handler) appendAndResolveCISuccess(ctx context.Context, origin store.Outcome, sourceRef string, eventTS time.Time, trigger string) error {
 	h.qualityMu.Lock()
 	defer h.qualityMu.Unlock()
 
-	flaky, err := h.isFlakyRerunLocked(ctx, origin.ID, quality.ParseCIRef(sourceRef), eventTS)
-	if err != nil {
-		return err
+	flaky := false
+	if trigger == "push" {
+		var err error
+		flaky, err = h.isFlakyRerunLocked(ctx, origin.ID, quality.ParseCIRef(sourceRef), eventTS)
+		if err != nil {
+			return err
+		}
 	}
 	eventType := quality.EventCIPass
-	if flaky {
+	if flaky && trigger == "push" {
 		eventType = quality.EventCIFailFlaky
 	}
-	return h.appendAndResolveLocked(ctx, origin, eventType, sourceRef, eventTS)
+	return h.appendAndResolveLocked(ctx, origin, eventType, sourceRef, eventTS, trigger)
 }
 
 // appendAndResolveLocked is appendAndResolve's body. 🔴 THE CALLER MUST HOLD
 // qualityMu. It is separate only because sync.Mutex is not reentrant and
 // appendAndResolveCISuccess needs to classify inside the same critical section.
-func (h *Handler) appendAndResolveLocked(ctx context.Context, origin store.Outcome, eventType, sourceRef string, eventTS time.Time) error {
+func (h *Handler) appendAndResolveLocked(ctx context.Context, origin store.Outcome, eventType, sourceRef string, eventTS time.Time, triggers ...string) error {
+	var trigger *string
+	if len(triggers) > 0 {
+		trigger = &triggers[0]
+	}
 	inserted, err := h.store.AppendQualityEvent(ctx, store.QualityEvent{
-		OutcomeID: origin.ID,
-		Developer: origin.Developer,
-		IssueID:   origin.IssueID,
-		EventType: eventType,
-		SourceRef: sourceRef,
-		EventTS:   eventTS,
+		TriggerEvent: trigger,
+		OutcomeID:    origin.ID,
+		Developer:    origin.Developer,
+		IssueID:      origin.IssueID,
+		EventType:    eventType,
+		SourceRef:    sourceRef,
+		EventTS:      eventTS,
 	})
 	if err != nil {
 		return fmt.Errorf("append quality event %q: %w", eventType, err)
@@ -1217,6 +1235,9 @@ func (h *Handler) appendAndResolveLocked(ctx context.Context, origin store.Outco
 			"outcome", origin.ID, "event_type", eventType, "source_ref", logSafeStr(sourceRef))
 	}
 
+	if trigger != nil && *trigger != "push" {
+		return nil
+	}
 	events, err := h.store.QualityEventsForOutcome(ctx, origin.ID)
 	if err != nil {
 		return fmt.Errorf("read quality events for outcome %d: %w", origin.ID, err)
@@ -1412,7 +1433,7 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		}
 
 		if !found {
-			issueID := issueref.FromCommitSubject(subject)
+			issueID := h.grammar.FromCommitSubject(subject)
 			reason := "no_candidate"
 			if prMergeSeen {
 				reason = "merge_push"
@@ -1573,7 +1594,8 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 		// Match the collector's git %s subject-only rule (#1017): close directives and
 		// tracker keys attribute; a bare #N does not. No branch is consulted:
 		// the push is to the default branch (main/master), which issueref ignores.
-		issueID := issueref.FromCommitSubject(subject)
+		issueRef := h.grammar.FromCommitSubjectRef(subject)
+		issueID := issueRef.ID
 		if issueID == "" || c.Author.Username == "" || store.ResemblesUnattributed(c.Author.Username) || !store.ValidPushCommitID(c.ID) {
 			// Unattributed direct commit — MUST be observable (log + counter), never
 			// a silent drop: no issue id in the subject, no GitHub author login,
@@ -1615,6 +1637,7 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 		o := store.Outcome{
 			Developer:    c.Author.Username,
 			IssueID:      issueID,
+			IssueRule:    issueRef.Rule,
 			Weight:       store.GitHeuristic(0, 0),
 			WeightSource: store.WeightSourcePush,
 			Quality:      1.0,
@@ -1689,3 +1712,6 @@ func gitCommitSubject(message string) string {
 	}
 	return strings.Join(lines, " ")
 }
+
+// WithGrammar supplies the same immutable grammar used by the collectors.
+func WithGrammar(g issueref.Grammar) Option { return func(h *Handler) { h.grammar = g } }

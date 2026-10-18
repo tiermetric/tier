@@ -47,6 +47,34 @@
         "outcome_only_repos": [],
         "unqualified_cost_share": 0
       },
+      "partition_diagnostics": {
+        "capped_pr_count": 0,
+        "capped_pr_count_share": 0,
+        "capped_pr_points": 0,
+        "capped_pr_points_share": 0,
+        "notice": "Points depend on PR partitioning: splitting the same work can change points on the same issue or across issues. Diagnostics apply no automatic penalties. Outcomes include PR and push outcomes; points per PR excludes direct push outcomes.",
+        "outcome_n": 4,
+        "outcomes_per_issue": [
+          {
+            "issues": 4,
+            "outcomes": 1
+          }
+        ],
+        "points_per_1000_usd": 158.40687938447613,
+        "points_per_pr": 1.75,
+        "weight_buckets": [
+          {
+            "outcomes": 1,
+            "points": 1,
+            "weight": 1
+          },
+          {
+            "outcomes": 3,
+            "points": 6,
+            "weight": 2
+          }
+        ]
+      },
       "unattributed_buckets": [
         {
           "bucket": "unattributed:main",
@@ -61,6 +89,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 4.5,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -68,6 +97,28 @@
         "developer": "e1",
         "exploratory_cost_share": 0,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 2
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 3,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 2
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 2,
         "spend_leverage": 0,
@@ -79,6 +130,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 8.22,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -86,6 +138,28 @@
         "developer": "e2",
         "exploratory_cost_share": 0,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 2,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 1,
         "spend_leverage": 0,
@@ -97,6 +171,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 7.125,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -104,6 +179,28 @@
         "developer": "e3",
         "exploratory_cost_share": 0.08771929824561403,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 2,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 1,
         "spend_leverage": 0,
@@ -113,6 +210,28 @@
       }
     ],
     "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "ci": {
+        "matched": 0,
+        "window_open": 4
+      },
+      "completeness": "unknown",
+      "cutover": "\u003ctime\u003e",
+      "denominator_weight": 7,
+      "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+      "numerator_weight": 0,
+      "quality_evidence_share": 0,
+      "recorded_numerator_rows": 0,
+      "recovered_numerator_rows": 0,
+      "revert": {
+        "matched": 0,
+        "window_open": 4
+      },
+      "status": "shown",
+      "trigger_unknown": 0,
+      "trigger_unknown_outcomes": [],
+      "workflows": []
+    },
     "rubric": {
       "version": 1
     },
@@ -195,6 +314,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 2.5,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -228,6 +348,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 5.5,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -246,6 +367,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 8.22,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -264,6 +386,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 6.5,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -341,6 +464,34 @@
         "outcome_only_repos": [],
         "unqualified_cost_share": 0
       },
+      "partition_diagnostics": {
+        "capped_pr_count": 0,
+        "capped_pr_count_share": 0,
+        "capped_pr_points": 0,
+        "capped_pr_points_share": 0,
+        "notice": "Points depend on PR partitioning: splitting the same work can change points on the same issue or across issues. Diagnostics apply no automatic penalties. Outcomes include PR and push outcomes; points per PR excludes direct push outcomes.",
+        "outcome_n": 4,
+        "outcomes_per_issue": [
+          {
+            "issues": 4,
+            "outcomes": 1
+          }
+        ],
+        "points_per_1000_usd": 158.40687938447613,
+        "points_per_pr": 1.75,
+        "weight_buckets": [
+          {
+            "outcomes": 1,
+            "points": 1,
+            "weight": 1
+          },
+          {
+            "outcomes": 3,
+            "points": 6,
+            "weight": 2
+          }
+        ]
+      },
       "unattributed_buckets": [
         {
           "bucket": "unattributed:main",
@@ -355,6 +506,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 4.5,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -362,6 +514,28 @@
         "developer": "e1",
         "exploratory_cost_share": 0,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 2
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 3,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 2
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 2,
         "spend_leverage": 0,
@@ -373,6 +547,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 8.22,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -380,6 +555,28 @@
         "developer": "e2",
         "exploratory_cost_share": 0,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 2,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 1,
         "spend_leverage": 0,
@@ -391,6 +588,7 @@
         "actual_paid_usd": 0,
         "ci_high": 0,
         "ci_low": 0,
+        "ci_note": "withheld: below evidence floor",
         "cost_per_point": 7.125,
         "cost_per_point_ci_high": 0,
         "cost_per_point_ci_low": 0,
@@ -398,6 +596,28 @@
         "developer": "e3",
         "exploratory_cost_share": 0.08771929824561403,
         "flagged_outcomes": 0,
+        "quality_evidence": {
+          "ci": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "completeness": "unknown",
+          "cutover": "\u003ctime\u003e",
+          "denominator_weight": 2,
+          "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+          "numerator_weight": 0,
+          "quality_evidence_share": 0,
+          "recorded_numerator_rows": 0,
+          "recovered_numerator_rows": 0,
+          "revert": {
+            "matched": 0,
+            "window_open": 1
+          },
+          "status": "shown",
+          "trigger_unknown": 0,
+          "trigger_unknown_outcomes": [],
+          "workflows": []
+        },
         "ranked": false,
         "sample_n": 1,
         "spend_leverage": 0,
@@ -407,6 +627,28 @@
       }
     ],
     "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "ci": {
+        "matched": 0,
+        "window_open": 4
+      },
+      "completeness": "unknown",
+      "cutover": "\u003ctime\u003e",
+      "denominator_weight": 7,
+      "label": "size-weighted points, adjusted for observed quality signals; evidence: 0%",
+      "numerator_weight": 0,
+      "quality_evidence_share": 0,
+      "recorded_numerator_rows": 0,
+      "recovered_numerator_rows": 0,
+      "revert": {
+        "matched": 0,
+        "window_open": 4
+      },
+      "status": "shown",
+      "trigger_unknown": 0,
+      "trigger_unknown_outcomes": [],
+      "workflows": []
+    },
     "rubric": {
       "version": 1
     },
@@ -489,6 +731,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 5.5,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -507,6 +750,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 8.22,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,
@@ -525,6 +769,7 @@
             "actual_paid_usd": 0,
             "ci_high": 0,
             "ci_low": 0,
+            "ci_note": "withheld: below evidence floor",
             "cost_per_point": 6.5,
             "cost_per_point_ci_high": 0,
             "cost_per_point_ci_low": 0,

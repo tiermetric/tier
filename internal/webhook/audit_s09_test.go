@@ -126,9 +126,9 @@ func TestAudit1113_RevertCommitSubjectFallback(t *testing.T) {
 		{"body_close_directive", `Revert "feat"` + "\n\ncloses #42", unknown, "issue-42", 1},
 		{"body_tracker_key", `Revert "feat"` + "\n\nPROJ-42", unknown, "PROJ-42", 1},
 		{"subject_close_directive", `Revert "feat (closes #42)"`, unknown, "issue-42", 0.1},
-		{"subject_tracker_key", `Revert "feat PROJ-42"`, unknown, "PROJ-42", 0.1},
+		{"subject_tracker_key", `Revert "feat PROJ-42"`, unknown, "PROJ-42", 1},
 		{"folded_subject_directive", "Revert \"feat\ncloses\n#42\"", unknown, "issue-42", 0.1},
-		{"subject_beats_body", `Revert "feat PROJ-42"` + "\n\ncloses #99", unknown, "PROJ-42", 0.1},
+		{"subject_beats_body", `Revert "feat PROJ-42"` + "\n\ncloses #99", unknown, "PROJ-42", 1},
 		{"resolved_sha_with_bare_number", `Revert "feat #99"`, wfMergeSHA, "issue-42", 0.1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

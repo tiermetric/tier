@@ -58,7 +58,7 @@ func fillPROutcome(ctx context.Context, tx *sql.Tx, o Outcome) error {
 	}
 	// PR-number evidence wins, using the same server-owned rule as PR a.
 	if o.PRNumber > 0 {
-		_, err := tx.ExecContext(ctx, `UPDATE token_events SET issue_id=?, attribution_rule=?
+		_, err := tx.ExecContext(ctx, `UPDATE token_events SET issue_id=?, attribution_rule=?, issue_rule=NULL
  WHERE repo=? AND pr_number=? AND (`+unattributedFamilyPredicate+`)
  AND (SELECT COUNT(*) FROM outcomes WHERE repo=? AND pr_number=? AND issue_id != ''
       AND NOT (`+unattributedFamilyPredicate+`)) = 1 AND `+unsealed,
@@ -68,6 +68,7 @@ func fillPROutcome(ctx context.Context, tx *sql.Tx, o Outcome) error {
 			return err
 		}
 	}
+	// Revert heads supply no HeadBranchHash and cannot recover branch spend.
 	// Backfill is newest-first: retain its branch evidence for later webhooks,
 	// but never credit events before predecessors are known.
 	if o.Source == "backfill" || o.HeadBranchHash == nil || o.CreatedAt == nil || o.MergedAt == nil || o.CreatedAt.After(*o.MergedAt) {
@@ -146,7 +147,7 @@ func fillPROutcome(ctx context.Context, tx *sql.Tx, o Outcome) error {
 		return err
 	}
 	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE token_events SET issue_id=?, attribution_rule=?
+		if _, err := tx.ExecContext(ctx, `UPDATE token_events SET issue_id=?, attribution_rule=?, issue_rule=NULL
  WHERE id=? AND pr_number IS NULL AND (`+unattributedFamilyPredicate+`) AND `+unsealed,
 			append([]any{o.IssueID, AttributionRuleBranchAtMerge, id, UnattributedIssueID, unattributedGlobPattern}, sealArgs...)...); err != nil {
 			return err

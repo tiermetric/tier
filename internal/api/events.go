@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -129,6 +130,8 @@ type eventRequest struct {
 	// member of store.AttributionRules(), stored INSERT-only. Omitted -> "" -> NULL,
 	// which is how every pre-#823 shipper already behaves.
 	AttributionRule string `json:"attribution_rule,omitempty"`
+	// IssueRule is client-asserted; absent or out-of-set evidence stores NULL.
+	IssueRule issueref.Rule `json:"issue_rule,omitempty"`
 	// Timestamp is the RFC3339 original capture time from the JSONL session
 	// file. Required: shipped events carry when the tokens were spent, not
 	// when the batch arrived — /scores windows would otherwise misattribute
@@ -199,6 +202,7 @@ func (h *Handler) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	events := make([]store.TokenEvent, 0, len(reqs))
 	for i, req := range reqs {
+		req.IssueRule = h.issueRules.Apply(collector.TokenEvent{IssueRule: req.IssueRule}).IssueRule
 		ev, err := validateEventRequest(req, now)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("events[%d]: %v", i, err))
@@ -450,6 +454,7 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 		BranchHash:      req.BranchHash,
 		SessionID:       req.SessionID,
 		AttributionRule: rule,
+		IssueRule:       req.IssueRule,
 		Timestamp:       ts.UTC(),
 	}, nil
 }

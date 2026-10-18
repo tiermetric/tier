@@ -88,6 +88,7 @@ type outcomeInserter interface {
 // goes to the injected writers so the whole subcommand is testable through dispatch.
 func runBackfillCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backfill", flag.ContinueOnError)
+	trackerKeys := addTrackerKeysFlag(fs)
 	fs.SetOutput(stderr)
 	repoFlag := fs.String("repo", "", `GitHub repository as "owner/name" (required)`)
 	sinceStr := fs.String("since", "", "reconstruct merged PRs on or after this date, e.g. 2026-01-01 (default: 90 days ago)")
@@ -98,15 +99,21 @@ func runBackfillCmd(args []string, stdout, stderr io.Writer) int {
 	token := fs.String("token", "", "GitHub API token. Prefer TIER_GITHUB_TOKEN env var or @/path/to/file (read from disk); a literal value here leaks via ps/shell history (#37)")
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path to write reconstructed outcomes into")
 	apiURL := fs.String("github-api-url", "https://api.github.com", "GitHub REST API base URL (override for GitHub Enterprise)")
-	// Backfill reads ONLY outcomes.size_labels from the config (#301): an org that
+	// Backfill uses the same tracker keys and size labels as serve. An org that
 	// remaps its size labels (#244) must score backfilled PRs on the SAME custom
 	// weights the live webhook applies, or historical and live outcomes for the same
 	// PR would diverge. Absent/empty → the built-in default table, exactly as serve.
-	configPath := fs.String("config", "", `path to the YAML config file (#29); backfill reads outcomes.size_labels so custom size-label weights match the live webhook (#301)`)
+	configPath := fs.String("config", "", `path to the YAML config file (#29); backfill reads attribution.tracker_keys and outcomes.size_labels to match the live webhook`)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 1
+	}
+
+	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
+	if grammarErr != nil {
+		_, _ = fmt.Fprintf(stderr, "tracker keys: %v\n", grammarErr)
 		return 1
 	}
 
@@ -202,6 +209,7 @@ func runBackfillCmd(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	gh := &githubClient{
+		grammar: grammar,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			// Keep the bearer token on the original HTTPS host; loopback HTTP is allowed.
@@ -405,7 +413,8 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 		return false, false, err == nil, err
 	}
 
-	issueID := issueref.FromBranchOrBody(pr.Head.Ref, pr.Body)
+	issueRef := gh.grammar.FromBranchOrBodyRef(pr.Head.Ref, pr.Body)
+	issueID := issueRef.ID
 	if issueID == "" {
 		// No resolvable issue id — cannot attribute. Log the PR NUMBER only (an int,
 		// not attacker-controlled); never the title/body/branch, which are.
@@ -433,6 +442,7 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 	o := store.Outcome{
 		Developer:      pr.User.Login,
 		IssueID:        issueID,
+		IssueRule:      issueRef.Rule,
 		PRNumber:       pr.Number,
 		Quality:        1.0,
 		MergeCommitSHA: pr.MergeCommitSHA,
@@ -446,6 +456,7 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 	o.SetDiffStats(pr.Additions, pr.Deletions, pr.ChangedFiles)
 	o.Weight, o.WeightSource = store.ResolveWeight(prderive.SizeWeight(labels, sizeLabels), o.Additions, o.Deletions, o.ChangedFiles)
 	if strings.EqualFold(pr.Head.Repo.FullName, o.Repo) &&
+		!issueref.IsRevertBranch(pr.Head.Ref) &&
 		strings.TrimPrefix(pr.Head.Ref, "refs/heads/") != pr.Base.Repo.DefaultBranch {
 		o.HeadBranchHash = issueref.BranchHash(o.Repo, pr.Head.Ref)
 	}
@@ -499,6 +510,7 @@ const (
 // exists rather than a dependency because the hard constraint is zero new deps
 // (tasks/README.md): net/http + encoding/json cover the two endpoints used.
 type githubClient struct {
+	grammar issueref.Grammar
 	http    *http.Client
 	baseURL string
 	token   string

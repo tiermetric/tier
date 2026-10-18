@@ -92,6 +92,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "attribution":
+		return runAttribution(args[1:], stdout, stderr)
 	case "issues":
 		return runIssues(args[1:], stdout, stderr)
 	case "score":
@@ -108,6 +110,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return runSealCmd(args[1:], os.Stdin, stdout, stderr)
 	case "ship":
 		runShip(args[1:])
+	case "quality":
+		return runQualityCmd(args[1:], stdout, stderr)
 	case "outcomes":
 		return runOutcomesCmd(args[1:], stdout, stderr)
 	case "corrections":
@@ -175,6 +179,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 // exit 0), so the two callers stay in lockstep as subcommands are added (#378).
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "usage: tierd <command> [flags]")
+	_, _ = fmt.Fprintln(w, "  attribution  read-only historical recovery receipt")
+	_, _ = fmt.Fprintln(w, "  quality      plan and apply CI trigger-provenance recovery")
 	_, _ = fmt.Fprintln(w, "  outcomes     plan and apply recognised-revert exclusions for existing PR outcomes")
 	_, _ = fmt.Fprintln(w, "  corrections  inspect and adjudicate corrective relations (self-asserted operator)")
 	_, _ = fmt.Fprintln(w, "  score    compute TIER from local Claude Code JSONL files")
@@ -404,15 +410,22 @@ func runScore(args []string) {
 	// `tierd serve` (GET /scores, the dashboard, GET /scores/{developer}), which are
 	// the surfaces an organization actually consumes.
 	fs := flag.NewFlagSet("score", flag.ExitOnError)
+	trackerKeys := addTrackerKeysFlag(fs)
 	repo := fs.String("repo", ".", "path to the git repository")
 	repoSlug := fs.String("repo-slug", "", `canonical "owner/repo" identity for --repo (#231). Omit to read remote.origin.url. REQUIRED ON A FORK: origin names the fork, while the upstream webhook records outcomes against the upstream, so without this your cost never joins your outcomes`)
 	sinceStr := fs.String("since", "", "start date, e.g. 2026-01-01 (default: 90 days ago)")
 	developer := fs.String("developer", "", "developer ID override (default: OS username)")
 	claudeDir := fs.String("claude-dir", "", "override ~/.claude directory (for testing)")
 	pricesPath := fs.String("prices", os.Getenv("TIER_PRICES"), "path to a price-table YAML override (#68); empty uses the embedded default. A bad file fails the command")
-	configPath := fs.String("config", "", "path to a tierd config YAML (#154); `score` reads ONLY prices_file from it, so the CLI prices identically to the serve it reports against. --prices wins over the file's prices_file")
+	configPath := fs.String("config", "", "path to a tierd config YAML (#154); `score` reads prices_file, subscriptions and attribution.tracker_keys from it. --prices wins over the file's prices_file")
 	worktreeAttr := fs.Bool(worktreeAttrFlag, false, "report with #823 worktree attribution on, as `tierd ship --"+worktreeAttrFlag+"` would ship it, then print a dry-run audit of what it changes against the flag off: counts per rule and per repo, and a bounded sample of changed messages (session id, time, old and new issue; never content or paths). Stores nothing. The counts compare against a local flag-off scan: the server keeps the first issue, repo and rule it stored for a message, so turning the flag on changes only messages not yet stored. Reads only this flag or env "+worktreeAttrEnv+", never --config")
 	_ = fs.Parse(args)
+	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
+	if grammarErr != nil {
+		fmt.Fprintf(os.Stderr, "tracker keys: %v\n", grammarErr)
+		os.Exit(1)
+	}
+
 	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
@@ -500,6 +513,7 @@ func runScore(args []string) {
 	}
 
 	c := &collector.JSONLCollector{
+		Grammar:     grammar,
 		RepoPath:    repoPath,
 		ClaudeDir:   *claudeDir,
 		DeveloperID: *developer,
@@ -527,7 +541,7 @@ func runScore(args []string) {
 		fmt.Println("No billable messages inside the --since window for the given repo.")
 		fmt.Printf("Searched: ~/.claude/projects/ for sessions since %s\n", since.Format("2006-01-02"))
 		fmt.Println("Make sure TIER is running in the correct git repository directory.")
-		fmt.Println("Note: `tierd score` reads Claude Code sessions only — it captures neither Codex CLI nor Opencode spend. For Codex, run `tierd serve --aggregation <mode> --watch-repo <path> --codex-rollout` (or `tierd ship --server <url> --repo <path> --codex-rollout`); replace <path> with your git repository path, <mode> with team or division (anonymized aggregates) or developer (named per-developer rows), and <url> with your central tierd base URL with TIER_API_TOKEN set; for Opencode, the same with --opencode; the embedded price table covers glm-5.3 and glm-5.3-flash, and any other GLM model needs a --prices table carrying its rate (#492, #719, #786).")
+		fmt.Println("Note: `tierd score` reads Claude Code sessions only — it captures neither Codex CLI nor Opencode spend. For Codex, run `tierd serve --aggregation <mode> --watch-repo <path> --codex-rollout` (or `tierd ship --server <url> --repo <path> --codex-rollout`); replace <path> with your git repository path, <mode> with team or division (anonymized aggregates; developer mode is reserved for the synthetic demo), and <url> with your central tierd base URL with TIER_API_TOKEN set; for Opencode, the same with --opencode; the embedded price table covers glm-5.3 and glm-5.3-flash, and any other GLM model needs a --prices table carrying its rate (#492, #719, #786).")
 		return
 	}
 
@@ -574,6 +588,7 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 		pricingTokens store.PricingTokenCounts
 	}
 	byDev := map[string]*row{}
+	var attributedMicro int64
 	for _, e := range events {
 		if byDev[e.Developer] == nil {
 			byDev[e.Developer] = &row{}
@@ -585,6 +600,9 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 		r.cacheWrite5m += e.CacheWrite5m
 		r.cacheWrite1h += e.CacheWrite1h
 		r.costMicro += e.CostMicro
+		if e.IssueID != "" && !store.IsUnattributed(e.IssueID) {
+			attributedMicro += e.CostMicro
+		}
 		addScorePricingTokens(&r.pricingTokens, e)
 	}
 
@@ -614,6 +632,16 @@ func printCostReport(w io.Writer, events []collector.TokenEvent, since time.Time
 	}
 	_, _ = fmt.Fprintln(w, "───────────────────────────────────────────────────────────────────────────────────────────")
 	_, _ = fmt.Fprintf(w, "%-20s  %78.4f%s\n", "TOTAL", store.MicroToDollars(totalCostMicro), scoreCostLabel(totalPricingTokens))
+	const shareLabel = "issue-attributed share of Claude Code spend (no outcome join)"
+	if totalCostMicro > 0 {
+		_, _ = fmt.Fprintf(w, "%s: %.1f%%\n", shareLabel, 100*float64(attributedMicro)/float64(totalCostMicro))
+	} else {
+		_, _ = fmt.Fprintf(w, "%s: unavailable (no spend)\n", shareLabel)
+	}
+	// ComputeDeveloper's ranking gate has no attributed-spend percentage floor
+	// (internal/scoring/engine.go). JSONL alone cannot evaluate its outcome tests.
+	_, _ = fmt.Fprintf(w, "Claude Code spend only; server ranking requires at least %d outcomes, at least $%.2f spend, and zero flagged outcomes\n",
+		scoring.MinRankedOutcomes, scoring.MinRankedCostUSD)
 	percentage := 100 * totalPricingTokens.Share()
 	shareText := fmt.Sprintf("%.2f%%", percentage)
 	if percentage > 0 && percentage < 0.01 {
@@ -816,11 +844,9 @@ func (s *repeatableStringSlice) Set(v string) error {
 // failing on the first bad entry with a message naming the config KEY and the
 // entry.
 //
-// It exists as a seam for the same reason buildWebhookOptions does: the two call
-// sites in runServeWithOptions end in os.Exit(1), which no in-process test can
-// survive, so without this the config->flag wiring is unreachable from a test and
-// only the flag type itself is covered. That is exactly the gap that let the #240
-// regression (a config key parsed but never plumbed) go unnoticed.
+// This seam tests config-to-flag wiring independently of server startup. Without
+// it only the flag type itself was covered; that gap let the #240 regression
+// (a config key parsed but never plumbed) go unnoticed.
 //
 // It matters more now that repeatableStringSlice.Set REJECTS an empty value: an
 // explicit `- ""` in watch.repos or http.trusted_proxy_cidrs used to be skipped
@@ -877,12 +903,9 @@ func buildWebhookOptions(pushCapture bool, unattributed, mergeLeak, missingPushe
 }
 
 // runServe runs the HTTP server subcommand and returns the process exit code
-// (0 clean, 1 fatal), so main's os.Exit is the single exit point and the
-// deferred db.Close always runs (#146). The early flag/config/validation
-// failures below still call os.Exit(1) directly: they fire BEFORE any resource
-// (the DB, the watcher) is open, so no defer is skipped that matters. Every
-// os.Exit AFTER store.Open has been converted to `return 1` so db.Close and the
-// watcher-drain shutdown sequence run on the fatal path too.
+// (0 clean, 1 fatal). Direct failures return so caller and server cleanup run.
+// Demo preflights the legacy environment-default parsers before allocating its
+// private directory; it never passes a config file to the legacy config helpers.
 func runServe(args []string) int {
 	// The `serve` CLI entry ALWAYS uses a zero serveOptions — no serve flag or env
 	// var can set syntheticDemo. That unreachability is the #476 security property:
@@ -897,14 +920,28 @@ type serveOptions struct {
 	// syntheticDemo marks a serve driven by `tierd demo` (#476): the dataset is
 	// invented and every write/ingest/admin route is structurally absent
 	// (--read-only), so exposing it beyond loopback leaks nothing real. It relaxes
-	// validateBind for that case ONLY. It is set exclusively by runDemo and is
+	// validateBind and the developer-mode guard for that case ONLY. It is set
+	// exclusively by runDemo and is
 	// unreachable from any serve flag/env, so a serve over real data on a
 	// non-loopback bind without a token is still refused.
 	syntheticDemo bool
+	issueIDCounts func(context.Context) (map[string]int, error)
+	// shutdown is registered by demo before its private directory is allocated.
+	// Nil for ordinary serve; early demo signals must still reach graceful drain.
+	shutdown <-chan struct{}
+}
+
+var serveBoolEnvNames = []string{
+	"TIER_EVENT3_SCORING",
+	"TIER_PUSH_CAPTURE",
+	"TIER_CODEX_ROLLOUT",
+	"TIER_OPENCODE",
+	"TIER_MUSE",
 }
 
 func runServeWithOptions(args []string, opts serveOptions) int {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	trackerKeys := addTrackerKeysFlag(fs)
 	// The settings sealing reads are registered once, for serve and `tierd seal` (#913).
 	sf := addSealServeFlags(fs)
 	configPath, dbPath, pricesPath, readOnly := sf.config, sf.db, sf.prices, sf.readOnly
@@ -923,19 +960,30 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	authFailureWindow := fs.Duration("auth-failure-window", rlDefault.Window, "sliding window over which --auth-max-failures is counted (#36)")
 	authLockout := fs.Duration("auth-lockout", rlDefault.Lockout, "how long an IP stays locked out (429) after tripping --auth-max-failures (#36)")
 	zeroOutcomeWindowDays := fs.Int("zero-outcome-window-days", 7, "zero-outcome tripwire look-back window in days (#189): serve fails loud (WARN log + tier_zero_outcome_tripwire metric) when cost accrued in this window but zero outcomes were recorded. Config key: zero_outcome_window_days. Must be >= 1")
-	event3Scoring := fs.Bool("event3-scoring", envBool("TIER_EVENT3_SCORING"), "score corrective work; OFF by default. Precedence: CLI > TIER_EVENT3_SCORING > outcomes.event3_scoring > false")
-	pushCapture := fs.Bool("push-capture", envBool("TIER_PUSH_CAPTURE"), "capture a qualifying direct commit to the default branch as a degraded (0.5, per-issue-per-UTC-day) outcome so trunk-based teams aren't scored ~0 (#196). OFF by default. Env TIER_PUSH_CAPTURE, config key outcomes.push_capture. Precedence: CLI > env > config > default")
+	event3Scoring := fs.Bool("event3-scoring", envBool(serveBoolEnvNames[0]), "score corrective work; OFF by default. Precedence: CLI > TIER_EVENT3_SCORING > outcomes.event3_scoring > false")
+	pushCapture := fs.Bool("push-capture", envBool(serveBoolEnvNames[1]), "capture a qualifying direct commit to the default branch as a degraded (0.5, per-issue-per-UTC-day) outcome so trunk-based teams aren't scored ~0 (#196). OFF by default. Env TIER_PUSH_CAPTURE, config key outcomes.push_capture. Precedence: CLI > env > config > default")
 	var trustedProxyCIDRs repeatableStringSlice
 	fs.Var(&trustedProxyCIDRs, "trusted-proxy-cidr", "CIDR of a trusted reverse proxy/TLS terminator (repeatable). When the direct peer is inside a trusted CIDR, the failed-auth lockout keys on the client IP from X-Forwarded-For (rightmost untrusted hop) instead of the peer address. Default: unset — X-Forwarded-For is never trusted (#131)")
 	var watchRepos repeatableStringSlice
 	fs.Var(&watchRepos, "watch-repo", "git repo path to tail Claude Code JSONL for (repeatable; omit to disable live ingestion)")
-	codexRollout := fs.Bool("codex-rollout", envBool("TIER_CODEX_ROLLOUT"), "capture Codex CLI spend from the local rollout logs at ~/.codex/sessions/**/rollout-*.jsonl (#464). This is the path that captures Codex as you actually run it: the reverse proxy can parse the Responses API Codex speaks (#459), but only for traffic you deliberately point at it with API-key auth, and that path is not yet live-verified. Do NOT do both at once — Codex routed through /openai/ while this flag is on is counted TWICE (the proxy keys on the response id, this collector keys on session+ordinal, and the two cannot dedup). Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_CODEX_ROLLOUT, config block collectors.codex_rollout (which also sets sessions_dir / scan_interval)")
-	opencodeFlag := fs.Bool("opencode", envBool("TIER_OPENCODE"), "capture Opencode spend from its local SQLite session store at ~/.local/share/opencode/opencode.db (#719). Opened READ-ONLY; Opencode may keep running. Captures only providers with an AUDITED per-token rate — today the Z.ai coding plan — and NAMES every exclusion at startup with a per-scan row count; Ollama's cloud tier is excluded because it publishes no per-token rate and would price at the guessed self-hosted-medium reference rate. GLM-5.3 needs no price-table override: the embedded table's glm-5.3 row prices it per token at Z.ai list price (#786). Any GLM model with no embedded row prices at that same guessed fallback, and serve logs a WARN naming it the first time it prices one. Do NOT also route Opencode through tier's proxy: the two keys are unrelatable and the spend DOUBLES. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_OPENCODE, config block collectors.opencode (which also sets db_path / scan_interval)")
-	museFlag := fs.Bool("muse", envBool("TIER_MUSE"), "capture Meta Muse Code spend from its local session logs at ~/.local/share/muse/sessions/**/session.jsonl (#895). Reads only token counts, model names, the session id (stored), each run's recorded branch and the workspace root — never prompt, reply or tool text. One event per billed model call, agent turns and automatic tool-approval reviews alike, emitted once its run settles: its branch is recorded, or it has ended and Muse wrote past it, or its session log has been quiet for 6h. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_MUSE, config block collectors.muse (which also sets home / scan_interval)")
+	codexRollout := fs.Bool("codex-rollout", envBool(serveBoolEnvNames[2]), "capture Codex CLI spend from the local rollout logs at ~/.codex/sessions/**/rollout-*.jsonl (#464). This is the path that captures Codex as you actually run it: the reverse proxy can parse the Responses API Codex speaks (#459), but only for traffic you deliberately point at it with API-key auth, and that path is not yet live-verified. Do NOT do both at once — Codex routed through /openai/ while this flag is on is counted TWICE (the proxy keys on the response id, this collector keys on session+ordinal, and the two cannot dedup). Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_CODEX_ROLLOUT, config block collectors.codex_rollout (which also sets sessions_dir / scan_interval)")
+	opencodeFlag := fs.Bool("opencode", envBool(serveBoolEnvNames[3]), "capture Opencode spend from its local SQLite session store at ~/.local/share/opencode/opencode.db (#719). Opened READ-ONLY; Opencode may keep running. Captures only providers with an AUDITED per-token rate — today the Z.ai coding plan — and NAMES every exclusion at startup with a per-scan row count; Ollama's cloud tier is excluded because it publishes no per-token rate and would price at the guessed self-hosted-medium reference rate. GLM-5.3 needs no price-table override: the embedded table's glm-5.3 row prices it per token at Z.ai list price (#786). Any GLM model with no embedded row prices at that same guessed fallback, and serve logs a WARN naming it the first time it prices one. Do NOT also route Opencode through tier's proxy: the two keys are unrelatable and the spend DOUBLES. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_OPENCODE, config block collectors.opencode (which also sets db_path / scan_interval)")
+	museFlag := fs.Bool("muse", envBool(serveBoolEnvNames[4]), "capture Meta Muse Code spend from its local session logs at ~/.local/share/muse/sessions/**/session.jsonl (#895). Reads only token counts, model names, the session id (stored), each run's recorded branch and the workspace root — never prompt, reply or tool text. One event per billed model call, agent turns and automatic tool-approval reviews alike, emitted once its run settles: its branch is recorded, or it has ended and Muse wrote past it, or its session log has been quiet for 6h. Attributes to the same repos as --watch-repo; with no watched repo serve refuses to start (except under --read-only, which disables all capture anyway). OFF by default. Env TIER_MUSE, config block collectors.muse (which also sets home / scan_interval)")
 	worktreeAttr := fs.Bool(worktreeAttrFlag, false, worktreeAttrServeHelp)
 	logFormat := fs.String("log-format", cmp.Or(os.Getenv("TIER_LOG_FORMAT"), "auto"), "log format: auto|json|text (#67; auto = JSON unless stderr is a terminal)")
 	logLevel := fs.String("log-level", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "info"), "log level: debug|info|warn|error (#67)")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
+	if grammarErr != nil {
+		fmt.Fprintf(os.Stderr, "tracker keys: %v\n", grammarErr)
+		return 1
+	}
+
 	secretEnvFallback(fs, webhookSecret, "webhook-secret", "TIER_WEBHOOK_SECRET")
 	secretEnvFallback(fs, apiToken, "api-token", "TIER_API_TOKEN")
 	secretEnvFallback(fs, readToken, "read-token", "TIER_READ_TOKEN")
@@ -950,7 +998,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	logger, err := newLogger(os.Stderr, *logFormat, *logLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	slog.SetDefault(logger)
 
@@ -1008,7 +1056,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "config: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		anthropicAdminCfg = cfg.Collectors.AnthropicAdmin
 		openaiUsageCfg = cfg.Collectors.OpenAIUsage
@@ -1064,7 +1112,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			}
 		} else if err := applyRepeatableConfigList(&watchRepos, cfg.Watch.Repos, "watch.repos"); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		// trusted-proxy-cidr is repeatable, same list-valued CLI-wins-entirely
 		// precedence as watch-repo (#131): any --trusted-proxy-cidr on the CLI
@@ -1077,14 +1125,14 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			}
 		} else if err := applyRepeatableConfigList(&trustedProxyCIDRs, cfg.HTTP.TrustedProxyCIDRs, "http.trusted_proxy_cidrs"); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
 	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, worktreeAttrCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
-		os.Exit(1)
+		return 1
 	}
 	logger.Info(wtSetting.String())
 
@@ -1093,7 +1141,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// than silently coerce), so refuse it at startup.
 	if *zeroOutcomeWindowDays < 1 {
 		fmt.Fprintf(os.Stderr, "--zero-outcome-window-days must be >= 1, got %d\n", *zeroOutcomeWindowDays)
-		os.Exit(1)
+		return 1
 	}
 	zeroOutcomeWindow := time.Duration(*zeroOutcomeWindowDays) * 24 * time.Hour
 
@@ -1110,7 +1158,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	sealCfg, err := sf.resolve(fs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	aggMode := sealCfg.mode
 
@@ -1118,26 +1166,28 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// or secret. Runs after config resolution so a value sourced from CLI, env,
 	// or config alike can use the `@/path` form; keeps the secret off the
 	// command line (and out of ps/shell history).
-	resolveOrExit := func(flagName string, p *string) {
-		v, err := resolveSecretFlag("--"+flagName, *p)
+	for _, secret := range []struct {
+		name  string
+		value *string
+	}{
+		{"api-token", apiToken}, {"read-token", readToken},
+		{"metrics-token", metricsToken}, {"ingest-token", ingestToken},
+		{"webhook-secret", webhookSecret},
+	} {
+		v, err := resolveSecretFlag("--"+secret.name, *secret.value)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "--%s: %v\n", flagName, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "--%s: %v\n", secret.name, err)
+			return 1
 		}
-		*p = v
+		*secret.value = v
 	}
-	resolveOrExit("api-token", apiToken)
-	resolveOrExit("read-token", readToken)
-	resolveOrExit("metrics-token", metricsToken)
-	resolveOrExit("ingest-token", ingestToken)
-	resolveOrExit("webhook-secret", webhookSecret)
 
 	// Token guardrails (#190, #944, #1144), checked after @file/env/config resolution so
 	// they see the effective values regardless of source. Two equal tokens would
 	// classify as the broader scope and silently grant it — refuse to start.
 	if err := checkDistinctTokens(*apiToken, *readToken, *metricsToken, *ingestToken); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	// A read token with no api token has no effect: auth is disabled entirely in
 	// that mode, and validateBind still refuses a non-loopback bind on a read
@@ -1161,21 +1211,21 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	adminSettings, err := resolveAnthropicAdminConfig(anthropicAdminCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	// Same for the OpenAI Usage/Costs poller (#139): resolve+validate before
 	// store.Open so a misconfiguration fails fast. Absent block → nil → disabled.
 	openaiSettings, err := resolveOpenAIUsageConfig(openaiUsageCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	// Same for the Codex rollout-log collector (#464): resolve+validate before
 	// store.Open. Enabled by EITHER --codex-rollout or the config block.
 	codexSettings, err := resolveCodexRolloutConfig(codexRolloutCfg, *codexRollout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Fail fast when Codex capture is requested but has no repo to attribute to
@@ -1190,30 +1240,30 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	opencodeSettings, err := resolveOpencodeConfig(opencodeCfg, *opencodeFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	museSettings, err := resolveMuseConfig(museCfg, *museFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if warn, fatal := codexWatchCheck(codexSettings != nil, len(watchRepos), *readOnly); fatal != "" {
 		fmt.Fprintln(os.Stderr, fatal)
-		os.Exit(1)
+		return 1
 	} else if warn != "" {
 		logger.Warn(warn)
 	}
 	if warn, fatal := opencodeWatchCheck(opencodeSettings != nil, len(watchRepos), *readOnly); fatal != "" {
 		fmt.Fprintln(os.Stderr, fatal)
-		os.Exit(1)
+		return 1
 	} else if warn != "" {
 		logger.Warn(warn)
 	}
 	if warn, fatal := museWatchCheck(museSettings != nil, len(watchRepos), *readOnly); fatal != "" {
 		fmt.Fprintln(os.Stderr, fatal)
-		os.Exit(1)
+		return 1
 	} else if warn != "" {
 		logger.Warn(warn)
 	}
@@ -1254,7 +1304,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// rather than expose auth that is silently un-throttled.
 	if err := validateAuthLockout(*authMaxFailures, *authFailureWindow, *authLockout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Parse the trusted-proxy CIDRs into prefixes, failing loud on a bad entry
@@ -1263,7 +1313,15 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	trustedProxies, err := parseTrustedProxies(trustedProxyCIDRs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
+	}
+
+	// #1228: real developer views wait for #826's named-viewer, audit and
+	// retention controls. Only runDemo can set this process-internal exemption;
+	// a loopback bind, token or read-only flag grants no exception.
+	if aggMode == scoring.AggregationDeveloper && !opts.syntheticDemo {
+		fmt.Fprintln(os.Stderr, "non-synthetic developer mode is disabled until #826's named-viewer, audit and retention controls ship; use --aggregation team or division, or tierd score for local Claude Code costs")
+		return 1
 	}
 
 	// Fail-closed exposure check (#59) — runs after config-file resolution so
@@ -1275,7 +1333,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// only via `tierd demo`, never from a serve flag/env — see serveOptions.
 	if err := validateBind(*addr, *apiToken, opts.syntheticDemo); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Apply a --prices override (#68) BEFORE store.Open: Open runs the #55 cost
@@ -1286,7 +1344,12 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// table_hash/file_hash (#713) ride along on the SAME record as the version:
 	// an operator diffing two installs' startup logs needs the content identity
 	// next to the version it disagrees with, not in a second line to correlate.
-	if info, ok := loadPricesOverride(*pricesPath); ok {
+	if *pricesPath != "" {
+		info, err := store.LoadPriceTable(*pricesPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "--prices: %v\n", err)
+			return 1
+		}
 		logger.Info("loaded price-table override", "path", *pricesPath,
 			"version", info.Version, "effective_date", info.EffectiveDate, "models", info.ModelCount,
 			"table_hash", info.TableHash, "file_hash", info.FileHash)
@@ -1304,23 +1367,34 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// fail startup without having touched the database.
 	if err := checkSubscriptionCoverage(subscriptionsCfg, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Ensure the database directory exists before opening.
 	if err := os.MkdirAll(filepath.Dir(*dbPath), 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "create db dir: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	db, err := store.Open(*dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open db: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer func() { _ = db.Close() }()
 	if n := db.UpgradeNotice(); n != "" {
 		_, _ = fmt.Fprintln(os.Stderr, n)
+	}
+
+	issueIDCounts := db.IssueIDCounts
+	if opts.issueIDCounts != nil {
+		issueIDCounts = opts.issueIDCounts
+	}
+	counts, countsErr := issueIDCounts(context.Background())
+	if countsErr != nil {
+		logger.Warn("tracker keys diagnostic", "err", countsErr)
+	} else {
+		logger.Info(grammar.Diagnostic(counts))
 	}
 
 	if err := configureServeCorrectionScoring(context.Background(), db, *event3Scoring, *readOnly); err != nil {
@@ -1463,6 +1537,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		// branch as degraded outcomes; unattributed commits are counted so the drop
 		// is observable in /metrics.
 		whOpts := buildWebhookOptions(*pushCapture, srvMetrics.pushUnattributed, srvMetrics.pushMergeLeak, srvMetrics.pushMissingPushedAt, generatedPathsCfg, sizeLabelsCfg, srvMetrics.revertAmbiguous)
+		whOpts = append(whOpts, webhook.WithGrammar(grammar))
 		whOpts = append(whOpts, webhook.WithOversizedCounter(srvMetrics.webhookOversized))
 		if *pushCapture {
 			logger.Info("push-to-default-branch outcome capture is ENABLED (#196): direct commits to the default branch earn degraded 0.5, per-issue-per-UTC-day outcomes")
@@ -1592,7 +1667,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			return 1
 		}
 		w := &collector.Watcher{
-			Repos: resolved,
+			Grammar: grammar,
+			Repos:   resolved,
 			// Operator overrides for repository identity (#231). Absent -> the
 			// watcher reads remote.origin.url, then degrades to 'unqualified' with
 			// one warning per repo. Required for forks, where origin names the fork
@@ -1864,6 +1940,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			targets = append(targets, codexrollout.RepoTarget{Path: p, Slug: watchRepoSlugs[p]})
 		}
 		codexCollector, err := codexrollout.New(codexrollout.Config{
+			Grammar:     grammar,
 			SessionsDir: codexSettings.sessionsDir,
 			Repos:       targets,
 			Interval:    codexSettings.interval,
@@ -2028,6 +2105,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 			targets = append(targets, muse.RepoTarget{Path: p, Slug: watchRepoSlugs[p]})
 		}
 		museCollector, err := muse.New(muse.Config{
+			Grammar:  grammar,
 			Home:     museSettings.home,
 			Repos:    targets,
 			Interval: museSettings.interval,
@@ -2090,8 +2168,14 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// Demo registered signals before allocating its database. Reuse that
+	// cancellation channel; ordinary serve registers its own signal context.
+	quit := opts.shutdown
+	if quit == nil {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		quit = ctx.Done()
+	}
 
 	// Both the fatal-error path and the signal path run the SAME shutdown
 	// sequence (cancel → join watcher → drain HTTP), so the deferred db.Close
@@ -2672,7 +2756,7 @@ func resolveAggregationMode(s string) (scoring.AggregationMode, error) {
 	case "developer":
 		return scoring.AggregationDeveloper, nil
 	case "":
-		return 0, fmt.Errorf("--aggregation is REQUIRED and has no default: set it to 'team' (team-only aggregates) or 'division' (division-only aggregates, one level up) — both k-anonymized and never naming an individual, the safe choice under EU works-council / GDPR Art. 22 co-determination — or 'developer' (named per-developer rows). Provide it via --aggregation, the TIER_AGGREGATION env var, or the config key aggregation (#185, #270)")
+		return 0, fmt.Errorf("--aggregation is REQUIRED and has no default: set it to 'team' (team-only aggregates) or 'division' (division-only aggregates, one level up) — both k-anonymized and never naming an individual, the safe choice under EU works-council / GDPR Art. 22 co-determination — or 'developer' (synthetic demo only; refused on real data until #826 ships). Provide it via --aggregation, the TIER_AGGREGATION env var, or the config key aggregation (#185, #270)")
 	default:
 		return 0, fmt.Errorf("--aggregation must be 'team', 'division', or 'developer', got %q (#185, #270)", s)
 	}

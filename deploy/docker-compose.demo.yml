@@ -32,7 +32,7 @@ services:
     # admin routes, the webhook, the proxies, the watcher, and the pollers are all
     # structurally absent. Do NOT append --read-only here: `demo` does not accept
     # serve flags, and it already implies read-only. Loopback bind => no token.
-    command: ["demo", "--addr", "127.0.0.1:8080", "--db", "/data/demo.db"]
+    command: ["demo", "--addr", "127.0.0.1:8080"]
 
     # --- hardening (mirrors docker-compose.yml) ---
     read_only: true
@@ -40,10 +40,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Named volume so the image's /data ownership (uid 65532) carries over; the
-    # synthetic DB is rewritten on every start, so its contents are disposable.
-    volumes:
-      - demo-data:/data
+    # Private random 0700 directory per process; no persistent/shared DB path.
+    # The rootfs is read-only, so SQLite needs this writable temporary parent.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
 
     # tierd exits 1 on a terminal HTTP-listener failure; the restart policy brings
     # it back with a fresh synthetic board. REQUIRED, not optional.
@@ -99,6 +99,3 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-
-volumes:
-  demo-data:

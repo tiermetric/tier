@@ -30,6 +30,8 @@ import (
 // joins them to the git log of a target repository to produce per-commit token
 // attribution.
 type JSONLCollector struct {
+	Grammar issueref.Grammar
+	Logger  *slog.Logger
 	// RepoPath is the root of the git repository to join against.
 	RepoPath string
 	// ClaudeDir overrides the default ~/.claude directory (for testing).
@@ -248,6 +250,7 @@ type gitCommit struct {
 	Subject   string
 	Branches  []string // branch names from the decorate field
 	IssueID   string   // extracted from branch or commit message
+	IssueRule issueref.Rule
 	PRNumber  *int
 }
 
@@ -302,6 +305,16 @@ func (c *JSONLCollector) Collect(ctx context.Context, since time.Time) ([]TokenE
 // can share the parse/filter/join pipeline without one calling the other
 // (which would duplicate the slice allocation).
 func (c *JSONLCollector) collectEvents(ctx context.Context, since time.Time) ([]TokenEvent, error) {
+	revertCount := 0
+	defer func() {
+		if revertCount > 0 {
+			logger := c.Logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Info("revert-branch events left unattributed", "count", revertCount)
+		}
+	}()
 	if err := validateGitRepo(c.RepoPath); err != nil {
 		return nil, fmt.Errorf("repo validation: %w", err)
 	}
@@ -342,7 +355,7 @@ func (c *JSONLCollector) collectEvents(ctx context.Context, since time.Time) ([]
 		return nil, nil
 	}
 
-	commits, err := gitLog(ctx, c.RepoPath, since.Add(-joinWindow))
+	commits, err := gitLogWithGrammar(ctx, c.RepoPath, since.Add(-joinWindow), c.Grammar)
 	if err != nil {
 		return nil, fmt.Errorf("git log: %w", err)
 	}
@@ -352,13 +365,18 @@ func (c *JSONLCollector) collectEvents(ctx context.Context, since time.Time) ([]
 		developer = osUsername()
 	}
 
-	events := joinSessionsToCommits(sessions, commits, developer, c.repo())
+	events := joinSessionsToCommits(sessions, commits, developer, c.repo(), c.Grammar)
 	// Since is inclusive. Timestamp-less messages use their session's start
 	// time, the same fallback the server stores, so the windows agree.
 	kept := events[:0]
 	for _, ev := range events {
 		if !ev.Timestamp.Before(since) {
 			kept = append(kept, ev)
+		}
+	}
+	for _, ev := range kept {
+		if ev.RevertBranch {
+			revertCount++
 		}
 	}
 	return kept, nil
@@ -1001,6 +1019,10 @@ func parseSessionLinesCapped(path string, startOffset int64, knownMeta sessionMe
 
 // gitLog runs git log in repoPath and returns parsed commits since the given time.
 func gitLog(ctx context.Context, repoPath string, since time.Time) ([]gitCommit, error) {
+	return gitLogWithGrammar(ctx, repoPath, since, issueref.Grammar{})
+}
+
+func gitLogWithGrammar(ctx context.Context, repoPath string, since time.Time, grammar issueref.Grammar) ([]gitCommit, error) {
 	// The trailing -07:00 offset is load-bearing: a zone-less --since string is
 	// parsed by git in the HOST-LOCAL timezone, so on any non-UTC machine the
 	// attribution window skews by the local UTC offset (issue #119). The instant
@@ -1049,15 +1071,16 @@ func gitLog(ctx context.Context, repoPath string, since time.Time) ([]gitCommit,
 		}
 		// Branch references take precedence over issue references in subjects.
 		for _, b := range commit.Branches {
-			if id := issueref.FromBranch(b); id != "" {
-				commit.IssueID = id
+			if ref := grammar.FromBranchRef(b); ref.ID != "" {
+				commit.IssueID, commit.IssueRule = ref.ID, ref.Rule
 				break
 			}
 		}
 		if commit.IssueID == "" {
-			commit.IssueID = issueref.FromCommitSubject(commit.Subject)
+			ref := grammar.FromCommitSubjectRef(commit.Subject)
+			commit.IssueID, commit.IssueRule = ref.ID, ref.Rule
 		}
-		commit.PRNumber = issueref.FromCommitSubjectPR(commit.Subject)
+		commit.PRNumber = grammar.FromCommitSubjectPR(commit.Subject)
 		commits = append(commits, commit)
 	}
 	return commits, nil
@@ -1121,7 +1144,7 @@ func parseBranches(decorateField string) []string {
 // filterSessionsByRepo (routeSessions with #823 attribution on, where a message
 // that ran in an unconfigured repo's worktree books to UnattributedForeignRepo
 // with an unqualified repo), so the fallback cannot leak foreign-repo cost.
-func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, developer, repo string) []TokenEvent {
+func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, developer, repo string, grammar issueref.Grammar) []TokenEvent {
 	var events []TokenEvent
 
 	// Index commits by branch leaf name ONCE, so per-message resolution scans only
@@ -1157,10 +1180,12 @@ func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, devel
 					branch, rule, foreign = a.Branch, a.Rule, a.Foreign
 				}
 			}
-			issueID, prNumber := resolveMessageAttribution(branch, msgTS, commitsByLeaf)
+			issueRef, prNumber := resolveMessageRef(branch, msgTS, commitsByLeaf, grammar)
+			issueID := issueRef.ID
 			if foreign {
 				issueID, evRepo = UnattributedForeignRepo, repoid.Unqualified
 				prNumber = nil
+				issueRef.Rule = ""
 			}
 
 			model := m.model
@@ -1228,9 +1253,11 @@ func joinSessionsToCommits(sessions []sessionSummary, commits []gitCommit, devel
 				Repo:               evRepo,
 				PRNumber:           prNumber,
 				BranchHash:         issueref.BranchHash(evRepo, branch),
+				RevertBranch:       issueref.IsRevertBranch(branch),
 				SessionID:          s.SessionID,
 				BillingMode:        billingMode,
 				AttributionRule:    rule,
+				IssueRule:          issueRef.Rule,
 				Timestamp:          ts,
 			})
 		}
@@ -1298,7 +1325,15 @@ func resolveMessageIssue(branch string, msgTS time.Time, commitsByLeaf map[strin
 }
 
 func resolveMessageAttribution(branch string, msgTS time.Time, commitsByLeaf map[string][]gitCommit) (string, *int) {
+	ref, pr := resolveMessageRef(branch, msgTS, commitsByLeaf, issueref.Grammar{})
+	return ref.ID, pr
+}
+
+func resolveMessageRef(branch string, msgTS time.Time, commitsByLeaf map[string][]gitCommit, grammar issueref.Grammar) (issueref.Ref, *int) {
 	branch = strings.TrimPrefix(branch, "refs/heads/")
+	if issueref.IsRevertBranch(branch) {
+		return issueref.Ref{ID: bucketForBranch(branch)}, nil
+	}
 	var prNumber *int
 	if !issueref.IsExploratoryBranch(branch) {
 		lo := msgTS.Add(-joinWindow)
@@ -1317,28 +1352,36 @@ func resolveMessageAttribution(branch string, msgTS time.Time, commitsByLeaf map
 					}
 				}
 			}
+			// A rejected event branch can fall back to subject evidence, never another decoration's branch ID.
+			if grammar.FromBranchRef(branch).ID == "" && (c.IssueRule == issueref.RuleBranchFirstSlot || c.IssueRule == issueref.RuleBranchConfiguredKey) {
+				if ref := grammar.FromCommitSubjectRef(c.Subject); ref.ID != "" {
+					return ref, prNumber
+				}
+				continue
+			}
+
 			if c.IssueID != "" {
 				issueBranches := 0
-				ownIssue := ""
+				ownIssue := issueref.Ref{}
 				for _, b := range c.Branches {
-					if id := issueref.FromBranch(b); id != "" {
+					if ref := grammar.FromBranchRef(b); ref.ID != "" {
 						issueBranches++
 						if b == branch {
-							ownIssue = id
+							ownIssue = ref
 						}
 					}
 				}
-				if issueBranches > 1 && ownIssue != "" {
+				if issueBranches > 1 && ownIssue.ID != "" {
 					return ownIssue, prNumber
 				}
-				return c.IssueID, prNumber
+				return issueref.Ref{ID: c.IssueID, Rule: c.IssueRule}, prNumber
 			}
 		}
-		if id := issueref.FromBranch(branch); id != "" {
-			return id, prNumber
+		if ref := grammar.FromBranchRef(branch); ref.ID != "" {
+			return ref, prNumber
 		}
 	}
-	return bucketForBranch(branch), prNumber
+	return issueref.Ref{ID: bucketForBranch(branch)}, prNumber
 }
 
 // ProviderAnthropic is the provider tag JSONL uses when building cross-source

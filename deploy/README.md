@@ -85,7 +85,7 @@ Generate a token with `openssl rand -hex 32`.
 ## 4. `--aggregation` is REQUIRED and has no default
 
 `tierd serve` **fails to start** unless the reporting mode is set to `team` or
-`developer`, from a CLI flag, the `TIER_AGGREGATION` env var, or the
+`division`, from a CLI flag, the `TIER_AGGREGATION` env var, or the
 `aggregation` config key. There is deliberately no default: defaulting would
 flip an existing deployment between naming individuals and not on upgrade, an EU
 works-council / GDPR Art. 22 co-determination concern.
@@ -93,8 +93,9 @@ works-council / GDPR Art. 22 co-determination concern.
 - `team` — emit only team-level aggregates; never name an individual. The safe
   posture under EU works-council regimes. Teams smaller than the k-anonymity
   floor (default 5, hard minimum 3) collapse into an aggregate `other` bucket.
-- `developer` — keep named per-developer rows (only where per-individual
-  measurement is lawful and consented).
+- `division` — roll teams up one level, under the same k-anonymity floor.
+- `developer` — reserved for the synthetic `tierd demo` until #826;
+  real-data startup is refused, including loopback and read-only operation.
 
 Both artifacts here set `team` as the safe default. The systemd unit sets it via
 the config file (`aggregation: team`); the Compose file sets it explicitly on

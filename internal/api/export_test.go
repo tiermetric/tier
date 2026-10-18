@@ -361,7 +361,7 @@ func TestGetOutcomes_CSVColumnContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse CSV: %v", err)
 	}
-	legacyHeader := outcomesCSVHeader[:18] // Raw evidence and projection columns both require Event 3.
+	legacyHeader := append(append([]string(nil), outcomesCSVHeader[:18]...), "issue_rule") // Raw evidence and projection columns both require Event 3.
 	if len(records) < 1 || strings.Join(records[0], ",") != strings.Join(legacyHeader, ",") {
 		t.Fatalf("outcomes CSV header = %v, want %v", records[0], legacyHeader)
 	}
@@ -553,7 +553,7 @@ func TestGetEvents_CSVPricingColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || len(records[0]) != 24 || len(records[1]) != 24 {
+	if len(records) != 2 || len(records[0]) != 25 || len(records[1]) != 25 {
 		t.Fatalf("CSV shape: %v", records)
 	}
 	if got := strings.Join(records[0][21:24], ","); got != "pricing_basis,rate_snapshot,cache_write_evidence" {

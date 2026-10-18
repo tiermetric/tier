@@ -1,0 +1,418 @@
+{
+  "/false/buckets": [
+    {
+      "Developer": "dev0",
+      "Bucket": "unattributed:main",
+      "CostMicro": 910
+    },
+    {
+      "Developer": "dev1",
+      "Bucket": "unattributed:branch-without-issue",
+      "CostMicro": 920
+    },
+    {
+      "Developer": "dev2",
+      "Bucket": "unattributed",
+      "CostMicro": 900
+    }
+  ],
+  "/false/captured dollars": [
+    {
+      "Engine": "claude-code",
+      "Bucket": "",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 930,
+      "SampleSize": 10
+    },
+    {
+      "Engine": "claude-code",
+      "Bucket": "issue-2",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 890,
+      "SampleSize": 10
+    },
+    {
+      "Engine": "claude-code",
+      "Bucket": "unattributed:main",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 910,
+      "SampleSize": 10
+    }
+  ],
+  "/false/composition": {
+    "TotalCostMicro": 5430,
+    "AttributedCostMicro": 2700,
+    "UnattributedCostMicro": 2730,
+    "UnattributedShare": 0.5027624309392266,
+    "CacheReadShare": 0,
+    "PremiumModelShare": 0,
+    "ByModel": [
+      {
+        "Model": "",
+        "Host": "unknown",
+        "CostMicro": 5430,
+        "Share": 1,
+        "Premium": false
+      }
+    ],
+    "ByClass": {
+      "InputTok": 120000,
+      "OutputTok": 0,
+      "CacheRead": 0,
+      "CacheWrite5m": 0,
+      "CacheWrite1h": 0
+    }
+  },
+  "/false/issue costs": [
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "issue-1",
+      "TotalCostMicro": 880,
+      "RealtimeCostMicro": 880,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "unattributed:main",
+      "TotalCostMicro": 910,
+      "RealtimeCostMicro": 910,
+      "CapturedRealtimeMicro": 910,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev1",
+      "Repo": "acme/b",
+      "IssueID": "issue-2",
+      "TotalCostMicro": 890,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 890
+    },
+    {
+      "Developer": "dev1",
+      "Repo": "acme/b",
+      "IssueID": "unattributed:branch-without-issue",
+      "TotalCostMicro": 920,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev2",
+      "Repo": "unqualified",
+      "IssueID": "",
+      "TotalCostMicro": 930,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 930
+    },
+    {
+      "Developer": "dev2",
+      "Repo": "unqualified",
+      "IssueID": "unattributed",
+      "TotalCostMicro": 900,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    }
+  ],
+  "/false/repair spend": {
+    "status": "recorded",
+    "token_events": 0,
+    "cost_micro": 0,
+    "supported_pr_cost_micro": 0,
+    "pooled_issue_cost_micro": 0,
+    "supported_pr_token_events": 0,
+    "pooled_issue_token_events": 0,
+    "attribution": "unavailable",
+    "claim_limit": "Supporting captured spend only; issue attribution is pooled, incomplete capture is retained, and neither cost causality nor complete repair history is established."
+  },
+  "/false/token totals": "map[{dev0 acme/a issue-1}:32000 {dev1 acme/b issue-2}:30000]",
+  "/true/buckets": [
+    {
+      "Developer": "dev0",
+      "Bucket": "unattributed:main",
+      "CostMicro": 2420
+    },
+    {
+      "Developer": "dev1",
+      "Bucket": "unattributed:branch-without-issue",
+      "CostMicro": 2440
+    },
+    {
+      "Developer": "dev2",
+      "Bucket": "unattributed",
+      "CostMicro": 2400
+    }
+  ],
+  "/true/captured dollars": [
+    {
+      "Engine": "claude-code",
+      "Bucket": "",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 2460,
+      "SampleSize": 20
+    },
+    {
+      "Engine": "claude-code",
+      "Bucket": "issue-2",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 2380,
+      "SampleSize": 20
+    },
+    {
+      "Engine": "claude-code",
+      "Bucket": "unattributed:main",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 2420,
+      "SampleSize": 20
+    }
+  ],
+  "/true/composition": {
+    "TotalCostMicro": 14460,
+    "AttributedCostMicro": 7200,
+    "UnattributedCostMicro": 7260,
+    "UnattributedShare": 0.5020746887966805,
+    "CacheReadShare": 0,
+    "PremiumModelShare": 0,
+    "ByModel": [
+      {
+        "Model": "",
+        "Host": "unknown",
+        "CostMicro": 14460,
+        "Share": 1,
+        "Premium": false
+      }
+    ],
+    "ByClass": {
+      "InputTok": 240000,
+      "OutputTok": 0,
+      "CacheRead": 0,
+      "CacheWrite5m": 0,
+      "CacheWrite1h": 0
+    }
+  },
+  "/true/issue costs": [
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "issue-1",
+      "TotalCostMicro": 2360,
+      "RealtimeCostMicro": 2360,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "unattributed:main",
+      "TotalCostMicro": 2420,
+      "RealtimeCostMicro": 2420,
+      "CapturedRealtimeMicro": 2420,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev1",
+      "Repo": "acme/b",
+      "IssueID": "issue-2",
+      "TotalCostMicro": 2380,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 2380
+    },
+    {
+      "Developer": "dev1",
+      "Repo": "acme/b",
+      "IssueID": "unattributed:branch-without-issue",
+      "TotalCostMicro": 2440,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev2",
+      "Repo": "unqualified",
+      "IssueID": "",
+      "TotalCostMicro": 2460,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 2460
+    },
+    {
+      "Developer": "dev2",
+      "Repo": "unqualified",
+      "IssueID": "unattributed",
+      "TotalCostMicro": 2400,
+      "RealtimeCostMicro": 0,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    }
+  ],
+  "/true/repair spend": {
+    "status": "recorded",
+    "token_events": 0,
+    "cost_micro": 0,
+    "supported_pr_cost_micro": 0,
+    "pooled_issue_cost_micro": 0,
+    "supported_pr_token_events": 0,
+    "pooled_issue_token_events": 0,
+    "attribution": "unavailable",
+    "claim_limit": "Supporting captured spend only; issue attribution is pooled, incomplete capture is retained, and neither cost causality nor complete repair history is established."
+  },
+  "/true/token totals": "map[{dev0 acme/a issue-1}:32000 {dev1 acme/b issue-2}:30000]",
+  "acme/a/false/buckets": [
+    {
+      "Developer": "dev0",
+      "Bucket": "unattributed:main",
+      "CostMicro": 910
+    }
+  ],
+  "acme/a/false/captured dollars": [
+    {
+      "Engine": "claude-code",
+      "Bucket": "unattributed:main",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 910,
+      "SampleSize": 10
+    }
+  ],
+  "acme/a/false/composition": {
+    "TotalCostMicro": 1790,
+    "AttributedCostMicro": 880,
+    "UnattributedCostMicro": 910,
+    "UnattributedShare": 0.5083798882681564,
+    "CacheReadShare": 0,
+    "PremiumModelShare": 0,
+    "ByModel": [
+      {
+        "Model": "",
+        "Host": "unknown",
+        "CostMicro": 1790,
+        "Share": 1,
+        "Premium": false
+      }
+    ],
+    "ByClass": {
+      "InputTok": 40000,
+      "OutputTok": 0,
+      "CacheRead": 0,
+      "CacheWrite5m": 0,
+      "CacheWrite1h": 0
+    }
+  },
+  "acme/a/false/issue costs": [
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "issue-1",
+      "TotalCostMicro": 880,
+      "RealtimeCostMicro": 880,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "unattributed:main",
+      "TotalCostMicro": 910,
+      "RealtimeCostMicro": 910,
+      "CapturedRealtimeMicro": 910,
+      "CapturedNonRealtimeMicro": 0
+    }
+  ],
+  "acme/a/false/repair spend": {
+    "status": "recorded",
+    "token_events": 0,
+    "cost_micro": 0,
+    "supported_pr_cost_micro": 0,
+    "pooled_issue_cost_micro": 0,
+    "supported_pr_token_events": 0,
+    "pooled_issue_token_events": 0,
+    "attribution": "unavailable",
+    "claim_limit": "Supporting captured spend only; issue attribution is pooled, incomplete capture is retained, and neither cost causality nor complete repair history is established."
+  },
+  "acme/a/false/token totals": "map[{dev0 acme/a issue-1}:32000]",
+  "acme/a/true/buckets": [
+    {
+      "Developer": "dev0",
+      "Bucket": "unattributed:main",
+      "CostMicro": 2420
+    }
+  ],
+  "acme/a/true/captured dollars": [
+    {
+      "Engine": "claude-code",
+      "Bucket": "unattributed:main",
+      "Origin": "unknown",
+      "CWD": "",
+      "CostMicro": 2420,
+      "SampleSize": 20
+    }
+  ],
+  "acme/a/true/composition": {
+    "TotalCostMicro": 4780,
+    "AttributedCostMicro": 2360,
+    "UnattributedCostMicro": 2420,
+    "UnattributedShare": 0.5062761506276151,
+    "CacheReadShare": 0,
+    "PremiumModelShare": 0,
+    "ByModel": [
+      {
+        "Model": "",
+        "Host": "unknown",
+        "CostMicro": 4780,
+        "Share": 1,
+        "Premium": false
+      }
+    ],
+    "ByClass": {
+      "InputTok": 80000,
+      "OutputTok": 0,
+      "CacheRead": 0,
+      "CacheWrite5m": 0,
+      "CacheWrite1h": 0
+    }
+  },
+  "acme/a/true/issue costs": [
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "issue-1",
+      "TotalCostMicro": 2360,
+      "RealtimeCostMicro": 2360,
+      "CapturedRealtimeMicro": 0,
+      "CapturedNonRealtimeMicro": 0
+    },
+    {
+      "Developer": "dev0",
+      "Repo": "acme/a",
+      "IssueID": "unattributed:main",
+      "TotalCostMicro": 2420,
+      "RealtimeCostMicro": 2420,
+      "CapturedRealtimeMicro": 2420,
+      "CapturedNonRealtimeMicro": 0
+    }
+  ],
+  "acme/a/true/repair spend": {
+    "status": "recorded",
+    "token_events": 0,
+    "cost_micro": 0,
+    "supported_pr_cost_micro": 0,
+    "pooled_issue_cost_micro": 0,
+    "supported_pr_token_events": 0,
+    "pooled_issue_token_events": 0,
+    "attribution": "unavailable",
+    "claim_limit": "Supporting captured spend only; issue attribution is pooled, incomplete capture is retained, and neither cost causality nor complete repair history is established."
+  },
+  "acme/a/true/token totals": "map[{dev0 acme/a issue-1}:32000]"
+}

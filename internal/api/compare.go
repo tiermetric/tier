@@ -98,7 +98,8 @@ type compareWindowMeta struct {
 // CI (#133) that drives the significance test. Zero-valued (and PresentA/PresentB
 // false on the parent) when the developer had no data in that window.
 type scoreSideJSON struct {
-	OutcomeN *int `json:"outcome_n,omitempty"`
+	CINote   string `json:"ci_note,omitempty"`
+	OutcomeN *int   `json:"outcome_n,omitempty"`
 
 	TIER            float64 `json:"tier"`
 	WeightedPoints  float64 `json:"weighted_points"`
@@ -132,9 +133,9 @@ type developerDeltaJSON struct {
 	DeltaTIER           float64       `json:"delta_tier"`
 	DeltaWeightedPoints float64       `json:"delta_weighted_points"`
 	DeltaTotalCostUSD   float64       `json:"delta_total_cost_usd"`
-	// Significant retains the legacy raw non-overlap result for compatibility.
-	// It is unvalidated, not a significance verdict; see Tier-Inference and
-	// Tier-Bounds-Status response headers (#1233).
+	// Significant is the legacy raw non-overlap result gated on both sides having
+	// intervals (ci_note == intervalAttributionNote). It is unvalidated, not a
+	// significance verdict; see Tier-Inference and Tier-Bounds-Status (#1233).
 	Significant bool `json:"significant"`
 }
 
@@ -461,6 +462,7 @@ func compareDevelopers(winA, winB windowScores) []developerDeltaJSON {
 			row.DeltaWeightedPoints = sb.WeightedPoints - sa.WeightedPoints
 			row.DeltaTotalCostUSD = sb.TotalCostUSD - sa.TotalCostUSD
 			row.Significant = sa.Ranked && sb.Ranked &&
+				sa.CINote == intervalAttributionNote && sb.CINote == intervalAttributionNote &&
 				ciDisjoint(sa.CILow, sa.CIHigh, sb.CILow, sb.CIHigh)
 		}
 		out = append(out, row)
@@ -490,6 +492,7 @@ func indexWindowSides(win windowScores) map[string]scoreSideJSON {
 			CostPerPoint: costPerPointOrNull(s.WeightedPoints, s.CostPerPoint),
 			SampleN:      s.SampleN,
 			OutcomeN:     rawOutcomeN(s, win.projectedPolicy),
+			CINote:       intervalNote(s, win.byDev[s.Developer], win.issueCostIndex),
 			CILow:        lo,
 			CIHigh:       hi,
 			Ranked:       s.Ranked,

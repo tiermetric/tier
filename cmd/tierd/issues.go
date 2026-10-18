@@ -93,6 +93,9 @@ func runIssues(args []string, stdout, stderr io.Writer) int {
 		end = "open-ended"
 	}
 	_, _ = fmt.Fprintf(tw, "Per-issue report [%s, %s), rubric %d (%s)\n", logsafe.Str(report.Since), logsafe.Str(end), report.RubricVersion, logsafe.Str(report.Policy))
+	if report.AttributionNotice != "" {
+		_, _ = fmt.Fprintln(tw, logsafe.Str(report.AttributionNotice))
+	}
 	_, _ = fmt.Fprintf(tw, "%s: $%.6f; unattributed %.2f%% ($%.6f); total captured spend $%.6f\n", report.Label, report.AttributedCostUSD, 100*report.UnattributedShare, report.UnattributedCostUSD, report.TotalCostUSD)
 	if report.RepoScopeExcluded != nil {
 		_, _ = fmt.Fprintln(tw, "Strict repo scope excludes unqualified records; see --json for excluded counts and cost.")
@@ -112,10 +115,17 @@ func runIssues(args []string, stdout, stderr io.Writer) int {
 		if row.TIER != nil {
 			tier = fmt.Sprintf("%.2f", *row.TIER)
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t$%.6f\t%.6f\t%d / %d\t%s\t%.2f%%\n", logsafe.Str(row.Repo), logsafe.Str(row.IssueID), logsafe.Str(row.Label), row.CostUSD, row.WeightedPoints, row.OutcomeN, row.SampleN, logsafe.Str(tier), 100*row.UnattributedShare)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t$%.6f\t%.6f\t%d / %d\t%s\t%.2f%%\n", logsafe.Str(row.Repo), logsafe.Str(row.IssueID), logsafe.Str(issueAttributionLabel(row)), row.CostUSD, row.WeightedPoints, row.OutcomeN, row.SampleN, logsafe.Str(tier), 100*row.UnattributedShare)
 	}
 	if err := tw.Flush(); err != nil {
 		return fail(err)
 	}
 	return 0
+}
+
+func issueAttributionLabel(row api.IssueReportRow) string {
+	if row.AttributionLayer == "read_time_recovery" {
+		return row.Label + "; includes read-time recovery"
+	}
+	return row.Label
 }

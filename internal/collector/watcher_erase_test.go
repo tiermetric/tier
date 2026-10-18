@@ -46,6 +46,7 @@ func (s storeIngester) Ingest(ctx context.Context, ev TokenEvent) error {
 		SessionID:      ev.SessionID,
 		Host:           ev.Host,
 		BillingMode:    ev.BillingMode,
+		IssueRule:      ev.IssueRule,
 		Timestamp:      ev.Timestamp,
 	})
 }
@@ -56,9 +57,10 @@ func (s storeIngester) Ingest(ctx context.Context, ev TokenEvent) error {
 // test can land an erasure between the watcher's tombstone check and its save.
 type hookedCheckpoints struct {
 	*store.DB
-	mu        sync.Mutex
-	loads     map[string]int
-	afterLoad func(path string)
+	mu           sync.Mutex
+	loads        map[string]int
+	afterLoad    func(path string)
+	afterLoadRow func(path string, cp store.WatcherCheckpoint)
 	// afterSave, when set, observes every SaveWatcherCheckpoint result.
 	afterSave func(path string, err error)
 }
@@ -82,9 +84,13 @@ func (h *hookedCheckpoints) LoadWatcherCheckpoint(ctx context.Context, key strin
 	}
 	h.loads[key]++
 	hook := h.afterLoad
+	rowHook := h.afterLoadRow
 	h.mu.Unlock()
 	if hook != nil {
 		hook(key)
+	}
+	if rowHook != nil {
+		rowHook(key, cp)
 	}
 	return cp, ok, err
 }
@@ -100,6 +106,7 @@ type eraseRig struct {
 	db                        *store.DB
 	worktrees                 *worktreeIndex // the watcher's #823 option
 	idle                      time.Duration  // the watcher's idleAfter
+	now                       func() time.Time
 }
 
 func newEraseRig(t *testing.T) eraseRig {
@@ -135,7 +142,7 @@ func (r eraseRig) runWith(t *testing.T, cps CheckpointStore, ing Ingester) (stop
 		ClaudeDir: r.claudeDir, Repos: []string{r.repo},
 		Ingester: ing, Checkpoints: cps,
 		DeveloperID: "alice", DebounceDelay: eraseTestDebounce,
-		worktrees: r.worktrees, idleAfter: r.idle,
+		worktrees: r.worktrees, idleAfter: r.idle, now: r.now,
 	}
 	go func() { _ = w.Run(ctx); close(done) }()
 	var once sync.Once

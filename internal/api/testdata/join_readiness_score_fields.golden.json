@@ -1,6 +1,7 @@
 {
   "developers": [
     {
+      "ci_note": "withheld: below evidence floor",
       "developer": "alice",
       "tier": 300,
       "weighted_points": 3,

@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -452,4 +453,63 @@ func TestGetQualityExports_EmptyRange(t *testing.T) {
 	if len(hresp.QualityHistory) != 0 || hresp.NextCursor != "" {
 		t.Errorf("quality_history empty: %d rows cursor=%q", len(hresp.QualityHistory), hresp.NextCursor)
 	}
+}
+
+func TestQualityEventsExportLegacyAndNonPushStatus(t *testing.T) {
+	h, db := newTestHandler(t)
+	id := seedQualityOutcome(t, db, "alice", "issue-1", "sha")
+	push, schedule := "push", "schedule"
+	for i, trigger := range []*string{nil, &schedule, &push} {
+		if _, err := db.AppendQualityEvent(context.Background(), store.QualityEvent{OutcomeID: id, Developer: "alice", IssueID: "issue-1", EventType: "ci_fail", SourceRef: "sha:1:" + strconv.Itoa(i+1), TriggerEvent: trigger, EventTS: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantStatus := []string{"CI trigger unknown", "unknown", "observed"}
+	rec := doExport(t, h, "/api/v1/quality_events?since=2020-01-01", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	var resp qualityEventsExportResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.QualityEvents) != 3 {
+		t.Fatal(resp)
+	}
+	for i, e := range resp.QualityEvents {
+		if e.Status != wantStatus[i] || e.Evidence != (i == 2) {
+			t.Fatalf("row %d: %+v", i, e)
+		}
+		if i == 0 && e.TriggerEvent != nil || i == 1 && (e.TriggerEvent == nil || *e.TriggerEvent != schedule) || i == 2 && (e.TriggerEvent == nil || *e.TriggerEvent != push) {
+			t.Fatalf("trigger row %d: %+v", i, e)
+		}
+	}
+	rec = doExport(t, h, "/api/v1/quality_events?since=2020-01-01", http.Header{"Accept": []string{"text/csv"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	rows, err := csv.NewReader(rec.Body).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 || rows[0][11] != "trigger_event" {
+		t.Fatal(rows)
+	}
+	for i, row := range rows[1:] {
+		if row[9] != wantStatus[i] || row[10] != strconv.FormatBool(i == 2) || row[11] != []string{"", "schedule", "push"}[i] {
+			t.Fatal(row)
+		}
+	}
+	t.Run("documented contract", func(t *testing.T) {
+		raw, err := os.ReadFile("../../docs/api-compatibility.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		section := strings.Split(strings.Split(string(raw), "#### `GET /api/v1/quality_events`")[1], "#### `GET /api/v1/quality_history`")[0]
+		for _, required := range []string{"`trigger_event`", `status="CI trigger unknown"`, `status="unknown"`, `evidence=false`, `status="observed"`, `evidence=true`} {
+			if !strings.Contains(section, required) {
+				t.Errorf("quality_events contract missing %s", required)
+			}
+		}
+	})
 }

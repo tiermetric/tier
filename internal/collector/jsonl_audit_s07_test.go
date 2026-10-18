@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/issueref"
 )
 
 func TestAuditS07_5_NoUsageWindowKeepsLastRealBranch(t *testing.T) {
@@ -102,7 +104,7 @@ func TestAuditS07_7_MessageBranchBreaksMultiIssueBranchCommitTie(t *testing.T) {
 				SessionID: "session", GitBranch: "fix/11-first", StartTime: at,
 				Messages: []messageUsage{{messageID: "message", timestamp: at, gitBranch: tc.branch, output: 100}},
 			}
-			events := joinSessionsToCommits([]sessionSummary{s}, commits, "dev", "owner/repo")
+			events := joinSessionsToCommits([]sessionSummary{s}, commits, "dev", "owner/repo", issueref.Grammar{})
 			if len(events) != 1 || events[0].IssueID != tc.want {
 				t.Fatalf("branch %q: events %+v, want issue %q", tc.branch, events, tc.want)
 			}
@@ -122,7 +124,7 @@ func TestAuditS07_7_SingleBranchCommitWinsOverMessageBranch(t *testing.T) {
 		SessionID: "session", GitBranch: "fix/77/capture", StartTime: at,
 		Messages: []messageUsage{{messageID: "message", timestamp: at, gitBranch: "fix/77/capture", output: 100}},
 	}
-	events := joinSessionsToCommits([]sessionSummary{s}, commits, "dev", "owner/repo")
+	events := joinSessionsToCommits([]sessionSummary{s}, commits, "dev", "owner/repo", issueref.Grammar{})
 	if len(events) != 1 || events[0].IssueID != "issue-11" {
 		t.Fatalf("events %+v, want commit's issue-11 over message branch's issue-77", events)
 	}

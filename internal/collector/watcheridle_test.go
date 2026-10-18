@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/store"
 )
 
 // idleN is idleRelease written as a literal, so a changed constant fails here.
@@ -444,10 +446,21 @@ func TestWatcher_EraseDuringAHoldTombstonesAHeldOnlyFile(t *testing.T) {
 			if restart {
 				r.idle = time.Hour
 			}
+			var clockOffset atomic.Int64
+			var sawTombstone atomic.Bool
+			r.now = func() time.Time { return time.Now().Add(time.Duration(clockOffset.Load())) }
 			parent := filepath.Join(r.projects, "sess-S.jsonl")
 			sub := filepath.Join(r.projects, "sess-S", "subagents", "agent-a1.jsonl")
 			mkdirs(t, filepath.Dir(sub))
-			cps := &hookedCheckpoints{DB: r.db}
+			newCheckpoints := func() *hookedCheckpoints {
+				return &hookedCheckpoints{DB: r.db, afterLoadRow: func(path string, cp store.WatcherCheckpoint) {
+					if path == sub && cp.Tombstoned() {
+						clockOffset.Store(int64(time.Hour))
+						sawTombstone.Store(true)
+					}
+				}}
+			}
+			cps := newCheckpoints()
 			stop := r.run(t, cps)
 
 			writeJSONLLine(t, parent, "sess-S", r.repo, "feature/42-foo", 111)
@@ -457,6 +470,8 @@ func TestWatcher_EraseDuringAHoldTombstonesAHeldOnlyFile(t *testing.T) {
 				want = 2 // released before the subagent file exists, so no parent read races the erase
 			}
 			waitUntil(t, "the parent's events stored", func() bool { return len(r.sessionInputs(t, "sess-S")) == want })
+			// The subagent stays held until a read observes the erasure tombstone.
+			clockOffset.Store(-int64(time.Hour))
 			if err := os.WriteFile(sub, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -466,7 +481,6 @@ func TestWatcher_EraseDuringAHoldTombstonesAHeldOnlyFile(t *testing.T) {
 			if restart {
 				stop()
 			}
-			loads := cps.loadCount(sub)
 			counts, err := r.db.EraseDeveloper(context.Background(), "alice")
 			if err != nil {
 				t.Fatalf("EraseDeveloper: %v", err)
@@ -479,14 +493,11 @@ func TestWatcher_EraseDuringAHoldTombstonesAHeldOnlyFile(t *testing.T) {
 				if err := os.Chtimes(sub, old, old); err != nil {
 					t.Fatal(err)
 				}
-				cps = &hookedCheckpoints{DB: r.db}
+				cps = newCheckpoints()
 				r.run(t, cps)
-				loads = 0
 				appendTaggedLine(t, sub, "sess-S", r.repo, "s444", 444)
 			}
-			waitUntil(t, "the watcher read the subagent file's row after the erase", func() bool {
-				return cps.loadCount(sub) > loads
-			})
+			waitUntil(t, "the watcher observed the subagent erasure tombstone", sawTombstone.Load)
 			time.Sleep(4 * eraseTestDebounce)
 
 			if got := r.sessionInputs(t, "sess-S"); len(got) != 0 {

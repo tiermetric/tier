@@ -23,7 +23,7 @@ func TestFromPRBody_CorrectsNeverAttributesAnIssue(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			for _, suffix := range []struct{ text, want string }{
 				{"", ""}, {"\ncloses #42", "issue-42"},
-				{"\ntracked in PROJ-42", "PROJ-42"}, {"\nsee #42", "issue-42"},
+				{"\nrefs #42", "issue-42"},
 			} {
 				if got := FromPRBody(line + suffix.text); got != suffix.want {
 					t.Errorf("FromPRBody with suffix %q = %q, want %q", suffix.text, got, suffix.want)
@@ -57,7 +57,7 @@ func TestFromPRBody_CorrectsContainerFence(t *testing.T) {
 	if got := FromPRBody(body); got != "" {
 		t.Errorf("FromPRBody = %q, want no attribution", got)
 	}
-	if got := FromPRBody(body + "\nsee #42"); got != "issue-42" {
+	if got := FromPRBody(body + "\nrefs #42"); got != "issue-42" {
 		t.Errorf("FromPRBody with real reference = %q, want issue-42", got)
 	}
 }
@@ -67,7 +67,7 @@ func TestFromPRBody_CorrectsReferenceBeforeLaterColon(t *testing.T) {
 	if got := FromPRBody(body); got != "" {
 		t.Errorf("FromPRBody = %q, want no attribution", got)
 	}
-	if got := FromPRBody(body + "\nsee #42"); got != "issue-42" {
+	if got := FromPRBody(body + "\nrefs #42"); got != "issue-42" {
 		t.Errorf("FromPRBody with real reference = %q, want issue-42", got)
 	}
 	if got := ClosedIssues("Corrects #7: closes #8"); len(got) != 0 {

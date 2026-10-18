@@ -85,6 +85,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
@@ -148,6 +149,7 @@ type RepoTarget struct {
 
 // Config configures a Collector. Repos is required; everything else defaults.
 type Config struct {
+	Grammar issueref.Grammar
 	// Home overrides the Muse home (~/.local/share/muse). Sessions are read from
 	// its sessions/ subdirectory.
 	Home        string
@@ -173,6 +175,7 @@ type Config struct {
 // the only way in, as for codexrollout.Collector: New is what makes a nil
 // logger, an empty repo list or a zero interval impossible.
 type Collector struct {
+	grammar     issueref.Grammar
 	sessionsDir string
 	repos       []RepoTarget
 	developerID string
@@ -218,6 +221,7 @@ func New(cfg Config) (*Collector, error) {
 		developerID: cfg.DeveloperID,
 		interval:    cfg.Interval,
 		logger:      cfg.Logger,
+		grammar:     cfg.Grammar,
 		now:         cfg.Now,
 		settled:     cfg.Settled,
 		lost:        cfg.Lost,
@@ -399,6 +403,7 @@ func (s *passStats) refuse(reason string, n int, example string) {
 // cursor. Per-FILE and per-repo failures still count as walked; they are
 // returned as err, on which Run holds its cursor too (see runPass).
 func (c *Collector) scan(ctx context.Context, since, fileFloor time.Time, pending map[string]time.Time) (events []collector.TokenEvent, nextPending map[string]time.Time, heldFrom time.Time, lost [][2]time.Time, walked bool, err error) {
+	defer func() { collector.LogRevertBranchEvents(c.logger, events) }()
 	now := c.now()
 	gitFloor := time.Time{}
 	if !fileFloor.IsZero() {
@@ -688,16 +693,19 @@ func (c *Collector) event(s *session, cl call, t *scanTarget, developer, branch 
 		Output:    cl.Tokens.Output,
 		CacheRead: cl.Tokens.CacheRead,
 	})
+	issueRef := t.resolver.ResolveRef(branch, cl.Timestamp)
 	return collector.TokenEvent{
-		Developer: developer,
-		IssueID:   t.resolver.Resolve(branch, cl.Timestamp),
-		Model:     cl.Model,
-		InputTok:  cl.Tokens.Input,
-		OutputTok: cl.Tokens.Output,
-		CacheRead: cl.Tokens.CacheRead,
-		CostMicro: cost,
-		Source:    collector.SourceMuse,
-		Fidelity:  collector.FidelityRealtime,
+		Developer:    developer,
+		IssueID:      issueRef.ID,
+		RevertBranch: issueref.IsRevertBranch(branch),
+		IssueRule:    issueRef.Rule,
+		Model:        cl.Model,
+		InputTok:     cl.Tokens.Input,
+		OutputTok:    cl.Tokens.Output,
+		CacheRead:    cl.Tokens.CacheRead,
+		CostMicro:    cost,
+		Source:       collector.SourceMuse,
+		Fidelity:     collector.FidelityRealtime,
 		// Muse's record id is unique per record and stable across re-reads of an
 		// append-only file, so it alone identifies the call.
 		IdempotencyKey: collector.IdempotencyKey(collector.SourceMuse, providerMeta, cl.RecordID),
@@ -789,7 +797,7 @@ func (c *Collector) resolveTargets(ctx context.Context, since time.Time) ([]scan
 	targets := make([]scanTarget, 0, len(c.repos))
 	var errs []error
 	for i, r := range c.repos {
-		resolver, err := collector.NewIssueResolver(ctx, r.Path, since)
+		resolver, err := collector.NewIssueResolver(ctx, r.Path, since, c.grammar)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("muse: repo %s is not attributable this pass (skipped; other repos still scanned): %w", logsafe.Str(r.Path), err))
 			continue

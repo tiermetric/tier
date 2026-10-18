@@ -83,6 +83,7 @@ func TestWorktreeResolver_CarryAcrossTargets(t *testing.T) {
 		f.g(filepath.Join(f.wtA, "a.go")), f.g(), f.g(filepath.Join(f.wt2, "r.go")), f.g(),
 		f.g(filepath.Join(f.wt2, "r.go")), f.g(filepath.Join(f.repo2, "m.go")), f.g(),
 	} {
+		g.Sidechain = true
 		a, target := r.resolve(g, "", ""), ""
 		if a.Target != "" {
 			target = filepath.Base(a.Target)
@@ -135,8 +136,8 @@ func (f *routeFixture) collectors(t *testing.T, on bool) (repo, repo2 *JSONLColl
 // Pins #823 Q3 on the batch (ship) path: a verdict naming a worktree of the
 // other configured repo books the message to that repo's collector, joined
 // against that repo's own commits (scratch-r2 names no issue; only repo2's
-// commit gives issue-66) and slug, in both directions; the carry follows it
-// across the targets; a worktree of the unconfigured repo, by tool path or by
+// commit gives issue-66) and slug, in both directions; parent messages
+// without paths stay with their session's owner; a worktree of the unconfigured repo, by tool path or by
 // cwd, books to unattributed:foreign-repo with repo "unqualified" and no path
 // text; a session outside every target books nothing (Q6); and each message is
 // emitted by exactly one collector.
@@ -145,6 +146,7 @@ func TestJSONLCollector_RoutesVerdictsAcrossTargets(t *testing.T) {
 	c1, c2 := f.collectors(t, true)
 	e1, e2 := wtCollect(t, f.wtFixture, c1), wtCollect(t, f.wtFixture, c2)
 	want1 := map[int]string{
+		2: "unattributed:main branch owner/repo",
 		3: "issue-11 worktree-toolpath owner/repo",
 		4: "unattributed:foreign-repo worktree-toolpath unqualified",
 		5: "unattributed:foreign-repo worktree-cwd unqualified",
@@ -153,7 +155,6 @@ func TestJSONLCollector_RoutesVerdictsAcrossTargets(t *testing.T) {
 	}
 	want2 := map[int]string{
 		1: "issue-66 worktree-toolpath owner/repo2",
-		2: "issue-66 carry owner/repo2",
 		9: "unattributed:main branch owner/repo2",
 	}
 	if got := byOutputRepo(t, e1); !reflect.DeepEqual(got, want1) {
@@ -235,11 +236,11 @@ func (h *heldRig) routed(from int) []string {
 }
 
 // Pins #823 Q3 on the watcher path: a verdict naming the other configured
-// repo's worktree books to that repo's commits and slug, and the carry keeps
-// routing there across reads (the checkpoint holds wt2, a configured
-// worktree); a worktree of the unconfigured repo books to
-// unattributed:foreign-repo with repo "unqualified", clears the carry, and
-// leaves no path text in any event or in the checkpoint.
+// repo's worktree books to that repo's commits and slug. Parent messages
+// without paths book to their session's owner across reads, and parent tool
+// paths never populate the checkpoint's carry; a worktree of
+// the unconfigured repo books to unattributed:foreign-repo with repo
+// "unqualified" and leaves no path text in any event or in the checkpoint.
 func TestWatcher_RoutesVerdictsAcrossTargets(t *testing.T) {
 	f := newRouteFixture(t)
 	h := f.routeRig(t, f.base)
@@ -251,8 +252,8 @@ func TestWatcher_RoutesVerdictsAcrossTargets(t *testing.T) {
 		line("msg_1", 1, f.repo, "main", wtRead(filepath.Join(f.wt2, "r.go"))),
 		line("msg_2", 2, f.repo, "main", wtText),
 	)
-	if got := h.state.metadata.LastWorktree; got != f.wt2 {
-		t.Errorf("carried worktree after read 1 = %q, want %q", got, f.wt2)
+	if got := h.state.metadata.LastWorktree; got != "" {
+		t.Errorf("carried worktree after parent read 1 = %q, want no carry", got)
 	}
 	h.read(t, w,
 		line("msg_3", 3, f.repo, "main", wtText),
@@ -263,11 +264,11 @@ func TestWatcher_RoutesVerdictsAcrossTargets(t *testing.T) {
 	)
 	wantEvents(t, h.routed(0),
 		"1 issue-66 worktree-toolpath owner/repo2", // read 1 holds msg_2 back
+		"2 unattributed:main branch owner/repo",
+		"3 unattributed:main branch owner/repo",
 		"4 unattributed:foreign-repo worktree-toolpath unqualified",
 		"5 unattributed:foreign-repo worktree-cwd unqualified",
 		"6 unattributed:main branch owner/repo",
-		"2 issue-66 carry owner/repo2",
-		"3 issue-66 carry owner/repo2",
 	)
 	wantNoPathText(t, f, h.rec.snapshot())
 	cp, err := checkpointFromState(h.path, h.state)

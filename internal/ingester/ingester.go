@@ -66,6 +66,7 @@ func (a *storeAdapter) Ingest(ctx context.Context, ev collector.TokenEvent) erro
 		Host:            ev.Host,
 		BillingMode:     ev.BillingMode,
 		AttributionRule: ev.AttributionRule,
+		IssueRule:       ev.IssueRule,
 		Timestamp:       ev.Timestamp,
 	})
 }

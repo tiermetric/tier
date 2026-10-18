@@ -15,10 +15,19 @@ time. Its positioning is **grade the work, not the worker**. That is a policy st
 not a mechanism that prevents evaluation.
 TIER is built for coaching, not for evaluating developers. Per-person figures
 are not accurate enough to judge an individual.
-Per-developer rows exist in `developer` mode for coaching conversations;
+Per-developer rows exist in `developer` mode for previewing coaching
+conversations (developer: synthetic demo only from v0.6.1 until #826);
 [docs/legal-and-privacy.md](docs/legal-and-privacy.md) describes access limits.
 The repo also documents the ways this number can mislead:
 [failure-mode analysis](docs/adversarial-analysis.md).
+
+By default, a follow-up fix PR earns its own points and does not reduce the
+original. Since v0.6.0, the default-off, operator opt-in Event 3 rule charges an
+enabled correction against the original under [rubric 2](docs/rubric.md#rubric-2-corrective-work-operator-opt-in)
+and, within 14 days of the original's merge, also lowers the original's quality;
+same-author corrections count before confirmation.
+Splitting the same work into more PRs can change points, on the same issue or
+across issues; developer-mode partition diagnostics accompany the score.
 
 TIER does not detect whether a PR was written with AI. It counts every merged PR
 that carries an issue reference, and it counts all the AI spend it captured.
@@ -131,7 +140,9 @@ datastore, and no message bus.
 
 Run it for one team or one organization at a time.
 
-**Promotion scope.** This release is for solo or wholly trusted use: every read, ingest or admin credential holder and database owner must be trusted with all retained developer data. Use name-free team/division reports for shared use. Promotion of non-synthetic developer mode waits on #826's named-viewer, audit and retention controls. Ingest credentials are not identity-bound until #1145; a holder can submit another developer id, so the k-floor does not authenticate contributors. The synthetic demo remains exempt. These are deployment and promotion boundaries, not new enforcement shipped by this wording change.
+**Who this release is for (from v0.6.1).** This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt. Solo users can run `tierd score` for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.
+
+The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.
 
 ---
 
@@ -344,7 +355,7 @@ and paste the same value into the **Secret** box of the GitHub webhook — see
 | You see | It means | Example |
 |---|---|---|
 | `alice`, `<id>`, `--developer` | A developer's name. On the **cost** side it is your OS username (`whoami`) unless you pass `--developer`; on the **outcome** side it is the PR author's GitHub login. If those differ, map them once — see [Identity mapping](#identity-mapping). | `alice` |
-| `issue-42`, `<issue-id>`, `TIER-99` | The issue a piece of work belongs to, read from the branch name (`feature/42-login` → `issue-42`) or PR body (`closes #42`). A tracker key like `TIER-99` is kept as-is. | `issue-42` |
+| `issue-42`, `<issue-id>`, `TIER-99` | The issue a piece of work belongs to, read from the branch name (`feature/42-login` → `issue-42`) or PR body (`closes #42`). A configured tracker key like `TIER-99` is kept as-is; `OP` is built in. | `issue-42` |
 | `--repo ~/src/app` | A **local path** to a git checkout (`score`, `ship`, `doctor`). | `~/src/app` |
 | `--repo owner/name` | The GitHub repository, as it appears in the URL after `github.com/` (`backfill` only). | `acme/api` |
 | `org`, `team`, `division` | Names you choose for your organisation's structure, used consistently in `org_hierarchy` and `org_actual_spend`. | `acme`, `platform` |
@@ -384,10 +395,11 @@ history required:
 ```
 
 Every name on it is marked as fake: `demo-*` developers, `DEMO-*` issues, an
-`ACME (DEMO)` org, and a `SYNTHETIC DATA` banner in the console. The database
-is a throwaway file, `tier-demo.db` in your system's temporary folder,
-recreated on every run; the demo refuses to overwrite a file that holds real
-data. If `TIER_API_TOKEN` is exported in that shell, the demo dashboard asks for
+`ACME (DEMO)` org, and a `SYNTHETIC DATA` banner in the console. From v0.6.1,
+the database is fresh SQLite in a random private temporary directory (mode 0700), removed
+on exit, including Ctrl-C and SIGTERM. The demo refuses `--db`; neither flags,
+environment nor config can select its database, and concurrent demos are
+isolated. If `TIER_API_TOKEN` is exported in that shell, the demo dashboard asks for
 that token too.
 
 ---
@@ -515,7 +527,7 @@ export TIER_GITHUB_TOKEN=@$HOME/.tier/github-token   # the file you saved it in
 ./bin/tierd backfill --repo your-org/your-repo        # GitHub "owner/name", not a path
 
 # 2. Start the server (see GOTCHA 3 immediately below this block).
-./bin/tierd serve --aggregation developer
+./bin/tierd serve --aggregation team
 # tierd listening addr=127.0.0.1:8080
 
 # 3. In a SECOND terminal, ship your last 90 days of cost to it. If the first
@@ -530,15 +542,15 @@ export TIER_GITHUB_TOKEN=@$HOME/.tier/github-token   # the file you saved it in
 # zero is expected.
 ```
 
-> ⚠️ **GOTCHA 3 — evaluating solo or on a small team? You must pass
-> `--aggregation developer`, or your own row vanishes.** The `team` setting
-> applies a k-anonymity floor (default 5, hard minimum 3): a trial with fewer
-> contributing developers than the floor folds every named row into a single
-> anonymous "other" row, so you will not see your own score. `developer` mode
-> keeps your named row.
+> ⚠️ **GOTCHA 3 — solo or small cohort?** Team/division reports withhold
+> numbers below the k floor (default 5, hard minimum 3). From v0.6.1, developer
+> mode on real data is refused. Use `tierd score --repo /path/to/local/checkout`
+> for a local Claude Code cost view, or `tierd demo` for an invented developer board.
 
-Open <http://127.0.0.1:8080> — the dashboard now shows a TIER score computed
-from the cost you shipped and the PRs you backfilled.
+Team/division dashboards publish closed, sealed calendar months only, after
+sealing is armed and the grace period has elapsed. Follow the
+[quickstart's sealing steps](docs/quickstart.md#7-viewing-the-dashboard-from-another-machine)
+to publish an eligible month; backfill and shipping alone do not publish it.
 
 **A brand-new trial** will probably sit below the evidence floor. A score with
 fewer than 3 merged PRs, or under $5 of list-price spend, is still shown but is
@@ -546,8 +558,7 @@ marked below the floor and never ranked, because with so little data the ratio
 means little (one 0.5-point PR against $0.0004 of spend would read 1,250,000).
 A PR whose issue shows fewer than 1,000 tokens of recorded AI use in the 14 days
 before it merged is flagged the same way: its work was probably done where TIER
-could not see it. The first two marks clear as data accrues. Switch to
-`--aggregation team` before sharing reports across a real org (see
+could not see it. The first two marks clear as data accrues. Use name-free team/division reports within the trusted-use scope above (see
 [docs/legal-and-privacy.md](docs/legal-and-privacy.md)).
 
 **One identity caveat.** Cost is attributed to your shipping identity (your OS
@@ -603,13 +614,13 @@ for prerequisites, status checks and the dashboard's first-seal state.
 
 `--aggregation` is **required** — `serve` refuses to start without it (there is
 no default, so an existing deployment's reporting mode never changes silently).
-Pick `team` to emit only team-level aggregates that never name an individual —
-the mode [docs/legal-and-privacy.md](docs/legal-and-privacy.md) suggests where
-works councils or GDPR Art. 22 rules apply (that page is guidance, not legal
-advice) — or `developer` to keep named per-developer rows. It is also
-settable via `TIER_AGGREGATION` or the `aggregation` config key. A third mode, `division`,
-rolls teams up one level and also never names an individual. `team` and
-`division` both enforce the same k-anonymity floor (`--k-anonymity`, default 5,
+Choose `team` or `division` for real data; both emit aggregates that never name
+an individual. From v0.6.1, `developer` is reserved for the synthetic `tierd demo`
+until #826; real-data startup is refused, including loopback and read-only operation.
+The mode is also settable via `TIER_AGGREGATION` or the `aggregation` config key.
+`division` rolls teams up one level. See
+[docs/legal-and-privacy.md](docs/legal-and-privacy.md) for deployment guidance.
+`team` and `division` both enforce the same k-anonymity floor (`--k-anonymity`, default 5,
 hard minimum 3; it counts developer identifiers, so load the alias map first or
 one person with two identifiers counts twice): a group with fewer developers contributing inside the score
 window is folded into an anonymous "other" row, and if "other" itself is below
@@ -855,21 +866,16 @@ code and lockfiles count in full, so label a PR whose size they inflate.
 
 | Where | Format | Example | Resolves to |
 |---|---|---|---|
-| branch | `<prefix>/<N>-<slug>` — trailing `-`/`_` optional; `N` has no leading zero | `feature/42-auth`, `feature/42` | `issue-42` |
-| branch | tracker key `[A-Z][A-Z0-9]+-<N>` | `fix/TIER-99-crash` | `TIER-99` |
-| PR body / commit | `closes #N`, `fixes #N`, `resolves #N` (case-insensitive) | `closes #42` | `issue-42` |
-| PR body | whitespace-preceded `#N` | `see #42` | `issue-42` |
+| branch | first slot numeric, no leading zero; year/date guard | `feature/42-auth`, `42-auth` | `issue-42` |
+| branch | first slot configured key or built-in OP | `fix/TIER-99-crash` with TIER configured | `TIER-99` |
+| PR body / commit subject | close directive | `closes #42` | `issue-42` |
+| PR body | explicit relation or trailer | `refs #42`, `Issue: #42` | `issue-42` |
+| PR body | configured key in a structured location | `implements PROJ-123` with PROJ configured | `PROJ-123` |
+| commit subject | configured key anywhere, word-bounded | `fix: PROJ-123` with PROJ configured | `PROJ-123` |
 
-When both the branch and the PR body carry a reference, the branch wins. A PR
-that closes several issues still records one outcome: under the branch's issue,
-or, if the branch has none, the first issue the body closes.
+Configure comma-separated uppercase prefixes with `--tracker-keys`, `TIER_TRACKER_KEYS`, or `attribution.tracker_keys` (CLI > env > config > empty). OP is always built in. Invalid entries stop startup. Serve, ship, score and backfill use the same grammar. Startup and `tierd doctor --db <existing-db>` suggest unconfigured prefixes found in stored outcomes without enabling them.
 
-Non-matches: `## heading`, hex colors like `#FF0000`, and branches named
-`main`/`master`/`HEAD`. A bare 4-digit segment in the year band `1900`–`2099`
-(e.g. `release/2024-fix`) is read as a calendar year, not an issue — disambiguate
-with a tracker key or a PR-body `#N`. See
-[docs/conventions.md](docs/conventions.md) for the full rules and the year-guard
-tradeoff.
+The branch wins over the PR body. A PR closing several issues still records one outcome under that primary issue. Only the first branch slot counts; later numbers, date/year slots and release, bot and revert branches supply no issue. PR bodies ignore code examples, quoted lines and Corrects declarations. Bare `#N`, free-prose tracker keys and unconfigured tokens such as `UTF-8` do not attribute PRs. Commit subjects accept closing directives and configured keys; a bare `(#N)` can still supply PR metadata for recorded-PR resolution. The change is prospective and rewrites no stored attribution. See [docs/conventions.md](docs/conventions.md) for the exact grammar.
 
 ---
 
@@ -998,6 +1004,7 @@ widens the Claude Code read: `--worktree-attribution` (#823) also reads the file
 folder paths in tool calls and uses the one that seven tools name (`Read`, `Edit`,
 `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`), never file contents or command
 lines, and stores no path in an event ([docs/privacy.md](docs/privacy.md#worktree-attribution-off-by-default)).
+Parents no longer carry (#1016); only message groups labelled `isSidechain:true` can use carry. Worktree attribution stays opt-in and **off by default**. Activation requires recorded gates, the operator's security rulings and an explicit operator decision. No new accuracy figures have been measured.
 
 What **is** stored, in one SQLite file on the machine that runs `tierd serve`:
 developer identifier, issue id, repository name, branch-derived issue refs,
@@ -1021,8 +1028,8 @@ forwards requests to the provider you chose. Full detail and code grounding:
 
 Per-developer measurement can be **restricted by law** in parts of the EU
 (German Betriebsrat co-determination, French and Dutch works councils, GDPR
-rules on profiling). Before you run in `developer` mode, where named
-developers' numbers are visible, read
+rules on profiling). From v0.6.1, `developer` is synthetic demo only until #826;
+real-data startup is refused. Before deploying real data in team or division mode, read
 [docs/legal-and-privacy.md](docs/legal-and-privacy.md) — works-council, DPIA, and
 team-only vs per-developer deployment guidance (not legal advice).
 

@@ -165,7 +165,7 @@ func TestServeSmoke_UnknownModelWarnSurvivesLogLevel(t *testing.T) {
 				"serve",
 				"--addr", addr,
 				"--db", dbPath,
-				"--aggregation", "developer",
+				"--aggregation", "team",
 				"--log-format", "json",
 				"--log-level", tc.level,
 			}, "\n")

@@ -11,9 +11,10 @@
 
 ## Why this document exists
 
-TIER attributes AI token spend to outcomes. In `developer` mode, which an
-operator has to choose on purpose, it reports that attribution **per named
-developer**. In several of TIER's target markets, measuring the performance of
+TIER attributes AI token spend to outcomes. `developer` mode reports that
+attribution **per named developer** (developer: synthetic demo only until #826).
+v0.6.1 refuses developer-mode startup on real data, including loopback
+and read-only operation. Use `team` or `division` for real data. In several of TIER's target markets, measuring the performance of
 named employees is legally constrained — sometimes requiring prior
 co-determination or works-council
 agreement, sometimes restricted outright under data-protection law. Adopters
@@ -40,12 +41,12 @@ Two independent reasons make this the right posture:
    work*, which is a team-and-portfolio property, not a fair proxy for
    individual worth.
 
-Use a per-developer view for coaching (a developer and their manager looking at
+The planned per-developer view is for coaching (a developer and their manager looking at
 how that person works with AI) and for engineering diagnosis (for example,
 "which spend is missing an issue reference?"). Make organizational decisions
 from **team-level** numbers.
 
-**What `developer` mode is.** It is meant as a coaching view that a developer
+**What `developer` mode is (synthetic demo only until #826).** It is meant as a coaching view that a developer
 and their manager read together, seeing the same numbers. Today anyone with
 read or dashboard access sees every developer's numbers; per-viewer access is
 planned (#826). Either way, a tool that shows named people's numbers can be
@@ -54,7 +55,9 @@ this document applies to it in full. TIER is built for coaching, not for evaluat
 into a review. Only your written policy, or a works agreement where one
 applies, can.
 
-**What limits exist today, and what is planned.** Today, in `developer` mode:
+**What limits exist today, and what is planned.** Real-data developer-mode
+startup is refused until #826; the synthetic demo only shows invented data.
+The demo view illustrates these remaining limits:
 
 - anyone who can read the API or the dashboard can see every developer's
   numbers;
@@ -75,8 +78,8 @@ Issue #826 plans four controls (**planned, not yet built**):
   org-level history kept in a roll-up that names nobody;
 - a developer list with no TIER order.
 
-Until those ship, restrict who can reach the API and the dashboard, and set
-retention by policy.
+Until those ship, use `team` or `division` on real data; `developer` startup is
+refused. Restrict who can reach the API and database, and set retention by policy.
 
 ## What TIER measures and stores (and what it never touches)
 
@@ -99,6 +102,8 @@ but the live watcher's checkpoint row keeps the absolute path of the worktree it
 is carrying, and spend in another repository's worktree is stored as
 `unattributed:foreign-repo`, without that repository's name or path; the full
 list is in [privacy.md](privacy.md#worktree-attribution-off-by-default).
+
+Parents no longer carry (#1016); only message groups labelled `isSidechain:true` can use carry. Worktree attribution stays opt-in and **off by default**. Activation requires recorded gates, the operator's security rulings and an explicit operator decision. No new accuracy figures have been measured.
 
 Full, code-grounded detail is in **[docs/privacy.md](privacy.md)** (guarantee
 verified against the code on 2026-07-04). In summary, TIER stores in a single
@@ -244,6 +249,8 @@ mandatory-DPIA lists.
 
 ## Works-council consultation prerequisites (checklist)
 
+**v0.6.1 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+
 Where a works council or equivalent body exists, treat the following as
 prerequisites **before** per-developer TIER goes live. Adapt to local law with
 counsel:
@@ -276,11 +283,12 @@ The recommended deployment mode depends on where your developers are employed
 (the location of the *employees measured*, not the company HQ). "Team-only" here
 means reporting that never surfaces an individual developer's performance.
 
-> **Availability note (accurate as of 2026-10-02):** TIER now ships a dedicated
+> **Availability note (accurate as of 2026-10-18):** TIER now ships a dedicated
 > **team-only aggregation mode** with a k-anonymity floor (issue **#185**). It is
-> selected by a **REQUIRED** `--aggregation team|division|developer` setting on
+> selected by a **REQUIRED** `--aggregation team|division` setting on
 > `tierd serve` (env `TIER_AGGREGATION`, config key `aggregation`): there is **no
-> silent default** — `tierd serve` refuses to start until you choose, so an
+> silent default**. `developer` is reserved for the synthetic `tierd demo` until
+> #826; real-data startup is refused. `tierd serve` refuses to start until you choose, so an
 > existing deployment can never change its reporting posture on upgrade by
 > accident. In `team` or `division` mode `GET /api/v1/scores`, the dashboard, and
 > `GET /api/v1/scores/{developer}` **never** return an individual developer name:
@@ -316,8 +324,8 @@ means reporting that never surfaces an individual developer's performance.
 | **France (FR)** | **Team-only** | Prior CSE information-and-consultation; advance employee notice; DPIA | Monitoring tools require CSE consultation and transparency (Code du travail L2312-38; CNIL guidance). |
 | **Netherlands (NL)** | **Team-only** | OR consent under WOR Art. 27; DPIA | Personnel-monitoring arrangements need works-council consent before adoption. |
 | **Other EU / EEA** | **Team-only (default)** | Local works-council consultation; DPIA; lawful basis + transparency | Most member states have analogous monitoring-consultation regimes; confirm locally. |
-| **UK** | Team-only preferred; per-developer only with safeguards | UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance | No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring. |
-| **US (at-will, non-union)** | Per-developer possible | Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. | Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties. |
+| **UK** | Team-only. Per-developer: not available in v0.6.1 (#826) | UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance | No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring. |
+| **US (at-will, non-union)** | Team-only. Per-developer: not available in v0.6.1 (#826) | Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. | Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties. |
 | **Anywhere with a collective agreement / union** | Follow the agreement | Whatever the agreement requires | A collective bargaining agreement can impose obligations beyond statute regardless of country. |
 
 **How to read this table:** in every EU/EEA row the safe default is **team-only
@@ -327,6 +335,7 @@ level higher (#270), so named per-developer views are technically
 suppressed — the API, dashboard, and per-developer endpoint never return an
 individual name, and sub-k cohorts collapse into "other". Pair that with access
 restriction (a read-only viewer token, #190) and separate instances per cohort.
+
 Per-developer deployment in a co-determined jurisdiction should not go live until
 both (a) the required works-council instrument is in place and (b) a DPIA has
 been completed. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.

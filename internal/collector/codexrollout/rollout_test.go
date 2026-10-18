@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 )
 
@@ -352,6 +353,9 @@ func TestEmittedEventShape(t *testing.T) {
 		// than fall into an unattributed bucket.
 		if e.IssueID != wantIssueID {
 			t.Errorf("event %d IssueID = %q, want %q (derived from branch %q)", i, e.IssueID, wantIssueID, testBranch)
+		}
+		if e.IssueRule != issueref.RuleBranchFirstSlot {
+			t.Errorf("event %d IssueRule = %q, want %q", i, e.IssueRule, issueref.RuleBranchFirstSlot)
 		}
 	}
 }
@@ -1452,5 +1456,34 @@ func TestDeltaFromWrapsAccountingError(t *testing.T) {
 	cause := errors.Unwrap(err)
 	if cause == nil || cause.Error() != "containment broken: cached_input_tokens=900 > input_tokens=100" {
 		t.Fatalf("deltaFrom() cause = %v, want tokenacct containment error", cause)
+	}
+}
+
+func TestRevertCountPerPass(t *testing.T) {
+	for _, branch := range []string{"feature/42-x", "revert-42-x"} {
+		t.Run(branch, func(t *testing.T) {
+			repo := initGitRepo(t, t.TempDir())
+			sessions := t.TempDir()
+			stageFixture(t, sessions, cleanFixture, repo, branch)
+			c := newTestCollector(t, sessions, RepoTarget{Path: repo})
+			var logs bytes.Buffer
+			c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			for pass := 1; pass <= 2; pass++ {
+				events, err := c.Collect(context.Background(), time.Time{})
+				if err != nil || len(events) != cleanBillableCalls {
+					t.Fatalf("events=%+v err=%v", events, err)
+				}
+				want := 0
+				if strings.HasPrefix(branch, "revert-") {
+					want = pass
+				}
+				if got := strings.Count(logs.String(), `"msg":"revert-branch events left unattributed"`); got != want {
+					t.Fatalf("count lines=%d want=%d logs=%s", got, want, &logs)
+				}
+				if want > 0 && (!strings.Contains(logs.String(), `"count":4`) || !strings.Contains(logs.String(), `"level":"INFO"`)) {
+					t.Fatal(logs.String())
+				}
+			}
+		})
 	}
 }

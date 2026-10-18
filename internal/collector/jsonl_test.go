@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -422,7 +423,7 @@ func TestJoinSessionsToCommits_EmitsIdempotencyKey(t *testing.T) {
 		},
 	}
 	// No commits — relies on FromBranch fallback for IssueID.
-	events := joinSessionsToCommits(sessions, nil, "alice", "")
+	events := joinSessionsToCommits(sessions, nil, "alice", "", issueref.Grammar{})
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
 	}
@@ -626,7 +627,7 @@ func TestJoinSessionsToCommits_IDlessFallback(t *testing.T) {
 			},
 		},
 	}
-	events := joinSessionsToCommits(sessions, nil, "alice", "")
+	events := joinSessionsToCommits(sessions, nil, "alice", "", issueref.Grammar{})
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events (one per ID-less message), got %d", len(events))
 	}
@@ -635,7 +636,7 @@ func TestJoinSessionsToCommits_IDlessFallback(t *testing.T) {
 	}
 	// Re-running join with the same input must produce the same keys (stable
 	// across re-scans).
-	again := joinSessionsToCommits(sessions, nil, "alice", "")
+	again := joinSessionsToCommits(sessions, nil, "alice", "", issueref.Grammar{})
 	for i := range events {
 		if events[i].IdempotencyKey != again[i].IdempotencyKey {
 			t.Errorf("event[%d] key changed across re-scan: %q vs %q",
@@ -1436,7 +1437,7 @@ func TestJoinSessionsToCommits_UnattributableSessionCostLandsOnDeveloper(t *test
 	}
 	// Empty commit slice: no commit match, and FromBranch("main") == "" — the
 	// classic unattributable case.
-	events := joinSessionsToCommits(sessions, nil, "dev", "")
+	events := joinSessionsToCommits(sessions, nil, "dev", "", issueref.Grammar{})
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2 (per-message emission for the unattributable session)", len(events))
 	}
@@ -1478,7 +1479,7 @@ func TestJoinSessionsToCommits_AttributedSessionsUnchanged(t *testing.T) {
 			},
 		},
 	}
-	events := joinSessionsToCommits(sessions, nil, "dev", "")
+	events := joinSessionsToCommits(sessions, nil, "dev", "", issueref.Grammar{})
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
 	}
@@ -1518,7 +1519,7 @@ func TestJoinSessionsToCommits_PerMessageBranchAttribution(t *testing.T) {
 			},
 		},
 	}
-	events := joinSessionsToCommits(sessions, nil, "dev", "")
+	events := joinSessionsToCommits(sessions, nil, "dev", "", issueref.Grammar{})
 	if len(events) != 4 {
 		t.Fatalf("got %d events, want 4 (one per message)", len(events))
 	}
@@ -1630,7 +1631,7 @@ func TestJoinSessionsToCommits_EmptyMessageBranchFallsBackToSession(t *testing.T
 			{messageID: "m1", timestamp: base, gitBranch: "", model: "claude-sonnet-4", input: 1000, output: 500},
 		},
 	}}
-	events := joinSessionsToCommits(sessions, nil, "dev", "")
+	events := joinSessionsToCommits(sessions, nil, "dev", "", issueref.Grammar{})
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
 	}
@@ -1735,7 +1736,7 @@ func TestParseSessionFile_PerMessageBranchThreaded(t *testing.T) {
 		t.Fatalf("per-message gitBranch not threaded through parse: %v", branchByID)
 	}
 	// And the join attributes per message: m1 (main) -> exploratory bucket, m2 -> issue-47.
-	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "")
+	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "", issueref.Grammar{})
 	got := map[string]string{}
 	for _, e := range events {
 		// key events by their token count to tell m1 (1500) from m2 (2800) apart.

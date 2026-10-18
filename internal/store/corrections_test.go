@@ -98,7 +98,7 @@ func TestCorrectionSchema_FreshAndMigratedConverge(t *testing.T) {
 			t.Fatalf("%s indexes differ", table)
 		}
 	}
-	if schemaVersion != 10 || readUserVersion(t, path) != schemaVersion || migrated.UpgradeNotice() != UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection || fresh.UpgradeNotice() != "" {
+	if schemaVersion != 12 || qualityTriggerSchemaVersion != 11 || readUserVersion(t, path) != schemaVersion || migrated.UpgradeNotice() != UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule || fresh.UpgradeNotice() != "" {
 		t.Fatal("schema version/notice incorrect")
 	}
 	if err := migrated.Close(); err != nil {

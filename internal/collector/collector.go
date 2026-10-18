@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -298,6 +299,8 @@ func bucketForBranch(branch string) string {
 // driving requirement yet). Both write fields are 0. For other providers: all
 // three cache fields are 0 today.
 type TokenEvent struct {
+	// RevertBranch is transient counting evidence, never stored or sent on the wire.
+	RevertBranch       bool   `json:"-"`
 	CacheWriteEvidence string // nested | legacy | empty when the raw shape was not observed
 	PricingBasis       string // aggregate_approx for a provider daily remainder
 	Developer          string
@@ -361,13 +364,18 @@ type TokenEvent struct {
 	// ship` carry it, and both pass the event through SinkRules first, so a value
 	// outside the set is never stored or sent by either.
 	AttributionRule store.AttributionRule
-	Timestamp       time.Time
+	// IssueRule labels the client's extractor evidence; empty means none.
+	IssueRule issueref.Rule
+	Timestamp time.Time
 }
 
 // SinkRules applies the #823 rules both event sinks share — the shipper's wire and
 // the direct-write store adapter — so one event lands the same way on either path.
 // The zero value is ready and safe for concurrent use.
-type SinkRules struct{ warned atomic.Bool }
+type SinkRules struct {
+	warned      atomic.Bool
+	issueWarned atomic.Bool
+}
 
 // Apply returns ev with the shared rules applied. Each rewrites, never refuses: a
 // refused event pins the watcher's checkpoint and stops a ship run, total capture
@@ -377,6 +385,7 @@ type SinkRules struct{ warned atomic.Bool }
 //   - a rule outside store.AttributionRules() is dropped (stored NULL, exported as
 //     "legacy"), with one WARN per SinkRules that never carries the value, which
 //     may be arbitrary text.
+//   - an issue rule outside issueref.Rules() is dropped with one separate WARN.
 func (r *SinkRules) Apply(ev TokenEvent) TokenEvent {
 	if ev.IssueID == UnattributedForeignRepo {
 		ev.Repo = repoid.Unqualified
@@ -385,6 +394,12 @@ func (r *SinkRules) Apply(ev TokenEvent) TokenEvent {
 		ev.AttributionRule = store.AttributionRuleNone
 		if r.warned.CompareAndSwap(false, true) {
 			slog.Warn("dropping an attribution_rule outside the closed set; affected events are stored with no rule")
+		}
+	}
+	if issueref.Validate(ev.IssueRule) != nil {
+		ev.IssueRule = ""
+		if r.issueWarned.CompareAndSwap(false, true) {
+			slog.Warn("dropping an issue_rule outside the closed set; affected events are stored with no rule")
 		}
 	}
 	return ev

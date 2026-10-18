@@ -355,7 +355,7 @@ function quarterStartISO() {
 // fills. Also drops the retained levers-export payload so a stale window can
 // never be exported.
 function resetViews() {
-  var hide = ['issue-report', 'correction-context', 'seal-disclosure', 'kpi-row', 'provenance', 'segments-note', 'segments-retro',
+  var hide = ['partition-diagnostics', 'issue-report', 'correction-context', 'seal-disclosure', 'kpi-row', 'provenance', 'segments-note', 'segments-retro',
               'detail-card', 'aggregate-pricing', 'trust-strip', 'unattr-breakdown', 'attr-coverage',
               'unjoined-strip', 'cost-comp', 'team-rollups', 'compare-view', 'cmp-total',
               // cost-horizon (#512) MUST be in this list. It is the only banner
@@ -652,6 +652,8 @@ function renderScores(data, since, until) {
   renderUnjoinedDevelopers(data.data_quality);
   renderTrustStrip(data.data_quality);
   renderAggregatePricing(data.data_quality);
+  renderPartitionDiagnostics(data.data_quality, teamMode);
+  renderQualityEvidence(data.quality_evidence);
   // Immediately after the four checks and NOT at the end of the function. The
   // band must run once every check has decided whether it is showing -- but the
   // four caveats are now gated on the band's own reveal, so every unrelated
@@ -1350,7 +1352,7 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
 
   // 95%-CI whisker: only ranked developer rows carry a CI (team rows and
   // below-floor rows do not, #133). Positioned on the same panel scale.
-  if (!teamMode && isRanked) {
+  if (!teamMode && isRanked && num(d.ci_high) > 0) {
     var lo = num(d.ci_low), hi = num(d.ci_high);
     // Expose the 95% CI to keyboard/screen-reader users on the row itself: the
     // whisker is a visual glyph and the value's title= is hover-only, so without
@@ -1359,13 +1361,13 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
     // no aria-label and read as their plain textContent.
     row.setAttribute('aria-label',
       'TIER ' + tierVal.toFixed(1) + ', ' + BOUNDS_LABEL + ' [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + ']' +
-      ', cost per point $' + num(d.cost_per_point).toFixed(2));
+      ', cost per point $' + num(d.cost_per_point).toFixed(2) + '. ' + rowIntervalNote(d));
     if (hi > lo) {
       var whisker = el('div', 'ybar-whisker');
       whisker.style.left = pct(lo / scale);
       whisker.style.width = pct((hi - lo) / scale);
       whisker.title = BOUNDS_LABEL + ' [' + lo.toFixed(0) + ', ' + hi.toFixed(0) + '] over ' +
-        num(d.sample_n) + ' outcomes (bootstrap). ' + BOUNDS_NOTE;
+        num(d.sample_n) + ' outcomes (bootstrap). ' + (rowIntervalNote(d) ? rowIntervalNote(d) + '. ' : '') + BOUNDS_NOTE;
       track.appendChild(whisker);
     }
   } else if (num(d.weighted_points) <= 0) {
@@ -1392,6 +1394,11 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
   var value = el('div', 'ybar-value' + (isRanked ? '' : ' below'));
   value.appendChild(buildTierReading(d, teamMode, isRanked));
   value.appendChild(buildCostPerPoint(d, teamMode, isRanked));
+  if (!teamMode && isRanked && num(d.ci_high) <= 0 && rowIntervalNote(d)) {
+    var intervalTag = el('span', 'ybar-floor-tag', 'interval ' + rowIntervalNote(d));
+    intervalTag.style.maxWidth = '18ch';
+    value.appendChild(intervalTag);
+  }
   row.appendChild(value);
 
   return row;
@@ -1422,6 +1429,10 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
 // The NO SCORE gate comes first: a row with neither points nor cost is NO SCORE,
 // not FREE. Gating on weighted_points mirrors buildCostPerPoint's "--", so the
 // two sub-readings always agree.
+function rowIntervalNote(d) {
+  return d.ci_note || '';
+}
+
 function buildTierReading(d, teamMode, isRanked) {
   if (num(d.weighted_points) <= 0) {
     var none = el('div', 'ybar-tier ybar-noscore', 'NO SCORE');
@@ -1435,9 +1446,11 @@ function buildTierReading(d, teamMode, isRanked) {
   }
   var tier = el('div', 'ybar-tier num', num(d.tier).toFixed(1));
   if (!teamMode) {
-    tier.title = isRanked
+    tier.title = isRanked && num(d.ci_high) <= 0 && rowIntervalNote(d)
+      ? rowIntervalNote(d)
+      : isRanked
       ? BOUNDS_LABEL + ' [' + num(d.ci_low).toFixed(0) + ', ' + num(d.ci_high).toFixed(0) + '] over ' +
-        num(d.sample_n) + ' outcomes (bootstrap). ' + BOUNDS_NOTE
+        num(d.sample_n) + ' outcomes (bootstrap). ' + (rowIntervalNote(d) ? rowIntervalNote(d) + '. ' : '') + BOUNDS_NOTE
       // Names the conditions this row actually fails, never one asserted cause:
       // "insufficient sample to rank" was false for a 20-outcome, $500 row held
       // back by a single zero-token outcome, with both cleared numbers printed
@@ -1484,6 +1497,7 @@ function buildCostPerPoint(d, teamMode, isRanked) {
     return none;
   }
   var cpp = el('div', 'ybar-cpp num', '$' + num(d.cost_per_point).toFixed(2) + '/pt');
+  if (!teamMode) cpp.title = rowIntervalNote(d);
   // Self-relative 95% CI only on ranked developer rows (team rows and below-floor
   // rows carry none, mirroring the TIER CI). scoring.CostPerPointCI already orders
   // low < high (reciprocal transform), so [low, high] reads naturally.
@@ -1491,7 +1505,7 @@ function buildCostPerPoint(d, teamMode, isRanked) {
     var lo = num(d.cost_per_point_ci_low), hi = num(d.cost_per_point_ci_high);
     if (hi > 0 || lo > 0) {
       cpp.title = 'cost-per-point ' + BOUNDS_LABEL + ' [$' + lo.toFixed(2) + ', $' + hi.toFixed(2) +
-        '/pt] (self-relative). ' + BOUNDS_NOTE;
+        '/pt] (self-relative). ' + (rowIntervalNote(d) ? rowIntervalNote(d) + '. ' : '') + BOUNDS_NOTE;
     }
   }
   return cpp;
@@ -3002,6 +3016,9 @@ function renderIssueReport(host, report) {
     + issueUSDText(report.unattributed_cost_usd) + '); total captured spend '
     + issueUSDText(report.total_cost_usd) + '. Disjoint rows sum to total spend. Identifier order.';
   host.appendChild(summary);
+  if (report.attribution_notice) {
+    host.appendChild(el('p', 'tr-caption', report.attribution_notice));
+  }
   var table = document.createElement('table');
   table.className = 'tr-table';
   var header = document.createElement('tr');
@@ -3014,7 +3031,7 @@ function renderIssueReport(host, report) {
   var tbody = document.createElement('tbody');
   (report.reconciliation || []).forEach(function(row) {
     var tr = document.createElement('tr');
-    [row.repo, row.issue_id || '(missing issue)', row.label, issueUSDText(row.cost_usd),
+    [row.repo, row.issue_id || '(missing issue)', row.label + (row.attribution_layer === 'read_time_recovery' ? '; includes read-time recovery' : ''), issueUSDText(row.cost_usd),
       num(row.weighted_points).toFixed(1), row.outcome_n + ' / ' + row.sample_n,
       row.tier == null ? row.score_status : num(row.tier).toFixed(1)].forEach(function(value, i) {
       var td = document.createElement(i === 1 ? 'th' : 'td');
@@ -3032,6 +3049,34 @@ function renderIssueReport(host, report) {
   note.className = 'tr-caption';
   note.textContent = 'Issue IDs come from branch/PR text and can be misfiled; per-issue work and spend may appear under the wrong issue.';
   host.appendChild(note);
+}
+
+
+function renderPartitionDiagnostics(dq, teamMode) {
+  var panel = $('partition-diagnostics');
+  if (!panel) return;
+  panel.textContent = '';
+  var d = dq && dq.partition_diagnostics;
+  if (teamMode || !d || typeof d !== 'object') {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+  panel.appendChild(el('h3', '', 'PR partition sensitivity'));
+  function value(v, suffix) { return v == null ? 'unavailable' : num(v).toFixed(2) + suffix; }
+  panel.appendChild(el('p', '', value(d.points_per_pr, ' points per PR') + ' · ' +
+    value(d.points_per_1000_usd, ' points per $1,000')));
+  panel.appendChild(el('p', '', 'PRs at the size cap: ' + num(d.capped_pr_count) +
+    ' (' + value(d.capped_pr_count_share == null ? null : d.capped_pr_count_share * 100, '% of PRs') +
+    '); ' + value(d.capped_pr_points, ' points') + ' (' +
+    value(d.capped_pr_points_share == null ? null : d.capped_pr_points_share * 100, '% of PR points') + ').'));
+  panel.appendChild(el('p', '', 'Outcomes per issue: ' + (d.outcomes_per_issue || []).map(function(b) {
+    return b.outcomes + ' outcomes: ' + b.issues + ' issues';
+  }).join('; ')));
+  panel.appendChild(el('p', '', 'Size weights: ' + (d.weight_buckets || []).map(function(b) {
+    return b.weight + ': ' + b.outcomes + ' outcomes, ' + num(b.points).toFixed(2) + ' points';
+  }).join('; ')));
+  panel.appendChild(el('p', '', d.notice || ''));
 }
 
 // --- Wiring -----------------------------------------------------------------
@@ -3100,3 +3145,29 @@ $('compare-toggle').addEventListener('change', function() {
 $('period-select').addEventListener('change', loadView);
 
 load();
+
+function renderQualityEvidence(evidence) {
+  var target = $('quality-evidence');
+  if (!target) return;
+  if (!evidence || evidence.status === 'not_shown') {
+    target.textContent = 'size-weighted points, adjusted for observed quality signals; evidence incomplete';
+    return;
+  }
+  var parts = [evidence.label || 'evidence incomplete',
+    'trigger recording began ' + evidence.cutover, 'completeness unknown'];
+  ['ci', 'revert'].forEach(function (kind) {
+    var counts = evidence[kind] || {};
+    parts.push(kind.toUpperCase() + ': ' + num(counts.matched) + ' matched, ' +
+      num(counts.window_open) + ' windows open at request time');
+  });
+  parts.push(num(evidence.trigger_unknown) + ' trigger unknown; ' +
+    num(evidence.recovered_numerator_rows) + ' evidence rows recovered, ' +
+    num(evidence.recorded_numerator_rows) + ' recorded');
+  (evidence.workflows || []).forEach(function (workflow) {
+    parts.push('workflow ' + workflow.workflow_id + ': ' +
+      (workflow.quality_evidence_share == null ? 'evidence incomplete' :
+        'evidence ' + (100 * num(workflow.quality_evidence_share)).toFixed(0) + '%'));
+  });
+  if ((evidence.trigger_unknown_outcomes || []).length) parts.push('CI trigger unknown');
+  target.textContent = parts.join('; ');
+}

@@ -14,8 +14,6 @@ package quality
 
 import (
 	"regexp"
-	"strconv"
-	"strings"
 
 	"github.com/tiermetric/tier/internal/qualityrule"
 	"github.com/tiermetric/tier/internal/store"
@@ -89,7 +87,7 @@ func Resolve(events []store.QualityEvent) float64 {
 	for i, e := range events {
 		ref := ParseCIRef(e.SourceRef)
 		facts[i] = qualityrule.Event{
-			EventType: e.EventType, HeadSHA: ref.HeadSHA, WorkflowID: ref.WorkflowID,
+			TriggerEvent: e.TriggerEvent, EventType: e.EventType, HeadSHA: ref.HeadSHA, WorkflowID: ref.WorkflowID,
 		}
 	}
 	return qualityrule.Resolve(facts).Float64
@@ -125,164 +123,17 @@ type CIKey struct {
 	HeadSHA    string
 	WorkflowID string
 }
-
-// CIRef is a parsed CI source_ref: the CIKey identity plus the run attempt.
-// RunAttempt is 0 when the source_ref carries no parseable attempt (a revert
-// commit SHA, or anything malformed).
 type CIRef struct {
 	CIKey
 	RunAttempt int
 }
 
-// BuildCISourceRef encodes a CI event's source_ref as
-// "head_sha:run_attempt:workflow_id".
-//
-// 🔑 WHY source_ref AND NOT A NEW COLUMN. The unique key is
-// (outcome_id, event_type, source_ref). With workflow identity OUTSIDE it, two
-// different workflows failing on the same commit at the same attempt collide on
-// that key and the second ci_fail is dropped by ON CONFLICT DO NOTHING — so the
-// failure a later matching flaky success must NOT clear would never have been
-// stored to begin with. Identity has to be in the key, and once it is in the key
-// a parallel column is a second representation of the same fact that can
-// disagree with it. Resolve also sees only []store.QualityEvent, so source_ref
-// is the one channel that reaches it without a schema change.
-//
-// UNAMBIGUITY, stated as what is ENFORCED rather than what is hoped.
-//
-// The last two components are colon-free by construction — they are strconv
-// output over non-negative ints, /^[0-9]+$/ — and ParseCIRef anchors on the
-// RIGHT, so the head-SHA field may contain anything at all and still round
-// trips. The workflow NAME, the only user-controlled colon-admitting field in
-// the payload, is never parsed and never encoded. ⇒ no GitHub input, legal or
-// not, can make one shape read as another.
-//
-// ⚠️ THE HEAD SHA IS NOT VALIDATED, AND AN EARLIER VERSION OF THIS COMMENT
-// CLAIMED IT WAS. It said head_sha "is matched against a stored 40-hex SHA".
-// It is not: outcomes.merge_commit_sha is TEXT with no CHECK, and
-// validateOutcomeRequest enforces only non-empty and a length cap — the comment
-// at internal/api/outcomes.go:136 says so outright. A bearer-token holder can
-// therefore store a colon-bearing merge_commit_sha, and (with the webhook HMAC
-// secret, which is what it takes to name it as a head_sha) reach this encoder
-// with a colon in headSHA. Right-anchored parsing is what makes that harmless
-// for the three-component form: "a:b" at attempt 1 of workflow 42 encodes to
-// "a:b:1:42" and parses back to exactly ("a:b", 1, 42).
-//
-// ⚠️ ONE RESIDUAL AMBIGUITY, AND IT IS INHERENT TO A DELIMITER-FREE ENCODING
-// OVER AN UNVALIDATED FIELD: in the UNIDENTIFIED fallback below, headSHA "a:7"
-// at attempt 1 and headSHA "a" at attempt 7 both encode to "a:7:1"... in fact
-// the first is "a:7:1" and the second is "a:7", so they differ — but headSHA
-// "a:7" at attempt 1 (unidentified) collides with headSHA "a" at attempt 7 of
-// workflow 1. It is not exploitable: matching is scoped to ONE outcome_id and
-// merge_commit_sha is UNIQUE, so every event on an outcome shares one headSHA,
-// and a colon-bearing one makes RunAttempt constant across the event set while
-// CIKey varies — which makes `success.RunAttempt > failed.RunAttempt`
-// unsatisfiable. ⇒ a poisoned head SHA can only DISABLE flaky neutralisation
-// for that outcome, never cause one. Fail-closed, and pinned by
-// TestPoisonedHeadSHAIsFailClosed.
-//
-// A non-positive workflowID (absent from the payload, or crafted) falls back to
-// the legacy two-component form: an event whose workflow cannot be identified
-// gets the identity "unknown" rather than a fabricated one, and unknown pairs
-// only with unknown. A negative runAttempt (impossible from GitHub, reachable
-// only by a forged HMAC-signed payload) is clamped to 0 so the ref stays
-// parseable rather than silently degrading to the opaque shape.
 func BuildCISourceRef(headSHA string, runAttempt int, workflowID int64) string {
-	if runAttempt < 0 {
-		runAttempt = 0
-	}
-	ref := headSHA + ":" + strconv.Itoa(runAttempt)
-	if workflowID <= 0 {
-		return ref
-	}
-	return ref + ":" + strconv.FormatInt(workflowID, 10)
+	return qualityrule.BuildCISourceRef(headSHA, runAttempt, workflowID)
 }
-
-// ParseCIRef parses a CI event's source_ref. It accepts, in order:
-//
-//	"head_sha:attempt:workflow_id"  (#687)   -> full identity
-//	"head_sha:attempt"              (legacy) -> WorkflowID ""
-//	anything else (e.g. a revert commit SHA) -> HeadSHA = text before the first
-//	                                            colon, WorkflowID "", attempt 0
-//
-// The final case preserves the pre-#687 HeadSHA contract for every non-CI
-// source_ref, so nothing that used to parse now parses differently.
 func ParseCIRef(sourceRef string) CIRef {
-	// 🔑 ANCHOR ON THE RIGHT, NOT THE LEFT. The trailing two fields are the
-	// encoder's own strconv output; the head-SHA field is the only one that can
-	// contain anything. Splitting from the left and demanding exactly three
-	// fields would silently LOSE the identity of any event whose head SHA
-	// carries a colon (it would read as four fields and fall through to the
-	// opaque branch), which is the one case where getting it right matters.
-	if wfAt := strings.LastIndexByte(sourceRef, ':'); wfAt > 0 {
-		if attemptAt := strings.LastIndexByte(sourceRef[:wfAt], ':'); attemptAt >= 0 {
-			attempt, aok := parseDecimal(sourceRef[attemptAt+1 : wfAt])
-			if aok && isPositiveDecimal(sourceRef[wfAt+1:]) {
-				return CIRef{
-					CIKey:      CIKey{HeadSHA: sourceRef[:attemptAt], WorkflowID: sourceRef[wfAt+1:]},
-					RunAttempt: attempt,
-				}
-			}
-		}
-		// Legacy two-component form.
-		if attempt, ok := parseDecimal(sourceRef[wfAt+1:]); ok {
-			return CIRef{CIKey: CIKey{HeadSHA: sourceRef[:wfAt]}, RunAttempt: attempt}
-		}
-	}
-	// Not a CI source_ref shape (a revert commit SHA, or anything malformed).
-	// The head-SHA component is the text before the FIRST colon — the pre-#687
-	// HeadSHA contract, preserved verbatim so nothing that used to parse now
-	// parses differently.
-	if i := strings.IndexByte(sourceRef, ':'); i >= 0 {
-		return CIRef{CIKey: CIKey{HeadSHA: sourceRef[:i]}}
-	}
-	return CIRef{CIKey: CIKey{HeadSHA: sourceRef}}
-}
-
-// isPositiveDecimal reports whether s is a run of ASCII digits containing at
-// least one non-zero — i.e. a workflow id the encoder would have emitted.
-//
-// ⚠️ It deliberately does NOT convert to an integer. strconv.Atoi is int-wide,
-// so on a 32-bit build a workflow_id >= 2^31 would FAIL to parse on read while
-// BuildCISourceRef (int64 / FormatInt) wrote it happily — a silent read/write
-// asymmetry that would degrade such an event to the legacy form and reinstate
-// #687 for it. Comparing digits has no width at all.
-//
-// Consequence worth knowing: the workflow id is kept as the raw substring, so
-// "007" and "7" are DISTINCT identities. Unreachable from BuildCISourceRef,
-// which never emits leading zeros; it would only bite a hand-written or
-// imported row, and it errs toward not-matching. Do not "normalise" it without
-// re-reading the back-compat rule on CIKey.
-func isPositiveDecimal(s string) bool {
-	nonZero := false
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-		if s[i] != '0' {
-			nonZero = true
-		}
-	}
-	return nonZero
-}
-
-// parseDecimal accepts only a non-empty run of ASCII digits, so "+1", " 1" and
-// "0x1" are all rejected. strconv.Atoi alone would accept a leading sign, which
-// would let two spellings of one attempt produce two different source_refs for
-// one run.
-func parseDecimal(s string) (int, bool) {
-	if s == "" {
-		return 0, false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, false
-		}
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, false // overflow on an absurdly long digit run
-	}
-	return n, true
+	ref := qualityrule.ParseCIRef(sourceRef)
+	return CIRef{CIKey: CIKey{HeadSHA: ref.HeadSHA, WorkflowID: ref.WorkflowID}, RunAttempt: ref.RunAttempt}
 }
 
 // strategicPatterns and qualityPatterns are the deterministic keyword lists

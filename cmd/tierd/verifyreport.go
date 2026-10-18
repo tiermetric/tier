@@ -901,7 +901,7 @@ func runVerifyReportCmdWithReplay(args []string, stdout, stderr io.Writer, repla
 	// defines — that is exactly what #741 removed. Before adding a query here, ask
 	// whether internal/store already answers it.
 	//
-	// mode=ro is the same posture store.InspectIdentities uses for the #475 safety
+	// mode=ro opens the report input read-only, preserving the database safety
 	// guarantee. Opened AFTER store.Open so the snapshot's schema and migrations
 	// are already applied — the digests read through `db` see the same bytes.
 	ro, err := sql.Open("sqlite", readOnlySnapshotDSN(snapPath))
@@ -1364,6 +1364,9 @@ func verifyAgainst(ctx context.Context, db *store.DB, ro *sql.DB, info store.Pri
 // mutate anything, independent of any token check. No listener is opened and no
 // port is bound — the request never leaves the process.
 func rerunScores(ctx context.Context, db *store.DB, w manifestWindow, scope string, mode scoring.AggregationMode, k int, policies ...scoring.ScoringPolicy) (json.RawMessage, error) {
+	// Developer windows use live /scores policy; historical anonymized windows
+	// replayed with WithUnsealedRecompute retain stored attribution.
+	ctx = store.WithReadTimeRecovery(ctx, !mode.Anonymized())
 	// Discard the handler's logs: api.New warns when no API token is set, which
 	// is correct for a server and pure noise for a local verifier reading its
 	// own database.

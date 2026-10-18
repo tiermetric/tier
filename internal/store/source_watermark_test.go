@@ -136,7 +136,7 @@ func TestOpen_V5ToV6AddsSourceWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := db.UpgradeNotice(); n != UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection || !strings.Contains(n, "schema version 6") {
+	if n := db.UpgradeNotice(); n != UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule || !strings.Contains(n, "schema version 6") {
 		t.Errorf("v5 open: UpgradeNotice = %q, want the source-watermark notice alone", n)
 	}
 	ctx := context.Background()

@@ -117,6 +117,17 @@ token, refuses redirects and returns nonzero on mode/auth/server/decode failure.
 The dashboard's developer-mode per-issue table uses the same endpoint; it never
 fetches this breakdown in team/division mode.
 
+Live issue reports may add `as_of` and `attribution_notice` when recovery is used:
+“scores are as of &lt;ts&gt; and may be revised as branches merge”. A reconciliation
+row with recovered support adds `attribution_layer: "read_time_recovery"` and
+`read_time_recovery_cost_usd` (omitted for a zero-dollar recovered portion).
+This marks mixed rows as including recovery. Developer-mode `/scores` and its
+per-issue developer detail add the same layer marker where applicable. All read
+routes except `GET /api/v1/report_manifest` and sealed reads carry the
+population-independent `X-TIER-Attribution` disclosure; stored
+sealed bodies stay byte-identical. Raw event exports continue to report stored
+attribution. See [effective attribution and the read-only recovery receipt](technical-reference.md#shared-effective-attribution-1306-489).
+
 ## Feature detection
 
 **The supported feature-detection mechanism is the `version` field of
@@ -352,7 +363,8 @@ shipped.**
    column, #231). This restates the contract already enforced in
    `internal/api/export.go` (`eventsCSVHeader`, `outcomesCSVHeader`,
    `qualityEventsCSVHeader`, `qualityHistoryCSVHeader`) and documented in
-   `docs/how-it-works.md`.
+   `docs/how-it-works.md`. With Event 3 enabled, its conditional outcome
+   columns precede `issue_rule`; positional consumers must read by header name.
 
 Request bodies are strict in the other direction: the write endpoints decode
 with `DisallowUnknownFields()`, so an **unknown request field is rejected 400**.
@@ -865,6 +877,18 @@ A `DELETE` carries no body and needs no `Content-Type`.
   as client input. Branch reuse bounds later credit at the previous merge. Guessable
   branch names can be recovered from the hash. API outcomes have no head-ref field and
   leave the hash NULL; webhook/backfill set it only with head-ref evidence.
+- **`issue_rule` is OPTIONAL (#1296):** client-asserted extractor provenance.
+  The closed set is `branch_first_numeric`, `branch_tracker_shape`,
+  `body_close_directive`, `body_tracker_shape`, `body_bare_hash`,
+  `commit_close_directive`, `commit_tracker_shape`, `branch_first_slot`,
+  `branch_configured_key`, `body_configured_key`, `body_relation_ref` and
+  `commit_configured_key`. In v0.6.1 (#1297), new rows carry strict rule names
+  from the strict issue-reference grammar; stored attribution is not rewritten.
+  An absent or unknown value is stored as NULL; unknown values cause one warning
+  without logging the supplied value. This assertion is never copied into
+  outcome provenance or used to upgrade a row to strict. Upgrade the server
+  first: the shipper reuses its single-resend fallback on an exact unknown-field
+  HTTP 400, omitting the rejected field for that server.
 - **`attribution_rule` is OPTIONAL (#823):** the rule that assigned `issue_id`,
   empty or one of the closed set `store.AttributionRules()` (`branch`,
   `worktree-cwd`, `worktree-toolpath`, `carry`). Omitted, the row stores no rule --
@@ -873,6 +897,11 @@ A `DELETE` carries no body and needs no `Content-Type`.
   allowed set; the refused value is not echoed. Stored on insert only; a replay
   never rewrites it. Same version skew as `host`: a pre-#823 server `400`s a batch
   that carries the field, so upgrade tierd before the shippers.
+  Claude Code capture uses `carry` only for `isSidechain:true` groups (#1016);
+  parents never carry. Worktree attribution stays opt-in and off by default.
+  Activation requires recorded gates, operator security rulings and an explicit
+  operator decision. No new accuracy figures have been measured. Historical
+  rows retain the rule recorded by their original collector.
 - ⚠️ **`developer` gets the STRICT rule here, with NO allowlist (#619).** The
   asymmetry with `issue_id` directly above is deliberate, not an oversight: the local
   collectors this wire admits (`source` must be `jsonl`, `codex-rollout`,
@@ -1580,6 +1609,48 @@ A `DELETE` carries no body and needs no `Content-Type`.
   zero-cost (FREE) row keeps its honest `0`. `cost_per_point_ci_low/high`
   are its nominal 95% self-relative bootstrap bounds (coverage unvalidated), the reciprocal (ends swapped) of
   the `tier` CI -- `0` for unranked rows. See [docs/rubric.md](./rubric.md).
+- **#1233 interval withholding (v0.6.1 wire-contract amendment).** On
+  `/scores` developer rows, developer detail, work-type developer rows and each
+  developer compare side, the row's OWN attributed-cost share must be at least
+  **0.5** for an interval. This uses the cost paired with resampled outcomes,
+  divided by this row's total cost, after the same allocation/scaling as the
+  bootstrap; its complement is `fixedCostUSD`, including cost on issues without
+  outcomes and non-resampled repair cost. It is not the window-level
+  `data_quality.attributed_cost_share`. Exactly 0.5 passes; a nonpositive total
+  has no interval. The evidence floor is checked first: an unranked row
+  always says `withheld: below evidence floor`, even when its attributed-cost
+  share is also below 0.5.
+  Withheld `ci_low`, `ci_high`, `cost_per_point_ci_low/high` remain **present
+  numeric `0`**, following the existing below-evidence-floor convention; they
+  are neither `null` nor omitted. Compare sides have no cost-per-point bounds.
+  Additive `ci_note` says `withheld: row attributed-cost share below 50%`, or
+  `withheld: below evidence floor`; shown intervals carry the exact label
+  `excludes uncertainty from unattributed spend`. `ranked`, the score and
+  cost-per-point point estimate do not change. `significant` is **false** if
+  either side's interval is withheld, even when both rows remain ranked.
+  For months sealed after this change, team/division `/scores` windows always return
+  `data_quality.interval_status: "not_shown"`, without row shares, reasons or
+  floor-dependent status; live `/scores` windows do too. These two diagnostics
+  are `/scores`-only, not compare-window or `/issues` fields. Older sealed months
+  omit both `interval_status` and `partition_diagnostics`; stored seal bytes
+  never change.
+- **#1233 partition diagnostics (additive, v0.6.1).**
+  `/scores` carries `data_quality.partition_diagnostics`: developer mode gets
+  `{outcomes_per_issue: [{outcomes, issues}], weight_buckets:
+  [{weight, outcomes, points}], outcome_n, capped_pr_count,
+  capped_pr_count_share, capped_pr_points, capped_pr_points_share,
+  points_per_pr, points_per_1000_usd, notice}`. Issues are keyed by repository
+  and issue ID across the window; distributions are sorted ascending. Buckets
+  use raw size weight and effective scored points. The cap is weight 8,
+  including quality-discounted outcomes. Cap shares use non-push PR outcomes
+  (`weight_source != "push"`), including legacy PRs without a number, by count and by points; `points_per_pr` uses those PRs
+  too. All scored outcomes and whole-window cost enter points per $1,000.
+  Zero share/mean denominators are `null`; zero-cost TIER remains `0`.
+  The notice discloses same-issue and cross-issue partition sensitivity and
+  that diagnostics apply no automatic penalties. Team/division `/scores` modes return
+  the constant string `not_shown` for live windows and months sealed after this
+  change, including suppressed or empty windows. Older sealed months omit the
+  field; stored seal bytes never change.
 - `teamScoreJSON`: `team (omitempty), tier, weighted_points, total_cost_usd,
   actual_paid_usd, spend_leverage, coverage_pct, cost_per_point, ranked`. No CI at
   team grain (the bootstrap is a per-developer signal, #133). `ranked` (#502) is
@@ -1785,7 +1856,7 @@ limitations](technical-reference.md#captured-dollar-diagnostics).
   `Tier-Bounds-Status: unvalidated_descriptive`, `Tier-Inference: not_established`
   and a `Tier-Bounds-Note` header. Legacy `ci_*` field names remain for compatibility.
 - **Legacy non-overlap result:** `significant` is retained, not a validated inference
-  verdict. It is true only when a developer is present and above the floor in both
+  verdict. It is true only when a developer is present, above the evidence floor and (in v0.6.1, #1233) at or above the row's own 50% attributed-cost-share floor in both
   windows and the bounds do not overlap; touching ends overlap. Withheld bounds,
   an absent side or a below-floor side make it false; it is always false for groups.
   Neither value establishes an effect or a noise threshold. The dashboard shows
@@ -2101,7 +2172,7 @@ windows open. Longer grace does not establish delivery completeness.
   Each event: `id, ts, developer, issue_id, model, input_tokens, output_tokens,
   cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cost_micro,
   source, fidelity, idempotency_key, repo, session_id, price_version, host,
-  billing_mode, billed_to, attribution_rule, pricing_basis, rate_snapshot, cache_write_evidence`.
+  billing_mode, billed_to, attribution_rule, pricing_basis, rate_snapshot, cache_write_evidence, issue_rule`.
 - **CSV** (`Accept: text/csv`): same fields in the **append-only** column order
   of `eventsCSVHeader`. Empty `next_cursor` (body and the `X-Next-Cursor` header)
   means the window is exhausted.
@@ -2110,8 +2181,14 @@ windows open. Longer grace does not establish delivery completeness.
   return, following OWASP CSV-injection guidance. Numeric columns remain numeric
   (including negative values such as `-1.5`); JSON values are unchanged. Use JSON
   when the original text is required without the CSV safety prefix.
-- `attribution_rule` (#823) is an **additive** field and the appended trailing
-  CSV column: the rule that assigned the row's `issue_id`. The values are
+- `issue_rule` (#1296) is appended last in JSON and CSV, after all existing
+  fields. NULL exports as `legacy`; a recorded extraction rule exports verbatim.
+  `legacy` can include post-upgrade NULL rows: the singleton
+  `issue_rule_cutover` records the UTC migration time and maximum outcome/event
+  IDs at cutover ([cutover details](technical-reference.md#4-where-the-outcomes-come-from-prs-weights-quality-floors-direct-commits-outcomes-api)).
+  The developer access export preserves the nullable stored value (JSON `null`
+  for SQL NULL), including archived rows in `outcome_exclusions`.
+- `attribution_rule` (#823) is an **additive** field appended after `billed_to`: the rule that assigned the row's `issue_id`. The values are
   `branch`, `worktree-cwd`, `worktree-toolpath`, `carry`, `pr-number-at-insert`
   or `branch-at-merge` (#1074: server-assigned, never client-sent;
   `branch-at-merge` is the merged PR's head-branch fill). A row with no rule
@@ -2126,8 +2203,16 @@ windows open. Longer grace does not establish delivery completeness.
 - **JSON:** `outcomesExportResponse` -- `{next_cursor, outcomes: [...]}`. Each
   outcome: `id, ts, developer, issue_id, pr_number, weight, weight_source,
   quality, merge_commit_sha, additions, deletions, changed_files, source,
-  work_type, work_type_source, repo, push_day, quality_status`.
+  work_type, work_type_source, repo, push_day, quality_status, issue_rule`
+  (Event 3 raw/projection fields, when enabled, precede `issue_rule`).
 - **CSV:** the **append-only** `outcomesCSVHeader` order.
+- `issue_rule` (#1296) is server-set from webhook/backfill extraction, appended
+  last after every existing column, including conditional Event 3 fields.
+  Explicit outcomes API issue IDs and pre-migration rows store NULL and export
+  `legacy`; recorded rules export verbatim. The `issue_rule_cutover` ID
+  boundaries above distinguish the pre-upgrade band from later NULL rows.
+  Posting `issue_rule` to
+  `POST /api/v1/outcomes` is rejected as an unknown field and stores nothing.
 - `quality_status` (#1228) is appended after `push_day` in CSV; JSON omits it
   when empty. `unknown` means the outcome has an unresolved or unrecognized
   quality check. Empty does not establish observed quality. This diagnostic
@@ -2145,21 +2230,32 @@ windows open. Longer grace does not establish delivery completeness.
   `GET /events`.
 - **JSON** (default): `qualityEventsExportResponse` -- `{next_cursor,
   quality_events: [...]}`. Each row: `id, outcome_id, developer, issue_id,
-  event_type, source_ref, event_ts, recorded_at, reason, status, evidence`.
+  event_type, source_ref, event_ts, recorded_at, reason, status, evidence, trigger_event`.
 - ⚠️ **`source_ref`'s value shape for CI rows changed in #687 (BREAKING)** --
   `head_sha:run_attempt:workflow_id`, was `head_sha:run_attempt`. Same column,
   different bytes; see the [changelog entry](#api-changelog). The identical
   change applies to `source_ref` on `GET /api/v1/quality_history`, which carries
   the CI ref through `UpdateQualityForOutcome`.
 - **CSV** (`Accept: text/csv`): the **append-only** `qualityEventsCSVHeader` order;
-  `reason`, `status`, and `evidence` (#1228) follow the original eight columns.
+  `reason`, `status`, and `evidence` (#1228) follow the original eight columns;
+  `trigger_event` (#1230) is appended after `evidence`.
 - `revert_ambiguous` records a checked but unresolved revert against each
   qualified candidate, with `reason="ambiguous"`, `status="unknown"`, and
   `evidence=false`. It neither changes numeric quality nor adds quality history.
   `source_ref` is the revert SHA; distinct SHAs, rather than candidate rows or
-  delivery counts, count unresolved reverts. Recognized CI and resolved revert
-  event types have `status="observed"` and `evidence=true`; unrecognized types
-  fail closed as `unknown`/`false`. `reason` is empty on earlier rows.
+  delivery counts, count unresolved reverts. Resolved revert event types have
+  `status="observed"` and `evidence=true`; unrecognized types fail closed as
+  `unknown`/`false`. `reason` is empty on earlier rows.
+- `trigger_event` (#1230) is the normalized CI workflow trigger: `push`,
+  `schedule`, `workflow_dispatch`, `merge_group`, `pull_request`,
+  `pull_request_target`, `release`, `workflow_run`, `repository_dispatch`, or
+  `other`. Missing or unsupported new triggers are `other`. Legacy CI rows
+  with unknown provenance and non-CI rows have JSON `null` and an empty CSV
+  cell. Only CI rows with `trigger_event="push"` have `status="observed"` and
+  `evidence=true`. Legacy CI rows with NULL provenance have
+  `status="CI trigger unknown"` and `evidence=false`; known non-push CI rows
+  have `status="unknown"` and `evidence=false`. These diagnostics do not
+  themselves change the stored numeric quality.
 
 #### `GET /api/v1/quality_history`
 - **Scope:** read. **Success:** `200 OK`. **403 in any anonymized (team/division) mode** (#185, #270).
@@ -2538,6 +2634,13 @@ refute an unchanged report. The verifier checks the replayed score body's nested
 Sealed reports likewise recompute with their recorded policy, rule and rubric.
 
 ## API changelog
+
+- **#1230 / #1302 -- CI trigger provenance (ADDITIVE field; BEHAVIOURAL evidence/status change).**
+  `GET /api/v1/quality_events` adds nullable JSON `trigger_event` and appends
+  the CSV column after `evidence`. CI evidence is now push-only: legacy NULL
+  CI rows return the new status `CI trigger unknown` with `evidence=false`;
+  known non-push CI rows return `unknown`/`false`. Push CI and resolved revert
+  rows remain `observed`/`true`. Numeric quality is a separate stored value.
 
 - **#972 / #1279 -- `GET /api/v1/diagnostics/captured-dollars` (ADDITIVE).**
   New public v1 read endpoint with the same stability promise as the other v1

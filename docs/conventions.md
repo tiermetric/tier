@@ -52,78 +52,32 @@ Explicit labels let reviewers apply the rubric using context the diff heuristic 
 
 ## Issue references → attribution
 
-Cost and outcomes are attributed to an **issue id** derived from the branch name
-or the PR/commit body. Accepted formats include:
+Cost and outcomes use the same strict grammar, with different accepted locations on each surface. `OP` is built in. Other tracker prefixes must be configured with `--tracker-keys`, `TIER_TRACKER_KEYS`, or `attribution.tracker_keys` (comma-separated; CLI > env > config > empty). Each prefix must match `^[A-Z][A-Z0-9]{0,15}$`; surrounding whitespace on each comma-separated entry is trimmed (`TIER, JIRA` is valid), and an empty or invalid entry stops startup and names the entry.
 
-| Where | Format | Example | Resolves to |
+| Where | Grammar | Example | Resolves to |
 |---|---|---|---|
-| branch | `<prefix>/<N>-<slug>` — trailing `-`/`_` optional; `N` has no leading zero | `feature/42-auth`, `feature/42` | `issue-42` |
-| branch | tracker key `[A-Z][A-Z0-9]+-<N>` | `fix/TIER-99-crash` | `TIER-99` |
-| PR/commit body | whole-word `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved` followed by whitespace or a colon and optional whitespace, then `#N` (case-insensitive) | `closes #42`, `fixes:#42` | `issue-42` |
-| PR/commit body | tracker key `[A-Z][A-Z0-9]+-<N>` | `part of PROJ-123` | `PROJ-123` |
-| PR/commit body | whitespace-preceded `#N` | `see #42` | `issue-42` |
+| branch | first slot: `<N>` followed by `-`, `_`, `.`, or end; no leading zero | `feature/42-auth`, `fix/42`, `42-auth` | `issue-42` |
+| branch | first slot: configured `<KEY>-<N>` or built-in `OP`, followed by `-`, `_`, `.`, `/`, or end | `fix/TIER-99-crash` with TIER configured; `OP-2024-x` | `TIER-99`; `OP-2024` |
+| PR body | whole-word close directive + `#N`, case-insensitive | `closes #42`, `fixes:#42` | `issue-42` |
+| PR body | configured key or OP immediately after a close directive or relation verb, or at the start of a trailer value | `implements PROJ-123`, `Issue: PROJ-123` with PROJ configured | `PROJ-123` |
+| PR body | explicit relation or trailer + `#N` | `refs #42`, `Issue: #42` | `issue-42` |
+| commit subject | close directive + `#N`, then configured key or OP anywhere, word-bounded | `fix: closes #42`; `fix: PROJ-123` with PROJ configured | `issue-42`; `PROJ-123` |
 
-The collector's commit-**subject** path attributes cost through tracker keys (`PROJ-123` → `PROJ-123`)
-or a whole-word close keyword (`close`, `closes`, `closed`, `fix`, `fixes`,
-`fixed`, `resolve`, `resolves`, or `resolved`, case-insensitive) followed by
-whitespace or a colon and optional whitespace, then `#N` (`closes: #12` → `issue-12`).
-The number must end at the end of the text, whitespace, or punctuation;
-`fixed #12abc` does not match. Close directives take precedence
-over tracker keys. A bare `#N` (`title (#909)`) stays unattributed, never booked
-as `issue-N` in this collector path. The webhook push path now uses the same
-commit-subject rule (#1069): only the git `%s` subject (first paragraph, folded)
-is read for attribution; the body is excluded.
+The first slot is the component immediately after the first `/`, or the whole branch when there is no `/`. Later components and later numbers never count. The first component is excluded when it is `release`, `releases`, `revert`, `dependabot`, `renovate`, `backup`, `archive`, or `gh-pages` (case-insensitive); `revert-*` branches are also excluded. `main`, `master`, `HEAD`, and an empty branch carry no issue evidence. Revert-branch spend stays unattributed even when a nearby commit names an issue; the collector logs an INFO count per run.
 
-**Branch precedence:** a tracker key (e.g. `TIER-99`) takes priority over a bare
-numeric segment when both appear in a branch. The branch rule is looser than
-the table: TIER takes the first plain number segment anywhere in the branch name
-(split on `/`, `-` or `_`, with no leading zero), skipping a 1900–2099 year;
-`docs/guide-2026-10-14` reads as issue 10.
+A numeric first slot is rejected if it is a four-digit year in 1900–2099 or starts with a date run `YYYY-MM`, `YYYY-MM-DD`, or `YYYYMMDD` followed by `-`, `_`, `.`, or end. There is no fallback to a later number: `release/2024-42`, `feature/007-42`, `docs/notes-2026-10-14`, `fix/435b-auth-50051-cutover`, and `dependabot/docker/node-26-alpine` yield no branch issue. Configured keys and built-in `OP` accept zero-padded positive numbers and preserve the digits (`ACME-006`, `OP-0042`); bare `#007` and numeric branch `007-x` remain invalid. To name issue 2024, use `OP-2024` or a configured key, or `closes #2024` in the PR body.
 
-**Issue-id misfiling.** Pull-request points and captured spend do not depend on issue ids. Misfiling can merge or split direct-push credit (one 0.5 per issue per UTC day per repository) or change which outcome a footerless revert penalises, so headline TIER can move and per-issue rows can be wrong. See [the measured rate and how to avoid it](technical-reference.md#51-the-shared-key-is-the-issue-id).
+Close directives are `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, and `resolved`, followed by whitespace or a colon and optional whitespace, then `#N`. The number ends at whitespace, punctuation, or end of text; `fixed #12abc` does not match. Relation verbs are `refs`, `references`, `part of`, `relates to`, `tracks`, and `implements` (case-insensitive, whole words). Key trailers are `Issue`, `Issues`, `Ref`, `Refs`, `References`, `Ticket`, `Tracker`, `Jira`, or `OpenProject`, followed by `:`. The PR-body relation phrase `half of #N` also attributes, including `the GET half of #1944` and `second half of #829`; `behalf of #5` does not. Hash-reference trailers are `Issue`, `Ref`, `Refs`, or `References`, followed by `:`.
 
-**PR-body precedence:** `closes #N` (highest confidence) > tracker key
-(`PROJ-123`) > bare `#N` (lowest confidence). This lets a Jira/Linear shop that
-references a tracker key in the PR body — with a generic branch name — still get
-attribution; within the body, an explicit `closes #N` wins when present.
-A branch-derived ID takes precedence over the entire body.
+Balanced `*`, `**`, `_`, or `__` wrappers immediately around a reference token are stripped: `Implements **ACME-006**`, `closes **#42**`, `Closes *#42*`, and `refs __#7__` attribute in their accepted locations. Emphasis on the verb (`**closes** #42`) does not attribute.
 
-### The year guard (a deliberate tradeoff)
+PR bodies exclude Corrects declaration lines, fenced code (backticks or tildes), quoted lines starting with `>`, and inline code spans. A branch-derived ID wins over the body; otherwise the body chooses close directives, then structured configured keys, then explicit relation references, first match within each class. `see #42 for context`, `Fixes an error in PR #446`, `Follow-up to #733`, free-prose keys, and unconfigured `UTF-8`, `SHA-256`, `HTTP-2`, or `CVE-2026-1234` do not attribute an issue. `Corrects: #733` is correction metadata only.
 
-A **bare** 4-digit branch segment in the range **1900–2099** is treated as a
-calendar year, not an issue number, and is **dropped**:
+Commit subjects accept close directives and configured keys; `Refs: #42`, relation references to `#N`, and bare `#N` do not attribute an issue. A bare `(#N)` can still supply PR metadata when the subject supplies no issue, for resolution against an already recorded PR. The push webhook reads only git's `%s` subject, excluding the commit body.
 
-- `release/2024-fix` → *no attribution* (2024 read as a year, not issue #2024)
-- `release/2024` → *no attribution*
+The grammar applies prospectively. Existing outcome and token-event attributions are not rewritten. Strict `issue_rule` values identify new extraction paths; old legacy rules or NULL remain the cutover record. The authorised one-way recovery of previously unattributed events retains its ambiguity, overwrite, default-branch, time-window and sealed-period guards.
 
-This biases toward the far more common release/date-stamp branch over an issue
-whose number happens to land in the year band. Numbers with 1–3 digits or 5+
-digits are never guarded (`feature/42`, `bugfix/1234`, `feature/12345` all
-attribute normally; `feature/2100` attributes because it is above the window).
-
-The guard **skips** a year segment rather than aborting, so a branch that
-carries both a date stamp and an issue number still attributes: `release/2024-42`
-→ `issue-42` (the `2024` is skipped, `42` is used).
-
-If your issue numbers genuinely reach 1900–2099, disambiguate with an **explicit
-marker**, where no guard applies: use a tracker key (`fix/PROJ-2024-…` →
-`PROJ-2024`) or reference `#2024` in the PR body.
-
-### Things that do NOT match (and why)
-
-- `release/2024-fix` — a bare 4-digit year-band segment; guarded as a date
-  stamp (see above). Use a tracker key or a `#N` body reference for issue 2024.
-- `## Section` — a Markdown heading; neither `#` is immediately followed by
-  an issue number, so it never matches an issue.
-- `#FF0000` — a hex color, not a numeric issue reference.
-- `main`, `master`, `HEAD` — excluded by name; work on these branches is not
-  attributed to an issue.
-
-> **Caveat for PR bodies and commit subjects:** tracker keys are read from
-> free-form text, so prose tokens shaped like a key — `UTF-8`, `SHA-256`,
-> `HTTP-2`, or the `CVE-2026` prefix in `CVE-2026-1234` — can be mis-read as
-> an issue when no close directive is present. An explicit `closes #N`
-> overrides this, so prefer it whenever a PR or commit closes a GitHub issue.
+At startup and in `tierd doctor --db <existing-db>`, TIER prints `tracker keys: none configured (OP built in)` or the configured list, plus up to ten unconfigured tracker-shaped prefixes found in stored outcome IDs, ordered by count descending then name. These are suggestions only and never change the configuration.
 
 ### Consequence of a miss
 
@@ -135,8 +89,7 @@ If none of the branch, PR body, or commit subjects yields an issue reference:
   outcome, so it contributes nothing to the TIER numerator.
 
 Name branches `<prefix>/<issue-number>-<slug>` (for example
-`fix/127-webhook-guide`) without tracker-shaped tokens elsewhere in the branch,
-and reference the issue in the PR body with `closes #<n>`; the body is only a
+`fix/127-webhook-guide`) and reference the issue in the PR body with `closes #<n>`; the body is only a
 fallback when the branch yields no ID.
 
 ## Multi-repo organizations

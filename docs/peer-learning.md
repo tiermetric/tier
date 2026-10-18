@@ -26,6 +26,8 @@ helped.
 
 ## What this is
 
+**v0.6.1 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+
 Practice transfer, not number transfer. When one part of a team has learned to
 get more yield per $1,000 -- higher cache reuse, less premium-model spend on
 routine work, less spend that TIER could not link to an issue -- the thing
@@ -136,9 +138,10 @@ curl -sS -H "Authorization: Bearer $TIER_READ_TOKEN" \
   `delta_total_cost_usd`, and a `significant` flag.
 - `significant` is a legacy raw non-overlap result, retained for compatibility.
   It is true only for a developer present and above the floor in both windows
-  with disjoint bounds, and false for withheld bounds. Neither value establishes
+  with disjoint bounds and, in v0.6.1 (#1233), each row's own attributed-cost share at least 50%; false for withheld bounds. Neither value establishes
   an effect or a noise threshold. The API labels it unvalidated and the dashboard
   says “inference not established”, without interval-derived colours.
+- In v0.6.1 (#1233), intervals are withheld below 50% of the row's own cost paired with resampled outcomes; exactly 50% passes. When shown they are labelled "excludes uncertainty from unattributed spend". Team and division rows carry none and reveal no floor status.
 - Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. They are descriptive resampling bounds and exclude uncertainty from unattributed spend, incorrect attribution and uncaptured usage.
 - Treat a small difference as no evidence either way, and a large one as a prompt
   to investigate, not a measured effect.

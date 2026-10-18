@@ -77,6 +77,7 @@ import (
 // does anything downstream of this loop add floats in the order this loop produced?
 // If yes, sort before the loop (or sort what it built) — do not allowlist it.
 var mapAccumAllowlist = map[string]string{
+	"api/quality_evidence.go:evidenceForWindow:workflows":   "SAFE: copies independently computed workflow shares, then sorts by workflow ID before publishing. Per-workflow weight additions follow the stable outcome slice; no downstream float sum consumes map iteration order.",
 	"api/join_readiness.go:buildJoinReadiness:costs":        "SAFE: builds diagnostic receipts only; all three receipt slices are sorted by (developer, issue, cost repo) before publishing or doctor aggregation. No score consumes them.",
 	"api/join_readiness.go:buildJoinReadiness:repoCosts":    "SAFE: one independent integer-micro-dollar conversion per repo, then rows sorted by repo before publishing or aggregation.",
 	"api/join_readiness.go:buildJoinReadiness:repoOutcomes": "SAFE: copies precomputed points from the stable outcome-slice fold; rows sorted by repo before publishing or doctor aggregation.",

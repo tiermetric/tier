@@ -76,7 +76,7 @@ func (r reader) CapturedDollarRowsWindow(ctx context.Context, since, until time.
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.q.QueryContext(ctx, `SELECT source, issue_id, COALESCE(session_id,''), SUM(cost_micro), COUNT(*) FROM token_events WHERE `+where+clause+` AND source <> 'api' GROUP BY source, issue_id, session_id ORDER BY source, issue_id, session_id`, args...)
+	rows, err := r.queryEffectiveWindow(ctx, since, until, scope, `SELECT source, issue_id, COALESCE(session_id,''), SUM(cost_micro), COUNT(*) FROM token_events WHERE `+where+clause+` AND source <> 'api' GROUP BY source, issue_id, session_id ORDER BY source, issue_id, session_id`, args...)
 	if err != nil {
 		return nil, err
 	}

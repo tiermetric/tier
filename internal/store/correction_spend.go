@@ -36,7 +36,7 @@ func (r reader) RepairSpendWindow(ctx context.Context, since, until time.Time, s
 	if !scope.IsFleetWide() {
 		repo = string(scope)
 	}
-	rows, err := r.q.QueryContext(ctx, query, append(args, repo, repo)...)
+	rows, err := r.queryEffectiveWindow(ctx, since, until, scope, query, append(args, repo, repo)...)
 	if err != nil {
 		return s, err
 	}

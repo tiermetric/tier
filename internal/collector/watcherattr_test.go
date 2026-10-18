@@ -34,55 +34,78 @@ func (h *heldRig) restart(t *testing.T) {
 	}
 }
 
-// Pins: the carry a message sets in one read attributes a message resolved in
-// the next read.
+// Pins: a carry persisted across reads attributes only sidechain messages;
+// parent messages without paths use the branch rule.
 func TestWatcher_CarrySurvivesAcrossReads(t *testing.T) {
-	f := newWTFixture(t)
-	h := newHeldRig(t, f.base, f.repo)
-	w := &Watcher{worktrees: f.x}
-	wantEvents(t, h.read(t, w,
-		wtJSONLLine("msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
-		wtJSONLLine("msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
-	), "300 issue-11 worktree-toolpath")
-	if got := h.state.metadata.LastWorktree; got != f.wtA {
-		t.Errorf("carried worktree after read 1 = %q, want %q", got, f.wtA)
-	}
-	wantEvents(t, h.read(t, w, wtJSONLLine("msg_3", f.wtAt(3), f.repo, "main", wtText, 302)), "301 issue-11 carry")
-}
-
-// Pins: the carry survives a restart through the checkpoint blob, and is
-// re-verified there: a worktree removed while the watcher was down carries
-// nothing.
-func TestWatcher_CarrySurvivesARestart(t *testing.T) {
-	for name, tc := range map[string]struct {
-		remove bool
-		want   string
-	}{
-		"worktree kept":    {false, "301 issue-11 carry"},
-		"worktree removed": {true, "301 unattributed:main branch"},
-	} {
-		t.Run(name, func(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sidechain=%t", side), func(t *testing.T) {
+			carryWant := "301 unattributed:main branch"
+			if side {
+				carryWant = "301 issue-11 carry"
+			}
 			f := newWTFixture(t)
 			h := newHeldRig(t, f.base, f.repo)
-			wantEvents(t, h.read(t, &Watcher{worktrees: f.x},
-				wtJSONLLine("msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
-				wtJSONLLine("msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
+			w := &Watcher{worktrees: f.x}
+			wantEvents(t, h.read(t, w,
+				wtStreamLine(side, "msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
+				wtStreamLine(side, "msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
 			), "300 issue-11 worktree-toolpath")
-			cp, err := checkpointFromState(h.path, h.state)
-			if err != nil {
-				t.Fatal(err)
+			wantWorktree := ""
+			if side {
+				wantWorktree = f.wtA
 			}
-			var blob map[string]any
-			if err := json.Unmarshal([]byte(cp.Metadata), &blob); err != nil || blob["LastWorktree"] != f.wtA {
-				t.Fatalf("checkpoint blob %s: LastWorktree want %q (err %v)", cp.Metadata, f.wtA, err)
+			if got := h.state.metadata.LastWorktree; got != wantWorktree {
+				t.Errorf("carried worktree after read 1 = %q, want %q", got, wantWorktree)
 			}
-			h.restart(t)
-			if tc.remove {
-				if err := os.RemoveAll(f.wtA); err != nil {
-					t.Fatal(err)
-				}
+			wantEvents(t, h.read(t, w, wtStreamLine(side, "msg_3", f.wtAt(3), f.repo, "main", wtText, 302)), carryWant)
+		})
+	}
+}
+
+// Pins: only sidechain messages use a carry after a checkpoint restart.
+// A worktree removed while the watcher was down carries nothing.
+func TestWatcher_CarrySurvivesARestart(t *testing.T) {
+	for _, side := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sidechain=%t", side), func(t *testing.T) {
+			carryWant := "301 unattributed:main branch"
+			if side {
+				carryWant = "301 issue-11 carry"
 			}
-			wantEvents(t, h.read(t, &Watcher{worktrees: f.x}, wtJSONLLine("msg_3", f.wtAt(3), f.repo, "main", wtText, 302)), tc.want)
+			for name, tc := range map[string]struct {
+				remove bool
+				want   string
+			}{
+				"worktree kept":    {false, carryWant},
+				"worktree removed": {true, "301 unattributed:main branch"},
+			} {
+				t.Run(name, func(t *testing.T) {
+					f := newWTFixture(t)
+					h := newHeldRig(t, f.base, f.repo)
+					wantEvents(t, h.read(t, &Watcher{worktrees: f.x},
+						wtStreamLine(side, "msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
+						wtStreamLine(side, "msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
+					), "300 issue-11 worktree-toolpath")
+					cp, err := checkpointFromState(h.path, h.state)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var wantWorktree any
+					if side {
+						wantWorktree = f.wtA
+					}
+					var blob map[string]any
+					if err := json.Unmarshal([]byte(cp.Metadata), &blob); err != nil || blob["LastWorktree"] != wantWorktree {
+						t.Fatalf("checkpoint blob %s: LastWorktree want %v (err %v)", cp.Metadata, wantWorktree, err)
+					}
+					h.restart(t)
+					if tc.remove {
+						if err := os.RemoveAll(f.wtA); err != nil {
+							t.Fatal(err)
+						}
+					}
+					wantEvents(t, h.read(t, &Watcher{worktrees: f.x}, wtStreamLine(side, "msg_3", f.wtAt(3), f.repo, "main", wtText, 302)), tc.want)
+				})
+			}
 		})
 	}
 }
@@ -146,8 +169,8 @@ func TestWatcher_NoMessageEmittedTwiceAcrossRestarts(t *testing.T) {
 	)...)
 	wantEvents(t, got,
 		"100 unattributed:main branch",
-		"102 issue-11 carry", "101 issue-11 worktree-toolpath", "103 issue-11 carry",
-		"104 issue-11 carry", "105 issue-11 carry",
+		"102 unattributed:main branch", "101 issue-11 worktree-toolpath", "103 unattributed:main branch",
+		"104 unattributed:main branch", "105 unattributed:main branch",
 	)
 }
 
@@ -307,8 +330,8 @@ func TestWatcher_ReplacedTranscriptStartsWithNoCarry(t *testing.T) {
 	h := newHeldRig(t, f.base, f.repo)
 	w := &Watcher{worktrees: f.x}
 	wantEvents(t, h.read(t, w,
-		wtJSONLLine("msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
-		wtJSONLLine("msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
+		wtStreamLine(true, "msg_1", f.wtAt(1), f.repo, "main", wtRead(filepath.Join(f.wtA, "a.go")), 300),
+		wtStreamLine(true, "msg_2", f.wtAt(2), f.repo, "main", wtText, 301),
 	), "300 issue-11 worktree-toolpath")
 	if got := h.state.metadata.LastWorktree; got != f.wtA {
 		t.Fatalf("carried worktree after read 1 = %q, want %q", got, f.wtA)
@@ -317,8 +340,8 @@ func TestWatcher_ReplacedTranscriptStartsWithNoCarry(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantEvents(t, h.read(t, w,
-		wtJSONLLine("msg_x", f.wtAt(3), f.repo, "main", wtText, 400),
-		wtJSONLLine("msg_y", f.wtAt(4), f.repo, "main", wtText, 401),
+		wtStreamLine(true, "msg_x", f.wtAt(3), f.repo, "main", wtText, 400),
+		wtStreamLine(true, "msg_y", f.wtAt(4), f.repo, "main", wtText, 401),
 	), "400 unattributed:main branch")
 }
 

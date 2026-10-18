@@ -20,6 +20,7 @@ func TestClientPRFieldsFallback(t *testing.T) {
 	}{
 		{"pr", `json: unknown field "pr_number"`, 400, 2, true, false},
 		{"branch", `json: unknown field "branch_hash"`, 400, 2, true, false},
+		{"issueRule", `json: unknown field "issue_rule"`, 400, 2, true, false},
 		{"cacheEvidence", `json: unknown field "cache_write_evidence"`, 400, 2, true, false},
 		{"other400", `pr_number must be >= 1`, 400, 1, false, true},
 		{"otherField", `json: unknown field "host"`, 400, 1, false, true},
@@ -38,6 +39,11 @@ func TestClientPRFieldsFallback(t *testing.T) {
 				_, pr := batch[0]["pr_number"]
 				_, hash := batch[0]["branch_hash"]
 				_, evidence := batch[0]["cache_write_evidence"]
+				_, issueRule := batch[0]["issue_rule"]
+				wantIssueRule := !tc.fallback || calls == 1 || !strings.Contains(tc.message, `"issue_rule"`)
+				if issueRule != wantIssueRule {
+					t.Errorf("call %d issue_rule present=%v, want %v", calls, issueRule, wantIssueRule)
+				}
 				wantPR := !tc.fallback || calls == 1 || !strings.Contains(tc.message, `"pr_number"`)
 				wantHash := !tc.fallback || calls == 1 || !strings.Contains(tc.message, `"branch_hash"`)
 				wantEvidence := !tc.fallback || calls == 1 || !strings.Contains(tc.message, `"cache_write_evidence"`)
@@ -57,6 +63,7 @@ func TestClientPRFieldsFallback(t *testing.T) {
 			n, hash := 42, strings.Repeat("a", 64)
 			ev.PRNumber, ev.BranchHash = &n, &hash
 			ev.CacheWriteEvidence = "nested"
+			ev.IssueRule = "branch_first_numeric"
 			err := c.Ingest(context.Background(), ev)
 			if (err != nil) != tc.fail || calls != tc.calls || c.omitPRFields != tc.fallback {
 				t.Fatalf("err=%v calls=%d omitted=%v", err, calls, c.omitPRFields)
@@ -108,6 +115,7 @@ func TestClientPRFieldsFallbackAlreadyCachedDuringBatch(t *testing.T) {
 	c := newTestClient(t, srv, Config{BatchSize: 1})
 	ev := testEvent("cached-during-batch")
 	ev.CacheWriteEvidence = "nested"
+	ev.IssueRule = "branch_first_numeric"
 	if err := c.Ingest(t.Context(), ev); err != nil {
 		t.Fatalf("cached field must still retry this batch: %v", err)
 	}
@@ -176,6 +184,7 @@ func TestClientPRFieldsTransportErrorsKeepState(t *testing.T) {
 		n, hash := 42, strings.Repeat("a", 64)
 		ev.PRNumber, ev.BranchHash = &n, &hash
 		ev.CacheWriteEvidence = "nested"
+		ev.IssueRule = "branch_first_numeric"
 		if err := c.Ingest(context.Background(), ev); !errors.Is(err, cause) || tr.calls != 2 || c.omitPRFields {
 			t.Fatalf("err=%v calls=%d omitted=%v", err, tr.calls, c.omitPRFields)
 		}

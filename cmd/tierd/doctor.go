@@ -113,6 +113,8 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return runCostConsistency(args[1:], stdout, stderr)
 	}
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	trackerKeys := addTrackerKeysFlag(fs)
+	dbPath := fs.String("db", defaultDBPath(), "existing database to inspect for unconfigured tracker prefixes (read-only)")
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", ".", "path to the git repository whose Claude Code sessions to check")
 	repoSlug := fs.String("repo-slug", "", `canonical "owner/repo" identity for --repo (#231); omit to read remote.origin.url`)
@@ -133,6 +135,23 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
+	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
+	if grammarErr != nil {
+		_, _ = fmt.Fprintf(stderr, "tracker keys: %v\n", grammarErr)
+		return 1
+	}
+
+	if *configPath != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "config: %v\n", err)
+			return 1
+		}
+		setFlags := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+		applyStringFromConfig(fs, setFlags, nil, "db", cfg.DB)
+	}
+
 	secretEnvFallback(fs, apiToken, "api-token", "TIER_API_TOKEN")
 	// Positive-range test (not `< 0 || > 1`) so a NaN — which strconv.ParseFloat
 	// accepts and against which every ordered comparison is false — is REJECTED
@@ -148,6 +167,17 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	// step must be interruptible).
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	var trackerCounts map[string]int
+	if _, err := os.Stat(*dbPath); err == nil {
+		trackerCounts, err = store.InspectIssueIDCounts(ctx, *dbPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "WARNING: tracker keys diagnostic: %v\n", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		_, _ = fmt.Fprintf(stderr, "WARNING: tracker keys diagnostic: %v\n", err)
+	}
+	_, _ = fmt.Fprintln(stdout, grammar.Diagnostic(trackerCounts))
 
 	var results []checkResult
 
@@ -172,6 +202,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		// `tierd score`/`ship` do, so doctor validates the SAME path capture uses.
 		since := time.Now().AddDate(0, 0, -doctorSinceDays).UTC()
 		c := &collector.JSONLCollector{
+			Grammar:     grammar,
 			RepoPath:    repoPath,
 			ClaudeDir:   *claudeDir,
 			DeveloperID: *developer,

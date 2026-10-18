@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -17,6 +18,8 @@ const attributedLowerBound = "attributed (lower bound)"
 // and unattributed reasons. Share is a fraction of captured spend, not a claim
 // about capture completeness; zero total spend has a zero share.
 type IssueReport struct {
+	AttributionNotice string `json:"attribution_notice,omitempty"`
+	AsOf              string `json:"as_of,omitempty"`
 	scoring.CorrectionRuleStamp
 	Since               string                 `json:"since"`
 	Until               string                 `json:"until,omitempty"`
@@ -31,23 +34,25 @@ type IssueReport struct {
 	Reconciliation      []IssueReportRow       `json:"reconciliation"`
 }
 
-// IssueReportRow identifies a stored (repo, issue_id), never a hierarchy or a
+// IssueReportRow identifies an effective (repo, issue_id), never a hierarchy or a
 // feature. Unattributed rows retain the sentinel issue_id as their reason.
 // TIER is null unless repository identity is unambiguous and the summed evidence
 // clears the shared engine's floor.
 type IssueReportRow struct {
-	Kind              string   `json:"kind"` // issue or unattributed
-	Repo              string   `json:"repo"`
-	IssueID           string   `json:"issue_id"`
-	Label             string   `json:"label"`
-	UnattributedShare float64  `json:"unattributed_share"`
-	CostUSD           float64  `json:"cost_usd"`
-	WeightedPoints    float64  `json:"weighted_points"`
-	OutcomeN          int      `json:"outcome_n"`
-	SampleN           int      `json:"sample_n"`
-	FlaggedOutcomes   int      `json:"flagged_outcomes"`
-	TIER              *float64 `json:"tier"`
-	ScoreStatus       string   `json:"score_status"`
+	AttributionLayer        string   `json:"attribution_layer,omitempty"`
+	ReadTimeRecoveryCostUSD float64  `json:"read_time_recovery_cost_usd,omitempty"`
+	Kind                    string   `json:"kind"` // issue or unattributed
+	Repo                    string   `json:"repo"`
+	IssueID                 string   `json:"issue_id"`
+	Label                   string   `json:"label"`
+	UnattributedShare       float64  `json:"unattributed_share"`
+	CostUSD                 float64  `json:"cost_usd"`
+	WeightedPoints          float64  `json:"weighted_points"`
+	OutcomeN                int      `json:"outcome_n"`
+	SampleN                 int      `json:"sample_n"`
+	FlaggedOutcomes         int      `json:"flagged_outcomes"`
+	TIER                    *float64 `json:"tier"`
+	ScoreStatus             string   `json:"score_status"`
 }
 
 func (h *Handler) handleGetIssueScores(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +111,10 @@ func (h *Handler) handleGetIssueScores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	report := buildIssueReport(win)
+	if store.RecoveryDisclosure(r.Context(), time.Now()) != "" {
+		report.AsOf = time.Now().UTC().Format(time.RFC3339)
+		report.AttributionNotice = fmt.Sprintf(store.RecoveryNotice, report.AsOf)
+	}
 	report.Repo = disclosure.Repo
 	report.RepoScopeExcluded = disclosure.Excluded
 	report.DataQuality = withCostHorizon(dataQualityBlock(h.aggregation, win.zeroTokenOutcomes, win.priceVersions, win.hasSpend()), since, horizon, hasHorizon, perSource)
@@ -115,8 +124,9 @@ func (h *Handler) handleGetIssueScores(w http.ResponseWriter, r *http.Request) {
 func buildIssueReport(win windowScores) IssueReport {
 	type key struct{ repo, issue string }
 	type group struct {
-		cost, realtime int64
-		outcomes       []scoring.Outcome
+		cost, realtime                 int64
+		recoveredCost, recoveredEvents int64
+		outcomes                       []scoring.Outcome
 	}
 	groups := map[key]*group{}
 	// Use the same repo-blind predicate as store.RepoMatch. Identity cannot be
@@ -136,6 +146,8 @@ func buildIssueReport(win windowScores) IssueReport {
 			repoBlindIssues[c.IssueID] = true
 		}
 		g := get(key{c.Repo, c.IssueID})
+		g.recoveredCost += c.ReadTimeRecoveryMicro
+		g.recoveredEvents += c.ReadTimeRecoveryEvents
 		g.cost += c.TotalCostMicro
 		g.realtime += c.RealtimeCostMicro
 		total += c.TotalCostMicro
@@ -182,6 +194,10 @@ func buildIssueReport(win windowScores) IssueReport {
 		score := scoring.ComputeDeveloper("", g.outcomes, store.MicroToDollars(g.cost), store.MicroToDollars(g.realtime), 0)
 		row := IssueReportRow{Kind: "issue", Repo: k.repo, IssueID: k.issue, Label: attributedLowerBound, UnattributedShare: report.UnattributedShare,
 			CostUSD: score.TotalCostUSD, WeightedPoints: score.WeightedPoints, OutcomeN: len(g.outcomes), SampleN: score.SampleN, FlaggedOutcomes: score.FlaggedOutcomes, ScoreStatus: "below evidence floor"}
+		if g.recoveredEvents > 0 {
+			row.AttributionLayer = string(store.AttributionRecovery)
+			row.ReadTimeRecoveryCostUSD = store.MicroToDollars(g.recoveredCost)
+		}
 		if isUnattributed(k) {
 			row.Kind = "unattributed"
 			row.Label = "unattributed"

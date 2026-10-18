@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -61,7 +62,7 @@ func TestJoinSessionsToCommits_MessageTimestampNormalizedToUTC(t *testing.T) {
 		}},
 	}}
 
-	events := joinSessionsToCommits(sessions, nil, "alice", "")
+	events := joinSessionsToCommits(sessions, nil, "alice", "", issueref.Grammar{})
 	if len(events) != 1 {
 		t.Fatalf("joinSessionsToCommits emitted %d events, want 1", len(events))
 	}
@@ -110,7 +111,7 @@ func TestJoinSessionsToCommits_OffsetTsWindowsCorrectlyInStore(t *testing.T) {
 			messageID: "m1", timestamp: rowInPlusTwo,
 			model: "claude-sonnet-4", input: 1000, output: 500,
 		}},
-	}}, nil, "alice", "")
+	}}, nil, "alice", "", issueref.Grammar{})
 	if len(events) != 1 {
 		t.Fatalf("joinSessionsToCommits emitted %d events, want 1", len(events))
 	}

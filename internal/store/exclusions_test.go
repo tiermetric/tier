@@ -276,7 +276,7 @@ func TestRevertExclusion_MigrationV6(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if readUserVersion(t, path) != schemaVersion || db.UpgradeNotice() != UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection {
+	if readUserVersion(t, path) != schemaVersion || db.UpgradeNotice() != UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule {
 		t.Fatal("v6 upgrade missing notice/version")
 	}
 	ctx := context.Background()

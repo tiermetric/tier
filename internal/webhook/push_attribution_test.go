@@ -176,28 +176,34 @@ func TestHandlePush_CaptureCommitSubjectAttribution(t *testing.T) {
 		name    string
 		message string
 		want    string
+		keys    string
 	}{
-		{"closes", "fix: attribution (closes #12)", "issue-12"},
-		{"fixes", "fix: attribution (fixes #1017)", "issue-1017"},
-		{"resolves", "fix: attribution (resolves #1017)", "issue-1017"},
-		{"tracker_key", "fix: attribution PROJ-123", "PROJ-123"},
-		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", "PROJ-123"},
-		{"bare_number", "docs: see #909 for context", ""},
-		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", ""},
-		{"no_reference", "chore: tidy up", ""},
-		{"mixed_references", "docs: REL-4 and #909 (CLOSES #1017) (#909)", "issue-1017"},
-		{"multiple_directives", "fix: attribution (closes #1017, fixes #42)", "issue-1017"},
-		{"body_close_directive", "chore: tidy up\n\ncloses #12", ""},
-		{"body_tracker_key", "chore: tidy up\n\nPROJ-123", ""},
-		{"subject_tracker_body_close", "fix: attribution PROJ-123\n\ncloses #12", "PROJ-123"},
+		{"closes", "fix: attribution (closes #12)", "issue-12", ""},
+		{"fixes", "fix: attribution (fixes #1017)", "issue-1017", ""},
+		{"resolves", "fix: attribution (resolves #1017)", "issue-1017", ""},
+		{"tracker_key", "fix: attribution PROJ-123", "", ""},
+		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", "", ""},
+		{"bare_number", "docs: see #909 for context", "", ""},
+		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", "", ""},
+		{"no_reference", "chore: tidy up", "", ""},
+		{"mixed_references", "docs: REL-4 and #909 (CLOSES #1017) (#909)", "issue-1017", ""},
+		{"multiple_directives", "fix: attribution (closes #1017, fixes #42)", "issue-1017", ""},
+		{"body_close_directive", "chore: tidy up\n\ncloses #12", "", ""},
+		{"body_tracker_key", "chore: tidy up\n\nPROJ-123", "", ""},
+		{"subject_tracker_body_close", "fix: attribution PROJ-123\n\ncloses #12", "", ""},
+		{"configured_tracker_key", "fix: attribution PROJ-123", "PROJ-123", "PROJ"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			g, err := issueref.NewGrammar(c.keys)
+			if err != nil {
+				t.Fatal(err)
+			}
 			st := newFakeStore()
 			ctr := &fakePushCounter{}
 			ts := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 			logs := captureLogs(func(logger *slog.Logger) {
-				h := New(st, testSecret, logger, WithPushCapture(ctr))
+				h := New(st, testSecret, logger, WithPushCapture(ctr), WithGrammar(g))
 				dispatchPush(t, h, "refs/heads/main", "main",
 					pushCommit("sha1", c.message, "alice", ts))
 			})
@@ -217,6 +223,13 @@ func TestHandlePush_CaptureCommitSubjectAttribution(t *testing.T) {
 			}
 			if len(outcomes) != 1 {
 				t.Fatalf("push outcomes = %+v, want one for %q", outcomes, c.want)
+			}
+			wantRule := issueref.RuleCommitCloseDirective
+			if c.want == "PROJ-123" {
+				wantRule = issueref.RuleCommitConfiguredKey
+			}
+			if outcomes[0].IssueRule != wantRule {
+				t.Errorf("IssueRule = %q, want %q", outcomes[0].IssueRule, wantRule)
 			}
 			if got := outcomes[0].IssueID; got != c.want {
 				t.Errorf("IssueID = %q, want %q", got, c.want)
@@ -255,7 +268,7 @@ func TestHandlePush_CaptureGitSubjectParity(t *testing.T) {
 		{"leading_blank_lines", "\n \t\nchore: tidy\ncloses #12", "issue-12"},
 		{"body_after_blank_line", "chore: tidy\n\ncloses #12", ""},
 		{"body_after_whitespace_line", "chore: tidy\n \t\ncloses #12", ""},
-		{"wrapped_tracker_body_close", "chore: tidy\nPROJ-123\n\ncloses #12", "PROJ-123"},
+		{"wrapped_tracker_body_close", "chore: tidy\nPROJ-123\n\ncloses #12", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			git("-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",

@@ -128,13 +128,12 @@ otherwise      → 8
 </code></pre>
 <p>Explicit labels let reviewers apply the rubric using context the diff heuristic lacks. TIER has not established that labels are more accurate or consistent; comparability depends on shared calibration.</p>
 <h2 id="issue-references--attribution">Issue references → attribution</h2>
-<p>Cost and outcomes are attributed to an <strong>issue id</strong> derived from the branch name
-or the PR/commit body. Accepted formats include:</p>
+<p>Cost and outcomes use the same strict grammar, with different accepted locations on each surface. <code>OP</code> is built in. Other tracker prefixes must be configured with <code>--tracker-keys</code>, <code>TIER_TRACKER_KEYS</code>, or <code>attribution.tracker_keys</code> (comma-separated; CLI &gt; env &gt; config &gt; empty). Each prefix must match <code>^[A-Z][A-Z0-9]{0,15}$</code>; surrounding whitespace on each comma-separated entry is trimmed (<code>TIER, JIRA</code> is valid), and an empty or invalid entry stops startup and names the entry.</p>
 <table>
 <thead>
 <tr>
 <th>Where</th>
-<th>Format</th>
+<th>Grammar</th>
 <th>Example</th>
 <th>Resolves to</th>
 </tr>
@@ -142,91 +141,50 @@ or the PR/commit body. Accepted formats include:</p>
 <tbody>
 <tr>
 <td>branch</td>
-<td><code>&lt;prefix&gt;/&lt;N&gt;-&lt;slug&gt;</code> — trailing <code>-</code>/<code>_</code> optional; <code>N</code> has no leading zero</td>
-<td><code>feature/42-auth</code>, <code>feature/42</code></td>
+<td>first slot: <code>&lt;N&gt;</code> followed by <code>-</code>, <code>_</code>, <code>.</code>, or end; no leading zero</td>
+<td><code>feature/42-auth</code>, <code>fix/42</code>, <code>42-auth</code></td>
 <td><code>issue-42</code></td>
 </tr>
 <tr>
 <td>branch</td>
-<td>tracker key <code>[A-Z][A-Z0-9]+-&lt;N&gt;</code></td>
-<td><code>fix/TIER-99-crash</code></td>
-<td><code>TIER-99</code></td>
+<td>first slot: configured <code>&lt;KEY&gt;-&lt;N&gt;</code> or built-in <code>OP</code>, followed by <code>-</code>, <code>_</code>, <code>.</code>, <code>/</code>, or end</td>
+<td><code>fix/TIER-99-crash</code> with TIER configured; <code>OP-2024-x</code></td>
+<td><code>TIER-99</code>; <code>OP-2024</code></td>
 </tr>
 <tr>
-<td>PR/commit body</td>
-<td>whole-word <code>close</code>, <code>closes</code>, <code>closed</code>, <code>fix</code>, <code>fixes</code>, <code>fixed</code>, <code>resolve</code>, <code>resolves</code>, or <code>resolved</code> followed by whitespace or a colon and optional whitespace, then <code>#N</code> (case-insensitive)</td>
+<td>PR body</td>
+<td>whole-word close directive + <code>#N</code>, case-insensitive</td>
 <td><code>closes #42</code>, <code>fixes:#42</code></td>
 <td><code>issue-42</code></td>
 </tr>
 <tr>
-<td>PR/commit body</td>
-<td>tracker key <code>[A-Z][A-Z0-9]+-&lt;N&gt;</code></td>
-<td><code>part of PROJ-123</code></td>
+<td>PR body</td>
+<td>configured key or OP immediately after a close directive or relation verb, or at the start of a trailer value</td>
+<td><code>implements PROJ-123</code>, <code>Issue: PROJ-123</code> with PROJ configured</td>
 <td><code>PROJ-123</code></td>
 </tr>
 <tr>
-<td>PR/commit body</td>
-<td>whitespace-preceded <code>#N</code></td>
-<td><code>see #42</code></td>
+<td>PR body</td>
+<td>explicit relation or trailer + <code>#N</code></td>
+<td><code>refs #42</code>, <code>Issue: #42</code></td>
 <td><code>issue-42</code></td>
+</tr>
+<tr>
+<td>commit subject</td>
+<td>close directive + <code>#N</code>, then configured key or OP anywhere, word-bounded</td>
+<td><code>fix: closes #42</code>; <code>fix: PROJ-123</code> with PROJ configured</td>
+<td><code>issue-42</code>; <code>PROJ-123</code></td>
 </tr>
 </tbody>
 </table>
-<p>The collector&#39;s commit-<strong>subject</strong> path attributes cost through tracker keys (<code>PROJ-123</code> → <code>PROJ-123</code>)
-or a whole-word close keyword (<code>close</code>, <code>closes</code>, <code>closed</code>, <code>fix</code>, <code>fixes</code>,
-<code>fixed</code>, <code>resolve</code>, <code>resolves</code>, or <code>resolved</code>, case-insensitive) followed by
-whitespace or a colon and optional whitespace, then <code>#N</code> (<code>closes: #12</code> → <code>issue-12</code>).
-The number must end at the end of the text, whitespace, or punctuation;
-<code>fixed #12abc</code> does not match. Close directives take precedence
-over tracker keys. A bare <code>#N</code> (<code>title (#909)</code>) stays unattributed, never booked
-as <code>issue-N</code> in this collector path. The webhook push path now uses the same
-commit-subject rule (#1069): only the git <code>%s</code> subject (first paragraph, folded)
-is read for attribution; the body is excluded.</p>
-<p><strong>Branch precedence:</strong> a tracker key (e.g. <code>TIER-99</code>) takes priority over a bare
-numeric segment when both appear in a branch. The branch rule is looser than
-the table: TIER takes the first plain number segment anywhere in the branch name
-(split on <code>/</code>, <code>-</code> or <code>_</code>, with no leading zero), skipping a 1900–2099 year;
-<code>docs/guide-2026-10-14</code> reads as issue 10.</p>
-<p><strong>Issue-id misfiling.</strong> Pull-request points and captured spend do not depend on issue ids. Misfiling can merge or split direct-push credit (one 0.5 per issue per UTC day per repository) or change which outcome a footerless revert penalises, so headline TIER can move and per-issue rows can be wrong. See <a href="technical-reference.html#51-the-shared-key-is-the-issue-id" rel="nofollow">the measured rate and how to avoid it</a>.</p>
-<p><strong>PR-body precedence:</strong> <code>closes #N</code> (highest confidence) &gt; tracker key
-(<code>PROJ-123</code>) &gt; bare <code>#N</code> (lowest confidence). This lets a Jira/Linear shop that
-references a tracker key in the PR body — with a generic branch name — still get
-attribution; within the body, an explicit <code>closes #N</code> wins when present.
-A branch-derived ID takes precedence over the entire body.</p>
-<h3 id="the-year-guard-a-deliberate-tradeoff">The year guard (a deliberate tradeoff)</h3>
-<p>A <strong>bare</strong> 4-digit branch segment in the range <strong>1900–2099</strong> is treated as a
-calendar year, not an issue number, and is <strong>dropped</strong>:</p>
-<ul>
-<li><code>release/2024-fix</code> → <em>no attribution</em> (2024 read as a year, not issue #2024)</li>
-<li><code>release/2024</code> → <em>no attribution</em></li>
-</ul>
-<p>This biases toward the far more common release/date-stamp branch over an issue
-whose number happens to land in the year band. Numbers with 1–3 digits or 5+
-digits are never guarded (<code>feature/42</code>, <code>bugfix/1234</code>, <code>feature/12345</code> all
-attribute normally; <code>feature/2100</code> attributes because it is above the window).</p>
-<p>The guard <strong>skips</strong> a year segment rather than aborting, so a branch that
-carries both a date stamp and an issue number still attributes: <code>release/2024-42</code>
-→ <code>issue-42</code> (the <code>2024</code> is skipped, <code>42</code> is used).</p>
-<p>If your issue numbers genuinely reach 1900–2099, disambiguate with an <strong>explicit
-marker</strong>, where no guard applies: use a tracker key (<code>fix/PROJ-2024-…</code> →
-<code>PROJ-2024</code>) or reference <code>#2024</code> in the PR body.</p>
-<h3 id="things-that-do-not-match-and-why">Things that do NOT match (and why)</h3>
-<ul>
-<li><code>release/2024-fix</code> — a bare 4-digit year-band segment; guarded as a date
-stamp (see above). Use a tracker key or a <code>#N</code> body reference for issue 2024.</li>
-<li><code>## Section</code> — a Markdown heading; neither <code>#</code> is immediately followed by
-an issue number, so it never matches an issue.</li>
-<li><code>#FF0000</code> — a hex color, not a numeric issue reference.</li>
-<li><code>main</code>, <code>master</code>, <code>HEAD</code> — excluded by name; work on these branches is not
-attributed to an issue.</li>
-</ul>
-<blockquote>
-<p><strong>Caveat for PR bodies and commit subjects:</strong> tracker keys are read from
-free-form text, so prose tokens shaped like a key — <code>UTF-8</code>, <code>SHA-256</code>,
-<code>HTTP-2</code>, or the <code>CVE-2026</code> prefix in <code>CVE-2026-1234</code> — can be mis-read as
-an issue when no close directive is present. An explicit <code>closes #N</code>
-overrides this, so prefer it whenever a PR or commit closes a GitHub issue.</p>
-</blockquote>
+<p>The first slot is the component immediately after the first <code>/</code>, or the whole branch when there is no <code>/</code>. Later components and later numbers never count. The first component is excluded when it is <code>release</code>, <code>releases</code>, <code>revert</code>, <code>dependabot</code>, <code>renovate</code>, <code>backup</code>, <code>archive</code>, or <code>gh-pages</code> (case-insensitive); <code>revert-*</code> branches are also excluded. <code>main</code>, <code>master</code>, <code>HEAD</code>, and an empty branch carry no issue evidence. Revert-branch spend stays unattributed even when a nearby commit names an issue; the collector logs an INFO count per run.</p>
+<p>A numeric first slot is rejected if it is a four-digit year in 1900–2099 or starts with a date run <code>YYYY-MM</code>, <code>YYYY-MM-DD</code>, or <code>YYYYMMDD</code> followed by <code>-</code>, <code>_</code>, <code>.</code>, or end. There is no fallback to a later number: <code>release/2024-42</code>, <code>feature/007-42</code>, <code>docs/notes-2026-10-14</code>, <code>fix/435b-auth-50051-cutover</code>, and <code>dependabot/docker/node-26-alpine</code> yield no branch issue. Configured keys and built-in <code>OP</code> accept zero-padded positive numbers and preserve the digits (<code>ACME-006</code>, <code>OP-0042</code>); bare <code>#007</code> and numeric branch <code>007-x</code> remain invalid. To name issue 2024, use <code>OP-2024</code> or a configured key, or <code>closes #2024</code> in the PR body.</p>
+<p>Close directives are <code>close</code>, <code>closes</code>, <code>closed</code>, <code>fix</code>, <code>fixes</code>, <code>fixed</code>, <code>resolve</code>, <code>resolves</code>, and <code>resolved</code>, followed by whitespace or a colon and optional whitespace, then <code>#N</code>. The number ends at whitespace, punctuation, or end of text; <code>fixed #12abc</code> does not match. Relation verbs are <code>refs</code>, <code>references</code>, <code>part of</code>, <code>relates to</code>, <code>tracks</code>, and <code>implements</code> (case-insensitive, whole words). Key trailers are <code>Issue</code>, <code>Issues</code>, <code>Ref</code>, <code>Refs</code>, <code>References</code>, <code>Ticket</code>, <code>Tracker</code>, <code>Jira</code>, or <code>OpenProject</code>, followed by <code>:</code>. The PR-body relation phrase <code>half of #N</code> also attributes, including <code>the GET half of #1944</code> and <code>second half of #829</code>; <code>behalf of #5</code> does not. Hash-reference trailers are <code>Issue</code>, <code>Ref</code>, <code>Refs</code>, or <code>References</code>, followed by <code>:</code>.</p>
+<p>Balanced <code>*</code>, <code>**</code>, <code>_</code>, or <code>__</code> wrappers immediately around a reference token are stripped: <code>Implements **ACME-006**</code>, <code>closes **#42**</code>, <code>Closes *#42*</code>, and <code>refs __#7__</code> attribute in their accepted locations. Emphasis on the verb (<code>**closes** #42</code>) does not attribute.</p>
+<p>PR bodies exclude Corrects declaration lines, fenced code (backticks or tildes), quoted lines starting with <code>&gt;</code>, and inline code spans. A branch-derived ID wins over the body; otherwise the body chooses close directives, then structured configured keys, then explicit relation references, first match within each class. <code>see #42 for context</code>, <code>Fixes an error in PR #446</code>, <code>Follow-up to #733</code>, free-prose keys, and unconfigured <code>UTF-8</code>, <code>SHA-256</code>, <code>HTTP-2</code>, or <code>CVE-2026-1234</code> do not attribute an issue. <code>Corrects: #733</code> is correction metadata only.</p>
+<p>Commit subjects accept close directives and configured keys; <code>Refs: #42</code>, relation references to <code>#N</code>, and bare <code>#N</code> do not attribute an issue. A bare <code>(#N)</code> can still supply PR metadata when the subject supplies no issue, for resolution against an already recorded PR. The push webhook reads only git&#39;s <code>%s</code> subject, excluding the commit body.</p>
+<p>The grammar applies prospectively. Existing outcome and token-event attributions are not rewritten. Strict <code>issue_rule</code> values identify new extraction paths; old legacy rules or NULL remain the cutover record. The authorised one-way recovery of previously unattributed events retains its ambiguity, overwrite, default-branch, time-window and sealed-period guards.</p>
+<p>At startup and in <code>tierd doctor --db &lt;existing-db&gt;</code>, TIER prints <code>tracker keys: none configured (OP built in)</code> or the configured list, plus up to ten unconfigured tracker-shaped prefixes found in stored outcome IDs, ordered by count descending then name. These are suggestions only and never change the configuration.</p>
 <h3 id="consequence-of-a-miss">Consequence of a miss</h3>
 <p>If none of the branch, PR body, or commit subjects yields an issue reference:</p>
 <ul>
@@ -236,8 +194,7 @@ an issue.</li>
 outcome, so it contributes nothing to the TIER numerator.</li>
 </ul>
 <p>Name branches <code>&lt;prefix&gt;/&lt;issue-number&gt;-&lt;slug&gt;</code> (for example
-<code>fix/127-webhook-guide</code>) without tracker-shaped tokens elsewhere in the branch,
-and reference the issue in the PR body with <code>closes #&lt;n&gt;</code>; the body is only a
+<code>fix/127-webhook-guide</code>) and reference the issue in the PR body with <code>closes #&lt;n&gt;</code>; the body is only a
 fallback when the branch yields no ID.</p>
 <h2 id="multi-repo-organizations">Multi-repo organizations</h2>
 <p>A GitHub issue number is only unique <strong>within one repository</strong>. Repo A&#39;s issue #42

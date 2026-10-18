@@ -249,7 +249,7 @@ func TestRunScore_NoSessionsHintRequiredFlags(t *testing.T) {
 			continue
 		}
 		seen[fields[1]] = true
-		for _, mode := range []string{"team", "division", "developer"} {
+		for _, mode := range []string{"team", "division"} {
 			for _, provider := range []string{"--codex-rollout", "--opencode"} {
 				t.Run(fields[1]+"/"+mode+"/"+provider, func(t *testing.T) {
 					args := append([]string(nil), fields[1:]...)

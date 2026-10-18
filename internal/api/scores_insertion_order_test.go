@@ -309,6 +309,23 @@ func TestScores_InvariantUnderInsertionOrder(t *testing.T) {
 
 	hA, dbA, pathA := newOrderTestHandler(t)
 	hB, dbB, pathB := newOrderTestHandler(t)
+
+	// Both stores have identical installation provenance.
+	for _, path := range []string{pathA, pathB} {
+		raw, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := raw.Exec(`UPDATE tier_migrations SET applied_at='2026-05-01 00:00:00' WHERE name=?`, store.QualityTriggerCutover)
+		closeErr := raw.Close()
+		if writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+
 	orderA := loadOrderFixture(t, dbA, rows, canonical)
 	orderB := loadOrderFixture(t, dbB, rows, shuffled)
 

@@ -33,6 +33,7 @@ func TestCorrectionReview_R2ServeReadOnly(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			month := u4SealScoresFixture(t, path)
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -42,7 +43,7 @@ func TestCorrectionReview_R2ServeReadOnly(t *testing.T) {
 			}
 			addr := listener.Addr().String()
 			_ = listener.Close()
-			args := []string{"serve", "--db", path, "--addr", addr, "--aggregation", "developer", "--read-only"}
+			args := []string{"serve", "--db", path, "--addr", addr, "--aggregation", "team", "--read-only"}
 			if match {
 				args = append(args, "--event3-scoring")
 			}
@@ -91,13 +92,23 @@ func TestCorrectionReview_R2ServeReadOnly(t *testing.T) {
 				if exited {
 					break
 				}
-				resp, e := client.Get("http://" + addr + "/api/v1/scores?since=2026-10-01")
+				resp, e := client.Get("http://" + addr + "/api/v1/livez")
 				if e == nil {
 					_ = resp.Body.Close()
-					ready = true
+					ready = resp.StatusCode == http.StatusOK
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+			if ready {
+				resp, err := client.Get("http://" + addr + "/api/v1/scores?period=" + month)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("score response %d, want 200", resp.StatusCode)
+				}
 			}
 			logs, _ := os.ReadFile(logPath)
 			if match && (!ready || exited) {

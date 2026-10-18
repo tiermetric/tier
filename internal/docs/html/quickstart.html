@@ -63,7 +63,9 @@ footer.site a { color: var(--muted); }
 <div class="wrap"><main>
 <h1 id="tier--quickstart">TIER — Quickstart</h1>
 <p><strong>Audience:</strong> anyone who wants to run TIER against a repository for the first time.</p>
-<p><strong>Every command on this page was run against the released binary.</strong> Where a step has a caveat, it is stated inline rather than discovered later.</p>
+<p><strong>Version scope:</strong> installation examples name the tagged v0.6.1 release. The developer-mode startup guard, demo isolation, issue-attributed spend share and trusted-use scope below apply from v0.6.1.</p>
+<p><strong>Who this release is for (from v0.6.1).</strong> This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every ingest/admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826&#39;s named-viewer, audit and retention controls ship. The synthetic <code>tierd demo</code> remains exempt. Solo users can run <code>tierd score</code> for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.</p>
+<p>The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.</p>
 <hr>
 <h2 id="table-of-contents">Table of contents</h2>
 <ol>
@@ -84,13 +86,13 @@ footer.site a { color: var(--muted); }
 </ol>
 <hr>
 <h2 id="1-install">1. Install</h2>
-<p>Building v0.6.0 requires <strong>Go 1.27.2 or newer</strong>. Download a release
+<p>Building v0.6.1 requires <strong>Go 1.27.2 or newer</strong>. Download a release
 archive below if you do not have a Go toolchain.</p>
 <pre><code>go install github.com/tiermetric/tier/cmd/tierd@latest
 </code></pre>
 <p><code>@latest</code> resolves to the newest tagged release — it does <strong>not</strong> track <code>main</code>,
 so you always get a published, reproducible version. Pin an exact tag instead
-(<code>@v0.6.0</code>, the release used as the example below) when you need a build that never moves, e.g. in CI.</p>
+(<code>@v0.6.1</code>, the release used as the example below) when you need a build that never moves, e.g. in CI.</p>
 <p><code>go install</code> puts the binary in <code>$(go env GOPATH)/bin</code> — usually <code>~/go/bin</code> —
 or in <code>GOBIN</code> if you have set it. If the next command says <code>command not found</code>,
 add that folder to your <code>PATH</code> (e.g. <code>export PATH=&#34;$HOME/go/bin:$PATH&#34;</code> in your
@@ -103,10 +105,10 @@ Each release carries one archive per platform, named
 each with a <code>.sha256</code> checksum beside it. The archive unpacks to a folder of the
 same name holding a single file, <code>tierd</code> (<code>tierd.exe</code> on Windows); move it
 somewhere on your <code>PATH</code>. <code>&lt;version&gt;</code> is the newest tag on the Releases page —
-<code>v0.6.0</code> at the time of writing, used below as the example:</p>
-<pre><code>tar -xzf tierd-v0.6.0-darwin-arm64.tar.gz
-sudo mv tierd-v0.6.0-darwin-arm64/tierd /usr/local/bin/
-# optional: gh attestation verify tierd-v0.6.0-darwin-arm64.tar.gz --repo tiermetric/tier
+<code>v0.6.1</code> at the time of writing, used below as the example:</p>
+<pre><code>tar -xzf tierd-v0.6.1-darwin-arm64.tar.gz
+sudo mv tierd-v0.6.1-darwin-arm64/tierd /usr/local/bin/
+# optional: gh attestation verify tierd-v0.6.1-darwin-arm64.tar.gz --repo tiermetric/tier
 </code></pre>
 <p><strong>macOS:</strong> if you downloaded the archive with a web browser, macOS marks the
 binary as downloaded, and because it is not notarized the system stops it from
@@ -143,8 +145,7 @@ lower <code>--min-attribution</code> if partial coverage is acceptable for this 
 <pre><code>tierd score --repo . --since 2026-05-01
 </code></pre>
 <p>This reads your local Claude Code session logs and prints <strong>cost per issue</strong> —
-no server, no token, no GitHub access. It is the day-one view: where the money
-went, before any outcomes are recorded.</p>
+no server, no token, no GitHub access. From v0.6.1, it also prints “issue-attributed share of Claude Code spend (no outcome join)”: issue-linked spend divided by all captured Claude Code spend, including every unattributed bucket in the denominator. With no spend the share is unavailable. The caveat names the server&#39;s real ranking requirements (at least 3 outcomes, at least $5 spend, zero flagged outcomes); there is no attributed-spend percentage ranking threshold.</p>
 <p><strong><code>score</code> shows cost, not a full TIER score.</strong> A TIER score is <em>accepted</em>
 outcome points per $1,000 of AI spend, and outcomes come from merged-PR
 history — the next step.</p>
@@ -166,12 +167,12 @@ tierd backfill --repo owner/name --token @$HOME/.tier/github-token
 #    laptop&#39;s 127.0.0.1 anyway. To add later merges, stop serve, re-run the
 #    backfill above (repeats are skipped), restart, then re-run step 3&#39;s
 #    `tierd ship` below.
-tierd serve --db ~/.tier/tier.db --aggregation developer --watch-repo ~/src/your-repo
+tierd serve --db ~/.tier/tier.db --aggregation team --watch-repo ~/src/your-repo
 </code></pre>
 <p><code>--aggregation</code> is <strong>required and has no default</strong> — <code>serve</code> refuses to start
 without it, so an existing deployment&#39;s privacy posture never changes silently:</p>
 <ul>
-<li><code>developer</code> — named per-developer rows (solo use, or where that is permitted).</li>
+<li><code>developer</code> — from v0.6.1, named rows are available only through the synthetic <code>tierd demo</code>; real-data startup is refused.</li>
 <li><code>team</code> — team-level aggregates only, k-anonymized, never naming an individual.</li>
 <li><code>division</code> — one level higher again.</li>
 </ul>
@@ -224,13 +225,15 @@ recorded under your GitHub login, which your GitHub profile page shows, or
 which <code>gh api user -q .login</code> prints if you have the GitHub CLI. If the two are
 the same, skip this step. If they differ, you appear twice in the scores: once
 with spend and no merged work, once with merged work and no spend.</p>
-<p>Check before you join them. Open the scores with
-<code>curl -f http://127.0.0.1:8080/api/v1/scores</code> and find the row whose
-<code>&#34;developer&#34;</code> is your computer login. It should show spend
-(<code>&#34;total_cost_usd&#34;</code> above 0) and no merged work (<code>&#34;weighted_points&#34;</code> of 0). If
-that row already carries merged work, your computer login is also somebody
-else&#39;s GitHub login, and those PRs are theirs. Stop here: the join moves both
-spend and merged work, so it would put that person&#39;s work into your score.</p>
+<p>Check before you join them. As the administrator, inspect your computer login with
+<code>curl --fail-with-body &#34;http://127.0.0.1:8080/api/v1/developer/$USER/export&#34;</code>,
+using the admin token as described below if the server has one. This export
+works in team/division mode, including before sealing. The sum of <code>cost_micro</code>
+in <code>token_events</code> must be above 0, and <code>outcomes</code> must be <code>null</code> or empty (no
+merged work). If the export fails, spend is absent, or any outcome is present,
+stop here. Merged work may belong to somebody whose GitHub login matches your
+computer login. The join moves both spend and merged work, so it would put
+that person&#39;s work into your score.</p>
 <p>If the check passes, tell the server the two names are one person:</p>
 <pre><code>curl --fail-with-body -X POST http://127.0.0.1:8080/api/v1/developer_alias \
   -H &#34;Content-Type: application/json&#34; \
@@ -257,7 +260,7 @@ appears on the command line: start the command with
 <h2 id="6-capturing-openai-codex-spend">6. Capturing OpenAI Codex spend</h2>
 <p>TIER captures Codex, but through a different path than Claude Code, and it is
 <strong>off by default</strong>:</p>
-<pre><code>tierd serve --aggregation developer \
+<pre><code>tierd serve --aggregation team \
   --watch-repo ~/src/your-repo \
   --codex-rollout
 </code></pre>
@@ -294,7 +297,7 @@ developers moving onto the cheaper path (#492).</p>
 <h2 id="capturing-opencode">Capturing Opencode</h2>
 <p>Opencode gets the same treatment and the same reasoning, with one extra
 precondition. It is <strong>off by default</strong>:</p>
-<pre><code>tierd serve --aggregation developer \
+<pre><code>tierd serve --aggregation team \
   --watch-repo ~/src/your-repo \
   --opencode
 </code></pre>
@@ -346,7 +349,7 @@ though they are scanned once across all repos rather than per repo.</p>
 <h2 id="capturing-meta-muse-code">Capturing Meta Muse Code</h2>
 <p>Muse Code is Meta&#39;s coding agent, run as the <code>muse</code> command. TIER reads the
 session log Muse writes for each session, and it is <strong>off by default</strong>:</p>
-<pre><code>tierd serve --aggregation developer \
+<pre><code>tierd serve --aggregation team \
   --watch-repo ~/src/your-repo \
   --muse
 </code></pre>
@@ -448,8 +451,8 @@ not show live spend. This preserves the privacy floor: overlapping date windows
 could be subtracted to isolate one person&#39;s figures even when each group clears
 k-anonymity. Team/division mode withholds numbers when fewer than k contributing
 developers are present (default k = 5, minimum 3). A solo user or a team smaller
-than k sees no numbers; use <code>--aggregation developer</code> to see them. Sealing does
-not remove that floor.</p>
+than k sees no numbers; use <code>tierd score</code> for local Claude Code costs. Sealing
+does not remove that floor; from v0.6.1, developer mode on real data is refused.</p>
 <p>Before the first seal, <code>GET /api/v1/scores</code> returns <code>404</code> with this <code>error</code>:</p>
 <pre><code>sealing not armed: no month is sealed until the operator arms sealing with seal_from or `tierd seal --arm` (#913)
 </code></pre>
@@ -493,7 +496,7 @@ are browsing on — nothing is exposed to the network:</p>
 <h2 id="8-running-on-a-different-port">8. Running on a different port</h2>
 <p>Every server command takes <code>--addr host:port</code>:</p>
 <pre><code>tierd demo  --addr 127.0.0.1:8123
-tierd serve --addr 127.0.0.1:9000 --aggregation developer --watch-repo ~/src/your-repo
+tierd serve --addr 127.0.0.1:9000 --aggregation team --watch-repo ~/src/your-repo
 </code></pre>
 <h2 id="9-what-each-command-actually-needs">9. What each command actually needs</h2>
 <table>

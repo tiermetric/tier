@@ -306,6 +306,7 @@ func TestWireEventMatchesServerContract(t *testing.T) {
 		"idempotency_key",
 		"input_tokens",
 		"issue_id",
+		"issue_rule",
 		"model",
 		"output_tokens",
 		"pr_number",

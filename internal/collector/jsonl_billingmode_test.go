@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -53,7 +54,7 @@ func TestJoinSessionsToCommits_StoresResolvedBillingMode(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			events := joinSessionsToCommits(sessionForModel(tc.model, ts, 1000, 500), nil, "alice", "")
+			events := joinSessionsToCommits(sessionForModel(tc.model, ts, 1000, 500), nil, "alice", "", issueref.Grammar{})
 			if len(events) != 1 {
 				t.Fatalf("emitted %d events, want 1", len(events))
 			}
@@ -140,7 +141,7 @@ func TestJoinSessionsToCommits_BillingModeFixIsCostNeutral(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			events := joinSessionsToCommits(sessionForModel(tc.model, ts, tc.in, tc.out), nil, "alice", "")
+			events := joinSessionsToCommits(sessionForModel(tc.model, ts, tc.in, tc.out), nil, "alice", "", issueref.Grammar{})
 			if len(events) != 1 {
 				t.Fatalf("emitted %d events, want 1", len(events))
 			}

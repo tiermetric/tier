@@ -306,7 +306,7 @@ func TestPipeline_CostToScoreToRevertToLeverage(t *testing.T) {
 	postWebhook(t, srv.URL, "workflow_run", "delivery-wf-1", map[string]any{
 		"action": "completed",
 		"workflow_run": map[string]any{
-			"head_sha": mergeSHA, "head_branch": "main",
+			"head_sha": mergeSHA, "head_branch": "main", "event": "push",
 			"conclusion": "failure", "run_attempt": 1,
 			"updated_at": time.Now().UTC().Format(time.RFC3339),
 		},

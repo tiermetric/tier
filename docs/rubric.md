@@ -172,6 +172,10 @@ both are defined) and is the unit TIER should be *benchmarked and trended* on:
 
 ### Self-relative interval (not an absolute rank)
 
+In v0.6.1, #1233 withholds intervals when the row's own attributed-cost share
+is below 50%; exactly 50% passes. When shown they are labelled "excludes
+uncertainty from unattributed spend". Team and division rows carry none.
+
 `/scores` also returns `cost_per_point_ci_low/high`: the nominal 95% percentile-bootstrap bounds (coverage unvalidated)
 for a ranked developer's `cost_per_point`, derived by reciprocal
 transform from the same TIER bootstrap (`#133`) — it expresses `cost_per_point`

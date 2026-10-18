@@ -12,20 +12,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/tiermetric/tier/internal/store"
 )
-
-// demoOrg is the unmistakably-synthetic org seedDemo stamps on every demo
-// developer. Hoisted to package scope so the #475 real-database guard can
-// recognise a prior demo database from its org without re-deriving the string.
-const demoOrg = "ACME (DEMO)"
 
 // runDemo seeds a synthetic database and hands off to runServe. It returns the
 // serve exit code; the seed is deterministic and the DB is recreated each run.
@@ -33,113 +29,64 @@ func runDemo(args []string, _, stderr io.Writer) int {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", defaultListenAddr, "loopback listen address for the demo dashboard")
-	dbPath := fs.String("db", filepath.Join(os.TempDir(), "tier-demo.db"), "SQLite path for the synthetic demo data (recreated each run)")
+	fs.Func("db", "refused: demo creates its own private synthetic database", func(string) error {
+		return errors.New("demo: --db is refused; demo creates its own private synthetic database")
+	})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 1
 	}
-	// #475: NEVER delete a real capture database. --db could point at a user's
-	// live ~/.tier/tier.db; the Remove below would silently destroy
-	// it. Only proceed when the target is absent or is a prior demo database
-	// (all-synthetic developers, the demo org). A real or unreadable file is
-	// refused, deleting nothing.
-	//
-	// SECURITY INVARIANT (#508): "a `tierd demo` boot can never let a byte of
-	// pre-existing --db content reach an HTTP client." Two independent controls
-	// jointly hold this, and BOTH are load-bearing — removing either one alone
-	// re-opens the exposure #508 describes (a misconfigured public origin serving
-	// real per-developer data):
-	//
-	//   1. guardDemoDBPath (just below): if the file holds ANY real data, this
-	//      returns non-nil and runDemo returns 1 here — execution never reaches
-	//      the Remove/seedDemo/serve below, so a real database is refused, never
-	//      served (guardDemoDBPath DOES read the file, via store.InspectIdentities
-	//      / store.PopulatedTablesOutside, to make that decision — "refused, not
-	//      served" is the accurate claim, not "refused, not read from").
-	//      TestGuardDemoDBPath_RefusesRealDB and
-	//      TestGuardDemoDBPath_RefusesWebhookOnlyDB (demo_test.go) call
-	//      guardDemoDBPath directly, so they pin its DECISION but cannot detect
-	//      the call site below being deleted or short-circuited from runDemo.
-	//      TestDemoSmoke_RefusesRealDataAndNeverBinds (demo_smoke_test.go,
-	//      integration-tagged) is the only control arm that drives the real
-	//      subprocess end to end and would fail if this call site were removed —
-	//      that is the mutant it exists to catch.
-	//
-	//   2. The FAIL-CLOSED os.Remove loop immediately below: once the guard has
-	//      passed, whatever was actually in the file — even guard-approved
-	//      content that is not the exact current synthetic cast (e.g. a strict
-	//      subset of the current demo-* cast, or extra rows under demo-* names) —
-	//      is deleted before store.Open re-creates the file and seedDemo writes
-	//      the fixed, deterministic dataset into it. seedDemo alone does NOT
-	//      provide this: it is additive/idempotent by design (dedups on
-	//      idempotency key / merge SHA, see its doc comment below), so run
-	//      without the preceding Remove it MERGES into whatever guard-approved
-	//      content was already there rather than replacing it. Removing the
-	//      os.Remove calls (while leaving the guard and seedDemo intact) is
-	//      exactly the "dark control" #508's re-scope names: it reads as
-	//      redundant busywork once the guard has already said "fine, proceed",
-	//      and an "optimization" along those lines would silently make the
-	//      invariant above depend on guard-approved content being byte-identical
-	//      to the canonical cast — which guardDemoDBPath's own doc comment does
-	//      NOT promise (it only protects a real DB from being CLOBBERED; a
-	//      guard-approved SUBSET or an extra guard-approved row both pass it).
-	//      TestDemoSmoke_AlwaysReseedsCanonicalData (demo_smoke_test.go,
-	//      integration-tagged) plants a guard-approved artifact seedDemo cannot
-	//      produce or overwrite and asserts it is ABSENT from what gets served —
-	//      the control arm for "os.Remove specifically", not merely "the reseed
-	//      step generically".
-	//
-	// Neither control alone is the invariant; both must hold. See #475 (guard
-	// (1)'s origin) and #508 (this comment's own issue) for the history; do not
-	// cite guard (1) alone as "the reason the demo serves only synthetic data" —
-	// it decides what is ALLOWED to proceed, not what ends up being SERVED.
-	if err := guardDemoDBPath(*dbPath, stderr); err != nil {
+	if fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "demo: unexpected positional arguments; use --addr only (--db is refused)")
 		return 1
 	}
-	// Recreate each run so the demo is deterministic and never accretes. Remove
-	// the WAL/SHM sidecars too so "recreated each run" is literally clean — a
-	// Ctrl-C'd serve can leave an uncheckpointed WAL behind.
-	//
-	// 🔴 THE ERRORS ARE FATAL, AND THAT IS THE WHOLE POINT. The first version of
-	// this block discarded them (`_ = os.Remove(...)`) while the comment above
-	// called it UNCONDITIONAL. It was not: it was best-effort, and a security
-	// review REPRODUCED the consequence end to end. With a guard-approved demo DB
-	// carrying one extra demo-* row at $999 in a chmod-0555 directory, every
-	// unlink failed silently, store.Open reopened the surviving file, seedDemo
-	// MERGED into it (it is additive by design), and `GET /api/v1/scores` served
-	// demo-ada at total_cost_usd=1024.70 against a canonical 25.70 — with the
-	// "SYNTHETIC DATA" banner printed and not one warning on stderr.
-	//
-	// unlink can fail while the file stays perfectly openable: a non-writable
-	// containing directory, a Docker single-file bind mount (EBUSY on Linux), or
-	// Windows blocking deletion of an open handle. On any of those, control (1)
-	// becomes the ONLY thing between pre-existing content and the HTTP client —
-	// and the guard only promises "no developer outside the demo cast", which a
-	// planted demo-* row satisfies. Fail closed instead.
-	//
-	// ⚠️ os.ErrNotExist, NOT fs.ErrNotExist: runDemo shadows the io/fs import
-	// with its own `fs := flag.NewFlagSet(...)` above.
-	for _, stale := range []string{*dbPath, *dbPath + "-wal", *dbPath + "-shm"} {
-		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_, _ = fmt.Fprintf(stderr, "demo: cannot delete %s (%v)\n", stale, err)
-			_, _ = fmt.Fprintf(stderr, "demo: refusing to serve — the demo recreates its DB every run, and content that survives that is not guaranteed synthetic\n")
-			return 1
-		}
+	// The legacy environment-default parsers exit on malformed input. Run them
+	// before allocating private storage, so they cannot bypass its cleanup.
+	// Demo accepts no config file; serve's remaining setup failures return.
+	_ = addSealServeFlags(flag.NewFlagSet("demo defaults", flag.ContinueOnError))
+	for _, name := range serveBoolEnvNames {
+		_ = envBool(name)
 	}
+	// Register before allocating/seeding so signals during startup also unwind
+	// cleanup. runServe joins its workers and closes SQLite before we remove it.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if ctx.Err() != nil {
+		return 0
+	}
+	// No flag, environment database setting or config supplies this path. MkdirTemp creates a fresh
+	// random directory with mode 0700; concurrent demos cannot share a database.
+	// This replaces the old inspection allow-list, including its pricing audit
+	// owner checks and correction/rate bookkeeping exemptions: no pre-existing
+	// table, even an orphaned pricing observation audit, is read or reused.
+	dir, err := os.MkdirTemp("", "tierd-demo-")
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "demo: create private database directory:", err)
+		return 1
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			_, _ = fmt.Fprintln(stderr, "demo: remove private database directory:", err)
+		}
+	}()
+	dbPath := filepath.Join(dir, "demo.db")
 
-	db, err := store.Open(*dbPath)
+	db, err := store.Open(dbPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "demo: open db: %v\n", err)
 		return 1
 	}
-	if err := seedDemo(context.Background(), db); err != nil {
+	if err := seedDemo(ctx, db); err != nil {
 		_ = db.Close()
 		_, _ = fmt.Fprintf(stderr, "demo: seed synthetic data: %v\n", err)
 		return 1
 	}
-	_ = db.Close() // runServe re-opens the same file.
+	_ = db.Close() // runServe re-opens the same private file.
+	if ctx.Err() != nil {
+		return 0
+	}
 
 	_, _ = fmt.Fprintln(stderr, "================================================================")
 	_, _ = fmt.Fprintln(stderr, " TIER DEMO  —  SYNTHETIC DATA, NOT REAL SCORES")
@@ -169,95 +116,9 @@ func runDemo(args []string, _, stderr io.Writer) int {
 	// structurally absent; it is unreachable from any serve flag/env, so a serve
 	// over REAL data is still refused on a non-loopback bind.
 	return runServeWithOptions(
-		[]string{"--db", *dbPath, "--aggregation", "developer", "--addr", *addr, "--read-only"},
-		serveOptions{syntheticDemo: true},
+		[]string{"--db", dbPath, "--aggregation", "developer", "--addr", *addr, "--read-only"},
+		serveOptions{syntheticDemo: true, shutdown: ctx.Done()},
 	)
-}
-
-// guardDemoDBPath refuses to let `tierd demo` clobber a real database at path
-// (#475). A nonexistent path is fine (nothing to protect). An existing file is
-// permitted only when store.InspectIdentities confirms it holds nothing but
-// synthetic demo identities. Anything else — a directory, an unreadable or
-// non-SQLite file, or a database with a single real developer or org — is
-// refused with a message naming the path, and NOTHING is deleted. All error
-// returns are non-nil so the caller aborts before the Remove calls.
-func guardDemoDBPath(path string, stderr io.Writer) error {
-	info, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil // fresh path — nothing to protect
-	}
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "demo: cannot inspect %s: %v\n", path, err)
-		return err
-	}
-	if info.IsDir() {
-		_, _ = fmt.Fprintf(stderr, "demo: %s is a directory, not a demo database\n", path)
-		return errors.New("demo db path is a directory")
-	}
-	ok, err := isRecreatableDemoDB(path)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "demo: refusing to touch %s: cannot confirm it is a synthetic demo database (%v); demo only operates on its own synthetic database — pass --db with a new path\n", path, err)
-		return err
-	}
-	if !ok {
-		_, _ = fmt.Fprintf(stderr, "demo: refusing to overwrite %s: it contains real (non-demo) data; demo only operates on its own synthetic database — pass --db with a different path\n", path)
-		return errors.New("demo db path holds real data")
-	}
-	return nil
-}
-
-// isRecreatableDemoDB reports whether the SQLite file at path is safe for `tierd
-// demo` to delete and reseed: every developer it holds must be one of the exact
-// synthetic identities seedDemo writes, and every org must be the demo org. An
-// empty database qualifies (nothing real to lose). The demo identity set is
-// derived from demoData() rather than hardcoded, so the cast can change without
-// this guard drifting. A read error (non-SQLite / corrupt / foreign schema) is
-// propagated so the caller refuses — fail-closed.
-// demoSeededTables is the exact set of tables seedDemo writes: token_events
-// (InsertTokenEvents), outcomes (InsertOutcome), actual_spend (InsertActualSpend),
-// and org_hierarchy + period_membership + hierarchy_membership (UpsertHierarchies
-// writes all THREE — see upsertHierarchyTx in store.go). A recreatable demo
-// database has rows in NO other user table. Keep this in lockstep with seedDemo;
-// a table seedDemo starts writing must be added here, and the fail-closed default
-// (refuse) makes an omission safe — it over-refuses, never over-deletes.
-var demoSeededTables = []string{"pricing_observation_audit", "token_events", "outcomes", "actual_spend", "org_hierarchy", "period_membership", "hierarchy_membership"}
-
-func isRecreatableDemoDB(path string) (bool, error) {
-	ctx := context.Background()
-
-	// Fail-closed FIRST: any row in a table the demo seeder does not write — e.g.
-	// webhook_payloads (the audit trail a webhook-configured deployment holds
-	// before any capture), quality_events, developer_alias — means real data,
-	// even when no developer/org identity is present to see it (#475). Enumerating
-	// from sqlite_master protects tables added to the schema in the future too.
-	extra, err := store.PopulatedTablesOutside(ctx, path, demoSeededTables)
-	if err != nil {
-		return false, err
-	}
-	if len(extra) > 0 {
-		return false, nil
-	}
-
-	// Then confirm the identities in the seeded tables are all synthetic.
-	ids, err := store.InspectIdentities(ctx, path)
-	if err != nil {
-		return false, err
-	}
-	demoDevs := make(map[string]bool)
-	for _, d := range demoData() {
-		demoDevs[d.name] = true
-	}
-	for _, dev := range ids.Developers {
-		if !demoDevs[dev] {
-			return false, nil
-		}
-	}
-	for _, org := range ids.Orgs {
-		if org != demoOrg {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // loopbackBind reports whether addr binds only the loopback interface — the

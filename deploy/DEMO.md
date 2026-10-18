@@ -105,7 +105,7 @@ routes one hostname*.
 | # | Condition | Enforced or checked by |
 |---|---|---|
 | 1 | The tunnel routes **exactly one** public hostname, and its catch-all is terminal | **Enforced:** `scripts/demo-tunnel-scope-gate.sh` (checklist step 0b) |
-| 2 | The demo serves **synthetic** data only | **Enforced:** `tierd demo` deletes and reseeds its DB on every start, and **refuses to boot (exit 1) if any of those deletes fails** — including the `-wal`/`-shm` sidecars. Fail-closed is load-bearing, not tidiness: `unlink` can fail while the file stays openable (read-only parent directory, Docker single-file bind mount, Windows open handle), and a best-effort delete there silently served stale content. (The `guardDemoDBPath` check is a *different* control — it refuses to CLOBBER a real DB, protecting the operator's data, not the demo's synthetic-ness. Do not cite it for this condition.) |
+| 2 | The demo serves **synthetic** data only | **Enforced:** `tierd demo` creates fresh SQLite inside its own random temporary directory (mode 0700). It refuses `--db`, including URI paths; flags, environment and config cannot select its database. Concurrent demos use different paths, outside writers to operator-chosen databases cannot affect the served scores, and the private directory is removed on exit including SIGINT/SIGTERM. |
 | 3 | Write routes stay structurally absent | *Checked* post-deploy: steps 5–6 |
 | 4 | The image stays **digest-pinned** | *Checked* pre-deploy: step 0 |
 
@@ -247,18 +247,13 @@ The boot log should carry both the `SYNTHETIC DATA, NOT REAL SCORES` and the
   stats are refreshed at reveal, that is a separate step (owned by tier) — the
   demo instance itself needs no stat refresh.
 - **No writable rootfs needed:** `tierd-demo` runs `read_only: true`; only the
-  `demo-data` volume is writable. `cloudflared` keeps a writable rootfs (it may
+  `/tmp` tmpfs is writable. `cloudflared` keeps a writable rootfs (it may
   write connection state), caps dropped.
 - **Restart policy is required** (`restart: unless-stopped`) — `tierd` exits 1 on
   a terminal listener failure and relies on the runtime to bring it back.
-  ⚠️ There is a **second** exit-1 cause: `tierd demo` refuses to boot if it cannot
-  delete its stale DB (see condition 2 above). Under `unless-stopped` that
-  becomes a **crash-loop, not a silent bad serve** — the right failure direction,
-  but if the demo is looping, check `docker logs` for `cannot delete` before
-  assuming a listener problem. This needs a writable `/data`; the named volume
-  (`demo-data`, uid 65532) provides it. Do **not** switch `--db` to a
-  single-file bind mount — `unlink` returns `EBUSY` on that shape and the demo
-  will refuse to start.
+  The demo also refuses `--db` and exits 1 if private temporary database setup
+  fails. The Compose `/tmp` tmpfs supplies writable space; no database volume
+  or single-file bind mount is needed.
 - **Restart coupling (expected):** because `cloudflared` shares `tierd-demo`'s
   network namespace, a `tierd-demo` crash/restart tears that namespace down and
   `cloudflared` must restart too — so the public endpoint blips (and `cloudflared`

@@ -1,5 +1,7 @@
 # Understanding TIER
 
+**v0.6.1 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+
 TIER (Token Impact & Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.
 
@@ -56,11 +58,12 @@ require consulting employee representatives.
   administrator token (its password for changes) can still export one
   person's stored records, so that person's request to see their data can be
   answered.
-- `developer` shows a named row for every person. It carries the heaviest
+- `developer` (synthetic demo only until #826; refused on real data) shows
+  invented named rows. The planned real-data view carries the heaviest
   legal obligations in those countries, so it should be a deliberate choice.
   Where a team uses it, the intended use is coaching: the developer and their
-  manager look at the same page together. Today, anyone who can read the server
-  sees every developer's row;
+  manager look at the same page together. In the synthetic demo, anyone who can
+  read the server sees every invented developer's row;
   [The limits, stated plainly](#the-limits-stated-plainly) says who that is.
   Access limited to each person's own row is planned but not built.
 
@@ -136,7 +139,8 @@ between the two as a separate number. See
 
 Spend is linked to a piece of work through the branch the AI session was on.
 TIER looks for the issue number (the ticket number in your tracker) in the
-branch name, such as `feature/42-login` or `fix/TIER-99-crash`, or in a commit
+branch name, such as `feature/42-login` or `fix/TIER-99-crash` (only with TIER
+configured as a tracker key, for example `--tracker-keys TIER`), or in a commit
 on that branch made around the same time. Spend it cannot link lands in an
 **unattributed** bucket. It stays in the bottom half of the fraction, so it
 still lowers the number. It is reported as its own line alongside the score,
@@ -206,7 +210,7 @@ hours lowers it to 0.7, unless a re-run of the same check soon passes. A revert
 within 60 days lowers it to 0.8 when the revert was a business decision, or to
 0.1 when it was a code problem. TIER tells the two apart from keywords in the
 revert's human-written commit message, and treats a revert as a code problem
-unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.0 the matcher requires the recorded merge SHA and default branch, but enforces no lower event-time bound; a matching failure timestamped before merge can count. A revert
+unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.1 (#1230), only push-triggered runs on the default branch with a recorded merge SHA change quality; matched scheduled and dispatched runs are audit-only, and `merge_group` runs are dropped. The matcher still enforces no lower event-time bound; a matching push-triggered failure timestamped before merge can count. A revert
 can arrive weeks after the merge, so a past period's score can still move. The
 numerator is `Σ(weight × quality)`.
 
@@ -235,10 +239,11 @@ uncounted people back. Folding drops nothing: the folded spend and points stay i
 in the totals. If `other` is itself below the floor, it is withheld along with
 the totals, because subtracting the named rows from the totals would reveal
 it, and TIER says so rather than showing an empty page. If you are evaluating
-TIER on your own, pick `developer` mode (`tierd serve --aggregation developer`):
-in `team` or `division` mode a group of one is always folded away and you will
-not see your own row. The full command is in
-[quickstart.md §5](quickstart.md#5-the-full-tier-score).
+TIER on your own, use `tierd score --repo <path>` for local Claude Code costs.
+Non-synthetic developer mode is refused until #826 ships; team/division reports
+withhold a cohort of one and publish only sealed calendar months. Follow
+[quickstart.md §7](quickstart.md#7-viewing-the-dashboard-from-another-machine)
+for sealing and the k floor.
 
 **3. The two halves must cover the same stretch of work.** Both halves are
 counted over the same calendar dates. TIER does not pair each merged pull
@@ -279,8 +284,9 @@ today, read [how-it-works.md](how-it-works.md) alongside it.
 
 ### From install to a first real score
 
-This is the single-developer path. Each step is in
-[quickstart.md](quickstart.md) with its full output.
+Solo users can stop after step 3 for local Claude Code costs. The remaining
+steps load a team/division server; reports also require a sealed month and
+enough contributors. See the [quickstart](quickstart.md) for the full setup.
 
 1. **Install.** Go 1.27.2 or newer, or a release download:
    [quickstart.md §1](quickstart.md#1-install).
@@ -298,7 +304,7 @@ This is the single-developer path. Each step is in
    GitHub token that can read the repository's pull requests;
    [README § What you need before you start](../README.md#what-you-need-before-you-start)
    shows how to create one.
-5. **Serve.** `tierd serve --aggregation developer --watch-repo <path>`, where
+5. **Serve.** `tierd serve --aggregation team --watch-repo <path>`, where
    `<path>` is the folder of your local checkout. Leave it running. No token
    is needed because none was set; without one, the server accepts
    connections only from this machine, unless something forwards that port,
@@ -473,8 +479,8 @@ mode, whichever you pick. `developer` aggregation carries the heaviest
 obligations, but that page also lists works-council consultation and a data
 protection impact assessment (DPIA) for `team` mode in several countries.
 
-In `developer` mode, anyone who can read the server today sees every
-developer's row. That means anyone
+In `developer` mode (synthetic demo only until #826; refused on real data),
+anyone who can read the server sees every invented developer's row. That means anyone
 who holds one of its tokens (the administrator token or the read-only viewer
 token), or, when no token is set, anyone on the same computer, plus anyone
 reaching it through something that forwards its port, such as an SSH tunnel or

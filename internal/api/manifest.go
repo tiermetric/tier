@@ -415,6 +415,7 @@ const digestOmittedAnonymized = "withheld: events_digest.rows, outcomes_digest.r
 // as-of state — replaying a report at an earlier watermark is a separate
 // capability that this record is the prerequisite for, not an implementation of.
 func (h *Handler) handleGetReportManifest(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(store.WithReadTimeRecovery(r.Context(), false))
 	if h.sealedRead() {
 		h.serveSealedManifest(w, r)
 		return

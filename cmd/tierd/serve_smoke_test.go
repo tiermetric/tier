@@ -105,13 +105,13 @@ func TestServeSmoke_BootDashboardAndShutdown(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "smoke.db")
 
 	// --aggregation is REQUIRED since #185 (serve refuses to start without it);
-	// 'developer' is the boot-neutral choice for a smoke test. A tokenless bind
+	// 'team' is the supported real-data mode (#1228). A tokenless bind
 	// is legal on loopback per validateBind, so no --api-token is needed.
 	childArgs := strings.Join([]string{
 		"serve",
 		"--addr", addr,
 		"--db", dbPath,
-		"--aggregation", "developer",
+		"--aggregation", "team",
 	}, "\n")
 
 	cmd := exec.Command(self)
@@ -241,7 +241,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 		"serve",
 		"--addr", addr,
 		"--db", dbPath,
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--api-token", "smoke-test-api-token",
 		"--anthropic-target", "http://127.0.0.1:1/",
 		"--openai-target", "http://127.0.0.1:1/",
@@ -283,7 +283,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 	// #893: runServe does not arm the Host check in token mode, so a token-mode
 	// tierd on 127.0.0.1 behind a proxy that forwards a public Host still serves.
 	t.Run("token mode serves a public Host", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, base+"/api/v1/scores", nil) //nolint:noctx // loopback test GET
+		req, err := http.NewRequest(http.MethodGet, base+"/api/v1/livez", nil) //nolint:noctx // loopback test GET
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -296,7 +296,7 @@ func TestServeSmoke_ProxiesMountedInNormalMode(t *testing.T) {
 		_, _ = io.Copy(io.Discard, res.Body)
 		_ = res.Body.Close()
 		if res.StatusCode != http.StatusOK {
-			t.Errorf("GET /api/v1/scores with Host tier.example.com = %d, want 200", res.StatusCode)
+			t.Errorf("GET /api/v1/livez with Host tier.example.com = %d, want 200", res.StatusCode)
 		}
 	})
 }
@@ -399,7 +399,7 @@ func TestServeSmoke_ReadOnlyOmitsWrites(t *testing.T) {
 		"serve",
 		"--addr", addr,
 		"--db", dbPath,
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--read-only",
 		"--anthropic-target", "http://127.0.0.1:1/",
 		"--openai-target", "http://127.0.0.1:1/",
@@ -537,7 +537,7 @@ func TestServeSmoke_CodexRolloutWithoutWatchRepoRefusesToStart(t *testing.T) {
 		"serve",
 		"--addr", addr,
 		"--db", filepath.Join(t.TempDir(), "codex-smoke.db"),
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--codex-rollout",
 		// deliberately NO --watch-repo
 	}, "\n")
@@ -692,7 +692,7 @@ func TestServeSmoke_ReadOnlyRegistersNoSources(t *testing.T) {
 	addr := freeLoopbackPort(t)
 	cmd := exec.Command(self)
 	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+strings.Join([]string{
-		"serve", "--addr", addr, "--db", dbPath, "--aggregation", "developer", "--read-only",
+		"serve", "--addr", addr, "--db", dbPath, "--aggregation", "team", "--read-only",
 	}, "\n"))
 	stderr := &lockedBuffer{}
 	cmd.Stderr = stderr

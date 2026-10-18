@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -199,7 +200,7 @@ func TestOpen_V1ToV2UpgradeIsOneWayAndAnnounced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule; n != want {
 		t.Errorf("v1 open: UpgradeNotice = %q, want every one-way notice %q", n, want)
 	}
 	_ = db.Close()
@@ -240,7 +241,7 @@ func TestOpen_UnstampedLegacyDBIsAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV886+"\n"+UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule; n != want {
 		t.Errorf("unstamped legacy open: UpgradeNotice = %q, want every one-way notice %q", n, want)
 	}
 }
@@ -269,7 +270,7 @@ func TestOpen_V2ToV3NoticeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, want := db.UpgradeNotice(), UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection; n != want {
+	if n, want := db.UpgradeNotice(), UpgradeNoticeV913+"\n"+UpgradeNoticeV975+"\n"+UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule; n != want {
 		t.Errorf("v2 open: UpgradeNotice = %q, want %q", n, want)
 	}
 	_ = db.Close()
@@ -302,7 +303,7 @@ func TestOpen_PricingLedgerRefusesOlderBinaries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantNotice := UpgradeNoticePricingObservations + "\n" + UpgradeNoticeCorrectionProjection
+			wantNotice := UpgradeNoticePricingObservations + "\n" + UpgradeNoticeCorrectionProjection + "\n" + UpgradeNoticeQualityTriggers + "\n" + UpgradeNoticeIssueRule
 			if version < 8 {
 				wantNotice = UpgradeNoticeCorrections + "\n" + wantNotice
 			}
@@ -313,6 +314,110 @@ func TestOpen_PricingLedgerRefusesOlderBinaries(t *testing.T) {
 			// The refuse-if-newer guard in either older binary must reject it.
 			if stored := readUserVersion(t, path); stored <= version {
 				t.Fatalf("schema-%d binary would open PII ledger: stored version=%d", version, stored)
+			}
+		})
+	}
+}
+
+// restoreMainV11Fixture replays a text `.dump` (with user_version 11 appended) of a
+// database created by store.Open from main at
+// 9c4d58d261857a7a8e1688a71e0483ec332cf486 (PR #1302), with synthetic Alice
+// outcome/token/exclusion rows and one legacy CI event. Unlike restamping the
+// latest schema, this fixture has never had issue_rule columns or its cutover.
+func restoreMainV11Fixture(t *testing.T, path string) {
+	t.Helper()
+	fixture, err := os.ReadFile("testdata/main-v11.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(string(fixture)); err != nil {
+		_ = raw.Close()
+		t.Fatalf("restore main v11 fixture: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUserVersion(t, path); got != 11 {
+		t.Fatalf("main fixture version = %d, want 11", got)
+	}
+}
+
+func TestOpen_V10AndMainV11ToV12(t *testing.T) {
+	if qualityTriggerSchemaVersion != 11 || issueRuleSchemaVersion != 12 || schemaVersion != 12 {
+		t.Fatalf("migration versions: quality=%d issue=%d current=%d", qualityTriggerSchemaVersion, issueRuleSchemaVersion, schemaVersion)
+	}
+	for _, version := range []int{10, 11} {
+		t.Run(fmt.Sprintf("v%d-to-v12", version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "main.db")
+			restoreMainV11Fixture(t, path)
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if version == 10 {
+				if _, err := raw.Exec(`ALTER TABLE quality_events DROP COLUMN trigger_event; DELETE FROM tier_migrations WHERE name='quality-trigger-recording-v1'; PRAGMA user_version=10`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var oldCutover string
+			if version == 11 {
+				if err := raw.QueryRow(`SELECT applied_at FROM tier_migrations WHERE name=?`, QualityTriggerCutover).Scan(&oldCutover); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := UpgradeNoticeIssueRule
+			if version == 10 {
+				want = UpgradeNoticeQualityTriggers + "\n" + want
+			}
+			if got := db.UpgradeNotice(); got != want {
+				t.Fatalf("notice=%q, want %q", got, want)
+			}
+			if readUserVersion(t, path) != 12 {
+				t.Fatal("schema 12 not stamped")
+			}
+			// Both earlier binaries' refuse-if-newer guards must reject this database.
+			for _, supported := range []int{10, 11} {
+				if stored := readUserVersion(t, path); stored <= supported {
+					t.Fatalf("v%d binary would accept schema %d", supported, stored)
+				}
+			}
+			var cutover string
+			if err := db.db.QueryRow(`SELECT applied_at FROM tier_migrations WHERE name=?`, QualityTriggerCutover).Scan(&cutover); err != nil {
+				t.Fatal(err)
+			}
+			if version == 11 && cutover != oldCutover {
+				t.Fatal("main's quality cutover moved")
+			}
+			var trigger sql.NullString
+			if err := db.db.QueryRow(`SELECT trigger_event FROM quality_events`).Scan(&trigger); err != nil || trigger.Valid {
+				t.Fatalf("legacy CI provenance = %v, err=%v", trigger, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := dumpSchema(t, path)
+			db, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if db.UpgradeNotice() != "" || dumpSchema(t, path) != before {
+				t.Fatal("reopen changed schema or repeated notice")
+			}
+			var reopenedCutover string
+			if err := db.db.QueryRow(`SELECT applied_at FROM tier_migrations WHERE name=?`, QualityTriggerCutover).Scan(&reopenedCutover); err != nil || reopenedCutover != cutover {
+				t.Fatalf("quality cutover changed: %q -> %q, err=%v", cutover, reopenedCutover, err)
 			}
 		})
 	}

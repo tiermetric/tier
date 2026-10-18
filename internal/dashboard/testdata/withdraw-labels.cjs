@@ -7,11 +7,19 @@ function element() {
 const nodes = {};
 const ctx = {document: {createElement:element, getElementById(id){return nodes[id] ||= element();}}, console};
 vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(process.argv[2] || 'assets/dashboard.js','utf8').split('// --- Wiring')[0],ctx);
+const source = fs.readFileSync(process.argv[2] || 'assets/dashboard.js','utf8');
+vm.runInContext(source.split('// --- Wiring')[0],ctx);
+vm.runInContext(source.slice(source.indexOf('function renderQualityEvidence(')),ctx);
+function textOnly(x) { return [x.textContent,...(x.children||[]).map(textOnly)].filter(Boolean).join(' '); }
 function all(x) { return [x.textContent,x.title,...Object.values(x.attrs||{}),...(x.children||[]).map(all)].filter(Boolean).join(' '); }
 const side = {ranked:true,tier:100,weighted_points:10,total_cost_usd:100,sample_n:5,ci_low:80,ci_high:120,cost_per_point:10,cost_per_point_ci_low:8,cost_per_point_ci_high:12};
 let failed = 0;
 function check(name, fn) { try { fn(); console.log('PASS '+name); } catch(e) { failed++; console.error('FAIL '+name+': '+e.message); } }
+for (const [share,label] of [[null,'evidence incomplete'],[0,'evidence 0%'],[0.5,'evidence 50%']]) check('workflow evidence share '+share,()=>{
+ ctx.renderQualityEvidence({status:'shown',cutover:'2026-10-17',workflows:[{workflow_id:'42',quality_evidence_share:share}]});
+ assert.match(nodes['quality-evidence'].textContent,new RegExp('workflow 42: '+label));
+ if (share === null) assert.doesNotMatch(nodes['quality-evidence'].textContent,/evidence 0%/);
+});
 check('aggregate pricing anonymous notice with zero counts',()=>{
  const notice='Conditional anonymous policy notice.';
  ctx.renderAggregatePricing({aggregate_pricing:{cutover:'aggregate-policy',approximation_notice:notice,ceiling_status:'not_shown'}});
@@ -44,6 +52,40 @@ for (const [name,build] of [
  const text = all(build());
  assert.match(text,/unvalidated/i);
  assert.doesNotMatch(text,/95% CI|confidence interval/i);
+});
+check('interval floor reason and shown label',()=>{
+ const withheld={...side,ci_low:0,ci_high:0,cost_per_point_ci_low:0,cost_per_point_ci_high:0,ci_note:'withheld: row attributed-cost share below 50%'};
+ for (const build of [ctx.buildTierReading,ctx.buildCostPerPoint]) {
+  assert.match(all(build(withheld,false,true)),/withheld: row attributed-cost share below 50%/);
+  assert.doesNotMatch(all(build(withheld,false,true)),/bounds.*\[0, 0\]/i);
+  assert.match(all(build({...side,ci_note:'excludes uncertainty from unattributed spend'},false,true)),/excludes uncertainty from unattributed spend/);
+ }
+ const row=ctx.buildYieldBar({...withheld,developer:'alice'},false,true,200,'','');
+ assert.doesNotMatch(all(row),/bounds.*\[0, 0\]/i);
+ assert.match(textOnly(row),/interval withheld: row attributed-cost share below 50%/);
+ assert.doesNotMatch(textOnly(ctx.buildYieldBar({...withheld,team:'eng'},true,true,200,'','')),/interval withheld/);
+});
+check('empty interval note leaves no tooltip punctuation gap',()=>{
+ for (const build of [ctx.buildTierReading,ctx.buildCostPerPoint]) {
+  const title=build(side,false,true).title;
+  assert.doesNotMatch(title,/\. \. /);
+  assert.match(title,/\((?:bootstrap|self-relative)\)\. Coverage is unvalidated/i);
+ }
+ const row=ctx.buildYieldBar({...side,developer:'alice'},false,true,200,'','');
+ function checkTitles(x) { if(x.title) assert.doesNotMatch(x.title,/\. \. /); (x.children||[]).forEach(checkTitles); }
+ checkTitles(row);
+});
+check('partition diagnostics and anonymous suppression',()=>{
+ const diagnostics={partition_diagnostics:{points_per_pr:4,points_per_1000_usd:400,capped_pr_count:1,capped_pr_count_share:0.5,capped_pr_points:8,capped_pr_points_share:0.8,outcomes_per_issue:[{outcomes:2,issues:1}],weight_buckets:[{weight:8,outcomes:1,points:8}],notice:'Splitting changes points; no automatic penalties.'}};
+ ctx.renderPartitionDiagnostics(diagnostics,false);
+ assert.match(all(nodes['partition-diagnostics']),/4.00 points per PR.*400.00 points per \$1,000/);
+ assert.match(all(nodes['partition-diagnostics']),/2 outcomes: 1 issues/);
+ assert.match(all(nodes['partition-diagnostics']),/Splitting changes points/);
+ ctx.renderPartitionDiagnostics(diagnostics,true);
+ assert.equal(nodes['partition-diagnostics'].style.display,'none');
+ assert.equal(nodes['partition-diagnostics'].textContent,'');
+ ctx.renderPartitionDiagnostics({partition_diagnostics:'not_shown'},false);
+ assert.equal(nodes['partition-diagnostics'].style.display,'none');
 });
 check('KPI bounds',()=>{
  ctx.renderKPIs({total:{...side},data_quality:{}},[side],false);

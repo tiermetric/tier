@@ -69,6 +69,7 @@ running; installing one, and getting spend and merged work into it, are covered
 in the project <a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">README</a>. For what the number itself means, start
 with <a href="understanding-tier.html" rel="nofollow">understanding-tier.md</a>.</p>
 <h2 id="what-do-i-need-before-i-run-these-commands">What do I need before I run these commands?</h2>
+<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
 <p>Three values. Ask the person who runs your TIER server for them.</p>
 <ul>
 <li>
@@ -129,7 +130,147 @@ token can then print something that looks like a real, empty answer.</p>
 (<code>brew install jq</code> on a Mac, <code>sudo apt install jq</code> on Debian or Ubuntu). The
 full setup is in the project README under
 <a href="https://github.com/tiermetric/tier/blob/main/README.md#what-you-need-before-you-start" rel="nofollow">What you need before you start</a>.</p>
+<h2 id="how-do-i-pilot-tier-on-my-team">How do I pilot TIER on my team?</h2>
+<p>Start with one question: <strong>which tools do the engineers use?</strong> TIER can read
+local usage records from the <strong>Claude Code, Codex CLI, Opencode and Meta Muse
+Code CLIs</strong> on each laptop. Claude Code, Codex and Muse write session logs;
+Opencode keeps its per-call records in a local SQLite store. Claude used inside
+<strong>Cursor, Copilot or the claude.ai website is not captured by this laptop path</strong>.
+Your Anthropic account&#39;s billed totals per engineer cannot, on their own, be
+split by PR, issue or feature: they contain no work linkage.</p>
+<p>Plan the first report around a <strong>full calendar month</strong>. Recovery works only
+while the source files still exist. Claude Code deletes a session file after
+<code>cleanupPeriodDays</code>, a Claude Code setting that is 30 days unless you change it,
+so check yours (<a href="https://code.claude.com/docs/en/data-usage#data-retention" rel="nofollow">Claude Code data retention</a>). A first pilot
+with default Claude Code retention can usually recover only about a month of
+cost; the other tools depend on their own retained files. <code>ship</code> and <code>backfill</code>
+default to 90 days, which does not recover deleted logs. Set the same recent
+<code>--since</code> when loading costs and merged work, and check the report&#39;s cost-capture
+horizon; reading a team report requires a sealed calendar month (step 6).</p>
+<p><strong>v0.6.1 is for a trusted team.</strong> Every laptop gets one shared, send-only ingest
+token: it opens only <code>POST /api/v1/events</code>. The server does not yet bind a laptop
+to one developer; a holder can post, inflate or suppress spend under any
+developer id (#1145, gated on #826; <a href="security.html#the-ingest-token-1144" rel="nofollow">trust limits</a>). Real-data
+<code>--aggregation developer</code> startup is refused with exit 1 until #826&#39;s named-viewer,
+audit and retention controls ship (#1253). Team mode has no per-issue view.
+Per-developer views and the per-issue report are not available on real data in v0.6.1 (#826); to see what they look like, run the synthetic demo (<code>tierd demo</code>), which generates its own invented data in a private temporary database and cannot load yours. TIER is
+built for coaching, not for evaluating developers. Per-person figures are not
+accurate enough to judge an individual. Agree to coach the practice, never rank
+people (<a href="peer-learning.html#coaching-not-appraisal" rel="nofollow">peer learning</a>).</p>
+<p>Install <code>tierd</code> via <a href="quickstart.html#1-install" rel="nofollow">quickstart</a>. On the server, create three different
+tokens, one per file, with the README recipes: <code>(umask 077; openssl rand -hex 32 &gt; ~/.tier/api-token)</code>,
+then the same for <code>read-token</code> and <code>ingest-token</code> (<code>serve</code> refuses two equal tokens). Replace the example inputs.</p>
+<ol>
+<li>
+<p><strong>Start one reachable server.</strong> Inputs: the three token files above (the
+<a href="https://github.com/tiermetric/tier/blob/main/README.md#the-ingest-token-tier_ingest_token---ingest-token--recommended-for-shippers" rel="nofollow">README ingest-token recipe</a>
+explains the send-only one); set <code>TIER_HOST</code> to the HTTPS address you will put in front of this server.</p>
+<pre><code>tierd serve --aggregation team --addr 127.0.0.1:8080 --db &#34;$HOME/.tier/tier.db&#34; \
+  --api-token @&#34;$HOME/.tier/api-token&#34; --read-token @&#34;$HOME/.tier/read-token&#34; \
+  --ingest-token @&#34;$HOME/.tier/ingest-token&#34; --trusted-proxy-cidr 127.0.0.1/32
+</code></pre>
+<p><code>serve</code> speaks plain HTTP, so run an HTTPS reverse proxy on the same machine and make
+it the only way in; the loopback bind keeps the plain listener off the network.
+<code>--trusted-proxy-cidr</code> lets the failed-login lockout see each client&#39;s own address
+instead of the proxy&#39;s, so one laptop with a wrong token cannot lock out the team.</p>
+</li>
+<li>
+<p><strong>Load the team roster.</strong> Export a CSV with header
+<code>developer,team,division,org</code>, one row per engineer. Use the same GitHub login
+for <code>developer</code> as in backfill and shipping; <code>division</code> and <code>org</code> may be empty.
+Import through the running server with the admin token:</p>
+<pre><code>tierd hierarchy import --server &#34;$TIER_HOST&#34; \
+  --api-token @&#34;$HOME/.tier/api-token&#34; roster.csv
+</code></pre>
+<p>A group is shown only when it has at least k counted people (default 5,
+minimum 3) and every figure it would publish (captured spend, merged-work
+points and, where present, paid spend and capture shares) is carried by at
+least k of them. They need not be the same people for each figure. Otherwise
+the group folds into <code>other</code>; if <code>other</code> also falls short, the response is
+withheld. The roster must be loaded before sealing; a sealed report does not
+change after an import.</p>
+</li>
+<li>
+<p><strong>Load merged PRs.</strong> Inputs: create a GitHub token in <strong>GitHub Settings →
+Developer settings → Personal access tokens → Fine-grained tokens</strong>, scoped to
+the repository with <strong>Pull requests: Read-only</strong>, and save it without echoing:</p>
+<pre><code>(umask 077; read -rs t; printf &#39;%s\n&#39; &#34;$t&#34; &gt; ~/.tier/github-token); chmod 600 ~/.tier/github-token
+tierd backfill --repo acme/app --since 2026-09-17 \
+  --token @&#34;$HOME/.tier/github-token&#34; --db &#34;$HOME/.tier/tier.db&#34;
+</code></pre>
+<p>Run this on the server machine, stopping <code>serve</code> first and restarting it after:
+backfill writes the same database directly. Repeat for each repository. For
+live merges instead, follow <a href="webhook-setup.html" rel="nofollow">webhook setup</a>: configure the
+shared secret with <code>serve --webhook-secret @file</code> and send GitHub deliveries
+to <code>POST /webhook/github</code>. Branch names or PR bodies must name the issue
+(<a href="conventions.html" rel="nofollow">conventions</a>); issue ids come from branch and PR text and
+can be misfiled (<a href="technical-reference.html#51-the-shared-key-is-the-issue-id" rel="nofollow">technical reference §5.1</a>).</p>
+</li>
+<li>
+<p><strong>Ship each laptop&#39;s usage.</strong> Inputs: the operator provisions the same ingest
+token as <code>~/.tier/ingest-token</code> on each laptop; <code>TIER_HOST</code> is the server&#39;s HTTPS
+base address, <code>~/src/app</code> is the checkout, and <code>jsmith</code> is the engineer&#39;s GitHub
+login so spend joins their merged PRs.</p>
+<pre><code>tierd ship --server &#34;$TIER_HOST&#34; --repo &#34;$HOME/src/app&#34; --since 2026-09-17 \
+  --developer jsmith --api-token @&#34;$HOME/.tier/ingest-token&#34;
+</code></pre>
+<p>Claude Code is read by default. Add <code>--codex-rollout</code>, <code>--opencode</code> or <code>--muse</code>
+only for tools that engineer uses; those collectors are off by default.
+Repeat <code>--repo</code> for more checkouts. On forks, set the upstream identity with
+<code>--repo-slug &#34;$HOME/src/app=acme/app&#34;</code>. Opencode currently captures only the
+Z.ai coding plan; it records no branch, so its spend remains unattributed to
+issues. Run every 15 minutes via the <a href="https://github.com/tiermetric/tier/blob/main/README.md#capturing-tokens" rel="nofollow">documented cron/launchd setup</a>,
+preserving these flags; move a fixed <code>--since</code> forward over time. Re-sends
+deduplicate. Check exit codes and the per-repository shipping summaries.</p>
+</li>
+<li>
+<p><strong>Optionally record billed totals.</strong> Inputs: the account&#39;s actual billed USD
+per engineer and calendar month, using the same developer id as above. This
+is a manual admin POST (<a href="api-compatibility.html#post-apiv1actual_spend" rel="nofollow">API reference</a>):</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/api-token)&#34; |
+  curl -fsS -X POST -H @- -H &#39;Content-Type: application/json&#39; \
+    -d &#39;{&#34;developer&#34;:&#34;jsmith&#34;,&#34;period&#34;:&#34;2026-09&#34;,&#34;actual_paid_usd&#34;:100}&#39; \
+    &#34;$TIER_HOST/api/v1/actual_spend&#34;
+</code></pre>
+<p>Posts add together; do not re-post a bill. Spend Leverage is captured list-price cost
+divided by actual paid spend; use whole calendar months for this cross-check.
+It does not allocate the bill to issues or prove completeness.</p>
+</li>
+<li>
+<p><strong>Seal the first calendar month.</strong> Results come from a <strong>SEALED calendar
+month</strong>; a month returns <code>404</code> until it is sealed. Finish loading cost, merged
+work, roster and any identity aliases before arming: the first seal pins the
+earliest published month permanently, and sealed reports never change.
+Leave <code>serve</code> running to register its sources, then on the server preview
+and confirm with the same database, configuration and environment:</p>
+<pre><code>tierd seal --arm earliest --dry-run --aggregation team --db &#34;$HOME/.tier/tier.db&#34;
+tierd seal --arm earliest --aggregation team --db &#34;$HOME/.tier/tier.db&#34;
+</code></pre>
+<p>The second command prompts for confirmation. The first readable month is the
+first full UTC calendar month of cost coverage, after it closes plus the
+default 14-day grace (<code>--report-grace</code>), once configured sources have settled
+through its end and the seal succeeds. With cost coverage starting
+2026-09-17, October is the first full month; it becomes sealable on
+<strong>2026-11-15 at 00:00 UTC</strong>, not when September&#39;s backfill finishes. If the
+retained cost horizon starts later, so does the first full month. With no
+eligible history, wait for a full covered month and its grace or backfill
+available history. See <a href="quickstart.html#7-viewing-the-dashboard-from-another-machine" rel="nofollow">the sealing procedure</a>
+for source gates, custom settings and sealing status. Later eligible months
+seal at writable-server startup and on its hourly pass.</p>
+</li>
+</ol>
+<p>Then read the <strong>team report for a sealed month</strong>, using the read token
+(replace <code>2026-10</code> with the month actually sealed):</p>
+<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
+  curl -fsS -H @- &#34;$TIER_HOST/api/v1/scores?period=2026-10&#34;
+</code></pre>
+<p>The report gives group cost at list prices, weighted points and TIER (points
+per $1,000), subject to the k floor above. Open <code>TIER_HOST</code> for the dashboard,
+enter the read token and select the same <strong>Sealed month</strong>.
+<strong>Capture Fidelity is not completeness</strong>: it measures how captured spend arrived,
+and says nothing about usage TIER never saw.</p>
 <h2 id="can-i-see-my-developers-names">Can I see my developers&#39; names?</h2>
+<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
 <p>That depends on one setting, chosen by whoever starts the server.
 <code>tierd serve</code>, the command that starts TIER&#39;s server, will not start without
 <code>--aggregation</code>, and there is no default
@@ -623,11 +764,11 @@ issue 42 in two repositories stays two issues):</p>
 session is recorded with the branch it started on, for every message in it. TIER
 first looks for a commit on that branch, made within 30 minutes either side of
 the message, and takes the issue from the branch names attached to that commit
-first, then from a closing directive (<code>closes #42</code>) or a tracker key such as
+first, then from a closing directive (<code>closes #42</code>) or a configured tracker key (OP is built in) such as
 Jira&#39;s <code>TIER-99</code> in its subject. A bare <code>#42</code> in the subject does not
 attach spend to an issue. If no matching commit supplies an issue, it reads the
 issue from the recorded branch name: <code>feature/42-login</code> becomes issue 42, <code>fix/TIER-99-crash</code>
-becomes <code>TIER-99</code>. Commits are matched on the last part of the branch name, so
+becomes <code>TIER-99</code> only when TIER is configured as a tracker key (<code>--tracker-keys TIER</code>). Only the first branch slot counts; later numbers, dates and excluded release, bot and revert branches do not supply an issue. Commits are matched on the last part of the branch name, so
 <code>feature/42-login</code> and <code>42-login</code> count as the same branch.</li>
 <li>Merged work: a merged pull request is tied to an issue from its branch name
 or from its description (<code>closes #42</code>).</li>
@@ -648,7 +789,7 @@ worktree from the file paths a session&#39;s tool calls name, so it reads more o
 the session file than the default
 (<a href="privacy.html#worktree-attribution-off-by-default" rel="nofollow">privacy.md</a>); read
 <a href="how-it-works.html#measured-accuracy-read-this-before-turning-it-on" rel="nofollow">how-it-works.md</a>
-before turning it on.</p>
+before turning it on. Parents no longer carry (#1016); only message groups labelled <code>isSidechain:true</code> can use carry. Worktree attribution stays opt-in and <strong>off by default</strong>. Activation requires recorded gates, the operator&#39;s security rulings and an explicit operator decision. No new accuracy figures have been measured.</p>
 <p>Spend that finds no issue is kept, labelled with the reason:</p>
 <table>
 <thead>
@@ -727,7 +868,8 @@ or with no branch is left out of that figure and reported on a separate line,
 <p>What raises attribution:</p>
 <ol>
 <li>Put the issue number in every branch name: <code>feature/42-login</code>,
-<code>fix/42</code>, <code>fix/TIER-99-crash</code>. The accepted patterns are in
+<code>fix/42</code>, <code>fix/TIER-99-crash</code> (the tracker form works only with TIER configured
+as a tracker key, for example <code>--tracker-keys TIER</code>). The accepted patterns are in
 <a href="conventions.html#issue-references--attribution" rel="nofollow">conventions.md</a>. Avoid a bare
 four-digit number from 1900 to 2099; TIER reads it as a year.</li>
 <li>Start the AI session in the checkout that is on the issue branch: switch
@@ -748,10 +890,10 @@ figures. The dashboard lists developers in identifier order and never sorts
 them by TIER; a row with too little evidence stays in its place with a &#34;below
 evidence floor&#34; tag. Compare a person or a team with their own earlier periods,
 within one kind of work. Before the number itself, read the attribution
-coverage and, where there are bounds, their limitations: each ranked developer
-row in <code>developer</code> mode carries bootstrap bounds (<code>ci_low</code> and <code>ci_high</code>, drawn as a
+coverage and, where there are bounds, their limitations: in v0.6.1, #1233 withholds intervals when the row&#39;s own attributed-cost share is below 50%. Each ranked developer
+row in <code>developer</code> mode at or above that share carries bootstrap bounds (<code>ci_low</code> and <code>ci_high</code>, drawn as a
 whisker on the dashboard bar; nominal 95% percentile bootstrap; coverage unvalidated), and team rows and the company <code>total</code> carry none.</p>
-<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. When shown, the bounds are the 2.5th and 97.5th percentiles of the stated bootstrap resampling procedure. Their 95% repeated-sampling coverage has not been validated. They exclude uncertainty from uncaptured usage, incorrect attribution and unattributed spend. Spend is counted when usage happened and points when the work merged, so work that crosses a period boundary can move the ratio either way. Team scores carry no interval, and month-to-month noise is large: TIER has not established how large a change must be to stand out from ordinary variation. Treat a small difference as no evidence either way, and a large one as a prompt to investigate, not a measured effect. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. &#39;Not shown&#39; is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain. The 50% attributed-cost-share withholding rule is planned, not implemented in v0.6.0.</p>
+<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. When shown, the bounds are the 2.5th and 97.5th percentiles of the stated bootstrap resampling procedure. Their 95% repeated-sampling coverage has not been validated. They exclude uncertainty from uncaptured usage, incorrect attribution and unattributed spend. Spend is counted when usage happened and points when the work merged, so work that crosses a period boundary can move the ratio either way. Team scores carry no interval, and month-to-month noise is large: TIER has not established how large a change must be to stand out from ordinary variation. Treat a small difference as no evidence either way, and a large one as a prompt to investigate, not a measured effect. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. &#39;Not shown&#39; is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain. When shown in v0.6.1 (#1233), the interval is labelled &#34;excludes uncertainty from unattributed spend&#34;. The floor uses the row&#39;s cost paired with resampled outcomes; exactly 50% passes. Team and division rows carry no interval and reveal no floor status. v0.6.0 itself did not apply the withholding rule.</p>
 <p><a href="peer-learning.html" rel="nofollow">peer-learning.md</a> is the full method for a team. In four
 steps:</p>
 <ol>

@@ -121,8 +121,9 @@ zero_outcome_window_days: 7
 #                with fewer than k_anonymity contributing developers collapse into
 #                an aggregate "other" bucket (their spend/outcomes stay in the
 #                totals — never dropped).
-#   developer  — keep named per-developer rows (only where per-individual
-#                measurement is lawful and consented; see docs/legal-and-privacy.md).
+#   division   — roll teams up one level under the same k-anonymity floor.
+#   developer  — reserved for the synthetic `tierd demo` until #826; real-data
+#                startup is refused. Choose team or division for real data.
 # This example ships `team` as the safe default. `tierd score` (the local CLI) is
 # unaffected — the gate applies only to the served surfaces.
 # REQUIRED onboarding for `team` mode (#232): populate org_hierarchy via
@@ -522,3 +523,8 @@ outcomes:
 #   --log-level   (env TIER_LOG_LEVEL)    debug | info | warn | error
 #   --config                              path to this file
 # ---------------------------------------------------------------------------
+
+# Prospective issue attribution; CLI --tracker-keys > TIER_TRACKER_KEYS > this value.
+# Comma-separated prefixes matching ^[A-Z][A-Z0-9]{0,15}$; OP is always built in.
+attribution:
+  tracker_keys: ""

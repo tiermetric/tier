@@ -325,6 +325,9 @@ the most efficient row (<code>#472</code>). (A <code>$0</code>-cost row with poi
 legitimate <code>0.0</code>, already surfaced by the zero-token tripwire <code>#136</code>.)</li>
 </ul>
 <h3 id="self-relative-interval-not-an-absolute-rank">Self-relative interval (not an absolute rank)</h3>
+<p>In v0.6.1, #1233 withholds intervals when the row&#39;s own attributed-cost share
+is below 50%; exactly 50% passes. When shown they are labelled &#34;excludes
+uncertainty from unattributed spend&#34;. Team and division rows carry none.</p>
 <p><code>/scores</code> also returns <code>cost_per_point_ci_low/high</code>: the nominal 95% percentile-bootstrap bounds (coverage unvalidated)
 for a ranked developer&#39;s <code>cost_per_point</code>, derived by reciprocal
 transform from the same TIER bootstrap (<code>#133</code>) — it expresses <code>cost_per_point</code>

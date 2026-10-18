@@ -257,6 +257,9 @@ func TestDispatch_BackfillReconstructsOutcomes(t *testing.T) {
 	if err != nil || len(exp.Outcomes) != 1 {
 		t.Fatalf("export: %v %v", exp.Outcomes, err)
 	}
+	if exp.Outcomes[0].IssueRule == nil || *exp.Outcomes[0].IssueRule != "branch_first_slot" {
+		t.Fatalf("backfill issue_rule = %+v", exp.Outcomes[0])
+	}
 	metadata := exp.Outcomes[0]
 	wantHash := issueref.BranchHash("owner/repo", "feature/55-x")
 	if metadata.HeadBranchHash == nil || *metadata.HeadBranchHash != *wantHash || metadata.CreatedAt == nil || metadata.MergedAt == nil || !metadata.CreatedAt.Equal(*metadata.MergedAt) {
@@ -284,6 +287,9 @@ func TestDispatch_BackfillReconstructsOutcomes(t *testing.T) {
 	if o103.WeightSource != store.WeightSourceHeuristic || o103.Weight != store.GitHeuristic(50, 3) {
 		t.Errorf("sha103 weight = %v/%q, want %v/git-heuristic",
 			o103.Weight, o103.WeightSource, store.GitHeuristic(50, 3))
+	}
+	if o103.IssueRule != "body_close_directive" {
+		t.Errorf("backfill body rule = %q, want body_close_directive", o103.IssueRule)
 	}
 	if o103.IssueID != "issue-77" {
 		t.Errorf("sha103 IssueID = %q, want issue-77", o103.IssueID)
@@ -595,6 +601,8 @@ func TestBackfillBranchEvidenceWithoutFill(t *testing.T) {
 		wantHash                              bool
 	}{
 		{"same_repo", "OWNER/REPO", "feature/topic", "main", true},
+		{"revert_prefix", "owner/repo", "revert-foo", "main", false},
+		{"revert_slash", "owner/repo", "REVERT/foo", "main", false},
 		{"fork_same_named_branch", "fork/repo", "feature/topic", "main", false},
 		{"custom_default", "owner/repo", "trunk", "trunk", false},
 		{"custom_default_prefixed", "owner/repo", "refs/heads/trunk", "trunk", false},

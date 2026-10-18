@@ -130,11 +130,11 @@ func (d *DB) excludePROutcome(ctx context.Context, o Outcome, evidence, actor st
  INSERT INTO outcome_exclusions
  (id, developer, issue_id, pr_number, weight, quality, merge_commit_sha,
  weight_source, additions, deletions, changed_files, source, push_day,
- work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at,
+ work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at, issue_rule,
  reason, evidence, actor, excluded_at, exclusion_pr_number, exclusion_merge_commit_sha, exclusion_repo, author_developer, exclusion_author_type)
  SELECT id, developer, issue_id, pr_number, weight, quality, merge_commit_sha,
  weight_source, additions, deletions, changed_files, source, push_day,
- work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at,
+ work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at, issue_rule,
  'github-revert-pr', ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') FROM outcomes
  WHERE merge_commit_sha = ?
  ON CONFLICT DO NOTHING`, evidence, actor, now, o.PRNumber, o.MergeCommitSHA,

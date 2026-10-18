@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/issueref"
 )
 
 // TestWatcher_WorktreeAgentInheritsSpawningBranchAcrossDebounce drives the REAL
@@ -429,7 +431,7 @@ func TestParseSessionFile_WorktreeAgentInheritsSpawningBranchNotSessionBranch(t 
 	}
 
 	// End to end: the spend must actually attribute to the parent's issue.
-	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "")
+	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "", issueref.Grammar{})
 	var agentIssue string
 	for _, e := range events {
 		if e.InputTok == 2000 {
@@ -467,7 +469,7 @@ func TestParseSessionFile_WorktreeAgentBranchWithoutSpawnerStillBuckets(t *testi
 	if s.LastRealBranch != "" {
 		t.Errorf("LastRealBranch = %q, want empty — a harness-invented name must never become the branch a later agent inherits", s.LastRealBranch)
 	}
-	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "")
+	events := joinSessionsToCommits([]sessionSummary{*s}, nil, "dev", "", issueref.Grammar{})
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -9,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/api"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -312,5 +316,91 @@ func TestCorrectionReview_SealedPinnedPolicy(t *testing.T) {
 	rc, out, stderr = runVerify(t, manifest, "--db", path)
 	if rc != 1 {
 		t.Fatal("incorrect seal provenance accepted", rc, out, stderr)
+	}
+}
+
+func TestVerifySealedRecoverableEventsStayStored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recoverable.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := sealedMay.Add(10 * 24 * time.Hour)
+	opened, merged := at.Add(-time.Hour), at.Add(time.Hour)
+	hash := issueref.BranchHash("acme/a", "feature/recorded")
+	var hierarchy []store.HierarchyRow
+	for i := 0; i < 5; i++ {
+		dev := fmt.Sprint("person-", i)
+		hierarchy = append(hierarchy, store.HierarchyRow{Developer: dev, Team: "eng", Division: "dev", Org: "acme"})
+	}
+	if err := db.SeedDemoMembershipBaseline(t.Context(), hierarchy); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		dev := fmt.Sprint("person-", i)
+		if err := db.InsertTokenEvent(t.Context(), store.TokenEvent{Developer: dev, Repo: "acme/a", IssueID: store.UnattributedIssueID, Model: "test", CostMicro: 10000000, InputTok: 2000, Source: "jsonl", Fidelity: "realtime", BranchHash: hash, Timestamp: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.InsertOutcome(t.Context(), store.Outcome{Developer: "person-0", Repo: "acme/a", IssueID: "recovered-issue", PRNumber: 42, HeadBranchHash: hash, CreatedAt: &opened, MergedAt: &merged, Timestamp: merged, Source: "backfill", Weight: 4, Quality: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RegisterSources(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertTokenEvent(t.Context(), store.TokenEvent{Developer: "person-0", Repo: "acme/a", IssueID: "horizon", Model: "test", CostMicro: 1, Source: "jsonl", Fidelity: "realtime", Timestamp: sealedMay.Add(-24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := db.EffectiveAttributionsWindow(t.Context(), sealedMay, sealedMay.AddDate(0, 1, 0), store.FleetWide)
+	if err != nil || len(events) != 5 || events[0].IssueID != "recovered-issue" {
+		t.Fatal(events, err)
+	}
+	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit))
+	h.SetAggregation(scoring.AggregationTeam, 5)
+	if err := h.EnableSealing(14*24*time.Hour, "2026-05"); err != nil {
+		t.Fatal(err)
+	}
+	period, err := api.ParsePeriod("2026-05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := h.RecomputeSealedBody(store.WithReadTimeRecovery(t.Context(), false), period)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recomputed, err := h.RecomputeSealedBody(t.Context(), period)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recomputed, expected) {
+		t.Error("recompute included recovery before first seal")
+	}
+	if _, err := h.ArmSealing(t.Context(), 14*24*time.Hour, "2026-05", "2026-05"); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	h.RegisterReadOnly(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/scores?period=2026-05", nil))
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), expected) {
+		t.Fatalf("sealed body included recovery: %d\nsealed %s\nstored %s", rec.Code, rec.Body.String(), expected)
+	}
+	manifest := httptest.NewRecorder()
+	mux.ServeHTTP(manifest, httptest.NewRequest(http.MethodGet, "/api/v1/report_manifest?period=2026-05", nil))
+	if manifest.Code != 200 {
+		t.Fatal(manifest.Code, manifest.Body.String())
+	}
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(manifestPath, manifest.Body.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := runVerify(t, manifestPath, "--db", path)
+	if code != rcReproduced || !strings.Contains(out, "would be IDENTICAL") {
+		t.Fatalf("verify-report %d: %s %s", code, out, errb)
 	}
 }

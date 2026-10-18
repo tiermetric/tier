@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/tiermetric/tier/internal/issueref"
 )
 
 // IssueResolver maps a (branch, timestamp) pair to the issue id a token event
@@ -39,6 +41,7 @@ import (
 // afterwards does not retroactively re-attribute; build a fresh resolver per
 // scan pass to pick up new commits.
 type IssueResolver struct {
+	grammar       issueref.Grammar
 	commitsByLeaf map[string][]gitCommit
 }
 
@@ -48,15 +51,15 @@ type IssueResolver struct {
 //
 // Returns an error when the path is not a checkout or `git log` fails — both are
 // operator-visible misconfigurations, not conditions to degrade past silently.
-func NewIssueResolver(ctx context.Context, repoPath string, since time.Time) (*IssueResolver, error) {
+func NewIssueResolver(ctx context.Context, repoPath string, since time.Time, grammar issueref.Grammar) (*IssueResolver, error) {
 	if err := validateGitRepo(repoPath); err != nil {
 		return nil, fmt.Errorf("repo validation: %w", err)
 	}
-	commits, err := gitLog(ctx, repoPath, since)
+	commits, err := gitLogWithGrammar(ctx, repoPath, since, grammar)
 	if err != nil {
 		return nil, fmt.Errorf("git log: %w", err)
 	}
-	return &IssueResolver{commitsByLeaf: indexCommitsByLeaf(commits)}, nil
+	return &IssueResolver{grammar: grammar, commitsByLeaf: indexCommitsByLeaf(commits)}, nil
 }
 
 // Resolve returns the issue id (or labeled unattributed bucket) for one event
@@ -65,8 +68,14 @@ func NewIssueResolver(ctx context.Context, repoPath string, since time.Time) (*I
 // available) still get honest, denominator-preserving attribution rather than a
 // nil-pointer panic or a dropped event.
 func (r *IssueResolver) Resolve(branch string, ts time.Time) string {
+	return r.ResolveRef(branch, ts).ID
+}
+
+// ResolveRef retains extractor evidence; labeled buckets carry no rule.
+func (r *IssueResolver) ResolveRef(branch string, ts time.Time) issueref.Ref {
 	if r == nil {
-		return bucketForBranch(branch)
+		return issueref.Ref{ID: bucketForBranch(branch)}
 	}
-	return resolveMessageIssue(branch, ts, r.commitsByLeaf)
+	ref, _ := resolveMessageRef(branch, ts, r.commitsByLeaf, r.grammar)
+	return ref
 }

@@ -22,6 +22,8 @@ const (
 	FloorRevertStrategic  = 0.8
 	FloorRevertQuality    = 0.1
 
+	CIObservationWindow = 48 * time.Hour
+
 	CorrectionWindow = 14 * 24 * time.Hour
 )
 
@@ -49,9 +51,10 @@ func ObservationStatus(eventType string) string {
 // An unidentified legacy workflow matches only another unidentified workflow.
 // The adapter owns source-reference parsing and flaky-event adjudication.
 type Event struct {
-	EventType  string
-	HeadSHA    string
-	WorkflowID string
+	TriggerEvent *string
+	EventType    string
+	HeadSHA      string
+	WorkflowID   string
 }
 
 // Correction contains only merge occurrence evidence; recording and confirmation
@@ -157,6 +160,9 @@ func resolve(events []Event, corrected bool) Result {
 	// only explains why it must not be applied to legacy rows.
 	flaky := make(map[[2]string]struct{})
 	for _, e := range events {
+		if IsCI(e.EventType) && e.TriggerEvent != nil && *e.TriggerEvent != "push" {
+			continue
+		}
 		if e.EventType == EventCIFailFlaky {
 			flaky[[2]string{e.HeadSHA, e.WorkflowID}] = struct{}{}
 		}
@@ -164,6 +170,9 @@ func resolve(events []Event, corrected bool) Result {
 
 	ci, revert := clean, clean
 	for _, e := range events {
+		if IsCI(e.EventType) && e.TriggerEvent != nil && *e.TriggerEvent != "push" {
+			continue
+		}
 		switch e.EventType {
 		case EventCIFail:
 			if _, ok := flaky[[2]string{e.HeadSHA, e.WorkflowID}]; !ok {
@@ -189,4 +198,22 @@ func resolve(events []Event, corrected bool) Result {
 		chosen = floor
 	}
 	return Result{big.NewRat(chosen.numerator, chosen.denominator), chosen.value}
+}
+
+// IsCI is closed over the CI event kinds.
+func IsCI(kind string) bool {
+	switch kind {
+	case EventCIPass, EventCIFail, EventCIFailFlaky:
+		return true
+	}
+	return false
+}
+
+// NormalizeTrigger bounds untrusted GitHub trigger provenance to a fixed vocabulary.
+func NormalizeTrigger(event string) string {
+	switch event {
+	case "push", "pull_request", "schedule", "workflow_dispatch", "merge_group", "pull_request_target", "release", "workflow_run", "repository_dispatch":
+		return event
+	}
+	return "other"
 }

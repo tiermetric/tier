@@ -54,7 +54,7 @@ func runServeChild(t *testing.T, args, env []string) (int, string) {
 	}
 }
 
-// bootServeChild boots a developer-mode loopback serve child and returns once
+// bootServeChild boots a team-mode loopback serve child and returns once
 // /livez answers; a child that exits first fails the test with its stderr.
 func bootServeChild(t *testing.T, args, env []string) {
 	t.Helper()
@@ -63,7 +63,7 @@ func bootServeChild(t *testing.T, args, env []string) {
 		t.Fatalf("locate test binary: %v", err)
 	}
 	addr := freeLoopbackPort(t)
-	full := append([]string{"serve", "--addr", addr, "--db", filepath.Join(t.TempDir(), "grace.db"), "--aggregation", "developer"}, args...)
+	full := append([]string{"serve", "--addr", addr, "--db", filepath.Join(t.TempDir(), "grace.db"), "--aggregation", "team"}, args...)
 	cmd := exec.Command(self)
 	cmd.Env = append(scrubbedEnv(os.Environ()), "TIERD_SMOKE_CHILD_ARGS="+strings.Join(full, "\n"))
 	cmd.Env = append(cmd.Env, env...)
@@ -125,7 +125,7 @@ func TestServeSmoke_ReportGraceWiring(t *testing.T) {
 	}
 	for _, tc := range refused {
 		t.Run("refused: "+tc.name, func(t *testing.T) {
-			args := append([]string{"--db", filepath.Join(t.TempDir(), "grace.db"), "--aggregation", "developer"}, tc.args...)
+			args := append([]string{"--db", filepath.Join(t.TempDir(), "grace.db"), "--aggregation", "team"}, tc.args...)
 			code, stderr := runServeChild(t, args, tc.env)
 			if code != 1 || !strings.Contains(stderr, tc.want) {
 				t.Fatalf("exit = %d, want 1 with %q; stderr:\n%s", code, tc.want, stderr)

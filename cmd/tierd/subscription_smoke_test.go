@@ -91,7 +91,7 @@ func TestServeSmoke_SubscriptionFeeReconcilerPostsThroughTheRealBinary(t *testin
 		"serve",
 		"--addr", addr,
 		"--db", dbPath,
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--config", writeCoveredSubscriptionServeConfig(t, dir),
 	}, "\n")
 
@@ -161,7 +161,7 @@ func TestServeSmoke_SubscriptionCoverageGateRefusesBoot(t *testing.T) {
 		"serve",
 		"--addr", freeLoopbackPort(t),
 		"--db", filepath.Join(t.TempDir(), "sub-gate.db"),
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--config", writeSubscriptionServeConfig(t),
 	}, "\n")
 
@@ -222,7 +222,7 @@ func TestServeSmoke_ReadOnlyNeutralizesSubscriptionFees(t *testing.T) {
 		"serve",
 		"--addr", addr,
 		"--db", filepath.Join(t.TempDir(), "sub-ro.db"),
-		"--aggregation", "developer",
+		"--aggregation", "team",
 		"--read-only",
 		"--config", writeSubscriptionServeConfig(t),
 	}, "\n")

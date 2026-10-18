@@ -19,6 +19,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,6 +33,7 @@ import (
 	"github.com/tiermetric/tier/internal/collector/codexrollout"
 	"github.com/tiermetric/tier/internal/collector/muse"
 	"github.com/tiermetric/tier/internal/collector/opencode"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/shipper"
@@ -50,7 +53,7 @@ import (
 // The caller ships the events regardless and treats the error as fatal AFTER
 // the flush, so one corrupt rollout log cannot silently zero out a laptop's
 // whole Codex spend.
-func shipCodexRollout(ctx context.Context, targets []codexrollout.RepoTarget, sessionsDir, developer string, since time.Time, ing collector.Ingester) error {
+func shipCodexRollout(ctx context.Context, targets []codexrollout.RepoTarget, sessionsDir, developer string, since time.Time, ing collector.Ingester, grammar issueref.Grammar) error {
 	// WARN, not the slog default's INFO. `ship` is documented as a */15 cron
 	// job; the collector logs at Info on any pass that filtered a session, and
 	// "a Codex session outside the --repo set" counts as filtered, so the
@@ -60,11 +63,12 @@ func shipCodexRollout(ctx context.Context, targets []codexrollout.RepoTarget, se
 	// scan filtered sessions ... foreign_repo=N" at INFO is the diagnostic for
 	// "why did my Codex scan find nothing?" and silencing it with no way back
 	// would trade one invisible failure for another.
-	logger, err := newLogger(os.Stderr, "auto", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "warn"))
+	logger, err := newShipCollectorLogger(os.Stderr)
 	if err != nil {
 		return err
 	}
 	c, err := codexrollout.New(codexrollout.Config{
+		Grammar:     grammar,
 		SessionsDir: sessionsDir,
 		Repos:       targets,
 		DeveloperID: developer,
@@ -139,13 +143,13 @@ func shipOpencode(ctx context.Context, targets []opencode.RepoTarget, dbPath, de
 // into the shipper (#895). The Codex twin above carries the Collect-not-Run and
 // partial-results reasoning. A run still in progress is not returned; the next
 // cron run ships it once it settles — `ship` is stateless and re-shippable.
-func shipMuse(ctx context.Context, targets []muse.RepoTarget, home, developer string, since time.Time, ing collector.Ingester) error {
+func shipMuse(ctx context.Context, targets []muse.RepoTarget, home, developer string, since time.Time, ing collector.Ingester, grammar issueref.Grammar) error {
 	// WARN by default, for the cron-noise reason shipCodexRollout gives.
-	logger, err := newLogger(os.Stderr, "auto", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "warn"))
+	logger, err := newShipCollectorLogger(os.Stderr)
 	if err != nil {
 		return err
 	}
-	c, err := muse.New(muse.Config{Home: home, Repos: targets, DeveloperID: developer, Logger: logger})
+	c, err := muse.New(muse.Config{Grammar: grammar, Home: home, Repos: targets, DeveloperID: developer, Logger: logger})
 	if err != nil {
 		return fmt.Errorf("%w", err)
 	}
@@ -339,6 +343,8 @@ func printRepoSummary(summaries []repoSummary, extras []crossRepoSource) {
 
 func runShip(args []string) {
 	fs := flag.NewFlagSet("ship", flag.ExitOnError)
+	trackerKeys := addTrackerKeysFlag(fs)
+	configPath := fs.String("config", "", "path to the YAML config file; reads attribution.tracker_keys")
 	server := fs.String("server", "", "central tierd base URL, e.g. https://tier.example (required)")
 	apiToken := fs.String("api-token", "", "Server credential sent as Authorization: Bearer. The server's --ingest-token is recommended for shippers; its admin --api-token still works. When the flag is not given, TIER_API_TOKEN is used. Prefer TIER_API_TOKEN env var or @/path/to/file; a literal value here leaks via ps/shell history (#37)")
 	var repos repeatableStringSlice
@@ -358,6 +364,12 @@ func runShip(args []string) {
 	worktreeAttr := fs.Bool(worktreeAttrFlag, false, worktreeAttrHelp)
 	allowEmpty := fs.Bool("allow-empty", envBool("TIER_SHIP_ALLOW_EMPTY"), "exit 0 instead of 1 when the run recovered nothing at all (#549 arm 3). Off by default: a run that recovers nothing is almost always a wrong --repo path, and the whole point of #549 is that such a run must not look like a successful one. Env TIER_SHIP_ALLOW_EMPTY")
 	_ = fs.Parse(args)
+	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
+	if grammarErr != nil {
+		fmt.Fprintf(os.Stderr, "tracker keys: %v\n", grammarErr)
+		os.Exit(1)
+	}
+
 	secretEnvFallback(fs, apiToken, "api-token", "TIER_API_TOKEN")
 
 	if *server == "" {
@@ -393,6 +405,11 @@ func runShip(args []string) {
 	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
+		os.Exit(1)
+	}
+	collectorLogger, loggerErr := newShipCollectorLogger(os.Stderr)
+	if loggerErr != nil {
+		fmt.Fprintln(os.Stderr, loggerErr)
 		os.Exit(1)
 	}
 	// The worktree index covers every --repo, each under the path its own
@@ -470,6 +487,8 @@ func runShip(args []string) {
 		opencodeTargets = append(opencodeTargets, opencode.RepoTarget{Path: repoPath, Slug: slug})
 		museTargets = append(museTargets, muse.RepoTarget{Path: repoPath, Slug: slug})
 		c := &collector.JSONLCollector{
+			Grammar:     grammar,
+			Logger:      collectorLogger,
 			RepoPath:    repoPath,
 			ClaudeDir:   *claudeDir,
 			DeveloperID: *developer,
@@ -521,7 +540,7 @@ func runShip(args []string) {
 	var codexErr error
 	codexTally := &repoTally{Next: client, sessions: map[string]struct{}{}}
 	if *codexRollout {
-		codexErr = shipCodexRollout(ctx, codexTargets, *codexSessionsDir, *developer, since, codexTally)
+		codexErr = shipCodexRollout(ctx, codexTargets, *codexSessionsDir, *developer, since, codexTally, grammar)
 	}
 	// Opencode is likewise scanned ONCE across every --repo: it is a single
 	// SQLite store keyed by each message's cwd, not a per-repo directory.
@@ -535,7 +554,7 @@ func runShip(args []string) {
 	var museErr error
 	museTally := &repoTally{Next: client, sessions: map[string]struct{}{}}
 	if *museFlag {
-		museErr = shipMuse(ctx, museTargets, *museHome, *developer, since, museTally)
+		museErr = shipMuse(ctx, museTargets, *museHome, *developer, since, museTally, grammar)
 	}
 
 	// Flush the final partial batch — without this, up to batchSize-1
@@ -696,4 +715,30 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// Revert INFO counts remain visible while routine successful scans retain their configured level.
+type shipCollectorHandler struct{ slog.Handler }
+
+func (h shipCollectorHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level == slog.LevelInfo || h.Handler.Enabled(ctx, level)
+}
+func (h shipCollectorHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "revert-branch events left unattributed" || h.Handler.Enabled(ctx, r.Level) {
+		return h.Handler.Handle(ctx, r)
+	}
+	return nil
+}
+func (h shipCollectorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return shipCollectorHandler{h.Handler.WithAttrs(attrs)}
+}
+func (h shipCollectorHandler) WithGroup(name string) slog.Handler {
+	return shipCollectorHandler{h.Handler.WithGroup(name)}
+}
+func newShipCollectorLogger(w io.Writer) (*slog.Logger, error) {
+	logger, err := newLogger(w, "auto", cmp.Or(os.Getenv("TIER_LOG_LEVEL"), "warn"))
+	if err != nil {
+		return nil, err
+	}
+	return slog.New(shipCollectorHandler{logger.Handler()}), nil
 }

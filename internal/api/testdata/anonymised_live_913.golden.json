@@ -12,10 +12,15 @@
       "cost_coverage_safe_since": "2026-05-11",
       "cost_coverage_start": "2026-05-10T03:00:00Z",
       "excludes_unattributed_spend": true,
+      "interval_status": "not_shown",
+      "partition_diagnostics": "not_shown",
       "window_predates_cost_capture": true
     },
     "developers": [],
     "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "status": "not_shown"
+    },
     "rubric": {
       "version": 1
     },
@@ -68,10 +73,15 @@
       "cost_coverage_safe_since": "2026-05-11",
       "cost_coverage_start": "2026-05-10T03:00:00Z",
       "excludes_unattributed_spend": true,
+      "interval_status": "not_shown",
+      "partition_diagnostics": "not_shown",
       "window_predates_cost_capture": true
     },
     "developers": [],
     "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "status": "not_shown"
+    },
     "rubric": {
       "version": 1
     },
@@ -124,6 +134,7 @@
       "cost_coverage_safe_since": "2026-05-11",
       "cost_coverage_start": "2026-05-10T03:00:00Z",
       "excludes_unattributed_spend": true,
+      "interval_status": "not_shown",
       "kanon_suppressed": {
         "developers": 5,
         "k_anonymity": 6,
@@ -132,10 +143,14 @@
         "withheld_teams": true,
         "withheld_total": true
       },
+      "partition_diagnostics": "not_shown",
       "window_predates_cost_capture": true
     },
     "developers": [],
     "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "status": "not_shown"
+    },
     "rubric": {
       "version": 1
     },

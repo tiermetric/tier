@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"go/ast"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +18,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/api"
+	"github.com/tiermetric/tier/internal/scoring"
+	"github.com/tiermetric/tier/internal/store"
 )
 
 func TestServe_Event3ScoringDefaultsOff(t *testing.T) {
@@ -94,14 +103,15 @@ func u4ServeRubric(t *testing.T, dbPath, envValue, cfgValue string, args ...stri
 	addr := listener.Addr().String()
 	_ = listener.Close()
 	cfg := filepath.Join(t.TempDir(), "config.yaml")
-	text := "aggregation: developer\n"
+	text := "aggregation: team\n"
 	if cfgValue != "" {
 		text += "outcomes:\n  event3_scoring: " + cfgValue + "\n"
 	}
 	if err := os.WriteFile(cfg, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	childArgs := append([]string{"--addr", addr, "--db", dbPath, "--config", cfg, "--aggregation", "developer"}, args...)
+	// The long serve grace keeps background sealing away from the fixture months.
+	childArgs := append([]string{"--addr", addr, "--db", dbPath, "--config", cfg, "--aggregation", "team", "--report-grace", "876000h"}, args...)
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +141,7 @@ func u4ServeRubric(t *testing.T, dbPath, envValue, cfgValue string, args ...stri
 		}
 	}()
 	client := &http.Client{Timeout: time.Second}
+	month := ""
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -139,7 +150,19 @@ func u4ServeRubric(t *testing.T, dbPath, envValue, cfgValue string, args ...stri
 			t.Fatalf("serve exited: %v %s", err, stderr.String())
 		default:
 		}
-		resp, err := client.Get("http://" + addr + "/api/v1/scores?since=2026-10-01&until=2026-11-01")
+		if month == "" {
+			resp, err := client.Get("http://" + addr + "/api/v1/livez")
+			if err != nil {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("livez response %d", resp.StatusCode)
+			}
+			month = u4SealScoresFixture(t, dbPath)
+		}
+		resp, err := client.Get("http://" + addr + "/api/v1/scores?period=" + month)
 		if err != nil {
 			time.Sleep(20 * time.Millisecond)
 			continue
@@ -168,4 +191,55 @@ func u4ServeRubric(t *testing.T, dbPath, envValue, cfgValue string, args ...stri
 	}
 	t.Fatal("serve did not start")
 	return 0
+}
+
+func u4SealScoresFixture(t *testing.T, dbPath string) string {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	latest, exists, err := db.LatestSealedPeriod(ctx, "month")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		start = latest.AddDate(0, 1, 0)
+	}
+	month := start.Format("2006-01")
+	period, err := api.ParsePeriod(month)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, "test", api.RateLimitConfig{}, api.WithStoredScoringPolicy())
+	h.SetAggregation(scoring.AggregationTeam, scoring.DefaultKAnonymity)
+	body, err := h.RecomputeSealedBody(ctx, period)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := db.EraseEpoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := db.CorrectionScoringPolicy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyName := "legacy"
+	if policy.Enabled {
+		policyName = "event3"
+	}
+	_, won, err := db.SealReport(ctx, store.SealedReport{
+		ScoringPolicy: &policyName, CorrectionRuleVersion: &policy.RuleVersion, RubricVersion: &policy.RubricVersion, CorrectionRevision: &policy.Revision,
+		Level: "team", PeriodSize: "month", PeriodStart: start, PeriodEnd: start.AddDate(0, 1, 0),
+		K: scoring.DefaultKAnonymity, ConfigDigest: "event3-test", Body: body,
+		BodyDigest: fmt.Sprintf("sha256:%x", sha256.Sum256(body)), ToolVersion: "test", ToolCommit: "test",
+	}, nil, nil, store.SealCheck{EraseEpoch: epoch, Floor: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil || !won {
+		t.Fatalf("seal scores fixture: won=%v err=%v", won, err)
+	}
+	return month
 }

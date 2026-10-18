@@ -53,6 +53,8 @@ struct are deserialized; every other JSON field — including any prompt or
 completion text — is silently dropped by the JSON decoder and never enters
 memory as a named value, let alone the database.
 
+- Read-time recovery can attribute one person’s spend to the issue of a merged PR (theirs or a colleague’s) on the same branch, without storing anything.
+
 - **JSONL capture** (`internal/collector/jsonl.go`, the `jsonlEntry` struct):
   reads `type`, `timestamp`, `gitBranch`, `cwd`, `sessionId`, and under
   `message`: `id`, `model`, `role`, and the `usage` token counters
@@ -155,6 +157,8 @@ How to turn it on, and the rules it applies, are in
 [how-it-works.md](how-it-works.md#worktree-attribution-823-off-by-default). This
 section states what it reads and what it keeps.
 
+Parents no longer carry (#1016); only message groups labelled `isSidechain:true` can use carry. Worktree attribution stays opt-in and **off by default**. Activation requires recorded gates, the operator's security rulings and an explicit operator decision. No new accuracy figures have been measured.
+
 **What it reads from the session file.** A second allowlist struct
 (`toolPathLine` in `internal/collector/toolpath.go`), separate from the token
 parser's, decodes from each assistant line only:
@@ -177,7 +181,7 @@ are dropped; at most 16 distinct paths are kept from one line
 (`maxToolPathsPerLine`), from at most 64 content blocks (`maxToolBlocksPerLine`).
 It also reads two markers each line already carries, `isSidechain` and
 `agentId`, which tell a subagent's lines apart from its parent's
-(`messageLineHead` in `internal/collector/messagemerge.go`).
+(`messageLineHead` in `internal/collector/messagemerge.go`). Only `isSidechain:true` permits carry; an absent, false or wrongly typed label does not.
 
 **Which session files.** `tierd ship` and `tierd score` decode the tool paths
 of every Claude Code session file whose session ended on or after `--since`,
@@ -234,7 +238,44 @@ Paths under `/tmp` and `~/.claude` are ignored.
 - Spend in a worktree of a repository you did not configure (not one of the
   command's `--repo` or watched repositories) goes to the
   fixed issue label `unattributed:foreign-repo`, with the repository stored as
-  `unqualified`. That repository's name and path are not stored.
+  `unqualified`. No event stores that repository's name or path, and
+  `tierd ship` never sends them. The watcher's local checkpoint is the
+  exception: see item (c) below and **Watcher tail-state** under
+  [What IS stored](#what-is-stored). Items (a) and (b) below are the known
+  cases where spend tied to another repository is booked to your configured
+  repository instead.
+- **Known gaps, with this switch on or off (tier#1018; operator ruling
+  2026-10-18: disclosed now, fixed after launch).** Items (a) and (b) book spend
+  to the wrong issue in a repository you configured. A booking is permanent:
+  TIER keeps the first one it writes and does not rewrite it.
+  - (a) When an isolated-agent message inherits the most recent human-named
+    branch seen in its session file, that branch can come from another
+    repository. The message can then be booked to that branch's `issue-N` in
+    your configured repository: with rule `branch` when this switch is on, and
+    with no rule (shown as `legacy`) when it is off.
+  - (b) A session that starts in a configured repository and later moves into
+    another repository's main checkout (not a linked worktree) records that
+    repository's branch on its later messages, and they can be booked to that
+    branch's `issue-N` in the configured repository.
+  - (c) The watcher's checkpoint keeps the raw branch names and the absolute
+    working-directory path of each session file it tails, including session
+    files in repositories you did not configure. So another repository's path
+    and branch names can sit in that local row. They stay in the local database
+    and are never shipped. A data-subject export
+    (`GET /api/v1/developer/{id}/export`) returns the rows it can link to that
+    person through their events, so in case (a) it can return another
+    repository's branch name; rows for sessions with no events stay local.
+    For sessions in configured repositories this is by design, because a
+    restart needs them to resume. The rows for other repositories are to be
+    cut down to the session id after launch.
+
+  For (a) and (b), the event's `branch_hash` is a hash of your configured
+  repository plus the other repository's branch name. It is not the name, but
+  for a common branch name the hash can be guessed.
+
+  The #823 gate run (one machine, about seven days) recorded that "the latch
+  passed only `main` (0 of 229 cases)" and found no row with another
+  repository's working directory. That is one machine, not a guarantee.
 - In live watch mode only, the watcher's checkpoint row for a session file also
   holds the absolute path of the worktree it is carrying from one message to the
   next, so a restart resumes correctly (see **Watcher tail-state** under
@@ -244,7 +285,7 @@ Paths under `/tmp` and `~/.claude` are ignored.
 **What it never stores or sends.** No tool-call path is written to an event or
 sent by `tierd ship`, and the code that reads and classifies the paths logs
 nothing. The dry-run audit
-(`tierd score --worktree-attribution`) prints counts, repository names, issue
+(`tierd score --worktree-attribution`) prints separate tool-path and carry counts and USD costs, repository names, issue
 labels, session ids and times, never a path or any message content, and stores
 nothing. With the switch off, none of this is read and events carry no rule.
 
@@ -353,24 +394,37 @@ transmission**:
   whose usage poller the server runs; **NULL** on every other row.
 - **Attribution rule** (`token_events.attribution_rule`, #823) — which rule
   assigned the row's issue id: one of the fixed labels `branch`, `worktree-cwd`,
-  `worktree-toolpath`, `carry` or `pr-number-at-insert` (#1074: server-assigned,
+  `worktree-toolpath`, `carry`, `branch-at-merge` or `pr-number-at-insert` (#1074: server-assigned,
   never client-sent), **never path text**. It is **NULL** on older
   rows and on rows no rule was recorded for, is written only when the row is
   first inserted, is included in the data-subject export, and is erased with the
   row.
+- **Issue extraction rule** (`outcomes.issue_rule`, `token_events.issue_rule`,
+  and the existing `outcome_exclusions.issue_rule` snapshot column, schema 12) — a fixed closed-set label, never branch, path or message text.
+  Outcomes retain server-derived webhook/backfill evidence; events retain
+  client assertions. Existing rows and unknown/absent event rules are NULL,
+  rendered as `legacy` in event/outcome exports; the data-subject access export
+  preserves JSON `null`. The field is included last and erased with the existing
+  outcome/event row. The identifier-free `issue_rule_cutover` singleton records
+  the UTC migration time and maximum outcome/event IDs once and survives erasure;
+  these boundaries distinguish the pre-upgrade band from later NULL rows
+  ([cutover details](technical-reference.md#4-where-the-outcomes-come-from-prs-weights-quality-floors-direct-commits-outcomes-api)).
 - **PR metadata** — PR number, author login, size-derived weight, quality, and
   the merge commit SHA.
 - **Watcher tail-state** (**live watch mode only** — `--watch-repo` or the
   `watch.repos` config key) — when live ingestion is enabled, TIER persists one
-  operational checkpoint row per watched
-  JSONL file (`watcher_checkpoint`) so a restart resumes tailing from the last
+  operational checkpoint row per JSONL file it tails (`watcher_checkpoint`),
+  including session files whose repository you did not configure, so a restart
+  resumes tailing from the last
   parsed byte instead of re-reading each file from the start. Each row's
   `metadata` column holds a small JSON blob describing the session being tailed:
   the **absolute working-directory path** (`cwd`), the **git branch** (and, when
   an isolated-agent session inherits one, the most recent human-named git branch
   seen so far in that file), and the **session id** (a UUID), plus the session
   start time, the first-observed model name, and an internal parse-sequence
-  counter. With worktree attribution on (#823), it also holds the **absolute
+  counter. For a session file in a repository you did not configure, that path
+  and those branch names are that other repository's (tier#1018 (c)). With
+  worktree attribution on (#823), it also holds the **absolute
   path of the linked git worktree** currently carried, if any.
   Nothing here is captured unless you run the watcher; a one-shot
   `tierd score` writes no checkpoint. Each row is keyed by the session file's

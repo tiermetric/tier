@@ -18,6 +18,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
 	"github.com/tiermetric/tier/internal/store"
@@ -67,6 +68,7 @@ type CheckpointStore interface {
 //     window and POSTs the events to a server's /api/v1/events. (`tierd
 //     score` only prints a local report; it writes nothing to any store.)
 type Watcher struct {
+	Grammar issueref.Grammar
 	// ClaudeDir defaults to ~/.claude when empty. The watcher attaches to
 	// ClaudeDir/projects/ recursively.
 	ClaudeDir string
@@ -190,7 +192,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// Per-repo commit cache (#99): lets the live join attribute main-branch
 	// (non-issue) sessions via commit decorate/subject the same way `score`
 	// does, refreshing git log at most once per repo per commitCacheTTL.
-	commits := newCommitCache(commitCacheTTL, commitLookback, gitLogTimeout, w.gitLogFn, time.Now)
+	gitLogFn := w.gitLogFn
+	if gitLogFn == nil {
+		gitLogFn = func(ctx context.Context, repo string, since time.Time) ([]gitCommit, error) {
+			return gitLogWithGrammar(ctx, repo, since, w.Grammar)
+		}
+	}
+	commits := newCommitCache(commitCacheTTL, commitLookback, gitLogTimeout, gitLogFn, time.Now)
 
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -741,11 +749,12 @@ func (w *Watcher) process(ctx context.Context, path string, prior parseState, ta
 	// branch-name attribution — the pre-#99 behaviour.
 	var events []TokenEvent
 	if w.worktrees == nil {
-		events = joinSessionsToCommits([]sessionSummary{*s}, cache.get(ctx, target.abs, logger), developer, w.repoSlug(target, logger))
+		events = joinSessionsToCommits([]sessionSummary{*s}, cache.get(ctx, target.abs, logger), developer, w.repoSlug(target, logger), w.Grammar)
 	} else {
 		w.attributeHeld(s, groups, knownMeta.LastWorktree)
 		events = w.joinRouted(ctx, s, target, targets, developer, cache, logger)
 	}
+	LogRevertBranchEvents(logger, events)
 	var insertFailed bool
 	for _, ev := range events {
 		// Forward through the shared collector.Ingester (#46) instead of building

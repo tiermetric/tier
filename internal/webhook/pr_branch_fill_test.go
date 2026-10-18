@@ -139,3 +139,36 @@ func TestPRBranchEvidenceRepoAndCustomDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestRevertBranchesNeverFillRemainder(t *testing.T) {
+	for _, branch := range []string{"Revert-12-x", "revert-foo", "REVERT/foo", "refs/heads/Revert-foo"} {
+		t.Run(branch, func(t *testing.T) {
+			db, err := store.Open(filepath.Join(t.TempDir(), "tier.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			merged := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+			opened := merged.Add(-time.Hour)
+			if err := db.InsertTokenEvent(context.Background(), store.TokenEvent{Developer: "alice", Repo: "acme/a", IssueID: store.UnattributedNoIssueBucket, Model: "claude-sonnet-4", Source: "jsonl", Timestamp: opened, BranchHash: issueref.BranchHash("acme/a", branch)}); err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{"action": "closed", "repository": map[string]string{"full_name": "acme/a", "default_branch": "main"}, "pull_request": map[string]any{"number": 42, "body": "closes #42", "merged": true, "merged_at": merged.Format(time.RFC3339), "created_at": opened.Format(time.RFC3339), "merge_commit_sha": "revert-fill", "head": map[string]any{"ref": branch, "repo": map[string]string{"full_name": "acme/a"}}, "user": map[string]string{"login": "alice"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := New(db, testSecret, quietLogger()).handlePR(context.Background(), body); err != nil {
+				t.Fatal(err)
+			}
+			exp, err := db.ExportDeveloper(context.Background(), "alice")
+			if err != nil || len(exp.TokenEvents) != 1 || exp.TokenEvents[0].IssueID != store.UnattributedNoIssueBucket {
+				t.Fatalf("revert remainder %+v err=%v", exp.TokenEvents, err)
+			}
+			for _, o := range exp.Outcomes {
+				if o.HeadBranchHash != nil {
+					t.Fatal("revert branch supplied fill evidence", o)
+				}
+			}
+		})
+	}
+}

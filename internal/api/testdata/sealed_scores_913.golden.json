@@ -10,10 +10,15 @@
     "attribution_coverage": "not_shown",
     "cost_coverage_start": "2026-04-15T00:00:00Z",
     "excludes_unattributed_spend": true,
+    "interval_status": "not_shown",
+    "partition_diagnostics": "not_shown",
     "window_predates_cost_capture": false
   },
   "developers": [],
   "price_table": "\u003cprice_table\u003e",
+  "quality_evidence": {
+    "status": "not_shown"
+  },
   "rubric": {
     "version": 1
   },

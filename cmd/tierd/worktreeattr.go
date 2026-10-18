@@ -13,6 +13,7 @@ import (
 
 	"github.com/tiermetric/tier/internal/collector"
 	"github.com/tiermetric/tier/internal/logsafe"
+	"github.com/tiermetric/tier/internal/store"
 )
 
 // The #823 worktree-attribution switch: one flag name on every command that
@@ -24,10 +25,10 @@ const (
 )
 
 // worktreeAttrWhat is the flag's help shared by ship and serve.
-const worktreeAttrWhat = "attribute Claude Code spend to the git worktree its session or tool calls worked in, and record the rule that chose each issue (#823). OFF by default, and a PREVIEW: carry in a parent session (any top-level session, interactive ones included) was wrong in 12 of 14 hand-checked messages, and a stored attribution is permanent. Read docs/how-it-works.md, \"Measured accuracy\", before turning it on. "
+const worktreeAttrWhat = "attribute Claude Code spend to the git worktree its session or tool calls worked in, and record the rule that chose each issue (#823). OFF by default, and a PREVIEW: parents never carry; only subagent (isSidechain) messages can carry. Activation requires recorded gates, operator security rulings and an explicit operator decision. Stored attributions remain permanent. Measured accuracy for the v0.5.2 rule (before this change): carry 63.3% overall (parent 6.9%, subagent 99.8%); hand-check: 86 correct, 13 wrong and 1 undeterminable. No new accuracy figures have been measured. Preview the effect with `tierd score --worktree-attribution`. Read docs/how-it-works.md, \"Measured accuracy\", before turning it on. "
 
 // worktreeAttrHelp is ship's help: ship sends events to a tierd server.
-const worktreeAttrHelp = worktreeAttrWhat + "UPGRADE TIERD (THE SERVER) FIRST: with this on, events carry attribution_rule and may carry the unattributed:foreign-repo bucket, and a tierd without #823 support rejects every such batch with HTTP 400. Nothing is lost if the server is upgraded while the transcripts still exist (Claude Code keeps about 30 days) and a re-ship's --since covers the gap. Preview the effect with `tierd score --worktree-attribution`. ship reads only this flag or env " + worktreeAttrEnv + " (it takes no config file), and the upgrade-first rule applies to both"
+const worktreeAttrHelp = worktreeAttrWhat + "UPGRADE TIERD (THE SERVER) FIRST: with this on, events carry attribution_rule and may carry the unattributed:foreign-repo bucket, and a tierd without #823 support rejects every such batch with HTTP 400. Nothing is lost if the server is upgraded while the transcripts still exist (Claude Code keeps about 30 days) and a re-ship's --since covers the gap. ship reads only this flag or env " + worktreeAttrEnv + " (it takes no config file), and the upgrade-first rule applies to both"
 
 // worktreeAttrServeHelp is serve's help: its watcher writes serve's own store,
 // so no upgrade order applies.
@@ -86,20 +87,24 @@ const worktreeAuditSample = 20
 type worktreeAuditChange struct{ old, new collector.TokenEvent }
 
 // printWorktreeAudit prints what #823 attribution changes: on and off are the
-// same JSONL scan with the flag on and off. It prints counts, repo slugs, issue
+// same JSONL scan with the flag on and off. It prints counts, costs, repo slugs, issue
 // labels, session ids and timestamps: never message content, never a path.
 func printWorktreeAudit(w io.Writer, off, on []collector.TokenEvent) {
 	offBy := make(map[string]collector.TokenEvent, len(off))
 	for _, e := range off {
 		offBy[e.IdempotencyKey] = e
 	}
-	rules, targets := map[string]int{}, map[string]int{}
+	rules := map[string]int{string(store.AttributionRuleWorktreeToolPath): 0, string(store.AttributionRuleCarry): 0}
+	targets := map[string]int{}
+	ruleCosts := map[string]int64{}
 	onKeys := make(map[string]bool, len(on))
 	foreign, onlyOn := 0, 0
 	var changed []worktreeAuditChange
 	for _, e := range on {
 		onKeys[e.IdempotencyKey] = true
-		rules[cmp.Or(string(e.AttributionRule), "none")]++
+		rule := cmp.Or(string(e.AttributionRule), "none")
+		rules[rule]++
+		ruleCosts[rule] += e.CostMicro
 		targets[e.Repo]++
 		if e.IssueID == collector.UnattributedForeignRepo {
 			foreign++
@@ -125,16 +130,13 @@ func printWorktreeAudit(w io.Writer, off, on []collector.TokenEvent) {
 	_, _ = fmt.Fprintf(w, "  only with the flag off (booked to another target): %d\n", onlyOff)
 	_, _ = fmt.Fprintf(w, "  only with the flag on: %d\n", onlyOn)
 	_, _ = fmt.Fprintf(w, "  %s: %d\n", collector.UnattributedForeignRepo, foreign)
-	// Rules are this repo's constants; a repo slug is git-config text.
-	for _, c := range []struct {
-		title  string
-		counts map[string]int
-		render func(string) string
-	}{{"by rule (flag on)", rules, func(s string) string { return s }}, {"by repo (flag on)", targets, logsafe.Str}} {
-		_, _ = fmt.Fprintf(w, "  %s:\n", c.title)
-		for _, k := range slices.Sorted(maps.Keys(c.counts)) {
-			_, _ = fmt.Fprintf(w, "    %-34s %d\n", c.render(k), c.counts[k])
-		}
+	_, _ = fmt.Fprintln(w, "  by rule (flag on; messages, cost USD):")
+	for _, rule := range slices.Sorted(maps.Keys(rules)) {
+		_, _ = fmt.Fprintf(w, "    %-34s %d  $%.6f\n", rule, rules[rule], float64(ruleCosts[rule])/1e6)
+	}
+	_, _ = fmt.Fprintln(w, "  by repo (flag on):")
+	for _, repo := range slices.Sorted(maps.Keys(targets)) {
+		_, _ = fmt.Fprintf(w, "    %-34s %d\n", logsafe.Str(repo), targets[repo])
 	}
 	slices.SortFunc(changed, func(a, b worktreeAuditChange) int {
 		return cmp.Or(a.new.Timestamp.Compare(b.new.Timestamp), cmp.Compare(a.new.IdempotencyKey, b.new.IdempotencyKey))

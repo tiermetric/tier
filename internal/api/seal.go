@@ -271,6 +271,7 @@ func (s *sealer) sealFloored(ctx context.Context, p, want Period, first bool) (b
 }
 
 func (s *sealer) sealOnce(ctx context.Context, p, want Period, first bool) ([]byte, time.Time, bool, error) {
+	ctx = store.WithReadTimeRecovery(ctx, false)
 	h := s.h
 	if !h.aggregation.Anonymized() {
 		return nil, time.Time{}, false, errSealDeveloperMode

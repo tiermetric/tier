@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tiermetric/tier/internal/issueref"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,7 +154,7 @@ func TestShipCodexRollout_PartialScanShipsWhatParsed(t *testing.T) {
 	})
 	err := shipCodexRollout(context.Background(),
 		[]codexrollout.RepoTarget{{Path: repo}}, sessionsDir, "alice",
-		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ing)
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ing, issueref.Grammar{})
 
 	// BOTH halves, in this order — the events matter more than the error.
 	// The exact count, not just >0: shipping 1 of the good session's 4 billable

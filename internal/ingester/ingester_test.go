@@ -73,6 +73,7 @@ func TestStore_ForwardsAllFields(t *testing.T) {
 		Host:            "openrouter.ai",
 		BillingMode:     "self_hosted_amortized",
 		AttributionRule: store.AttributionRuleCarry,
+		IssueRule:       "branch_first_numeric",
 		Timestamp:       now,
 	}
 	if err := ing.Ingest(context.Background(), ev); err != nil {
@@ -92,7 +93,7 @@ func TestStore_ForwardsAllFields(t *testing.T) {
 		got.PRNumber == nil || *got.PRNumber != n || got.BranchHash == nil || *got.BranchHash != hash ||
 		got.SessionID != ev.SessionID ||
 		got.Host != ev.Host || got.BillingMode != ev.BillingMode ||
-		got.AttributionRule != ev.AttributionRule ||
+		got.AttributionRule != ev.AttributionRule || got.IssueRule != ev.IssueRule ||
 		!got.Timestamp.Equal(ev.Timestamp) {
 		t.Errorf("field-by-field copy diverged:\n got = %+v\nwant = %+v", got, ev)
 	}

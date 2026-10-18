@@ -198,6 +198,7 @@ type Digest struct {
 // be on this list, justified as "provenance"; that was measured FALSE and it is
 // now covered. See the Fidelity field below.
 // cost_clamped is diagnostic history; no spend or scoring query reads it.
+// issue_rule is extractor provenance; published figures read the resolved issue_id.
 // poller_baseline records the baseline cutover; no spend or scoring query reads it.
 // pr_number is an insert-time lookup input; published figures read the resolved
 // issue_id, never this reference. branch_hash is a pseudonymised attribution
@@ -262,8 +263,9 @@ type tokenEventDigestRow struct {
 // Outcome head_branch_hash/created_at are merge-time lookup inputs;
 // the resolved token issue_id and reporting ts are already covered.
 // tierdig2 covers nullable diff stats, merged_at and the availability bit because
-// they now feed Event 3 projections. weight_source / work_type_source record HOW a value was derived rather
-// than the value or its origin; push_day is a dedup key for the push-capture
+// they now feed Event 3 projections. issue_rule is extractor provenance; published
+// figures read the resolved issue_id. weight_source / work_type_source record
+// HOW a value was derived rather than the value or its origin; push_day is a dedup key for the push-capture
 // path. author_type (#856) is the arguable one: it is no figure, but it decides
 // whether its author counts toward the k-anonymity floor, so editing it moves
 // data_quality.uncounted_active_ids.bot and can fold or withhold a group. It

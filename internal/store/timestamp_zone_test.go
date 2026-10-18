@@ -374,4 +374,36 @@ func TestOrderedTSWriters_NormalizeToUTC(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ApplyCITrigger SQL UTC default", func(t *testing.T) {
+		db, cleanup := newTestDB(t)
+		defer cleanup()
+		ctx := context.Background()
+		id := seedOutcomeForQuality(t, db, "dev", "issue-utc", "sha-utc")
+		if _, err := db.db.Exec(`UPDATE outcomes SET repo='r/r' WHERE id=?`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AppendQualityEvent(ctx, QualityEvent{OutcomeID: id, Developer: "dev", IssueID: "issue-utc", EventType: "ci_fail", SourceRef: "sha-utc:1:42", EventTS: nonUTC}); err != nil {
+			t.Fatal(err)
+		}
+		candidates, err := db.LegacyCIEvents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := time.Now().UTC().Truncate(time.Second)
+		if _, _, err := db.ApplyCITrigger(ctx, candidates[0], "push", "operator", "digest", "api"); err != nil {
+			t.Fatal(err)
+		}
+		raw := rawTS(t, db, "quality_history", "ts")
+		if len(raw) != 1 {
+			t.Fatal(raw)
+		}
+		at, err := time.Parse(qualityHistoryTSLayout, raw[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if at.Before(before) || at.After(time.Now().UTC()) {
+			t.Fatalf("SQL audit timestamp is not UTC: %q", raw[0])
+		}
+	})
+
 }

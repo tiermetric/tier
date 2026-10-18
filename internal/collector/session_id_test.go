@@ -3,6 +3,8 @@ package collector
 import (
 	"testing"
 	"time"
+
+	"github.com/tiermetric/tier/internal/issueref"
 )
 
 // TestJoinSessionsToCommits_PopulatesSessionID proves the JSONL path stamps the
@@ -34,7 +36,7 @@ func TestJoinSessionsToCommits_PopulatesSessionID(t *testing.T) {
 			},
 		},
 	}
-	events := joinSessionsToCommits(sessions, nil, "alice", "")
+	events := joinSessionsToCommits(sessions, nil, "alice", "", issueref.Grammar{})
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
 	}

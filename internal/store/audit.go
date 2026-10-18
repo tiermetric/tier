@@ -83,22 +83,33 @@ type WebhookPayload struct {
 // written before #687 carry the two-component form and still parse — see
 // quality.CIKey for what that means for matching.
 type QualityEvent struct {
-	Reason     string // ambiguous diagnostic reason; empty for legacy/scoring events
-	ID         int64
-	OutcomeID  int64
-	Developer  string
-	IssueID    string
-	EventType  string
-	SourceRef  string
-	EventTS    time.Time
-	RecordedAt time.Time
+	TriggerEvent *string // NULL preserves unknown legacy provenance.
+	Reason       string  // ambiguous diagnostic reason; empty for legacy/scoring events
+	ID           int64
+	OutcomeID    int64
+	Developer    string
+	IssueID      string
+	EventType    string
+	SourceRef    string
+	EventTS      time.Time
+	RecordedAt   time.Time
 }
 
 // IsEvidence excludes unresolved and unknown event types by default.
-func (e QualityEvent) IsEvidence() bool { return qualityrule.IsEvidence(e.EventType) }
+func (e QualityEvent) IsEvidence() bool {
+	return qualityrule.IsEvidence(e.EventType) && (!qualityrule.IsCI(e.EventType) || (e.TriggerEvent != nil && *e.TriggerEvent == "push"))
+}
 
 // Status reports observation status, not the stored numeric quality.
-func (e QualityEvent) Status() string { return qualityrule.ObservationStatus(e.EventType) }
+func (e QualityEvent) Status() string {
+	if qualityrule.IsCI(e.EventType) && e.TriggerEvent == nil {
+		return "CI trigger unknown"
+	}
+	if e.IsEvidence() {
+		return "observed"
+	}
+	return "unknown"
+}
 
 // DistinctAmbiguousReverts counts checks rather than candidate rows (U32).
 // Use the same source_ref set across outcomes when measuring a cohort.
@@ -290,11 +301,9 @@ func (d *DB) PruneWebhookPayloads(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
-// AppendQualityEvent appends one quality_events row and reports whether it
-// landed. event_type is validated against the Go-side allowlist. The insert is
-// idempotent on the (outcome_id, event_type, source_ref) unique key: a replayed
-// webhook delivery inserts nothing and returns inserted=false, so P2-03 (#134)
-// can rely on this for replay-safe, event-derived quality.
+// AppendQualityEvent reports whether an event was inserted or its known non-push
+// trigger upgraded to push. NULL legacy provenance is never upgraded by replay.
+// The (outcome_id, event_type, source_ref) unique key makes replays idempotent.
 // Ambiguous markers also return inserted=false if the outcome no longer belongs
 // to the developer: the existence check and insert share one atomic SQL write.
 func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted bool, err error) {
@@ -312,13 +321,14 @@ func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted b
 	e.EventTS = normalizeTS(e.EventTS)
 	res, err := d.db.ExecContext(ctx, `
 		INSERT INTO quality_events
-		    (outcome_id, developer, issue_id, event_type, source_ref, event_ts, reason)
-		SELECT ?, ?, ?, ?, ?, ?, ?
+		    (outcome_id, developer, issue_id, event_type, source_ref, event_ts, reason, trigger_event)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE ? <> 'revert_ambiguous' OR EXISTS (
 		    SELECT 1 FROM outcomes WHERE id = ? AND developer = ?
 		)
-		ON CONFLICT (outcome_id, event_type, source_ref) DO NOTHING`,
-		e.OutcomeID, e.Developer, e.IssueID, e.EventType, e.SourceRef, e.EventTS, e.Reason,
+		ON CONFLICT (outcome_id, event_type, source_ref) DO UPDATE SET trigger_event='push', event_ts=excluded.event_ts
+		WHERE excluded.trigger_event='push' AND trigger_event IS NOT NULL AND trigger_event<>'push'`,
+		e.OutcomeID, e.Developer, e.IssueID, e.EventType, e.SourceRef, e.EventTS, e.Reason, e.TriggerEvent,
 		e.EventType, e.OutcomeID, e.Developer,
 	)
 	if err != nil {
@@ -334,8 +344,12 @@ func (d *DB) AppendQualityEvent(ctx context.Context, e QualityEvent) (inserted b
 // QualityEventsForOutcome returns all quality_events for an outcome, oldest
 // first (by id). Used by P2-03 (#134) resolution and by audit reads.
 func (d *DB) QualityEventsForOutcome(ctx context.Context, outcomeID int64) ([]QualityEvent, error) {
-	rows, err := d.db.QueryContext(ctx, `
-		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason
+	return qualityEventsFrom(ctx, d.db, outcomeID)
+}
+
+func qualityEventsFrom(ctx context.Context, q readQuerier, outcomeID int64) ([]QualityEvent, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason, trigger_event
 		FROM quality_events
 		WHERE outcome_id = ?
 		ORDER BY id`,
@@ -349,7 +363,7 @@ func (d *DB) QualityEventsForOutcome(ctx context.Context, outcomeID int64) ([]Qu
 	for rows.Next() {
 		var e QualityEvent
 		if err := rows.Scan(&e.ID, &e.OutcomeID, &e.Developer, &e.IssueID,
-			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt, &e.Reason); err != nil {
+			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt, &e.Reason, &e.TriggerEvent); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

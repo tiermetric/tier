@@ -32,8 +32,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 
-# The config file MUST set `aggregation: team` (or `developer`) — it is REQUIRED
-# and has no default, so tierd exits at startup if it is unset from flag, the
+# The config file MUST set `aggregation: team` (or `division`) — it is REQUIRED.
+# developer is reserved for the synthetic `tierd demo` until #826; real-data
+# startup is refused. There is no default: tierd exits if unset from flag, the
 # TIER_AGGREGATION env var, AND this config. Secrets (TIER_API_TOKEN,
 # TIER_WEBHOOK_SECRET) come from the EnvironmentFile below, never from this
 # config or a literal flag.

@@ -415,7 +415,7 @@ func TestCorrectionSchemaU1_MigrateReopenAndSealedBytes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantNotice := UpgradeNoticeCorrectionProjection
+			wantNotice := UpgradeNoticeCorrectionProjection + "\n" + UpgradeNoticeQualityTriggers + "\n" + UpgradeNoticeIssueRule
 			if version < 9 {
 				wantNotice = UpgradeNoticePricingObservations + "\n" + wantNotice
 			}
@@ -425,8 +425,8 @@ func TestCorrectionSchemaU1_MigrateReopenAndSealedBytes(t *testing.T) {
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if got := readUserVersion(t, path); got != correctionProjectionSchemaVersion {
-				t.Fatalf("user_version = %d, want %d", got, correctionProjectionSchemaVersion)
+			if got := readUserVersion(t, path); got != schemaVersion {
+				t.Fatalf("user_version = %d, want %d", got, schemaVersion)
 			}
 			after := dumpSchema(t, path)
 			if before == after {

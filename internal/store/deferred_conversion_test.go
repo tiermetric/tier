@@ -111,6 +111,36 @@ func convertedSites() []convertedSite {
 		}
 	}
 	return []convertedSite{
+		{name: "ApplyCITrigger", bounded: false,
+			seed: func(t *testing.T, db *DB) {
+				id := seedOutcomeForQuality(t, db, "alice", "issue-trigger", "census-trigger")
+				if _, err := db.db.Exec(`UPDATE outcomes SET repo='acme/app',quality=0.7 WHERE id=?`, id); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.AppendQualityEvent(context.Background(), QualityEvent{OutcomeID: id, Developer: "alice", IssueID: "issue-trigger", EventType: "ci_fail", SourceRef: "census-trigger:1:42", EventTS: time.Now()}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			call: func(ctx context.Context, db *DB) error {
+				rows, err := db.LegacyCIEvents(ctx)
+				if err != nil {
+					return err
+				}
+				if len(rows) != 1 {
+					return fmt.Errorf("trigger fixture has %d candidates", len(rows))
+				}
+				applied, _, err := db.ApplyCITrigger(ctx, rows[0], "schedule", "operator", "census-approval", "api")
+				if err == nil && !applied {
+					return fmt.Errorf("trigger fill was a no-op")
+				}
+				return err
+			},
+			verify: func(t *testing.T, db *DB) {
+				assertCount(t, db, `SELECT COUNT(*) FROM quality_events WHERE trigger_event='schedule'`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM outcomes WHERE merge_commit_sha='census-trigger' AND quality=1`, 1)
+				assertCount(t, db, `SELECT COUNT(*) FROM quality_history WHERE reason LIKE 'resolve-triggers:%'`, 1)
+			}},
+
 		{name: "ConfigureCorrectionScoring", bounded: false,
 			seed: func(t *testing.T, db *DB) {
 				projectionFixture(t, db, true)
@@ -827,7 +857,9 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		"SeedDemoMembershipBaseline": true,
 		"recomputeKnownSourceCosts":  true,
 		// Operator CLI commit paths.
-		"Reprice": true, "RepairRepo": true, "InsertTokenEvent": true, "RepairPricingBasis": true,
+		// ApplyCITrigger serializes approved provenance, quality and audit under one write lock; no HTTP deadline applies.
+		"ApplyCITrigger": true,
+		"Reprice":        true, "RepairRepo": true, "InsertTokenEvent": true, "RepairPricingBasis": true,
 		// #668 background sites.
 		"ReconcileSubscriptionFee": true, "PostSubscriptionFeeIfUnposted": true,
 		"UpdateQuality": true,
@@ -957,7 +989,7 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 	// And every #668 site and the U2/U4 writers must be IN the table.
 	for _, name := range []string{
 		"ConfigureCorrectionScoring", "InsertOutcome", "UpsertPushOutcome",
-		"mutateCorrection",
+		"mutateCorrection", "ApplyCITrigger",
 		"UpsertHierarchiesWithResult", "EndMembership", "UpdateQualityForOutcome",
 		"ReconcileSubscriptionFee", "PostSubscriptionFeeIfUnposted", "UpdateQuality",
 	} {

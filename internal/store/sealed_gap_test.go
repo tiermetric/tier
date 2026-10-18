@@ -262,7 +262,7 @@ func TestOpen_V4ToV5AddsSealedGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := db.UpgradeNotice(); n != UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection || !strings.Contains(n, "schema version 5") {
+	if n := db.UpgradeNotice(); n != UpgradeNoticeSealedGap+"\n"+UpgradeNoticeSourceWatermark+"\n"+UpgradeNoticeOutcomeExclusions+"\n"+UpgradeNoticeCorrections+"\n"+UpgradeNoticePricingObservations+"\n"+UpgradeNoticeCorrectionProjection+"\n"+UpgradeNoticeQualityTriggers+"\n"+UpgradeNoticeIssueRule || !strings.Contains(n, "schema version 5") {
 		t.Errorf("v4 open: UpgradeNotice = %q, want the sealed-gap notice and the later one", n)
 	}
 	for _, trg := range []string{"trg_sealed_gap_no_update", "trg_sealed_gap_no_delete", "trg_sealed_gap_no_replace",

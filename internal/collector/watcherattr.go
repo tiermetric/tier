@@ -155,7 +155,7 @@ func (w *Watcher) joinRouted(ctx context.Context, s *sessionSummary, own resolve
 		if len(part.Messages) == 0 {
 			continue
 		}
-		events = append(events, joinSessionsToCommits([]sessionSummary{part}, cache.get(ctx, t.abs, logger), developer, w.repoSlug(t, logger))...)
+		events = append(events, joinSessionsToCommits([]sessionSummary{part}, cache.get(ctx, t.abs, logger), developer, w.repoSlug(t, logger), w.Grammar)...)
 	}
 	if n := len(s.Messages) - booked; n > 0 {
 		logger.Warn("watcher: worktree verdicts name an unwatched target; messages not booked", "messages", n)

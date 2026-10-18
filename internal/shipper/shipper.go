@@ -178,6 +178,8 @@ type wireEvent struct {
 	// value is always read after collector.SinkRules.Apply, never ev.AttributionRule
 	// raw, so an out-of-set value never crosses the wire.
 	AttributionRule string `json:"attribution_rule,omitempty"`
+	// IssueRule is the normalized client assertion, omitted when no rule remains.
+	IssueRule string `json:"issue_rule,omitempty"`
 }
 
 // wireRepo renders a collector-resolved repo for the wire, and is LOAD-BEARING:
@@ -337,6 +339,7 @@ func (c *Client) Ingest(ctx context.Context, ev collector.TokenEvent) error {
 		// with the RFC3339 layout (Go accepts fractional seconds there).
 		Timestamp:       ev.Timestamp.UTC().Format(time.RFC3339Nano),
 		AttributionRule: string(ev.AttributionRule),
+		IssueRule:       string(ev.IssueRule),
 	})
 	if len(c.buf) < c.batchSize {
 		return nil
@@ -464,7 +467,7 @@ func (c *Client) postBatch(ctx context.Context, body []byte) (eventsReceipt, err
 
 // stripUnsupportedFields preserves every field the receiver has not rejected.
 func (c *Client) stripUnsupportedFields() {
-	for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence"} {
+	for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence", "issue_rule"} {
 		if _, unsupported := unsupportedPRFields.Load(c.endpoint + "\x00" + field); !unsupported {
 			continue
 		}
@@ -475,6 +478,8 @@ func (c *Client) stripUnsupportedFields() {
 				c.buf[i].PRNumber = nil
 			case "branch_hash":
 				c.buf[i].BranchHash = nil
+			case "issue_rule":
+				c.buf[i].IssueRule = ""
 			case "cache_write_evidence":
 				c.buf[i].CacheWriteEvidence = ""
 			}
@@ -536,7 +541,7 @@ func (c *Client) postOnce(ctx context.Context, body []byte) (eventsReceipt, erro
 		message = envelope.Error
 	}
 	if resp.StatusCode == http.StatusBadRequest {
-		for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence"} {
+		for _, field := range []string{"pr_number", "branch_hash", "cache_write_evidence", "issue_rule"} {
 			if strings.Contains(message, `json: unknown field "`+field+`"`) {
 				return eventsReceipt{}, &unknownPRFieldError{err, field}
 			}

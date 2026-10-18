@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/repoid"
-
 	// Named, not blank: isPromoteContention needs *sqlite.Error.Code() to tell a
 	// LOCK from a permanently unwritable database. The import still registers the
 	// driver, so the "sqlite" DSN name is unaffected.
@@ -81,7 +81,22 @@ const maxModelsNamedInError = 20
 // Version 8 (#1235): endpoint and text PII requires the correction-aware eraser.
 // Version 9 (#1231): older erasure leaves pricing_observation_audit PII behind.
 // Version 10 (#1235 U1): assessments, allocations and all Event 3 reserved fields.
-const schemaVersion = correctionProjectionSchemaVersion
+// Version 11 (#1230): older writers ignore CI trigger provenance and penalise non-push runs.
+// Version 12: issue extraction provenance and its prospective cutover.
+const schemaVersion = issueRuleSchemaVersion
+const issueRuleSchemaVersion = 12
+
+// The store-wide cutover survives erasure and reopening without identifying people.
+const schemaIssueRuleCutover = `
+CREATE TABLE IF NOT EXISTS issue_rule_cutover (
+ id INTEGER PRIMARY KEY CHECK(id=1), recorded_at TEXT NOT NULL,
+ outcome_id INTEGER NOT NULL, token_event_id INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO issue_rule_cutover(id,recorded_at,outcome_id,token_event_id)
+ SELECT 1,strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+ COALESCE((SELECT MAX(id) FROM outcomes),0),COALESCE((SELECT MAX(id) FROM token_events),0);
+`
+const UpgradeNoticeIssueRule = "tierd: this database was upgraded to schema version 12 (issue extraction provenance). " + upgradeOneWayNotice
 
 const UpgradeNoticeCorrections = "tierd: this database was upgraded to schema version 8 (Corrects declarations and endpoint-aware DSAR, #1235). " + upgradeOneWayNotice
 
@@ -1055,7 +1070,7 @@ CREATE TABLE IF NOT EXISTS cost_correction_audit (
 --
 -- ⚠️ "NOTHING SELECTS IT" IS NOT QUITE TRUE, AND THE NEXT ADDITIVE TABLE WILL
 -- INHERIT THIS TRAP. A GENERIC ENUMERATOR over sqlite_master selects everything:
--- PopulatedTablesOutside (inspect.go) reports any populated table outside its
+-- The former demo-path inspection guard reported any populated table outside its
 -- allow list, so this table had to be added there. That fix lives in the NEW
 -- binary only -- a pre-#714 'tierd demo' opening a post-#714 database sees one
 -- unexplained populated table and refuses to recreate its demo data. Fail-CLOSED
@@ -1441,7 +1456,9 @@ type DB struct {
 	// upgradedToV9 records the pricing observation audit and DSAR upgrade (#1231).
 	upgradedToV9 bool
 	// upgradedToV10 records the correction projection and DSAR upgrade (#1235 U1).
-	upgradedToV10 bool
+	upgradedToV10             bool
+	upgradedToQualityTriggers bool
+	upgradedToIssueRule       bool
 	// now is the clock hierarchy_membership writes stamp valid_from/valid_to
 	// with (#886). nil means time.Now; only this package's tests set it. It is
 	// deliberately NOT settable from outside the package: no caller may choose a
@@ -1456,7 +1473,9 @@ type DB struct {
 // UpgradeNoticeSealedGap below version 5 and UpgradeNoticeSourceWatermark below
 // version 6, UpgradeNoticeOutcomeExclusions below version 7,
 // UpgradeNoticeCorrections below version 8, UpgradeNoticePricingObservations
-// below version 9, UpgradeNoticeCorrectionProjection below version 10, and ""
+// below version 9, UpgradeNoticeCorrectionProjection below version 10,
+// UpgradeNoticeQualityTriggers below version 11, UpgradeNoticeIssueRule below
+// version 12, and ""
 // otherwise — so it is non-empty exactly once
 // per database, on the open that upgraded it. Commands that open the live
 // database print it to stderr.
@@ -1488,6 +1507,12 @@ func (d *DB) UpgradeNotice() string {
 	}
 	if d.upgradedToV10 {
 		notices = append(notices, UpgradeNoticeCorrectionProjection)
+	}
+	if d.upgradedToQualityTriggers {
+		notices = append(notices, UpgradeNoticeQualityTriggers)
+	}
+	if d.upgradedToIssueRule {
+		notices = append(notices, UpgradeNoticeIssueRule)
 	}
 	return strings.Join(notices, "\n")
 }
@@ -2001,15 +2026,27 @@ func Open(path string) (*DB, error) {
 	// re-prunes every 24h while it runs (runWebhookPayloadPruner, #846), so a
 	// server that never restarts still honours the bounds. Uses the same *DB the
 	// caller receives, so it runs against the fully-migrated schema above.
-	d := &DB{db: db, upgradedToV2: upgradedToV2, upgradedToV3: upgradedToV3, upgradedToV4: upgradedToV4, upgradedToV5: upgradedToV5, upgradedToV6: upgradedToV6, upgradedToV7: upgradedToV7, upgradedToV8: upgradedToV8, upgradedToV9: upgradedToV9, upgradedToV10: upgradedToV10}
+	d := &DB{db: db, upgradedToV2: upgradedToV2, upgradedToV3: upgradedToV3, upgradedToV4: upgradedToV4, upgradedToV5: upgradedToV5, upgradedToV6: upgradedToV6, upgradedToV7: upgradedToV7, upgradedToV8: upgradedToV8, upgradedToV9: upgradedToV9, upgradedToV10: upgradedToV10, upgradedToQualityTriggers: existing && storedVersion < qualityTriggerSchemaVersion, upgradedToIssueRule: existing && storedVersion < issueRuleSchemaVersion}
 	if _, err := d.PruneWebhookPayloads(context.Background()); err != nil {
 		return nil, fmt.Errorf("prune webhook payloads: %w", err)
+	}
+	if err := migrateQualityTriggers(db); err != nil {
+		return nil, err
 	}
 	if err := migrateCorrectionSealColumns(db); err != nil {
 		return nil, err
 	}
 	if err := installCorrectionSealGuard(db); err != nil {
 		return nil, fmt.Errorf("install correction seal guard: %w", err)
+	}
+	// Existing rows retain NULL provenance; the singleton records the row boundary.
+	for _, table := range []string{"outcomes", "token_events", "outcome_exclusions"} {
+		if err := addColumnIfMissing(db, table, "issue_rule", "TEXT"); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := db.Exec(schemaIssueRuleCutover); err != nil {
+		return nil, fmt.Errorf("record issue-rule cutover: %w", err)
 	}
 	// Stamp the schema version LAST, after every migration phase has converged the
 	// schema to its final shape (#141). Doing it here — not before the chain —
@@ -3864,7 +3901,9 @@ type TokenEvent struct {
 	// AttributionRule is the rule that assigned IssueID (#823); "" stores NULL.
 	// INSERT-only, validated by ValidateAttributionRule on every insert path.
 	AttributionRule AttributionRule
-	Timestamp       time.Time
+	// IssueRule is client-asserted extractor provenance, never outcome evidence.
+	IssueRule issueref.Rule
+	Timestamp time.Time
 }
 
 // insertTokenEventSQL is the statement shared by single + bulk inserts.
@@ -3915,12 +3954,13 @@ INSERT INTO token_events
     (developer, issue_id, model, input_tok, output_tok, cache_read,
      cache_write_5m, cache_write_1h,
      cost_micro, source, fidelity, repo, idempotency_key, session_id, price_version,
-     host, billing_mode, billed_to, attribution_rule, cost_clamped, poller_baseline, ts, pr_number, branch_hash, pricing_basis, rate_snapshot, cache_write_evidence)
+     host, billing_mode, billed_to, attribution_rule, cost_clamped, poller_baseline, ts, pr_number, branch_hash, pricing_basis, rate_snapshot, cache_write_evidence, issue_rule)
 VALUES (?1, COALESCE((SELECT issue_id FROM pr_issue), ?2), ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULLIF(?13, ''), NULLIF(?14, ''), ?15, ?16, ?17, NULLIF(?18, ''),
  CASE WHEN (SELECT issue_id FROM pr_issue) IS NOT NULL THEN 'pr-number-at-insert' ELSE NULLIF(?19, '') END, ?20, CASE WHEN ?21 != '' AND EXISTS (
     SELECT 1 FROM token_events WHERE source = ?10 AND ts > ?23 AND ts <= ?24
       AND poller_baseline IS NULL
-) THEN NULL ELSE NULLIF(?21, '') END, ?22, ?25, ?31, ?34, NULLIF(?35, ''), NULLIF(?36, ''))
+) THEN NULL ELSE NULLIF(?21, '') END, ?22, ?25, ?31, ?34, NULLIF(?35, ''), NULLIF(?36, ''),
+ CASE WHEN (SELECT issue_id FROM pr_issue) IS NOT NULL OR ?2 = ?29 OR ?2 GLOB ?30 THEN NULL ELSE NULLIF(?37, '') END)
 ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
 
 // normalizeRepo maps an empty or unset repo to the reserved sentinel so the NOT NULL
@@ -4079,6 +4119,9 @@ func stampPriceVersion(pv int) int {
 // and the arg order is a silent data-corruption bug, so it must not be
 // duplicated per caller. It refuses an AttributionRule outside the closed set.
 func insertTokenEventArgs(e TokenEvent) ([]any, error) {
+	if err := issueref.Validate(e.IssueRule); err != nil {
+		return nil, err
+	}
 	if err := ValidateAttributionRule(e.AttributionRule); err != nil {
 		return nil, err
 	}
@@ -4101,7 +4144,7 @@ func insertTokenEventArgs(e TokenEvent) ([]any, error) {
 		stampPriceVersion(e.PriceVersion), normalizeHost(e.Host), normalizeBillingMode(e.BillingMode), e.BilledTo, string(e.AttributionRule), mark, pollerBaseline(e.Source), normalizeTS(e.Timestamp),
 		dayStart, dayStart.Add(24 * time.Hour),
 		e.PRNumber, IsUnattributed(e.IssueID) && realRepo, sealTime(monthStart), sealTime(monthStart.AddDate(0, 1, 0)), UnattributedIssueID, unattributedGlobPattern, e.BranchHash,
-		sealTime(e.Timestamp.Add(AttributableWindow)), sealTime(e.Timestamp), nil, nil, nil,
+		sealTime(e.Timestamp.Add(AttributableWindow)), sealTime(e.Timestamp), nil, nil, nil, string(e.IssueRule),
 	}, nil
 }
 
@@ -5531,7 +5574,9 @@ type Outcome struct {
 	// AuthorType* values, or "" when not captured. Written by InsertOutcome; the
 	// scoring reads do not select it (BotDevelopers is the reader).
 	AuthorType string
-	Timestamp  time.Time
+	// IssueRule is server-derived extractor provenance; empty stores NULL.
+	IssueRule issueref.Rule
+	Timestamp time.Time
 }
 
 // SetDiffStats retains each nullable input independently of its numeric value.
@@ -5622,6 +5667,9 @@ type sqlExecer interface {
 
 // insertOutcomeRow is InsertOutcome's single INSERT, on any execer.
 func insertOutcomeRow(ctx context.Context, ex sqlExecer, o Outcome) (inserted bool, err error) {
+	if err := issueref.Validate(o.IssueRule); err != nil {
+		return false, err
+	}
 	// NULLIF empties the SHA to SQL NULL so the partial index on
 	// merge_commit_sha never carries the empty string — same pattern as
 	// idempotency_key on token_events.
@@ -5661,18 +5709,21 @@ func insertOutcomeRow(ctx context.Context, ex sqlExecer, o Outcome) (inserted bo
 		workTypeSource = WorkTypeSourceDefault
 	}
 	additions, deletions, changedFiles := o.DiffStats()
+	if IsUnattributed(o.IssueID) {
+		o.IssueRule = ""
+	}
 	res, err := ex.ExecContext(ctx, `
 		INSERT INTO outcomes (developer, issue_id, pr_number, weight, quality, merge_commit_sha,
 		                      weight_source, additions, deletions, changed_files, source,
-		                      work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at)
-		SELECT ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?
+		                      work_type, work_type_source, repo, ts, author_type, head_branch_hash, created_at, merged_at, issue_rule)
+		SELECT ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, '')
 		WHERE NOT EXISTS (SELECT 1 FROM outcome_exclusions
 		  WHERE exclusion_merge_commit_sha = ?)
 		ON CONFLICT DO NOTHING`,
 		o.Developer, o.IssueID, o.PRNumber, o.Weight, o.Quality, o.MergeCommitSHA,
 		weightSource, additions, deletions, changedFiles, source,
 		workType, workTypeSource, normalizeRepo(o.Repo), normalizeTS(o.Timestamp),
-		normalizeAuthorType(o.AuthorType), o.HeadBranchHash, nullableOutcomeTime(o.CreatedAt), nullableOutcomeTime(o.MergedAt),
+		normalizeAuthorType(o.AuthorType), o.HeadBranchHash, nullableOutcomeTime(o.CreatedAt), nullableOutcomeTime(o.MergedAt), string(o.IssueRule),
 		o.MergeCommitSHA,
 	)
 	if err != nil {
@@ -5733,6 +5784,9 @@ func (d *DB) UpsertPushOutcome(ctx context.Context, o Outcome, day string) (inse
 
 // upsertPushOutcomeRow is UpsertPushOutcome's single INSERT, on any execer.
 func upsertPushOutcomeRow(ctx context.Context, ex sqlExecer, o Outcome, day string) (inserted bool, err error) {
+	if err := issueref.Validate(o.IssueRule); err != nil {
+		return false, err
+	}
 	if day == "" {
 		// Fail loud: a NULL push_day would make the partial unique index treat every
 		// push row as distinct (SQLite NULLs compare unequal), silently defeating the
@@ -5751,12 +5805,15 @@ func upsertPushOutcomeRow(ctx context.Context, ex sqlExecer, o Outcome, day stri
 	// default-branch commit, which carries no PR labels and no API-supplied category,
 	// so there is nothing to derive a type from — 'feature'/'default' is the honest
 	// baseline, identical to a labelless PR insert.
+	if IsUnattributed(o.IssueID) {
+		o.IssueRule = ""
+	}
 	res, err := ex.ExecContext(ctx, `
 		INSERT INTO outcomes (developer, issue_id, weight, quality, weight_source, source,
-		                      work_type, work_type_source, push_day, repo, ts)
-		VALUES (?, ?, ?, ?, ?, 'push', 'feature', 'default', ?, ?, ?)
+		                      work_type, work_type_source, push_day, repo, ts, issue_rule)
+		VALUES (?, ?, ?, ?, ?, 'push', 'feature', 'default', ?, ?, ?, NULLIF(?, ''))
 		ON CONFLICT (repo, issue_id, push_day) WHERE source = 'push' DO NOTHING`,
-		o.Developer, o.IssueID, o.Weight, o.Quality, weightSource, day, normalizeRepo(o.Repo), normalizeTS(o.Timestamp),
+		o.Developer, o.IssueID, o.Weight, o.Quality, weightSource, day, normalizeRepo(o.Repo), normalizeTS(o.Timestamp), string(o.IssueRule),
 	)
 	if err != nil {
 		return false, err
@@ -5922,6 +5979,19 @@ func (d *DB) UpdateQualityForOutcome(ctx context.Context, outcomeID int64, quali
 		return err
 	}
 
+	// A recorded driving event makes the current log authoritative inside the write lock.
+	var recorded bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM quality_events WHERE outcome_id=? AND event_type=? AND source_ref=?)`, outcomeID, reason, sourceRef).Scan(&recorded); err != nil {
+		return err
+	}
+	if recorded {
+		events, err := qualityEventsFrom(ctx, tx, outcomeID)
+		if err != nil {
+			return err
+		}
+		quality = resolveQualityEvents(events)
+	}
+
 	// No-op: the derived value already matches. The floor constants are exact
 	// float64 literals round-tripped through SQLite REAL, so equality is
 	// reliable. Skipping avoids a 1.0->1.0 history row on every ci_pass/replay.
@@ -5976,7 +6046,7 @@ func (d *DB) OutcomeByMergeCommit(ctx context.Context, sha string) (Outcome, boo
 		       `+outcomeDiffStatsSQL+`
 		       COALESCE(source, 'github-webhook'),
 		       COALESCE(work_type, 'feature'), COALESCE(work_type_source, 'legacy'),
-		       COALESCE(repo, 'unqualified'), ts, `+revertUnknownSQL+`
+		       COALESCE(repo, 'unqualified'), ts, `+revertUnknownSQL+`, COALESCE(issue_rule, '')
 		FROM outcomes
 		WHERE merge_commit_sha = ? AND merge_commit_sha != ''
 		ORDER BY id DESC
@@ -5984,7 +6054,7 @@ func (d *DB) OutcomeByMergeCommit(ctx context.Context, sha string) (Outcome, boo
 		sha,
 	).Scan(&o.ID, &o.Developer, &o.IssueID, &o.PRNumber, &o.Weight, &o.Quality,
 		&o.MergeCommitSHA, &o.WeightSource, &stats[0], &stats[1], &stats[2], &legacyZeros,
-		&o.Source, &o.WorkType, &o.WorkTypeSource, &o.Repo, &o.Timestamp, &o.QualityStatus)
+		&o.Source, &o.WorkType, &o.WorkTypeSource, &o.Repo, &o.Timestamp, &o.QualityStatus, &o.IssueRule)
 	if err == sql.ErrNoRows {
 		return Outcome{}, false, nil
 	}
@@ -6144,14 +6214,9 @@ func (d *DB) UpsertHierarchiesWithResult(ctx context.Context, rows []HierarchyRo
 	// BOUNDED BEGIN IMMEDIATE (#668): hierarchy and membership reads decide
 	// writes in this transaction. Both PUT and bulk callers pass r.Context().
 	//
-	// ⚠️ IT HAS A SECOND, NON-REQUEST CALLER, and the rule above would put that
-	// one on the unbounded helper: seedDemo (cmd/tierd/demo.go) passes
-	// context.Background(). Bounded still wins, because a method takes ONE helper
-	// and the request-path caller is the one with a client to protect. The cap is
-	// harmless there: runDemo deletes and recreates the database file before
-	// opening it, so nothing can hold the write lock against the seed. Recorded
-	// rather than left implicit — a future reader who finds the background caller
-	// should not conclude the split was applied wrongly.
+	// seedDemo (cmd/tierd/demo.go) passes the demo's signal context, so shutdown
+	// cancels its seed writes too. Its database is in a fresh private os.MkdirTemp
+	// directory and --db is refused, so no other writer can contend with the seed.
 	//
 	// ⚠️ The cap governs ACQUIRING the lock, not holding it: a 50-row import
 	// still runs to completion once it has the lock. The bound is what stops an
@@ -6891,7 +6956,9 @@ func (r reader) BotDevelopers(ctx context.Context, since, until time.Time) ([]st
 // the outcome(s) sharing its (developer, issue), which requires cost at issue grain
 // rather than the developer-total DeveloperCosts returns.
 type DevIssueCost struct {
-	Developer string
+	ReadTimeRecoveryMicro  int64
+	ReadTimeRecoveryEvents int64
+	Developer              string
 	// Repo is the canonical repository of these token_events (#231), or
 	// repoid.Unqualified. Part of the grain: pooling repo A's and repo B's issue
 	// #42 into one cost bucket was the cost half of the #231 corruption.
@@ -6937,7 +7004,7 @@ func (r reader) DeveloperIssueCostsWindow(ctx context.Context, since, until time
 	where, args := tsWindow(since, until)
 	scopeSQL, scopeArgs := scope.clause()
 	args = append(args, scopeArgs...)
-	rows, err := r.q.QueryContext(ctx, `
+	rows, err := r.queryEffectiveWindow(ctx, since, until, scope, `
 		SELECT
 			developer,
 			repo,
@@ -6945,7 +7012,9 @@ func (r reader) DeveloperIssueCostsWindow(ctx context.Context, since, until time
 			SUM(cost_micro)                                                 AS total_cost,
 			SUM(CASE WHEN fidelity = 'realtime' THEN cost_micro ELSE 0 END) AS realtime_cost,
 			SUM(CASE WHEN source <> 'api' AND fidelity = 'realtime' THEN cost_micro ELSE 0 END)  AS captured_realtime,
-			SUM(CASE WHEN source <> 'api' AND fidelity <> 'realtime' THEN cost_micro ELSE 0 END) AS captured_non_realtime
+			SUM(CASE WHEN source <> 'api' AND fidelity <> 'realtime' THEN cost_micro ELSE 0 END) AS captured_non_realtime,
+ SUM(CASE WHEN issue_id != stored_issue_id THEN cost_micro ELSE 0 END),
+ SUM(CASE WHEN issue_id != stored_issue_id THEN 1 ELSE 0 END)
 		FROM token_events
 		WHERE `+where+scopeSQL+`
 		GROUP BY developer, repo, issue_id`,
@@ -6959,7 +7028,7 @@ func (r reader) DeveloperIssueCostsWindow(ctx context.Context, since, until time
 	for rows.Next() {
 		var c DevIssueCost
 		if err := rows.Scan(&c.Developer, &c.Repo, &c.IssueID, &c.TotalCostMicro, &c.RealtimeCostMicro,
-			&c.CapturedRealtimeMicro, &c.CapturedNonRealtimeMicro); err != nil {
+			&c.CapturedRealtimeMicro, &c.CapturedNonRealtimeMicro, &c.ReadTimeRecoveryMicro, &c.ReadTimeRecoveryEvents); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -7322,7 +7391,7 @@ func (d *DB) CostCompositionWindow(ctx context.Context, since, until time.Time, 
 
 func (r reader) CostCompositionWindow(ctx context.Context, since, until time.Time, scope RepoScope) (CostComposition, error) {
 	stmt, args := costCompositionStmt(since, until, scope)
-	rows, err := r.q.QueryContext(ctx, stmt, args...)
+	rows, err := r.queryEffectiveWindow(ctx, since, until, scope, stmt, args...)
 	if err != nil {
 		return CostComposition{}, err
 	}
@@ -7374,7 +7443,7 @@ func (r reader) UnattributedBucketCostsWindow(ctx context.Context, since, until 
 	args = append([]any{UnattributedIssueID, unattributedGlobPattern}, args...)
 	scopeSQL, scopeArgs := scope.clause()
 	args = append(args, scopeArgs...)
-	rows, err := r.q.QueryContext(ctx, `
+	rows, err := r.queryEffectiveWindow(ctx, since, until, scope, `
 		SELECT developer, issue_id, SUM(cost_micro) AS cost
 		FROM token_events
 		WHERE (`+unattributedFamilyPredicate+`) AND `+where+scopeSQL+`
@@ -7735,6 +7804,49 @@ func (r reader) OutcomeTokenTotals(ctx context.Context, outcomes []Outcome, scop
 		windows[k] = window{low: high.Add(-AttributableWindow), high: high}
 	}
 
+	var since, until time.Time
+	for _, w := range windows {
+		if since.IsZero() || w.low.Before(since) {
+			since = w.low
+		}
+		if w.high.After(until) {
+			until = w.high
+		}
+	}
+	until = until.Add(time.Nanosecond)
+	if len(windows) == 0 {
+		return totals, nil
+	}
+	if recoveryEnabled(ctx) {
+		byIssue := make(map[string][]repoIssue, len(windows))
+		for k := range windows {
+			byIssue[k.issue] = append(byIssue[k.issue], k)
+		}
+		where, args := tsWindow(since, until)
+		clause, scopeArgs := scope.clause()
+		rows, err := r.queryEffectiveWindow(ctx, since, until, scope, `SELECT developer,repo,issue_id,ts,input_tok+output_tok+cache_read+cache_write_5m+cache_write_1h FROM token_events WHERE `+where+clause, append(args, scopeArgs...)...)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var k DevIssue
+			var at time.Time
+			var tokens int64
+			if err := rows.Scan(&k.Developer, &k.Repo, &k.IssueID, &at, &tokens); err != nil {
+				return nil, err
+			}
+			for _, key := range byIssue[k.IssueID] {
+				w := windows[key]
+				if !at.Before(w.low) && !at.After(w.high) && (!scope.IsFleetWide() || RepoMatch(key.repo, k.Repo)) {
+					totals[k] += tokens
+					break
+				}
+			}
+		}
+		return totals, rows.Err()
+	}
+
 	// Stable ordering keeps batch boundaries deterministic (aids testing and
 	// reasoning). Sorting by ISSUE FIRST is load-bearing, not cosmetic: batches are
 	// cut on issue boundaries below, and every window for one issue must live in the
@@ -7822,7 +7934,7 @@ func (r reader) OutcomeTokenTotals(ctx context.Context, outcomes []Outcome, scop
 		}
 		sb.WriteString(" GROUP BY developer, repo, issue_id")
 
-		rows, err := r.q.QueryContext(ctx, sb.String(), args...)
+		rows, err := r.queryEffectiveWindow(ctx, since, until, scope, sb.String(), args...)
 		if err != nil {
 			return nil, err
 		}
@@ -8199,7 +8311,7 @@ func (d *DB) ListTokenEvents(ctx context.Context, since, until time.Time, after 
 		       cache_write_5m, cache_write_1h, cost_micro, source, fidelity,
 		       COALESCE(idempotency_key, ''), COALESCE(repo, 'unqualified'),
 		       COALESCE(session_id, ''), price_version, host, billing_mode,
-		       COALESCE(billed_to, ''), COALESCE(attribution_rule, ''), ts, pr_number, branch_hash, COALESCE(pricing_basis,''),COALESCE(rate_snapshot,''),COALESCE(cache_write_evidence,'')
+		       COALESCE(billed_to, ''), COALESCE(attribution_rule, ''), ts, pr_number, branch_hash, COALESCE(pricing_basis,''),COALESCE(rate_snapshot,''),COALESCE(cache_write_evidence,''), COALESCE(issue_rule,'')
 		FROM token_events`+keysetWindowSQL,
 		since, until, after.TS, after.TS, after.ID, page+1,
 	)
@@ -8213,7 +8325,7 @@ func (d *DB) ListTokenEvents(ctx context.Context, since, until time.Time, after 
 		if err := rows.Scan(&e.ID, &e.Developer, &e.IssueID, &e.Model,
 			&e.InputTok, &e.OutputTok, &e.CacheRead, &e.CacheWrite5m, &e.CacheWrite1h,
 			&e.CostMicro, &e.Source, &e.Fidelity, &e.IdempotencyKey, &e.Repo, &e.SessionID,
-			&e.PriceVersion, &e.Host, &e.BillingMode, &e.BilledTo, &e.AttributionRule, &e.Timestamp, &e.PRNumber, &e.BranchHash, &e.PricingBasis, &e.RateSnapshot, &e.CacheWriteEvidence); err != nil {
+			&e.PriceVersion, &e.Host, &e.BillingMode, &e.BilledTo, &e.AttributionRule, &e.Timestamp, &e.PRNumber, &e.BranchHash, &e.PricingBasis, &e.RateSnapshot, &e.CacheWriteEvidence, &e.IssueRule); err != nil {
 			return nil, false, err
 		}
 		out = append(out, e)
@@ -8248,7 +8360,7 @@ func (r reader) ListOutcomes(ctx context.Context, since, until time.Time, after 
 		       COALESCE(weight_source, 'legacy'), `+outcomeDiffStatsSQL+`
 		       COALESCE(merge_commit_sha, ''), COALESCE(source, 'github-webhook'),
 		       COALESCE(work_type, 'feature'), COALESCE(work_type_source, 'legacy'),
-		       COALESCE(repo, 'unqualified'), COALESCE(push_day, ''), ts, `+revertUnknownSQL+`
+		       COALESCE(repo, 'unqualified'), COALESCE(push_day, ''), ts, `+revertUnknownSQL+`, COALESCE(issue_rule, '')
 		FROM outcomes`+keysetWindowSQL,
 		since, until, after.TS, after.TS, after.ID, page+1,
 	)
@@ -8265,7 +8377,7 @@ func (r reader) ListOutcomes(ctx context.Context, since, until time.Time, after 
 		// same convention merge_commit_sha uses (#242).
 		if err := rows.Scan(&o.ID, &o.Developer, &o.IssueID, &o.PRNumber, &o.Weight, &o.Quality,
 			&o.WeightSource, &stats[0], &stats[1], &stats[2], &legacyZeros,
-			&o.MergeCommitSHA, &o.Source, &o.WorkType, &o.WorkTypeSource, &o.Repo, &o.PushDay, &o.Timestamp, &o.QualityStatus); err != nil {
+			&o.MergeCommitSHA, &o.Source, &o.WorkType, &o.WorkTypeSource, &o.Repo, &o.PushDay, &o.Timestamp, &o.QualityStatus, &o.IssueRule); err != nil {
 			return nil, false, err
 		}
 		o.scanDiffStats(stats, legacyZeros)
@@ -8314,7 +8426,7 @@ func keysetWindowSQLFor(tsCol string) string {
 func (d *DB) ListQualityEvents(ctx context.Context, since, until time.Time, after PageCursor, limit int) (events []QualityEvent, hasMore bool, err error) {
 	page := clampExportLimit(limit)
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason
+		SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason, trigger_event
 		FROM (SELECT * FROM quality_events WHERE outcome_id NOT IN
           (SELECT id FROM outcome_exclusions WHERE id IS NOT NULL))`+keysetWindowSQLFor("event_ts"),
 		since, until, after.TS, after.TS, after.ID, page+1,
@@ -8327,7 +8439,7 @@ func (d *DB) ListQualityEvents(ctx context.Context, since, until time.Time, afte
 	for rows.Next() {
 		var e QualityEvent
 		if err := rows.Scan(&e.ID, &e.OutcomeID, &e.Developer, &e.IssueID,
-			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt, &e.Reason); err != nil {
+			&e.EventType, &e.SourceRef, &e.EventTS, &e.RecordedAt, &e.Reason, &e.TriggerEvent); err != nil {
 			return nil, false, err
 		}
 		out = append(out, e)
@@ -9922,6 +10034,7 @@ type ExportTokenEvent struct {
 	CacheWriteEvidence *string   `json:"cache_write_evidence"`
 	PollerBaseline     *string   `json:"poller_baseline"`
 	Timestamp          time.Time `json:"ts"`
+	IssueRule          *string   `json:"issue_rule"`
 }
 
 type ExportOutcome struct {
@@ -9947,6 +10060,7 @@ type ExportOutcome struct {
 	HeadBranchHash *string    `json:"head_branch_hash"`
 	CreatedAt      *time.Time `json:"created_at"`
 	MergedAt       *time.Time `json:"merged_at"`
+	IssueRule      *string    `json:"issue_rule"`
 }
 
 type ExportOutcomeExclusion struct {
@@ -9982,6 +10096,7 @@ type ExportOutcomeExclusion struct {
 	Evidence   string    `json:"evidence"`
 	Actor      string    `json:"actor"`
 	ExcludedAt time.Time `json:"excluded_at"`
+	IssueRule  *string   `json:"issue_rule"`
 }
 
 type ExportActualSpend struct {
@@ -10017,15 +10132,16 @@ type ExportHierarchyMembership struct {
 }
 
 type ExportQualityEvent struct {
-	Reason     string    `json:"reason"`
-	ID         int64     `json:"id"`
-	OutcomeID  int64     `json:"outcome_id"`
-	Developer  string    `json:"developer"`
-	IssueID    string    `json:"issue_id"`
-	EventType  string    `json:"event_type"`
-	SourceRef  string    `json:"source_ref"`
-	EventTS    time.Time `json:"event_ts"`
-	RecordedAt time.Time `json:"recorded_at"`
+	TriggerEvent *string   `json:"trigger_event"`
+	Reason       string    `json:"reason"`
+	ID           int64     `json:"id"`
+	OutcomeID    int64     `json:"outcome_id"`
+	Developer    string    `json:"developer"`
+	IssueID      string    `json:"issue_id"`
+	EventType    string    `json:"event_type"`
+	SourceRef    string    `json:"source_ref"`
+	EventTS      time.Time `json:"event_ts"`
+	RecordedAt   time.Time `json:"recorded_at"`
 }
 
 type ExportQualityHistory struct {
@@ -10172,7 +10288,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 		`SELECT id, developer, issue_id, model, input_tok, output_tok, cache_read,
 		        cache_write_5m, cache_write_1h, cost_micro, source, fidelity,
 		        repo, idempotency_key, session_id, price_version, host,
-		        billing_mode, billed_to, attribution_rule, cost_clamped, poller_baseline, ts, pr_number, branch_hash, pricing_basis, rate_snapshot, cache_write_evidence
+		        billing_mode, billed_to, attribution_rule, cost_clamped, poller_baseline, ts, pr_number, branch_hash, pricing_basis, rate_snapshot, cache_write_evidence, issue_rule
 		 FROM token_events WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
 			var r ExportTokenEvent
@@ -10181,7 +10297,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 			if err := rows.Scan(&r.ID, &r.Developer, &r.IssueID, &r.Model, &r.InputTok,
 				&r.OutputTok, &r.CacheRead, &r.CacheWrite5m, &r.CacheWrite1h, &r.CostMicro,
 				&r.Source, &r.Fidelity, &r.Repo, &key, &session, &r.PriceVersion,
-				&r.Host, &r.BillingMode, &billedTo, &rule, &mark, &baseline, &r.Timestamp, &r.PRNumber, &r.BranchHash, &r.PricingBasis, &r.RateSnapshot, &r.CacheWriteEvidence); err != nil {
+				&r.Host, &r.BillingMode, &billedTo, &rule, &mark, &baseline, &r.Timestamp, &r.PRNumber, &r.BranchHash, &r.PricingBasis, &r.RateSnapshot, &r.CacheWriteEvidence, &r.IssueRule); err != nil {
 				return err
 			}
 			r.IdempotencyKey, r.SessionID, r.BilledTo = nullStr(key), nullStr(session), nullStr(billedTo)
@@ -10211,7 +10327,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 		`SELECT id, developer, issue_id, pr_number, weight, quality, merge_commit_sha,
 		        weight_source, additions, deletions, changed_files, source,
 		        COALESCE(work_type, 'feature'), COALESCE(work_type_source, 'legacy'),
-		        push_day, repo, ts, author_type, head_branch_hash, created_at, merged_at
+		        push_day, repo, ts, author_type, head_branch_hash, created_at, merged_at, issue_rule
 		 FROM outcomes WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
 			var r ExportOutcome
@@ -10219,7 +10335,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 			var sha, pushDay, authorType sql.NullString
 			if err := rows.Scan(&r.ID, &r.Developer, &r.IssueID, &pr, &r.Weight, &r.Quality,
 				&sha, &r.WeightSource, &add, &del, &cf, &r.Source,
-				&r.WorkType, &r.WorkTypeSource, &pushDay, &r.Repo, &r.Timestamp, &authorType, &r.HeadBranchHash, &r.CreatedAt, &r.MergedAt); err != nil {
+				&r.WorkType, &r.WorkTypeSource, &pushDay, &r.Repo, &r.Timestamp, &authorType, &r.HeadBranchHash, &r.CreatedAt, &r.MergedAt, &r.IssueRule); err != nil {
 				return err
 			}
 			r.PRNumber, r.Additions, r.Deletions, r.ChangedFiles = nullInt(pr), nullInt(add), nullInt(del), nullInt(cf)
@@ -10235,7 +10351,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 		`SELECT id, developer, issue_id, pr_number, weight, quality, merge_commit_sha,
 		        weight_source, additions, deletions, changed_files, source,
 		        work_type, work_type_source,
-		        push_day, repo, ts, author_type, head_branch_hash, created_at, merged_at, reason, evidence, actor, excluded_at, exclusion_pr_number, exclusion_merge_commit_sha, exclusion_repo, author_developer, exclusion_author_type
+		        push_day, repo, ts, author_type, head_branch_hash, created_at, merged_at, reason, evidence, actor, excluded_at, exclusion_pr_number, exclusion_merge_commit_sha, exclusion_repo, author_developer, exclusion_author_type, issue_rule
 		 FROM outcome_exclusions WHERE developer IN (`+placeholders+`) OR author_developer IN (`+placeholders+`) ORDER BY id`, append(append([]any{}, args...), args...),
 		func(rows *sql.Rows) error {
 			var r ExportOutcomeExclusion
@@ -10243,7 +10359,7 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 			var sha, pushDay, authorType sql.NullString
 			if err := rows.Scan(&r.ID, &r.Developer, &r.IssueID, &pr, &r.Weight, &r.Quality,
 				&sha, &r.WeightSource, &add, &del, &cf, &r.Source,
-				&r.WorkType, &r.WorkTypeSource, &pushDay, &r.Repo, &r.Timestamp, &authorType, &r.HeadBranchHash, &r.CreatedAt, &r.MergedAt, &r.Reason, &r.Evidence, &r.Actor, &r.ExcludedAt, &r.ExclusionPRNumber, &r.ExclusionMergeCommitSHA, &r.ExclusionRepo, &r.AuthorDeveloper, &r.ExclusionAuthorType); err != nil {
+				&r.WorkType, &r.WorkTypeSource, &pushDay, &r.Repo, &r.Timestamp, &authorType, &r.HeadBranchHash, &r.CreatedAt, &r.MergedAt, &r.Reason, &r.Evidence, &r.Actor, &r.ExcludedAt, &r.ExclusionPRNumber, &r.ExclusionMergeCommitSHA, &r.ExclusionRepo, &r.AuthorDeveloper, &r.ExclusionAuthorType, &r.IssueRule); err != nil {
 				return err
 			}
 			r.PRNumber, r.Additions, r.Deletions, r.ChangedFiles = nullInt(pr), nullInt(add), nullInt(del), nullInt(cf)
@@ -10324,12 +10440,12 @@ func (d *DB) ExportDeveloper(ctx context.Context, id string) (DeveloperExport, e
 
 	// quality_events
 	if err := queryRows(ctx, tx,
-		`SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason
+		`SELECT id, outcome_id, developer, issue_id, event_type, source_ref, event_ts, recorded_at, reason, trigger_event
 		 FROM quality_events WHERE developer IN (`+placeholders+`) ORDER BY id`, args,
 		func(rows *sql.Rows) error {
 			var r ExportQualityEvent
 			if err := rows.Scan(&r.ID, &r.OutcomeID, &r.Developer, &r.IssueID, &r.EventType,
-				&r.SourceRef, &r.EventTS, &r.RecordedAt, &r.Reason); err != nil {
+				&r.SourceRef, &r.EventTS, &r.RecordedAt, &r.Reason, &r.TriggerEvent); err != nil {
 				return err
 			}
 			exp.QualityEvents = append(exp.QualityEvents, r)

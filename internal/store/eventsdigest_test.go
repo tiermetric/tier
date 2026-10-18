@@ -1695,6 +1695,7 @@ func TestDigestCoversEveryCostBearingColumn(t *testing.T) {
 	// Columns deliberately outside the digest. Each reason is in eventsdigest.go.
 	excluded := map[string]map[string]string{
 		"token_events": {
+			"issue_rule":           "extractor provenance; published figures read the resolved issue_id",
 			"pricing_basis":        "aggregate disclosure input outside EventsDigest; sealed disclosure is bound by body_digest",
 			"rate_snapshot":        "aggregate disclosure rates outside EventsDigest; sealed disclosure is bound by body_digest",
 			"cache_write_evidence": "observation-selection provenance; existing reports read the selected token counts",
@@ -1709,6 +1710,7 @@ func TestDigestCoversEveryCostBearingColumn(t *testing.T) {
 			"attribution_rule": "no published figure or spend query reads it as of #823 S1; the first report that reads it must move it into the digest with a digestScheme bump",
 		},
 		"outcomes": {
+			"issue_rule":       "extractor provenance; published figures read the resolved issue_id",
 			"head_branch_hash": "merge-time attribution input; published figures read the resolved token issue_id",
 			"created_at":       "branch-window input; published figures read the resolved token issue_id",
 			"weight_source":    "records HOW weight was derived, not the value",

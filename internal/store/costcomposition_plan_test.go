@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -101,19 +102,28 @@ func TestCostCompositionWindow_PlanStaysAWindowSeek(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name  string
-		scope RepoScope
+		name     string
+		scope    RepoScope
+		recovery bool
 	}{
-		{"fleet-wide", FleetWide},
+		{"fleet-wide-off", FleetWide, false},
+		{"fleet-wide-on", FleetWide, true},
 		// #590 scoped read: a different statement (trailing "AND repo = ?"), so it
 		// gets its own plan. Nothing else in the suite plans this variant.
-		{"repo-scoped", RepoScope("acme/widgets")},
+		{"repo-scoped-off", RepoScope("acme/widgets"), false},
+		{"repo-scoped-on", RepoScope("acme/widgets"), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The WHOLE statement production will run, predicates included —
 			// see costCompositionStmt's doc for why the seam must sit there.
 			stmt, args := costCompositionStmt(since, time.Time{}, tc.scope)
-			plan := explainPlan(t, db, stmt, args...)
+			readctx := WithReadTimeRecovery(ctx, tc.recovery)
+			rows, err := (reader{explainEffectiveQuerier{db.db}}).queryEffectiveWindow(readctx, since, time.Time{}, tc.scope, stmt, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := readPlan(t, rows)
+
 			if !strings.Contains(plan, wantCompositionPlan) {
 				t.Errorf("cost-composition no longer seeks the ts window on the expected index.\n"+
 					"  got:  %s\n  want: a plan containing %q\n"+
@@ -138,6 +148,17 @@ func explainPlan(t *testing.T, db *DB, stmt string, args ...any) string {
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
+	return readPlan(t, rows)
+}
+
+type explainEffectiveQuerier struct{ readQuerier }
+
+func (q explainEffectiveQuerier) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return q.readQuerier.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+}
+func readPlan(t *testing.T, rows *sql.Rows) string {
+	t.Helper()
+
 	defer func() { _ = rows.Close() }()
 	var plan []string
 	for rows.Next() {

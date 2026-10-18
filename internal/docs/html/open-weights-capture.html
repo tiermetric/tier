@@ -62,6 +62,7 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="capturing-open-weights--self-hosted-models">Capturing open-weights / self-hosted models</h1>
+<p><strong>v0.6.1 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
 <p><strong>Audience:</strong> operators who run open-weights models (Llama, Qwen, DeepSeek, Mixtral)
 through a hosted per-token API (OpenRouter, Together, Fireworks, Groq, DeepInfra) or a
 self-hosted server (Ollama, vLLM) and want TIER to price that spend.</p>
@@ -75,16 +76,16 @@ Ollama&#39;s <code>/v1</code>, vLLM&#39;s OpenAI server, a hosted gateway, or a 
 environment variable sets it) at the upstream, then send your OpenAI-SDK traffic
 through <code>http://&lt;tierd&gt;/openai/</code> instead of the provider directly:</p>
 <pre><code># Local Ollama
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --api-token @/run/secrets/tier-token \
   --openai-target http://localhost:11434/v1
 
 # vLLM OpenAI server
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --openai-target http://vllm.internal:8000/v1
 
 # A per-token host (host-qualified rates apply — see §4)
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --openai-target https://openrouter.ai/api/v1
 </code></pre>
 <p><code>@/run/secrets/tier-token</code> is a file holding the API token you chose — see
@@ -531,7 +532,7 @@ for the full rule, the refusal message, and the narrow escape hatch.</p>
 deployment uses <code>@file</code>.)</p>
 <pre><code>ollama serve &amp;                     # :11434
 ollama pull llama3.1:8b
-tierd serve --aggregation developer --api-token secret \
+tierd serve --aggregation team --api-token secret \
   --openai-target http://localhost:11434/v1 &amp;
 
 curl -s http://localhost:8080/openai/chat/completions \
@@ -539,9 +540,12 @@ curl -s http://localhost:8080/openai/chat/completions \
   -H &#34;Content-Type: application/json&#34; \
   -d &#39;{&#34;model&#34;:&#34;llama3.1:8b&#34;,&#34;messages&#34;:[{&#34;role&#34;:&#34;user&#34;,&#34;content&#34;:&#34;hi&#34;}]}&#39; | jq .usage
 </code></pre>
-<p>Then confirm the event landed:</p>
-<pre><code>curl -s http://localhost:8080/api/v1/events -H &#34;Authorization: Bearer secret&#34; | tail
+<p>Using the separate <code>sqlite3</code> CLI, confirm at least one matching row in the default
+serve database (the count should increase after the request):</p>
+<pre><code>sqlite3 -readonly -cmd &#39;.timeout 5000&#39; &#34;$HOME/.tier/tier.db&#34; \
+  &#34;SELECT COUNT(*) FROM token_events WHERE source = &#39;proxy&#39; AND host = &#39;localhost&#39; AND model = &#39;llama3.1:8b&#39;;&#34;
 </code></pre>
+<p><code>/api/v1/events</code> is not used because team mode refuses per-event export with <code>403</code>.</p>
 <p><code>localhost</code> has no seeded host row, so <code>llama3.1:8b</code> prices via the size-class heuristic
 (<code>8b</code> → <code>self-hosted-medium</code>) with a one-time WARN in tierd&#39;s log — expected, and visible
 in <code>tier_unknown_model_events_total</code>. Point <code>--openai-target</code> at a seeded per-token host

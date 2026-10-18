@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tiermetric/tier/internal/collector"
+	"github.com/tiermetric/tier/internal/issueref"
 	"github.com/tiermetric/tier/internal/store"
 )
 
@@ -171,6 +172,9 @@ func TestCollect_FixtureEndToEnd(t *testing.T) {
 		}
 		if e.IssueID != wantIssueID {
 			t.Errorf("%s: IssueID = %q, want %q from the run's workspace_branch %q", id, e.IssueID, wantIssueID, fixtureBranch)
+		}
+		if e.IssueRule != issueref.RuleBranchFirstSlot {
+			t.Errorf("%s: IssueRule = %q, want %q", id, e.IssueRule, issueref.RuleBranchFirstSlot)
 		}
 		if e.Model != fixtureModel || e.SessionID != fixtureSession || e.Developer != "dev-fixture" || e.Host != "" {
 			t.Errorf("%s: model=%q session=%q developer=%q host=%q", id, e.Model, e.SessionID, e.Developer, e.Host)
@@ -1485,5 +1489,32 @@ func TestRun_ResolverFailureKeepsPendingFiles(t *testing.T) {
 	c.runPass(context.Background(), time.Time{}, ing)
 	if len(ing.byKey) != len(fixtureWant) {
 		t.Fatalf("stored %d events, want %d: a failing resolver dropped the held file from pending", len(ing.byKey), len(fixtureWant))
+	}
+}
+
+func TestRevertCountPerPass(t *testing.T) {
+	for _, branch := range []string{"feature/895-muse-fixture", "revert-895-x"} {
+		t.Run(branch, func(t *testing.T) {
+			repo, home := initGitRepo(t), t.TempDir()
+			writeSession(t, home, fixtureSession, repo, strings.ReplaceAll(readFixture(t), "feature/895-muse-fixture", branch))
+			c, logs := newLoggedCollector(t, home, repo, nil)
+			for pass := 1; pass <= 2; pass++ {
+				events, err := c.Collect(context.Background(), time.Time{})
+				if err != nil || len(events) != len(fixtureWant) {
+					t.Fatalf("events=%+v err=%v", events, err)
+				}
+				rows := linesWithMsg(logRecords(t, logs), "revert-branch events left unattributed")
+				want := 0
+				if strings.HasPrefix(branch, "revert-") {
+					want = pass
+				}
+				if len(rows) != want {
+					t.Fatalf("count lines=%d want=%d logs=%s", len(rows), want, logs)
+				}
+				if want > 0 && (rows[want-1]["level"] != "INFO" || rows[want-1]["count"] != float64(len(events))) {
+					t.Fatal(rows)
+				}
+			}
+		})
 	}
 }

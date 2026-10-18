@@ -45,7 +45,7 @@ import (
 // which are provenance stamps nothing sorts on.
 //
 // ⚠️ This list is scoped by WHAT IS ORDERED, deliberately NOT by what currently
-// takes a Go value. quality_history.ts takes none today — both its INSERTs let
+// takes a Go value. quality_history.ts takes none today — all its INSERTs let
 // SQLite's DEFAULT CURRENT_TIMESTAMP fill it, which is always UTC — so it is
 // absent from normalizeTS's ledger and there is no live bug. But it IS
 // keyset-exported (store.go, keysetWindowSQLFor("ts")), and this guard exists to
@@ -99,12 +99,12 @@ var knownOrderedTSInserts = map[insertSite]int{
 	{file: "store.go", decl: "insertOutcomeRow", tbl: "outcomes"}:         1, // InsertOutcome + RecordPROutcome
 	{file: "store.go", decl: "upsertPushOutcomeRow", tbl: "outcomes"}:     1, // UpsertPushOutcome + RecordPushCommit
 	{file: "audit.go", decl: "AppendQualityEvent", tbl: "quality_events"}: 1,
-	// quality_history: ts is filled by DEFAULT CURRENT_TIMESTAMP at both sites —
-	// neither INSERT names the column. Pinned so a THIRD one, or a ts added to
-	// either of these, has to be looked at.
-	{file: "store.go", decl: "UpdateQuality", tbl: "quality_history"}:           1,
-	{file: "store.go", decl: "UpdateQualityForOutcome", tbl: "quality_history"}: 1,
-	// #714. Same shape as the quality_history pair: neither INSERT names its
+	// quality_history.ts is filled by DEFAULT CURRENT_TIMESTAMP (UTC).
+	// ApplyCITrigger is covered by the SQL-default subtest under TestOrderedTSWriters_NormalizeToUTC.
+	{file: "store.go", decl: "UpdateQuality", tbl: "quality_history"}:             1,
+	{file: "store.go", decl: "UpdateQualityForOutcome", tbl: "quality_history"}:   1,
+	{file: "quality_triggers.go", decl: "ApplyCITrigger", tbl: "quality_history"}: 1,
+	// #714. Same SQL-default shape as quality_history: neither INSERT names its
 	// timestamp column, so both are filled by DEFAULT CURRENT_TIMESTAMP (UTC).
 	// Pinned so that naming one from Go — or adding a third writer — has to be
 	// looked at. price_forget_audit DOES bind a first_seen value, but it is a

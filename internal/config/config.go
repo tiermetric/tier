@@ -42,13 +42,14 @@ import (
 // (explicit empty value) is treated as an override-to-empty rather than
 // "not present."
 type Config struct {
-	HTTP       HTTPConfig       `yaml:"http"`
-	DB         *string          `yaml:"db,omitempty"`
-	PricesFile *string          `yaml:"prices_file,omitempty"`
-	Proxy      ProxyConfig      `yaml:"proxy"`
-	Watch      WatchConfig      `yaml:"watch"`
-	Collectors CollectorsConfig `yaml:"collectors"`
-	Outcomes   OutcomesConfig   `yaml:"outcomes"`
+	Attribution AttributionConfig `yaml:"attribution"`
+	HTTP        HTTPConfig        `yaml:"http"`
+	DB          *string           `yaml:"db,omitempty"`
+	PricesFile  *string           `yaml:"prices_file,omitempty"`
+	Proxy       ProxyConfig       `yaml:"proxy"`
+	Watch       WatchConfig       `yaml:"watch"`
+	Collectors  CollectorsConfig  `yaml:"collectors"`
+	Outcomes    OutcomesConfig    `yaml:"outcomes"`
 	// ZeroOutcomeWindowDays configures the zero-outcome tripwire (#189): the
 	// look-back window, in days, over which "cost accrued but zero outcomes
 	// recorded" is evaluated. Mirrors --zero-outcome-window-days. Absent → nil →
@@ -713,4 +714,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// AttributionConfig supplies the prospective issue-reference grammar.
+type AttributionConfig struct {
+	TrackerKeys *string `yaml:"tracker_keys,omitempty"`
 }

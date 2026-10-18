@@ -9,7 +9,7 @@ func TestFromCommitSubjectPR(t *testing.T) {
 	}{
 		{"fix: widget (#42)", 42}, {"Merge pull request #42 from branch", 42},
 		{"#42", 42}, {"fix: widget (#42) closes #9", 0},
-		{"fix: PROJ-9 (#42)", 0}, {"fix: widget (#0)", 0},
+		{"fix: PROJ-9 (#42)", 42}, {"fix: widget (#0)", 0},
 		{"fix: widget (#042)", 0}, {"fix: widget (#42foo)", 0},
 		{"fix: widget (#9999999999999999999999999)", 0},
 	} {

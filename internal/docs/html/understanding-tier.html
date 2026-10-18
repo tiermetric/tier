@@ -62,6 +62,7 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="understanding-tier">Understanding TIER</h1>
+<p><strong>v0.6.1 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
 <p>TIER (Token Impact &amp; Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.</p>
 <ol>
@@ -113,11 +114,12 @@ change it, but never to fewer than three. Whoever holds the server&#39;s
 administrator token (its password for changes) can still export one
 person&#39;s stored records, so that person&#39;s request to see their data can be
 answered.</li>
-<li><code>developer</code> shows a named row for every person. It carries the heaviest
+<li><code>developer</code> (synthetic demo only until #826; refused on real data) shows
+invented named rows. The planned real-data view carries the heaviest
 legal obligations in those countries, so it should be a deliberate choice.
 Where a team uses it, the intended use is coaching: the developer and their
-manager look at the same page together. Today, anyone who can read the server
-sees every developer&#39;s row;
+manager look at the same page together. In the synthetic demo, anyone who can
+read the server sees every invented developer&#39;s row;
 <a href="#the-limits-stated-plainly" rel="nofollow">The limits, stated plainly</a> says who that is.
 Access limited to each person&#39;s own row is planned but not built.</li>
 </ul>
@@ -177,7 +179,8 @@ between the two as a separate number. See
 <a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a> for the table itself.</p>
 <p>Spend is linked to a piece of work through the branch the AI session was on.
 TIER looks for the issue number (the ticket number in your tracker) in the
-branch name, such as <code>feature/42-login</code> or <code>fix/TIER-99-crash</code>, or in a commit
+branch name, such as <code>feature/42-login</code> or <code>fix/TIER-99-crash</code> (only with TIER
+configured as a tracker key, for example <code>--tracker-keys TIER</code>), or in a commit
 on that branch made around the same time. Spend it cannot link lands in an
 <strong>unattributed</strong> bucket. It stays in the bottom half of the fraction, so it
 still lowers the number. It is reported as its own line alongside the score,
@@ -280,7 +283,7 @@ hours lowers it to 0.7, unless a re-run of the same check soon passes. A revert
 within 60 days lowers it to 0.8 when the revert was a business decision, or to
 0.1 when it was a code problem. TIER tells the two apart from keywords in the
 revert&#39;s human-written commit message, and treats a revert as a code problem
-unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.0 the matcher requires the recorded merge SHA and default branch, but enforces no lower event-time bound; a matching failure timestamped before merge can count. A revert
+unless the message gives only business reasons. The worst of these wins. Other PR-head SHAs are not scored. In v0.6.1 (#1230), only push-triggered runs on the default branch with a recorded merge SHA change quality; matched scheduled and dispatched runs are audit-only, and <code>merge_group</code> runs are dropped. The matcher still enforces no lower event-time bound; a matching push-triggered failure timestamped before merge can count. A revert
 can arrive weeks after the merge, so a past period&#39;s score can still move. The
 numerator is <code>Σ(weight × quality)</code>.</p>
 <h3 id="three-things-that-will-bite-you">Three things that will bite you</h3>
@@ -306,10 +309,11 @@ uncounted people back. Folding drops nothing: the folded spend and points stay i
 in the totals. If <code>other</code> is itself below the floor, it is withheld along with
 the totals, because subtracting the named rows from the totals would reveal
 it, and TIER says so rather than showing an empty page. If you are evaluating
-TIER on your own, pick <code>developer</code> mode (<code>tierd serve --aggregation developer</code>):
-in <code>team</code> or <code>division</code> mode a group of one is always folded away and you will
-not see your own row. The full command is in
-<a href="quickstart.html#5-the-full-tier-score" rel="nofollow">quickstart.md §5</a>.</p>
+TIER on your own, use <code>tierd score --repo &lt;path&gt;</code> for local Claude Code costs.
+Non-synthetic developer mode is refused until #826 ships; team/division reports
+withhold a cohort of one and publish only sealed calendar months. Follow
+<a href="quickstart.html#7-viewing-the-dashboard-from-another-machine" rel="nofollow">quickstart.md §7</a>
+for sealing and the k floor.</p>
 <p><strong>3. The two halves must cover the same stretch of work.</strong> Both halves are
 counted over the same calendar dates. TIER does not pair each merged pull
 request with the exact spend that produced it. Spend is recorded when it
@@ -343,8 +347,9 @@ this layer says what the program does, gives each rule&#39;s key numbers in brie
 and links the page that owns it, so each rule has one copy to keep correct. For a code-grounded account of what the tool does and does not do
 today, read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> alongside it.</p>
 <h3 id="from-install-to-a-first-real-score">From install to a first real score</h3>
-<p>This is the single-developer path. Each step is in
-<a href="quickstart.html" rel="nofollow">quickstart.md</a> with its full output.</p>
+<p>Solo users can stop after step 3 for local Claude Code costs. The remaining
+steps load a team/division server; reports also require a sealed month and
+enough contributors. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the full setup.</p>
 <ol>
 <li>
 <p><strong>Install.</strong> Go 1.27.2 or newer, or a release download:
@@ -371,7 +376,7 @@ GitHub token that can read the repository&#39;s pull requests;
 shows how to create one.</p>
 </li>
 <li>
-<p><strong>Serve.</strong> <code>tierd serve --aggregation developer --watch-repo &lt;path&gt;</code>, where
+<p><strong>Serve.</strong> <code>tierd serve --aggregation team --watch-repo &lt;path&gt;</code>, where
 <code>&lt;path&gt;</code> is the folder of your local checkout. Leave it running. No token
 is needed because none was set; without one, the server accepts
 connections only from this machine, unless something forwards that port,
@@ -537,8 +542,8 @@ person made solely by automated processing. Read
 mode, whichever you pick. <code>developer</code> aggregation carries the heaviest
 obligations, but that page also lists works-council consultation and a data
 protection impact assessment (DPIA) for <code>team</code> mode in several countries.</p>
-<p>In <code>developer</code> mode, anyone who can read the server today sees every
-developer&#39;s row. That means anyone
+<p>In <code>developer</code> mode (synthetic demo only until #826; refused on real data),
+anyone who can read the server sees every invented developer&#39;s row. That means anyone
 who holds one of its tokens (the administrator token or the read-only viewer
 token), or, when no token is set, anyone on the same computer, plus anyone
 reaching it through something that forwards its port, such as an SSH tunnel or

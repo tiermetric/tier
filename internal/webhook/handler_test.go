@@ -949,6 +949,7 @@ const testWorkflowID int64 = 42
 // wfRunPayloadFor is wfRunPayload with an explicit workflow_id.
 func wfRunPayloadFor(headSHA, branch, conclusion string, attempt int, workflowID int64, updatedAt time.Time) map[string]any {
 	wr := map[string]any{
+		"event":       "push",
 		"head_sha":    headSHA,
 		"head_branch": branch,
 		"conclusion":  conclusion,

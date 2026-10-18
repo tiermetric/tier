@@ -357,3 +357,8 @@ func TestScoresCompareSnapshotReleasedBeforeBootstrap(t *testing.T) {
 		}
 	}
 }
+
+func (s *eraseDuringReadStore) QualityEvidenceWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.QualityEvidenceRead, error) {
+	s.pooled++
+	return s.Store.QualityEvidenceWindow(ctx, since, until, scope)
+}

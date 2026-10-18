@@ -2,6 +2,7 @@ package issueref
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -59,7 +60,7 @@ func TestCloseDirectiveTerminators(t *testing.T) {
 				if got := FromCommitSubject(body); got != want {
 					t.Errorf("FromCommitSubject(%q) = %q, want %q", body, got, want)
 				}
-				if got := FromPRBody(body + " PROJ-9"); got != "PROJ-9" && want == "" || want != "" && got != want {
+				if got := FromPRBody(body + " PROJ-9"); got != want {
 					t.Errorf("FromPRBody(%q) = %q, close directive = %q", body, got, want)
 				}
 				refs := ClosedIssues(body)
@@ -93,10 +94,10 @@ func TestFromBranch(t *testing.T) {
 		branch string
 		want   string
 	}{
-		// Existing behavior — must stay green.
+		// Only the first slot supplies branch issue evidence.
 		{"slug-suffixed", "feature/42-auth-rewrite", "issue-42"},
-		{"tracker-key-nested", "fix/TIER-123-something", "TIER-123"},
-		{"tracker-key-leading", "JIRA-456-description", "JIRA-456"},
+		{"tracker-key-nested", "fix/TIER-123-something", ""},
+		{"tracker-key-leading", "JIRA-456-description", ""},
 		{"main", "main", ""},
 		{"master", "master", ""},
 		{"head", "HEAD", ""},
@@ -108,28 +109,30 @@ func TestFromBranch(t *testing.T) {
 		{"tail-number-underscore", "feature/42_auth", "issue-42"},
 		{"tail-number-five-digit", "feature/12345", "issue-12345"},
 		// Gap 2 — year-like segments must not be mis-attributed.
-		{"year-prefixed", "release/2024-fix", ""},
-		{"year-tail", "release/2024", ""},
-		{"year-lower-bound-1900", "release/1900", ""},
-		{"year-upper-bound-2099", "release/2099", ""},
+		{"year-prefixed", "feature/2024-fix", ""},
+		{"year-tail", "feature/2024", ""},
+		{"year-lower-bound-1900", "feature/1900", ""},
+		{"year-upper-bound-2099", "feature/2099", ""},
 		// Boundary: 4-digit values outside the year window are real issues.
 		{"nonyear-below-window", "feature/1899", "issue-1899"},
 		{"nonyear-above-window", "feature/2100", "issue-2100"},
-		// A tracker key with a year-looking number is explicit → not guarded.
-		{"tracker-key-year-number", "fix/REL-2024-hotfix", "REL-2024"},
-		// Year guard skips (does not abort): a real issue after a date stamp is
-		// still recovered.
-		{"year-then-issue", "release/2024-42", "issue-42"},
-		{"year-then-issue-multiseg", "release/2024-hotfix-42", "issue-42"},
+		// An unconfigured key supplies no branch evidence.
+		{"tracker-key-year-number", "fix/REL-2024-hotfix", ""},
+		// Rejected first slots never fall back to later numbers.
+		{"year-then-issue", "release/2024-42", ""},
+		{"year-then-issue-multiseg", "release/2024-hotfix-42", ""},
 		// Leading-zero / zero segments are not valid issue numbers.
 		{"leading-zero-rejected", "feature/007", ""},
 		{"zero-rejected", "feature/0", ""},
-		{"leading-zero-then-real-issue", "feature/007-42", "issue-42"},
-		// Underscore is a full segment delimiter (both sides).
-		{"underscore-delimited", "feature_42", "issue-42"},
+		{"leading-zero-then-real-issue", "feature/007-42", ""},
+		// A standalone form must begin with the issue number.
+		{"underscore-delimited", "feature_42", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if got := FromBranchRef(c.branch).ID; got != c.want {
+				t.Errorf("Ref ID = %q, want %q", got, c.want)
+			}
 			if got := FromBranch(c.branch); got != c.want {
 				t.Errorf("FromBranch(%q) = %q, want %q", c.branch, got, c.want)
 			}
@@ -143,9 +146,9 @@ func TestFromCommitSubject(t *testing.T) {
 		subject string
 		want    string
 	}{
-		{"tracker_token", "docs(rulings): record ladder rung REL-4", "REL-4"},
-		{"tracker_key", "fix: attribution PROJ-123", "PROJ-123"},
-		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", "PROJ-123"},
+		{"tracker_token", "docs(rulings): record ladder rung REL-4", ""},
+		{"tracker_key", "fix: attribution PROJ-123", ""},
+		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", ""},
 		{"bare_pr_number", "Merge pull request #909 from feature/rulings", ""},
 		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", ""},
 		{"closes", "fix: attribution (closes #12)", "issue-12"},
@@ -162,10 +165,13 @@ func TestFromCommitSubject(t *testing.T) {
 		{"discloses", "docs: discloses #909", ""},
 		{"mixed_references", "docs: REL-4 and #909 (CLOSES #1017) (#909)", "issue-1017"},
 		{"multiple_directives", "fix: attribution (closes #1017, fixes #42)", "issue-1017"},
-		{"lookalike_tracker_key", "fix: mitigate CVE-2026-1234", "CVE-2026"},
+		{"lookalike_tracker_key", "fix: mitigate CVE-2026-1234", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if got := FromCommitSubjectRef(c.subject).ID; got != c.want {
+				t.Errorf("Ref ID = %q, want %q", got, c.want)
+			}
 			if got := FromCommitSubject(c.subject); got != c.want {
 				t.Errorf("FromCommitSubject(%q) = %q, want %q", c.subject, got, c.want)
 			}
@@ -179,15 +185,15 @@ func TestFromPRBody(t *testing.T) {
 		body string
 		want string
 	}{
-		// Existing behavior — must stay green.
+		// Body attribution requires an explicit structured reference.
 		{"closes", "closes #7", "issue-7"},
 		{"fixes-inline", "fixes #99 for prod", "issue-99"},
 		{"resolves", "resolves #123", "issue-123"},
-		{"bare-hash", "see #42 for context", "issue-42"},
+		{"bare-hash", "see #42 for context", ""},
 		{"markdown-heading", "## 3-tier architecture", ""},
 		{"empty", "", ""},
 		// Gap 3 — prefixed tracker key in a PR body with a generic branch.
-		{"prefixed-key-only", "Implements PROJ-123 behaviour", "PROJ-123"},
+		{"prefixed-key-only", "Implements PROJ-123 behaviour", ""},
 		// Documented precedence: closes #N > prefixed key > bare #N.
 		{"closes-beats-prefixed", "closes #7, part of PROJ-123", "issue-7"},
 		{"close-beats-prefixed", "close #7, part of PROJ-123", "issue-7"},
@@ -197,15 +203,26 @@ func TestFromPRBody(t *testing.T) {
 		{"fixed-beats-prefixed", "fixed #7, part of PROJ-123", "issue-7"},
 		{"resolved-beats-prefixed", "resolved #7, part of PROJ-123", "issue-7"},
 		{"past-tense-case-insensitive", "FiXeD #7, part of PROJ-123", "issue-7"},
-		{"prefixes-not-close", "prefixes #909, part of PROJ-123", "PROJ-123"},
-		{"discloses-not-close", "discloses #909, part of PROJ-123", "PROJ-123"},
-		{"prefixed-beats-bare", "PROJ-123 tracked, see #42", "PROJ-123"},
+		{"prefixes-not-close", "prefixes #909, part of PROJ-123", ""},
+		{"discloses-not-close", "discloses #909, part of PROJ-123", ""},
+		{"prefixed-beats-bare", "PROJ-123 tracked, see #42", ""},
 		// Leading-zero / bare "#0" is not a valid issue reference.
 		{"closes-zero-rejected", "closes #0", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := FromPRBody(c.body); got != c.want {
+			var g Grammar
+			if strings.Contains(c.name, "beats-prefixed") || c.name == "past-tense-case-insensitive" {
+				var err error
+				g, err = NewGrammar("PROJ")
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := g.FromPRBodyRef(c.body).ID; got != c.want {
+				t.Errorf("Ref ID = %q, want %q", got, c.want)
+			}
+			if got := g.FromPRBody(c.body); got != c.want {
 				t.Errorf("FromPRBody(%q) = %q, want %q", c.body, got, c.want)
 			}
 		})
@@ -222,12 +239,15 @@ func TestFromBranchOrBody(t *testing.T) {
 		{"branch-wins-over-body", "feature/42-auth", "closes #99", "issue-42"},
 		{"body-fallback-when-branch-plain", "main", "closes #7", "issue-7"},
 		// Gap 3 wired end to end: generic branch, prefixed key only in body.
-		{"prefixed-key-body-only", "feature/no-issue", "Implements PROJ-123", "PROJ-123"},
+		{"prefixed-key-body-only", "feature/no-issue", "Implements PROJ-123", ""},
 		// Gap 2 interaction: a year-branch yields nothing, so the body is used.
-		{"year-branch-falls-through-to-body", "release/2024-fix", "closes #55", "issue-55"},
+		{"year-branch-falls-through-to-body", "feature/2024-fix", "closes #55", "issue-55"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if got := FromBranchOrBodyRef(c.branch, c.body).ID; got != c.want {
+				t.Errorf("Ref ID = %q, want %q", got, c.want)
+			}
 			if got := FromBranchOrBody(c.branch, c.body); got != c.want {
 				t.Errorf("FromBranchOrBody(%q, %q) = %q, want %q", c.branch, c.body, got, c.want)
 			}

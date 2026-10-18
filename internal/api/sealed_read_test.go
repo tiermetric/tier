@@ -83,8 +83,14 @@ func TestSealedRead_NoSealerServesLiveOutput(t *testing.T) {
 		t.Errorf("no sealer: %d periods sealed, want 0", n)
 	}
 
-	plain, _, _ := newSealFixture(t)
+	plain, plainDB, _ := newSealFixture(t)
 	sealed, db, _ := newSealedReadHandler(t)
+	// The compared fixtures have identical installation provenance.
+	for _, fixture := range []*store.DB{plainDB, db} {
+		if _, err := rawSealStore(t, fixture).Exec(`UPDATE tier_migrations SET applied_at='2026-05-01 00:00:00' WHERE name=?`, store.QualityTriggerCutover); err != nil {
+			t.Fatal(err)
+		}
+	}
 	plain.SetAggregation(scoring.AggregationDeveloper, 0)
 	sealed.SetAggregation(scoring.AggregationDeveloper, 0)
 	want := sealedGet(t, plain, "/api/v1/scores"+window)

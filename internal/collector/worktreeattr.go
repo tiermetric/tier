@@ -22,10 +22,9 @@ type messageAttribution struct {
 
 // worktreeResolver attributes the messages of ONE transcript file, in file
 // order, by the #823 priority: the message's cwd in a linked worktree, then the
-// worktree its own tool paths name, then the carry, then today's rule. It holds
-// the carry latch, so use one per file. It reads the disk only through its
-// index, never logs, and never reads a group's stream label (Sidechain, Agent):
-// a subagent file carries across its whole length like any other.
+// worktree its own tool paths name, then carry for sidechain groups only,
+// then today's rule. Parent groups never use carry. The carry latch is per
+// file. It reads the disk only through its index and never logs.
 type worktreeResolver struct {
 	index *worktreeIndex
 	now   time.Time // the clock branchAt measures the reflog's expiry horizon from
@@ -50,7 +49,7 @@ func (r *worktreeResolver) resolve(g messageGroup, cwd, gitBranch string) messag
 	if !isNetworkPath(cwd) {
 		if a, decided := r.cwdArm(g, cwd, gitBranch); decided {
 			if ok && direct.Class == worktreeLinked {
-				// branchOf also clears a carry it cannot read.
+				// Unreadable tool-path branches clear only sidechain carry.
 				if b := r.branchOf(direct, g, store.AttributionRuleWorktreeToolPath); a.Foreign {
 					return b
 				}
@@ -64,7 +63,7 @@ func (r *worktreeResolver) resolve(g messageGroup, cwd, gitBranch string) messag
 	if ok {
 		return r.branchOf(direct, g, store.AttributionRuleWorktreeToolPath)
 	}
-	if r.carry.Class == worktreeLinked {
+	if g.Sidechain && r.carry.Class == worktreeLinked {
 		return r.branchOf(r.carry, g, store.AttributionRuleCarry)
 	}
 	return messageAttribution{}
@@ -88,12 +87,13 @@ func (r *worktreeResolver) cwdArm(g messageGroup, cwd, gitBranch string) (messag
 // observe classifies g's paths. It returns the one linked worktree they name,
 // if they name exactly one and nothing else that is not neutral, or
 // resolvedForeignWorktree if every path that is not neutral is in a linked
-// worktree of an unconfigured repo, and updates the carry: neutral paths leave
-// it; a path in a main checkout, a foreign repo, an unresolvable tree (another
-// uid's worktree included), a second worktree in the same message, or a group
-// whose paths may be incomplete clears it; a worktree other than the carried
-// one clears it; the carried worktree, or any worktree when nothing is
-// carried, sets it. A foreign worktree never sets it: it has no Root to carry.
+// worktree of an unconfigured repo. Only sidechain groups update the carry:
+// neutral paths leave it; a path in a main checkout, a foreign repo, an
+// unresolvable tree (another uid's worktree included), a second worktree in
+// the same message, or a group whose paths may be incomplete clears it; a
+// worktree other than the carried one clears it; the carried worktree, or any
+// worktree when nothing is carried, sets it. A foreign worktree never sets it:
+// it has no Root to carry.
 func (r *worktreeResolver) observe(g messageGroup) (pathClassification, bool) {
 	var one pathClassification
 	named, foreign, reset := false, false, g.Truncated
@@ -111,13 +111,19 @@ func (r *worktreeResolver) observe(g messageGroup) (pathClassification, bool) {
 	}
 	switch {
 	case reset || (named && foreign):
-		r.carry = pathClassification{}
+		if g.Sidechain {
+			r.carry = pathClassification{}
+		}
 		return pathClassification{}, false
 	case foreign:
-		r.carry = pathClassification{}
+		if g.Sidechain {
+			r.carry = pathClassification{}
+		}
 		return resolvedForeignWorktree, true
 	case !named:
 		return pathClassification{}, false
+	case !g.Sidechain:
+		return one, true
 	case r.carry.Class == worktreeLinked && r.carry != one:
 		r.carry = pathClassification{}
 	default:
@@ -140,11 +146,14 @@ func (r *worktreeResolver) branchIn(c pathClassification, g messageGroup) (strin
 
 // branchOf is branchIn for the tool-path and carry arms. A branch it cannot
 // read, or a harness worktree name (no signal: #490's inheritance decides), is
-// today's rule and clears the carry, never kept stale.
+// today's rule and clears the carry only for sidechain groups. Parent groups
+// leave the carry unchanged.
 func (r *worktreeResolver) branchOf(c pathClassification, g messageGroup, rule store.AttributionRule) messageAttribution {
 	b, ok := r.branchIn(c, g)
 	if !ok || IsHarnessWorktreeBranch(b) {
-		r.carry = pathClassification{}
+		if g.Sidechain {
+			r.carry = pathClassification{}
+		}
 		return messageAttribution{}
 	}
 	return messageAttribution{Rule: rule, Target: c.Target, Branch: b}

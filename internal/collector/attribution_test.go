@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,30 +339,36 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 		name    string
 		subject string
 		want    string
+		keys    string
 	}{
-		{"tracker_token", "docs(rulings): record ladder rung REL-4", "REL-4"},
-		{"tracker_key", "fix: attribution PROJ-123", "PROJ-123"},
-		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", "PROJ-123"},
-		{"bare_pr_number", "Merge pull request #909 from feature/rulings", ""},
-		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", ""},
-		{"closes", "fix: attribution (closes #12)", "issue-12"},
-		{"close_with_pr_number", "fix: attribution closes #12 (#909)", "issue-12"},
-		{"fixes", "fix: attribution (fixes #1017)", "issue-1017"},
-		{"resolves", "fix: attribution (resolves #1017)", "issue-1017"},
-		{"close", "fix: attribution (close #1017)", "issue-1017"},
-		{"fix", "fix: attribution (fix #1017)", "issue-1017"},
-		{"resolve", "fix: attribution (resolve #1017)", "issue-1017"},
-		{"closed", "fix: attribution (closed #12)", "issue-12"},
-		{"fixed", "fix: attribution (fixed #12)", "issue-12"},
-		{"resolved", "fix: attribution (resolved #12)", "issue-12"},
-		{"past_tense_case_insensitive", "fix: attribution (FiXeD #12)", "issue-12"},
-		{"prefixes", "docs: prefixes #909", ""},
-		{"discloses", "docs: discloses #909", ""},
-		{"mixed_references", "docs: REL-4 and #909 (CLOSES #1017) (#909)", "issue-1017"},
-		{"multiple_directives", "fix: attribution (closes #1017, fixes #42)", "issue-1017"},
+		{"tracker_token", "docs(rulings): record ladder rung REL-4", "", ""},
+		{"tracker_key", "fix: attribution PROJ-123", "", ""},
+		{"tracker_key_with_pr_number", "fix: attribution PROJ-123 (#909)", "", ""},
+		{"bare_pr_number", "Merge pull request #909 from feature/rulings", "", ""},
+		{"parenthesized_pr_number", "docs(rulings): record ruling (#909)", "", ""},
+		{"closes", "fix: attribution (closes #12)", "issue-12", ""},
+		{"close_with_pr_number", "fix: attribution closes #12 (#909)", "issue-12", ""},
+		{"fixes", "fix: attribution (fixes #1017)", "issue-1017", ""},
+		{"resolves", "fix: attribution (resolves #1017)", "issue-1017", ""},
+		{"close", "fix: attribution (close #1017)", "issue-1017", ""},
+		{"fix", "fix: attribution (fix #1017)", "issue-1017", ""},
+		{"resolve", "fix: attribution (resolve #1017)", "issue-1017", ""},
+		{"closed", "fix: attribution (closed #12)", "issue-12", ""},
+		{"fixed", "fix: attribution (fixed #12)", "issue-12", ""},
+		{"resolved", "fix: attribution (resolved #12)", "issue-12", ""},
+		{"past_tense_case_insensitive", "fix: attribution (FiXeD #12)", "issue-12", ""},
+		{"prefixes", "docs: prefixes #909", "", ""},
+		{"discloses", "docs: discloses #909", "", ""},
+		{"mixed_references", "docs: REL-4 and #909 (CLOSES #1017) (#909)", "issue-1017", ""},
+		{"multiple_directives", "fix: attribution (closes #1017, fixes #42)", "issue-1017", ""},
+		{"configured_tracker_key", "fix: attribution PROJ-123", "PROJ-123", "PROJ"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			g, err := issueref.NewGrammar(c.keys)
+			if err != nil {
+				t.Fatal(err)
+			}
 			repo := initGitRepoForLog(t)
 			const branch = "feature/subject"
 			for _, args := range [][]string{
@@ -375,7 +382,7 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 				}
 			}
 			since := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-			commits, err := gitLog(context.Background(), repo, since)
+			commits, err := gitLogWithGrammar(context.Background(), repo, since, g)
 			if err != nil {
 				t.Fatalf("gitLog: %v", err)
 			}
@@ -389,28 +396,43 @@ func TestGitLogSubjectIssueReferences(t *testing.T) {
 			if commit == nil {
 				t.Fatalf("gitLog missing subject %q", c.subject)
 			}
+			wantRule := issueref.Rule("")
+			if strings.HasPrefix(c.want, "issue-") {
+				wantRule = issueref.RuleCommitCloseDirective
+			} else if c.want != "" {
+				wantRule = issueref.RuleCommitConfiguredKey
+			}
+			if commit.IssueRule != wantRule {
+				t.Errorf("git log rule=%q want %q", commit.IssueRule, wantRule)
+			}
 			if commit.IssueID != c.want {
 				t.Errorf("subject %q IssueID = %q, want %q", c.subject, commit.IssueID, c.want)
 			}
 			var wantPR *int
-			if c.want == "" {
+			if c.want == "" && strings.Contains(c.subject, "#909") {
 				n := 909
 				wantPR = &n
 			}
 			if (commit.PRNumber == nil) != (wantPR == nil) || (wantPR != nil && *commit.PRNumber != *wantPR) {
 				t.Fatalf("commit pr_number = %v, want %v", commit.PRNumber, wantPR)
 			}
-			events := joinSessionsToCommits([]sessionSummary{{GitBranch: branch, Messages: []messageUsage{{gitBranch: branch, timestamp: commit.Timestamp, model: "claude-sonnet-4", input: 10}}}}, commits, "alice", "acme/widgets")
+			events := joinSessionsToCommits([]sessionSummary{{GitBranch: branch, Messages: []messageUsage{{gitBranch: branch, timestamp: commit.Timestamp, model: "claude-sonnet-4", input: 10}}}}, commits, "alice", "acme/widgets", g)
 			if len(events) != 1 || events[0].Repo != "acme/widgets" || events[0].BranchHash == nil || *events[0].BranchHash != *issueref.BranchHash("acme/widgets", branch) || (events[0].PRNumber == nil) != (wantPR == nil) || (wantPR != nil && *events[0].PRNumber != *wantPR) {
 				t.Fatalf("emitted events = %+v, want pr_number %v", events, wantPR)
 			}
-			resolver, err := NewIssueResolver(context.Background(), repo, since)
+			resolver, err := NewIssueResolver(context.Background(), repo, since, g)
 			if err != nil {
 				t.Fatalf("NewIssueResolver: %v", err)
+			}
+			if events[0].IssueRule != wantRule {
+				t.Fatalf("event rule=%q want %q", events[0].IssueRule, wantRule)
 			}
 			want := c.want
 			if want == "" {
 				want = UnattributedNoIssue
+			}
+			if got := resolver.ResolveRef(branch, commit.Timestamp); got.ID != want || got.Rule != wantRule {
+				t.Fatal(got, want, wantRule)
 			}
 			if got := resolver.Resolve(branch, commit.Timestamp); got != want {
 				t.Errorf("Resolve(%q) = %q, want %q", branch, got, want)
@@ -436,7 +458,7 @@ func TestResolveMessageAttribution_PRNumberRequiresFullBranch(t *testing.T) {
 			commits := []gitCommit{{Branches: []string{tc.commitBranch}, Timestamp: ts, PRNumber: &pr, IssueID: tc.issue}}
 			events := joinSessionsToCommits([]sessionSummary{{GitBranch: tc.branch,
 				Messages: []messageUsage{{timestamp: ts, model: "claude-sonnet-4", input: 10}},
-			}}, commits, "alice", "acme/a")
+			}}, commits, "alice", "acme/a", issueref.Grammar{})
 			if len(events) != 1 {
 				t.Fatalf("events = %v, want one", events)
 			}
@@ -470,7 +492,7 @@ func TestResolveMessageAttribution_PrefixedMainlineHasNoPRNumber(t *testing.T) {
 				events := joinSessionsToCommits([]sessionSummary{{GitBranch: messageBranch,
 					Messages: []messageUsage{{gitBranch: messageBranch, timestamp: ts,
 						model: "claude-sonnet-4", input: 10}},
-				}}, commits, "alice", "acme/a")
+				}}, commits, "alice", "acme/a", issueref.Grammar{})
 				if len(events) != 1 {
 					t.Fatalf("events = %v, want one", events)
 				}

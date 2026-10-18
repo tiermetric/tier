@@ -1,5 +1,7 @@
 # Capturing open-weights / self-hosted models
 
+**v0.6.1 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+
 **Audience:** operators who run open-weights models (Llama, Qwen, DeepSeek, Mixtral)
 through a hosted per-token API (OpenRouter, Together, Fireworks, Groq, DeepInfra) or a
 self-hosted server (Ollama, vLLM) and want TIER to price that spend.
@@ -20,16 +22,16 @@ through `http://<tierd>/openai/` instead of the provider directly:
 
 ```sh
 # Local Ollama
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --api-token @/run/secrets/tier-token \
   --openai-target http://localhost:11434/v1
 
 # vLLM OpenAI server
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --openai-target http://vllm.internal:8000/v1
 
 # A per-token host (host-qualified rates apply — see §4)
-tierd serve --aggregation developer \
+tierd serve --aggregation team \
   --openai-target https://openrouter.ai/api/v1
 ```
 
@@ -390,7 +392,7 @@ deployment uses `@file`.)
 ```sh
 ollama serve &                     # :11434
 ollama pull llama3.1:8b
-tierd serve --aggregation developer --api-token secret \
+tierd serve --aggregation team --api-token secret \
   --openai-target http://localhost:11434/v1 &
 
 curl -s http://localhost:8080/openai/chat/completions \
@@ -399,11 +401,15 @@ curl -s http://localhost:8080/openai/chat/completions \
   -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"hi"}]}' | jq .usage
 ```
 
-Then confirm the event landed:
+Using the separate `sqlite3` CLI, confirm at least one matching row in the default
+serve database (the count should increase after the request):
 
 ```sh
-curl -s http://localhost:8080/api/v1/events -H "Authorization: Bearer secret" | tail
+sqlite3 -readonly -cmd '.timeout 5000' "$HOME/.tier/tier.db" \
+  "SELECT COUNT(*) FROM token_events WHERE source = 'proxy' AND host = 'localhost' AND model = 'llama3.1:8b';"
 ```
+
+`/api/v1/events` is not used because team mode refuses per-event export with `403`.
 
 `localhost` has no seeded host row, so `llama3.1:8b` prices via the size-class heuristic
 (`8b` → `self-hosted-medium`) with a one-time WARN in tierd's log — expected, and visible

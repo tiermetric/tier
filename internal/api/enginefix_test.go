@@ -19,10 +19,10 @@ func TestEngineFixExportLegacyBytes(t *testing.T) {
 	a, b, c := 10, 2, 1
 	o.SetDiffStats(&a, &b, &c)
 	o.Projection = &store.OutcomeProjection{RawWeight: "3/1", AllocatedPoints: 1, RuleVersion: "event3-v2"}
-	// Exact main export.go wire fixtures: all 18 legacy columns and JSON keys,
+	// Exact export fixtures preserve the 18-column prefix and append issue_rule,
 	// including field order, empty push_day and the trailing newline.
-	const legacyCSV = "id,ts,developer,issue_id,pr_number,weight,weight_source,quality,merge_commit_sha,additions,deletions,changed_files,source,work_type,work_type_source,repo,push_day,quality_status\n7,2026-10-01T12:00:00Z,alice,issue-9,22,3,label,1,merge-sha,10,2,1,github,bug,label,acme/app,,final\n"
-	const legacyJSON = "{\"next_cursor\":\"\",\"outcomes\":[{\"id\":7,\"ts\":\"2026-10-01T12:00:00Z\",\"developer\":\"alice\",\"issue_id\":\"issue-9\",\"pr_number\":22,\"weight\":3,\"weight_source\":\"label\",\"quality\":1,\"merge_commit_sha\":\"merge-sha\",\"additions\":10,\"deletions\":2,\"changed_files\":1,\"source\":\"github\",\"work_type\":\"bug\",\"work_type_source\":\"label\",\"repo\":\"acme/app\",\"push_day\":\"\",\"quality_status\":\"final\"}]}\n"
+	const legacyCSV = "id,ts,developer,issue_id,pr_number,weight,weight_source,quality,merge_commit_sha,additions,deletions,changed_files,source,work_type,work_type_source,repo,push_day,quality_status,issue_rule\n7,2026-10-01T12:00:00Z,alice,issue-9,22,3,label,1,merge-sha,10,2,1,github,bug,label,acme/app,,final,legacy\n"
+	const legacyJSON = "{\"next_cursor\":\"\",\"outcomes\":[{\"id\":7,\"ts\":\"2026-10-01T12:00:00Z\",\"developer\":\"alice\",\"issue_id\":\"issue-9\",\"pr_number\":22,\"weight\":3,\"weight_source\":\"label\",\"quality\":1,\"merge_commit_sha\":\"merge-sha\",\"additions\":10,\"deletions\":2,\"changed_files\":1,\"source\":\"github\",\"work_type\":\"bug\",\"work_type_source\":\"label\",\"repo\":\"acme/app\",\"push_day\":\"\",\"quality_status\":\"final\",\"issue_rule\":\"legacy\"}]}\n"
 	for _, tc := range []struct {
 		name, want string
 		write      func(*httptest.ResponseRecorder)
