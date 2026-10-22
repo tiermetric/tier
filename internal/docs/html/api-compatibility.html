@@ -88,6 +88,119 @@ separately.</li>
 <li><strong>Encoding:</strong> UTF-8 JSON unless noted. The four bulk exports also emit CSV via
 <code>Accept: text/csv</code>.</li>
 </ul>
+<h2 id="time-to-merge-1342-v062">Time to merge (#1342, v0.6.2)</h2>
+<p><code>GET /api/v1/time-to-merge</code> is <strong>read-scoped</strong>, including on the read-only
+server. It is a separate live descriptive measure, <strong>not part of the sealed
+report and not covered by <code>verify</code></strong>. Calling it never writes or changes a seal
+or the <code>/scores</code> response. Late evidence can change this live measure after a
+score month is sealed; its populations must not be reconstructed from sealed
+score counts. Its definition is <code>pr_created_to_merged</code>, labelled
+<strong>PR created → merged (includes draft time)</strong>: <code>merged_at − created_at</code>, using
+both captured timestamps, including timestamps stored by backfill. It never
+substitutes outcome <code>ts</code> for merge evidence. Quality, points, cost, labels and
+correction eligibility do not weight or filter a duration.</p>
+<p>In team/division modes, parameters and the sealed-read gate match <code>/scores</code>:
+only <code>?period=YYYY-MM</code> is accepted, with omission selecting the latest sealed
+month. Free <code>since</code>, <code>until</code> and <code>before</code> bounds are refused with <code>400</code>; no
+sealer returns <code>503</code>. The figures for a sealed month are computed from the
+stored outcomes at read time and are <strong>NOT part of the sealed report</strong>. The
+dashboard passes the same <code>period</code> as its <code>/scores</code> request.</p>
+<p>The synthetic demo keeps the existing <code>/scores</code> window helpers: <code>since</code>,
+<code>until</code>, and <code>before</code> (the legacy alias for <code>until</code>), with UTC whole-day bounds,
+half-open <code>[since, until)</code> selection by outcome <code>ts</code>, default <code>since</code> 90 days
+ago at UTC midnight, and omitted <code>until</code> meaning open-ended. Invalid/unknown
+parameters return <code>400</code>; retention violations return <code>422</code>. This is an
+org-wide read: <code>repo</code>, <code>team</code> and <code>work_type</code> are not accepted. Aggregation mode
+is the server&#39;s existing setting, never a client <code>mode</code> parameter. Real-data
+developer mode returns <code>403</code> before store reads. The synthetic demo uses the
+team fold and echoes <code>window.aggregation: &#34;team&#34;</code>; its four synthetic authors
+are below k=5, so its tile is withheld rather than publishing group figures.</p>
+<p>The frozen wire shape is:</p>
+<pre><code>{
+  &#34;definition&#34;: &#34;pr_created_to_merged&#34;,
+  &#34;window&#34;: {&#34;since&#34;: &#34;2026-10-01&#34;, &#34;until&#34;: &#34;2026-11-01&#34;, &#34;aggregation&#34;: &#34;team&#34;},
+  &#34;groups&#34;: [{&#34;team&#34;: &#34;Engineering&#34;, &#34;count&#34;: 10, &#34;median_seconds&#34;: 14400, &#34;p90_seconds&#34;: 86400, &#34;null_reason&#34;: &#34;&#34;}],
+  &#34;residual&#34;: {&#34;team&#34;: &#34;other&#34;, &#34;count&#34;: null, &#34;median_seconds&#34;: null, &#34;p90_seconds&#34;: null, &#34;null_reason&#34;: &#34;authors&lt;k&#34;},
+  &#34;total&#34;: {&#34;count&#34;: null, &#34;median_seconds&#34;: null, &#34;p90_seconds&#34;: null, &#34;null_reason&#34;: &#34;withheld_with_group&#34;},
+  &#34;excluded&#34;: {&#34;count&#34;: 0, &#34;reasons&#34;: {&#34;no_created_at_before_capture&#34;: 0, &#34;no_created_at&#34;: 0, &#34;no_merged_at&#34;: 0, &#34;bot&#34;: 0}, &#34;null_reason&#34;: &#34;&#34;}
+}
+</code></pre>
+<p>The row key is <strong><code>team</code></strong>, matching <code>/scores</code> (also in division mode);
+<code>window.aggregation</code> identifies its level. <code>groups</code> is always an array in label
+order; <code>residual</code> is an object with key <code>other</code> only when the shared fold
+actually emits that cohort, and is otherwise omitted. Omitted <code>until</code> is not
+echoed. A group or residual with no included PRs has null figures with
+<code>null_reason: &#34;no_prs&#34;</code>, which does not withhold the total. For nonempty figures,
+counts and both statistics are <code>null</code> with <code>null_reason: &#34;authors&lt;k&#34;</code>
+unless at least k distinct <strong>census-counted developers each authored an included
+PR</strong> in that figure. k has the same <code>MinKAnonymity</code> clamp as <code>/scores</code>.</p>
+<p>The endpoint shares the score window load, canonical aliases, dated membership,
+census and <code>PreFold</code>/<code>AggregateFolded</code> rules. A group folded in <code>/scores</code> folds
+into the same residual here; if <code>/scores</code> withholds all rows because its
+residual is unsafe, this endpoint withholds them too. It may withhold more:
+a named score group failing the PR-author floor keeps its row with null
+figures. Its PRs <strong>never move into the residual</strong>. The residual independently
+requires k counted PR authors. No org-wide duration total is implied by a sum
+of group medians.</p>
+<p><strong>Strict protected org total.</strong> <code>total</code> has <code>count</code>, <code>median_seconds</code>,
+<code>p90_seconds</code> and <code>null_reason</code>, with no <code>team</code> key. It is computed over every
+included PR in the window, using the same statistic rules and k distinct
+counted PR authors at org level. Below org-k, all three figures are <code>null</code>
+with <code>null_reason: &#34;authors&lt;k&#34;</code>. An empty total instead has null figures
+with <code>null_reason: &#34;no_prs&#34;</code>. Otherwise, whenever <strong>a group or residual with
+included PRs fails its floor</strong>, all three total figures are <code>null</code> with
+<code>null_reason: &#34;withheld_with_group&#34;</code>. An absent residual or a cohort with
+zero included PRs does not withhold the total. No group failing the PR-author
+floor is added to that residual. This
+strict complementary suppression prevents subtracting a published total to
+recover a hidden cohort, mirroring <code>/scores</code> (#593). A group&#39;s short-sample
+p90 (<code>n&lt;10</code>) is not a withheld cohort: its count and median are published, and
+it does not alone suppress <code>total</code>. The total&#39;s own p90 is <code>null</code> with reason
+<code>&#34;n&lt;10&#34;</code> when its included n &lt; 10.</p>
+<p>The dashboard tile beside the headline says <strong>Time to merge · PR created →
+merged (includes draft time)</strong>. A published total shows <code>median X h · N of M merged PRs measured</code>, with N = <code>total.count</code> and M = <code>total.count + excluded.count</code>, both org-wide. M is this defined reporting denominator;
+the exclusions can include push-only/API rows, so it is not a separate census
+of GitHub PRs. A withheld total or excluded block explicitly says
+<strong>Time to merge: withheld to
+protect small groups</strong>, without numbers or a denominator. An empty window
+with no exclusions says <strong>Time to merge: no merged PRs measured</strong>; malformed
+or missing figures say <strong>Time to merge: unavailable</strong>. p90 appears on hover
+and in off-screen screen-reader text for n ≥ 10. The tile is neutral, wraps at
+390px, and states:
+&#34;smaller or later-created PRs merge faster; not a quality measure&#34;.</p>
+<p>Statistics are unweighted whole seconds. The median requires n ≥ k and is the
+middle value for odd n, or the <strong>arithmetic mean of the two middle durations</strong>
+for even n. Durations retain subsecond precision through that calculation;
+the result is truncated to integer seconds. p90 is nearest rank
+<code>sorted[ceil(0.9*n)-1]</code>, truncated to integer seconds. For n &lt; 10, count and
+median can be present but p90 is <code>null</code> with <code>null_reason: &#34;n&lt;10&#34;</code> applying
+<strong>only to p90</strong>. No mean duration is published.</p>
+<p><code>excluded.count</code> and its four reason counts cover the <strong>whole org only</strong>;
+they never appear per row. The author set covers every outcome in the
+population, including excluded evidence, using the canonical census counting
+rule and excluding bots and unattributed identities. Below k counted authors,
+or whenever <code>/scores</code> suppresses its residual, <code>excluded.count</code> and
+<code>excluded.reasons</code> are null with <code>excluded.null_reason: &#34;authors&lt;k&#34;</code>. An empty
+population with no included PRs or exclusions uses <code>&#34;no_prs&#34;</code> with the same
+null fields; a published block has <code>null_reason: &#34;&#34;</code>. Each excluded outcome
+is counted once, in this precedence order:</p>
+<ol>
+<li><code>bot</code>: the same canonical bot classification as the census (captured GitHub
+type, fixed login list or <code>[bot]</code> suffix), including alias-carried marks.</li>
+<li><code>no_created_at_before_capture</code>: a webhook/backfill PR with NULL <code>created_at</code>
+and outcome <code>ts</code> before 2026-10-11, when commit <code>840fa8da</code> introduced capture.
+This is the column&#39;s release date, not this installation&#39;s upgrade date;
+later upgrades classify missing evidence on or after that date as
+<code>no_created_at</code>. It does not invent a creation date.</li>
+<li><code>no_created_at</code>: other NULL creation evidence, including push-only/API rows,
+and a PR whose <code>created_at</code> fell after its merge. Both the webhook and
+backfill store NULL in that case; the read also rejects inverted evidence.</li>
+<li><code>no_merged_at</code>: creation evidence exists but merge evidence is NULL.</li>
+</ol>
+<p>Pseudo-developer rows are dropped as on <code>/scores</code>. Webhook and backfill sources
+are both included when both timestamps are present, including old merges
+captured by a later backfill. Smaller or later-created PRs merge faster; not a
+quality measure.</p>
 <h2 id="pricing-provenance-additions-1231-1232">Pricing provenance additions (#1231, #1232)</h2>
 <p><code>POST /events</code> accepts optional <code>cache_write_evidence</code> (<code>nested</code> or <code>legacy</code>; omitted means unknown). <code>legacy</code> with a nonzero 1h write count is refused. The receiver derives costs and basis; clients cannot declare a pricing snapshot or rule. Shippers preserve the evidence on current receivers and retry once without additive provenance/PR fields only for an exact unknown-field 400 from an older receiver. Other 400s retain their usual failure behavior.</p>
 <p><code>GET /events</code> appends <code>pricing_basis</code>, <code>rate_snapshot</code> and <code>cache_write_evidence</code> to JSON and CSV; the previous columns retain their positions. Bases include <code>token_derived</code>, <code>guessed_estimate</code>, <code>caller_authoritative</code>, <code>aggregate_approx</code>, <code>legacy_aggregate</code> and <code>basis_unavailable</code>; historical nulls export empty strings. Snapshot identities resolve inside the operator&#39;s database to immutable effective rates and a retained rule implementation.</p>
@@ -934,7 +1047,9 @@ until an identity layer exists (#65).</li>
 so the override can only ever touch a row whose stored <code>source</code> is
 <code>api</code> -- the manual-import lane. Automatically captured spend (every
 non-<code>api</code> source: <code>jsonl</code>, <code>proxy</code>, <code>codex-rollout</code>, <code>opencode</code>, <code>muse</code>,
-<code>copilot-api</code>, and the org pollers) is unreachable from this endpoint.</li>
+legacy stored <code>copilot-api</code> rows, and the org pollers <code>anthropic-admin</code>,
+<code>openai-usage</code>, <code>copilot-billing</code>, and <code>cursor-admin</code>) is unreachable from
+this endpoint.</li>
 <li><code>override_actor</code> is <strong>a self-asserted claim, not a verified identity</strong>.
 It is unvalidated free text the caller chooses, written verbatim into the
 audit ledger and the operator log. <strong>The audit trail records who the
@@ -1849,8 +1964,10 @@ never sorts the rows by TIER (#830); the v0.4.1 dashboard put ranked rows first,
 highest TIER first. <code>cost_per_point</code> (#239) is
 <code>total_cost_usd / weighted_points</code> -- the inverse-unit dual of <code>tier</code>
 (numerically <code>1000/tier</code>); it is <strong><code>null</code> on a zero-point row</strong> (#472) so &#34;no
-accepted outcome&#34; is not encoded as the most-efficient <code>0</code>, while a genuine
-zero-cost (FREE) row keeps its honest <code>0</code>. <code>cost_per_point_ci_low/high</code>
+accepted outcome&#34; is not encoded as the most-efficient <code>0</code>, while a
+zero-recorded-cost row (shown as &#34;No recorded AI cost&#34;, often a capture gap rather
+than free work) keeps <code>0</code>, meaning no recorded cost, not an efficiency reading.
+<code>cost_per_point_ci_low/high</code>
 are its nominal 95% self-relative bootstrap bounds (coverage unvalidated), the reciprocal (ends swapped) of
 the <code>tier</code> CI -- <code>0</code> for unranked rows. See <a href="rubric.html" rel="nofollow">docs/rubric.md</a>.</li>
 <li><strong>#1233 interval withholding (v0.6.1 wire-contract amendment).</strong> On

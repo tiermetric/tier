@@ -478,7 +478,7 @@ A developer who executes all of these behaviors simultaneously will have an arti
 |----|-------------|----------|------------|----------------------|
 | G-01 | Cherry-picking high-weight issues | High | Common | Partial |
 | G-02 | Off-books AI usage (zero denominator) | Critical | Common | No (requires policy) |
-| G-03 | Issue splitting / weight fragmentation | High | Occasional | Yes |
+| G-03 | Issue splitting / weight fragmentation | High | Occasional | Proposed, not built (parent/leaf-issue rule) |
 | G-04 | Quality score window exploitation | High | Occasional/Common | Yes (extend window) |
 | G-05 | Token-minimization via prompt engineering | Medium | Common | No (by design) |
 | G-06 | Deferred token attribution | Medium | Occasional | Partial |

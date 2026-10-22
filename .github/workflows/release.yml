@@ -11,7 +11,7 @@
 # ⚠️ It used to add "and works identically for forkers". Since #678 it does NOT:
 # the publish/release jobs are pinned to this repository by name, so a fork that
 # pushes a `v*` tag gets a refusal from `publish-image` and skipped release jobs.
-# A forker who wants the lane must repoint those three repo terms at their own
+# A forker who wants the lane must repoint those repo terms at their own
 # repository. The BUILD and SCAN half still works anywhere.
 # TIER has zero private dependencies (go.mod
 # is 100% public and the Dockerfile is a plain `go mod download` + `go build`),
@@ -33,12 +33,13 @@
 #      darwin/amd64, linux/amd64, linux/arm64, windows/amd64), CVE-scans each
 #      binary before archiving, checksums and attests the archives, and uploads
 #      them to the Release. Windows binaries carry the .exe suffix inside the archive.
+#   4. homebrew-render / homebrew -- render after both CVE gates, then update the tap with an App token after release-environment approval.
 #
 # SHA-PINNING: every action is pinned to a 40-char commit SHA, never a mutable
 # tag, so a tag re-cut cannot silently re-point this lane at attacker content
 # (cf. the tj-actions tag-rewrite supply-chain compromise, Mar 2025). The
 # trailing `# vX.Y.Z` preserves the human-readable version; each SHA was verified
-# to peel to that tag upstream (2026-07-17).
+# to peel to that tag upstream (2026-07-17; create-github-app-token bcd2ba49… = v3.2.0, upload-artifact 043fb46d… = v7.0.1, download-artifact 3e5f45b2… = v8.0.1 verified 2026-10-20).
 #
 # NOTE: the image publishes to `ghcr.io/tiermetric/tierd`. The GitHub org owns
 # that GHCR namespace (it is the repo owner). The container image is linux/amd64
@@ -440,15 +441,17 @@ jobs:
           #
           # Raised 1.26.9 -> 1.27.2 after v0.5.2 (#1140), in lockstep with the
           # module floors and Docker builder. Go 1.27.0–1.27.1 carry those advisories.
+          # Raised 1.27.2 -> 1.27.3 (#1344, GO-2026-6809)
+          # Fixes crypto/x509; CI must build on the same floor as the image.
           #
           # ⛔ NEVER loosen this to "1.27" (or "1.26"). The EXACT three-part version
-          # makes the pin authoritative: setup-go resolves "1.27.2" by semver
+          # makes the pin authoritative: setup-go resolves "1.27.3" by semver
           # EQUALITY, so nothing else can match. "1.27" becomes the range
-          # >=1.27.0 <1.28.0-0, and any cached 1.27.0/1.27.1 on the runner then
-          # satisfies it -- re-admitting the advisories 1.27.2 fixes (the same way
+          # >=1.27.0 <1.28.0-0, and any cached 1.27.0/1.27.1/1.27.2 on the runner then
+          # satisfies it -- re-admitting the advisories 1.27.3 fixes (the same way
           # 1.26.5 came back under #683). check-latest:false only skips a manifest
           # round-trip; it is NOT what holds the pin.
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           check-latest: false
 
       # Same tool as Makefile lint; install for the runner before setting the
@@ -494,3 +497,112 @@ jobs:
           version="${GITHUB_REF_NAME}"
           # --clobber makes the upload idempotent on re-run.
           gh release upload "${version}" tierd-*.tar.gz tierd-*.tar.gz.sha256 --clobber
+
+  # Mirror tags only: `==` deliberately has the opposite polarity to the
+  # scheduled workflows, so each job that writes states its own mirror guard.
+  homebrew-render:
+    name: Render the Homebrew formula
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') && github.repository == 'tiermetric/tier'
+    needs: [publish-image, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.formula.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Hash the source archive and render the formula
+        id: formula
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/tierd-source.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors \
+            "https://github.com/tiermetric/tier/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" \
+            -o "$archive"
+          # get-tar-commit-id reads only the header; drain the rest so gzip does not die of SIGPIPE under pipefail.
+          commit=$(gzip -dc "$archive" | { git get-tar-commit-id; cat >/dev/null; })
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::Source archive commit $commit does not match GITHUB_SHA $GITHUB_SHA"
+            exit 1
+          fi
+          sha=$(sha256sum "$archive" | cut -d ' ' -f 1)
+          printf 'Source archive sha256: %s\n' "$sha"
+          scripts/render-homebrew-formula.sh "$GITHUB_REF_NAME" "$GITHUB_SHA" "$sha" "$RUNNER_TEMP/tierd.rb"
+          printf 'sha256=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the rendered formula
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: homebrew-formula
+          path: ${{ runner.temp }}/tierd.rb
+          retention-days: 7
+          if-no-files-found: error
+
+  homebrew:
+    name: Update the Homebrew tap
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') && github.repository == 'tiermetric/tier'
+    needs: homebrew-render
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download the rendered formula
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: homebrew-formula
+          path: ${{ runner.temp }}/formula
+
+      - name: Mint a token for the tap only
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: tiermetric
+          repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Commit and push the formula if changed
+        env:
+          TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
+          ARCHIVE_SHA256: ${{ needs.homebrew-render.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          # The helper reads the token from env only when Git requests credentials;
+          # neither the remote URL nor the cloned repository's config contains it.
+          tap_git() {
+            # shellcheck disable=SC2016 # Git expands TAP_TOKEN when running the helper.
+            git -c credential.helper= \
+              -c 'credential.helper=!f() { printf "%s\n" "username=x-access-token" "password=$TAP_TOKEN"; }; f' "$@"
+          }
+          tap_git clone --branch main --single-branch \
+            https://github.com/tiermetric/homebrew-tap.git "$RUNNER_TEMP/homebrew-tap"
+          cd "$RUNNER_TEMP/homebrew-tap"
+          if [ -f Formula/tierd.rb ]; then
+            current_version=$(sed -nE 's@^[[:space:]]*url "https://github\.com/tiermetric/tier/archive/refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz"[[:space:]]*$@\1@p' Formula/tierd.rb)
+            if [[ ! "$current_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Cannot parse the current tap version from Formula/tierd.rb."
+              exit 1
+            fi
+            oldest_version=$(printf '%s\n%s\n' "$current_version" "$GITHUB_REF_NAME" | sort -V | sed -n '1p')
+            if [ "$oldest_version" = "$GITHUB_REF_NAME" ] && [ "$current_version" != "$GITHUB_REF_NAME" ]; then
+              echo "::notice::Tap already has $current_version; refusing to roll back to $GITHUB_REF_NAME."
+              exit 0
+            fi
+          fi
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/formula/tierd.rb" Formula/tierd.rb
+          git add -- Formula/tierd.rb
+          if git diff --cached --quiet -- Formula/tierd.rb; then
+            echo "::notice::Homebrew formula is unchanged; nothing to commit or push."
+            exit 0
+          fi
+          git -c user.name="TIER maintainers" -c user.email=noreply@tiermetric.org \
+            -c commit.gpgsign=false commit -m "tierd ${GITHUB_REF_NAME}" \
+            -m "Source commit: ${GITHUB_SHA}; archive sha256: ${ARCHIVE_SHA256}"
+          tap_git push origin HEAD:main

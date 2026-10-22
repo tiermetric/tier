@@ -205,6 +205,9 @@ func seedDemo(ctx context.Context, db *store.DB) error {
 		for oi := range d.outcomes {
 			ts := now.AddDate(0, 0, -(base + oi*3))
 			d.outcomes[oi].Timestamp = ts
+			created := ts.Add(-time.Duration(12+di*6+oi) * time.Hour)
+			d.outcomes[oi].CreatedAt = &created
+			d.outcomes[oi].MergedAt = &ts
 			mergeAt[d.outcomes[oi].IssueID] = ts
 		}
 		for ei := range d.events {

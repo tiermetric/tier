@@ -7,6 +7,32 @@ reaches v1.
 
 ## Unreleased
 
+## 0.6.2 - 2026-10-22
+
+**Upgrade from v0.6.1:** No database schema change or migration; schema version stays 12. Source builds require Go 1.27.3 or newer.
+
+### Added
+
+- **New capture settings — experimental Copilot billing and Cursor Admin sources.** Configure `collectors.copilot_billing` for GitHub organisation AI-credit gross spend by mapped login/model and an unattributed org remainder (#1336, #1340). Use an installed GitHub App with Administration: Read-only (preferred), or an org-admin token. Configure `collectors.cursor_admin` with a team Admin API key for usage events on a Cursor team plan with Admin API access (Teams or Enterprise; Cursor decides which plans include it) (#1336, #1341). Cursor values token-based calls on models with an audited TIER rate at list rate, whether included-plan or usage-based; any other event uses Cursor's reported cents. BYO-key events and their Cursor fee are skipped. Individual Copilot Pro and individual Cursor accounts are not covered by these pollers. `tierd doctor --config <path>` adds `copilot_billing credential` (HTTP status, item count, auth mode) and `cursor_admin credential` (HTTP status, event count) checks without ingesting spend. Both sources are new in v0.6.2 and remain experimental.
+- Document per-plan source requirements, attribution limits and outbound hosts (`api.github.com`, including App token exchange, and `api.cursor.com`). Pin Cursor's live-observed `User API Key` BYO marker in a skip test (refs #1336, 4/4).
+- **Time to merge.** Add read-scoped `GET /api/v1/time-to-merge` and a dashboard tile for PR created → merged (including draft time), a live descriptive measure separate from the TIER score and sealed reports, with median and nearest-rank p90 in seconds (only p90 is null below 10 PRs once the k floor is met), a per-figure k-anonymity floor of distinct counted PR authors, withholding in parity with `/scores`, and protected totals that cannot expose a withheld group (#1348).
+- Add a Homebrew formula for macOS: `brew install tiermetric/tap/tierd` builds tierd from source (#1332).
+- The release job writes the Homebrew tap formula for stable mirror tags after the image and binary CVE gates, with the source archive checksum and mirror commit stamp; protected publication refuses a tap rollback (#1333).
+
+### Changed
+
+- Replace the dashboard's “FREE — yield unbounded” label with “No recorded AI cost”; missing recorded spend can reflect a capture gap (#1337).
+- Add the README's “What TIER does not measure” section, including account-specific Copilot/Cursor capture limits and the effect of missing usage on the ratio (#1338, #1349).
+- Add the README's “Is TIER right for you?” section describing fit and trusted-use limits (#1343).
+- Reconcile manager FAQ and peer-learning guidance with the real-data developer-mode refusal; fix the demo compare example to use dates inside the seeded range (#1324).
+
+### Fixed
+
+- Cursor Admin: a literal "null" service-account id (as Cursor's API sends it) no longer marks human usage as automation, so Cursor spend is attributed to mapped developers (#1353).
+- Name and log webhook body-read failures, join push-handler errors, and return 503 for a busy database only when every failure is lock contention; report Muse file-info errors (#1347).
+- 🔴 **BUILD REQUIREMENT: Go 1.27.3+ (#1344, #1346).** `GOTOOLCHAIN=local` refuses older toolchains; 1.27.2 carries GO-2026-6809 (crypto/x509), fixed in 1.27.3. Published v0.6.1 artifacts were built on 1.27.2; v0.6.2 ships on 1.27.3.
+- docs/webhook-setup.md: the signed test payload now uses `closes #999999999`; under v0.6.1's strict issue grammar the old `closes WEBHOOKTEST-000000` returned HTTP 204 but stored no outcome (#1325).
+
 ## 0.6.1 - 2026-10-18
 
 **ONE-WAY UPGRADE — upgrading from v0.6.0.** Before upgrading, run

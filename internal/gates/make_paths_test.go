@@ -33,7 +33,7 @@ func TestMakePathsWithSpaces(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Makefile"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, script := range []string{"e2e-summary.sh", "event3-replay.sh", "image-cve-rescan.sh", "seam-exercise.sh", "vet-386.sh"} {
+	for _, script := range []string{"e2e-summary.sh", "event3-replay.sh", "image-cve-rescan.sh", "seam-exercise.sh", "vet-386.sh", "render-homebrew-formula-selftest.sh"} {
 		stub := "#!/bin/sh\nprintf 'ran %s\\npath <%s>\\n' \"$*\" \"$0\"\n"
 		if err := os.WriteFile(filepath.Join(dir, "scripts", script), []byte(stub), 0o755); err != nil {
 			t.Fatal(err)
@@ -62,7 +62,7 @@ func TestMakePathsWithSpaces(t *testing.T) {
 		}
 	}
 
-	for _, target := range []string{"expect-head", "e2e-summary", "e2e-summary-selftest", "event3-replay", "cve-rescan", "cve-rescan-selftest", "lint", "seam-exercise", "check-full"} {
+	for _, target := range []string{"expect-head", "e2e-summary", "e2e-summary-selftest", "event3-replay", "cve-rescan", "cve-rescan-selftest", "homebrew-formula-selftest", "lint", "seam-exercise", "check-full"} {
 		t.Run(target, func(t *testing.T) {
 			cmd := exec.Command("make", target)
 			cmd.Dir = dir
@@ -85,9 +85,10 @@ func TestMakePathsWithSpaces(t *testing.T) {
 				t.Fatalf("make %s did not run its script:\n%s", target, out)
 			}
 			scripts := map[string][]string{
-				"seam-exercise": {"seam-exercise.sh"},
-				"event3-replay": {"event3-replay.sh"},
-				"check-full":    {"image-cve-rescan.sh", "e2e-summary.sh", "event3-replay.sh", "seam-exercise.sh"},
+				"seam-exercise":             {"seam-exercise.sh"},
+				"event3-replay":             {"event3-replay.sh"},
+				"homebrew-formula-selftest": {"render-homebrew-formula-selftest.sh"},
+				"check-full":                {"image-cve-rescan.sh", "e2e-summary.sh", "event3-replay.sh", "seam-exercise.sh"},
 			}
 			for _, script := range scripts[target] {
 				if !strings.Contains(out, "path <"+filepath.Join(physicalDir, "scripts", script)+">") &&
@@ -99,7 +100,7 @@ func TestMakePathsWithSpaces(t *testing.T) {
 				t.Fatalf("make %s lost lint cache path:\n%s", target, out)
 			}
 
-			if strings.HasSuffix(target, "-selftest") && !strings.Contains(out, "ran --selftest") {
+			if strings.HasSuffix(target, "-selftest") && target != "homebrew-formula-selftest" && !strings.Contains(out, "ran --selftest") {
 				t.Fatalf("make %s did not pass --selftest:\n%s", target, out)
 			}
 		})

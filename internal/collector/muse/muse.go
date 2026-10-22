@@ -177,6 +177,8 @@ type Config struct {
 type Collector struct {
 	grammar     issueref.Grammar
 	sessionsDir string
+	// walkDir overrides directory walking in tests; nil uses filepath.WalkDir.
+	walkDir     func(string, fs.WalkDirFunc) error
 	repos       []RepoTarget
 	developerID string
 	interval    time.Duration
@@ -836,8 +838,8 @@ func (c *Collector) resolveSlugs() {
 // findSessionFiles returns every session.jsonl under the sessions root whose
 // mtime is at or after floor, plus every pending file that still exists, in
 // lexical order. A missing root is an empty scan, not an error (Muse may not be
-// installed yet); it is Stat-checked up front because the walk callback below
-// swallows per-entry errors (codexrollout #464 Y-G1).
+// installed yet); it is Stat-checked up front to distinguish that case from
+// scan failures. The walk callback collects per-entry errors for the caller.
 func (c *Collector) findSessionFiles(floor time.Time, pending map[string]time.Time) ([]string, error) {
 	if _, err := os.Stat(c.sessionsDir); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -851,7 +853,11 @@ func (c *Collector) findSessionFiles(floor time.Time, pending map[string]time.Ti
 	// whatever its mtime: scanning a parent scans all of its children.
 	children := map[string][]string{}
 	var entryErrs []error
-	err := filepath.WalkDir(c.sessionsDir, func(path string, d fs.DirEntry, err error) error {
+	walkDir := c.walkDir
+	if walkDir == nil {
+		walkDir = filepath.WalkDir
+	}
+	err := walkDir(c.sessionsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == c.sessionsDir {
 				// An unlistable ROOT means nothing was looked at: fail the walk so
@@ -877,7 +883,9 @@ func (c *Collector) findSessionFiles(floor time.Time, pending map[string]time.Ti
 		}
 		_, isPending := pending[path]
 		if !floor.IsZero() && !isPending {
-			if info, ierr := d.Info(); ierr == nil && info.ModTime().Before(floor) {
+			if info, ierr := d.Info(); ierr != nil {
+				entryErrs = append(entryErrs, fmt.Errorf("muse: file info %s: %w", logsafe.Str(path), ierr))
+			} else if info.ModTime().Before(floor) {
 				return nil
 			}
 		}

@@ -18,6 +18,9 @@ package api
 //     acted, so an alias edit cannot roster a past window's activity (#914);
 //   - it has CAPTURED evidence in the window: a token event from any source other
 //     than a manual /costs row, or an outcome other than a push-captured one.
+//     This includes copilot-billing and cursor-admin spend for mapped developers,
+//     like anthropic-admin/openai-usage evidence. Unmapped poller spend uses the
+//     pseudo-developer and cannot count, regardless of source or pricing basis.
 //
 // Ids are canonicalized through the alias map first, so two aliases of one person
 // are one id. Every check reads the CANONICAL id (the roster and bot flags are
@@ -87,6 +90,7 @@ func (u uncountedActiveIDsJSON) any() bool {
 // kanonCensus is one window's counting rule. Its zero value counts nobody.
 type kanonCensus struct {
 	counted map[string]bool
+	bots    map[string]bool
 	// uncountedActive is the per-reason count of active ids that did not count.
 	uncountedActive uncountedActiveIDsJSON
 }
@@ -152,7 +156,7 @@ func (h *Handler) kanonCensusFor(ctx context.Context, r windowReader, win window
 		}
 	}
 
-	c := kanonCensus{counted: map[string]bool{}}
+	c := kanonCensus{counted: map[string]bool{}, bots: bot}
 	for _, s := range win.devScores {
 		dev := s.Developer
 		if !s.HasActivity() || store.ResemblesUnattributed(dev) {

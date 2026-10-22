@@ -3860,7 +3860,7 @@ type TokenEvent struct {
 	CacheWrite5m   int
 	CacheWrite1h   int
 	CostMicro      int64  // cost in integer micro-dollars (1 USD = 1e6), #69
-	Source         string // "api" (manual REST) | "jsonl" | "proxy" | "copilot-api" | "anthropic-admin"
+	Source         string // "api" (manual REST) | "jsonl" | "proxy" | "codex-rollout" | "opencode" | "muse" | "anthropic-admin" | "openai-usage" | "copilot-billing" | "cursor-admin" | "copilot-api" (legacy)
 	Fidelity       string // "realtime" | "daily" | "estimated"
 	IdempotencyKey string // empty = legacy/unkeyed, may double-insert; non-empty enforces uniqueness
 	// Repo is the canonical "owner/repo" this cost was spent in (#231), or
@@ -4150,6 +4150,8 @@ func insertTokenEventArgs(e TokenEvent) ([]any, error) {
 
 // pollerBaseline is the default for newly started poller days. The INSERT
 // inherits NULL for a late model on a legacy day; replays never restamp old rows.
+// copilot-billing and cursor-admin do not subtract captured Anthropic/OpenAI
+// tokens, so neither carries this remainder-baseline marker.
 func pollerBaseline(source string) string {
 	if source == "anthropic-admin" || source == "openai-usage" {
 		return "per-token-host-v1"
@@ -4831,9 +4833,9 @@ type RepriceResult struct {
 }
 
 // repriceExcludedWhereSQL is the predicate for token_events rows a reprice must
-// NEVER re-derive, because their stored cost_micro is NOT a function of their
-// token counts. Repricing such a row does not correct it — it recomputes it to
-// $0.00 and destroys the figure.
+// NEVER re-derive: caller-authoritative or corrected dollars, money without
+// tokens, all Anthropic/OpenAI daily rows, and Cursor daily aggregates whose
+// costs were summed from per-request prices.
 //
 // It serves the SAME INTENT as recomputeKnownSourceCosts -- an /api/v1/costs
 // row's caller-authoritative cost is never silently overwritten -- but it is
@@ -4841,8 +4843,8 @@ type RepriceResult struct {
 // recomputeKnownSourceCosts is a closed ALLOWLIST (source IN ('jsonl','proxy',
 // 'copilot-api','anthropic-admin')), which fails SAFE -- a new source is simply
 // not touched. This is an open DENYLIST, which fails DESTRUCTIVE -- a future
-// source whose cost is caller-authoritative gets repriced unless someone adds
-// it here. A denylist is nonetheless right for reprice, whose whole purpose is
+// source whose cost is caller-authoritative gets repriced unless a row-level
+// or source-level clause covers it. A denylist is right for reprice, whose purpose is
 // that the default must stay "reprice it"; an allowlist would silently stop
 // repricing every new collector. TestRepriceClassifiesEverySource is the
 // compensating control: it iterates collector.AllSources() and fails when the
@@ -4855,18 +4857,25 @@ type RepriceResult struct {
 // on asserting the old→new pair as though it still held, leaving the ledger
 // affirmatively false with no marker.
 //
-// Two disjunctions, each measured, each independently load-bearing:
+// The source and row-level guards are independently load-bearing:
 //
 //   - source = 'api' — the manual-import surface (POST /api/v1/costs). Its
 //     cost_usd is the CALLER's authoritative figure (a finance team posting a
 //     reconciled invoice number); token counts are optional there and routinely
-//     absent. This is the same exclusion recomputeKnownSourceCosts makes, and
-//     the ONLY source in the tree whose cost is not server-derived: every other
-//     producer prices from raw token counts with the server's own table
-//     ('jsonl'/'proxy'/'codex-rollout' collectors, the 'anthropic-admin' /
-//     'openai-usage' org pollers via ComputeCostHost, and POST /api/v1/events,
-//     which re-prices what a shipper posts, #233). So this filter excludes
-//     exactly the rows that cannot be repriced and nothing that should be.
+//     absent. This is the same exclusion recomputeKnownSourceCosts makes.
+//
+//   - anthropic-admin/openai-usage — every row remains frozen by source policy.
+//
+//   - cursor-admin — daily aggregates are frozen at source level because each
+//     event was priced per request before aggregation. Repricing the summed
+//     tokens as one request can incorrectly apply a long-context tier.
+//     copilot-billing has no source-level exclusion; its cost-only rows are
+//     covered below.
+//
+//   - caller_authoritative — preserves vendor dollars, including Copilot gross
+//     spend. Cursor vendor-cents fallbacks also have source-level protection.
+//
+//   - a cost_correction_audit entry — preserves an explicitly corrected figure.
 //
 //   - a MONEY-CARRYING row with no tokens at all — cost_micro <> 0 while every
 //     token column is 0. Whatever produced that cost, it was not the token
@@ -4888,7 +4897,7 @@ type RepriceResult struct {
 // behavioral invariant: examined + excluded == every row at or above the floor.
 const repriceExcludedWhereSQL = `(
        source = 'api'
-    OR source IN ('anthropic-admin','openai-usage')
+    OR source IN ('anthropic-admin','openai-usage','cursor-admin')
     OR COALESCE(pricing_basis,'')='caller_authoritative'
     OR EXISTS (SELECT 1 FROM cost_correction_audit a WHERE a.token_event_id=token_events.id)
     OR (cost_micro <> 0 AND input_tok = 0 AND output_tok = 0
@@ -8551,11 +8560,17 @@ func (d *DB) InsertActualSpend(ctx context.Context, a ActualSpend) error {
 // period — the single enterprise-contract invoice line item for the whole
 // team. Two-tier resolution (closes #23):
 //
-//   - Per-developer rows in actual_spend take precedence (Cursor Business
-//     and similar tools that emit per-seat invoices land here).
+//   - Per-developer rows in actual_spend take precedence (recorded per-seat
+//     fees or invoices land here).
 //   - Org rows in org_actual_spend are the fallback (the common Anthropic /
 //     OpenAI enterprise case: one bill, N seats). The developer's slice is
 //     computed as org_total / distinct seat count in org_hierarchy.
+//
+// copilot-billing and cursor-admin token_events are the list/consumption side:
+// Copilot gross dollars at model API rates, and Cursor rows list-priced from
+// TIER's table, falling back to vendor totalCents for unpriced models. What an
+// organization actually paid (seat fees, invoices) belongs only in actual_spend
+// or org_actual_spend.
 //
 // This avoids forcing finance to fabricate a per-developer allocation that
 // the system would then report with false per-developer precision.
@@ -8804,6 +8819,9 @@ func (d *DB) PollerModelsByDay(ctx context.Context, day time.Time, source string
 // 'muse' is deliberately NOT here: every Muse call is billed by Meta, which no
 // poller reads, so a Muse row can never be inside an Anthropic or OpenAI org
 // aggregate and subtracting one would under-count that provider.
+// 'copilot-billing' and 'cursor-admin' are also deliberately absent: their
+// vendors bill that spend, outside the polled Anthropic/OpenAI accounts. Even
+// Cursor's per_token, list-priced rows must not reduce either remainder.
 // The rule for a future capture source: if it writes one row per API call on an
 // account a poller reads, it MUST be added here, or that poller double-counts
 // it. TestPollerBaselineClassifiesEverySource fails until a new source is
@@ -8890,6 +8908,7 @@ func (d *DB) CapturedTokensByDayModel(ctx context.Context, day time.Time, provid
 }
 
 // providerPollerSource maps the two polled accounts to their stored feed.
+// copilot-billing and cursor-admin do not poll either provider's account.
 func providerPollerSource(provider string) string {
 	switch provider {
 	case "anthropic":

@@ -44,9 +44,11 @@ type serveMetrics struct {
 	adminPolls          *metrics.CounterVec
 	adminEvents         *metrics.CounterVec
 	adminCostDeltas     *metrics.CounterVec
+	copilot             copilotBillingMetrics
 	openaiPolls         *metrics.CounterVec
 	openaiEvents        *metrics.CounterVec
 	openaiCostDeltas    *metrics.CounterVec
+	cursor              cursorAdminMetrics
 	pricingDivergence   *metrics.CounterVec
 }
 
@@ -351,10 +353,23 @@ func newServeMetrics(version string) *serveMetrics {
 		adminPolls:          adminPolls,
 		adminEvents:         adminEvents,
 		adminCostDeltas:     adminCostDeltas,
-		openaiPolls:         openaiPolls,
-		openaiEvents:        openaiEvents,
-		openaiCostDeltas:    openaiCostDeltas,
-		pricingDivergence:   pricingDivergence,
+		copilot: copilotBillingMetrics{
+			polls:      reg.NewCounter("tier_copilot_billing_polls_total", "Copilot billing poll outcomes.", "outcome"),
+			events:     reg.NewCounter("tier_copilot_billing_delta_events_total", "Copilot settled-day delta rows ingested."),
+			clamps:     reg.NewCounter("tier_copilot_billing_clamps_total", "Copilot spend clamp observations per pass (not unique keys)."),
+			skipped:    reg.NewCounter("tier_copilot_billing_remainder_skipped_total", "Copilot days with unusable org totals."),
+			httpErrors: reg.NewCounter("tier_copilot_billing_http_errors_total", "Copilot failed HTTP calls by bounded status class.", "status"),
+		},
+		openaiPolls:      openaiPolls,
+		openaiEvents:     openaiEvents,
+		openaiCostDeltas: openaiCostDeltas,
+		cursor: cursorAdminMetrics{
+			polls:  reg.NewCounter("tier_cursor_admin_polls_total", "Cursor Admin poll passes, by outcome.", "outcome"),
+			events: reg.NewCounter("tier_cursor_admin_delta_events_total", "Cursor Admin daily reconciliation delta row observations per completed pass across the lookback window."),
+			counts: reg.NewCounter("tier_cursor_admin_events_total", "Cursor Admin fallback, skipped and clamped observations per completed pass across the lookback window; repeated observations count again. Non-chargeable tokens on priced models are valued at list rate; nonchargeable counts only skipped events with zero valued cost.", "reason"),
+			auth:   reg.NewCounter("tier_cursor_admin_auth_failures_total", "Cursor Admin authorization failures.", "status"),
+		},
+		pricingDivergence: pricingDivergence,
 	}
 }
 
@@ -480,4 +495,36 @@ func watchAddErrno(err error) string {
 	default:
 		return "other"
 	}
+}
+
+// copilotBillingMetrics uses only fixed labels; no org, user or vendor model.
+type copilotBillingMetrics struct{ polls, events, clamps, skipped, httpErrors *metrics.CounterVec }
+
+func (m copilotBillingMetrics) PollComplete(ok bool) {
+	outcome := "ok"
+	if !ok {
+		outcome = "error"
+	}
+	m.polls.Inc(outcome)
+}
+func (m copilotBillingMetrics) EventsIngested(n int) { m.events.Add(float64(n)) }
+func (m copilotBillingMetrics) Clamps(n int)         { m.clamps.Add(float64(n)) }
+func (m copilotBillingMetrics) RemainderSkipped()    { m.skipped.Inc() }
+func (m copilotBillingMetrics) HTTPError(status int) {
+	label := "other"
+	switch status {
+	case 401:
+		label = "401"
+	case 403:
+		label = "403"
+	case 404:
+		label = "404"
+	case 429:
+		label = "429"
+	default:
+		if status >= 500 {
+			label = "5xx"
+		}
+	}
+	m.httpErrors.Inc(label)
 }

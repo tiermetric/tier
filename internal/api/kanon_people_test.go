@@ -27,10 +27,57 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/collector"
 	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
 	"github.com/tiermetric/tier/internal/webhook"
 )
+
+// Collector-captured spend counts as activity even when cost-only or vendor
+// priced. The new pollers follow the same source!='api' evidence rule as
+// anthropic-admin/openai-usage: mapped rostered people count; off-roster ids and
+// unattributed spend cannot lift k. No outcome is required to prove activity.
+func TestKAnonPeople_CopilotAndCursorCapturedSpend(t *testing.T) {
+	for _, source := range []string{collector.SourceCopilotBilling, collector.SourceCursorAdmin,
+		collector.SourceAnthropicAdmin, collector.SourceOpenAIUsage} {
+		t.Run(source, func(t *testing.T) {
+			h, db := newTestHandler(t)
+			now := time.Now().UTC()
+			win := windowScores{since: now.Add(-time.Hour), until: now.Add(time.Hour),
+				scope: store.FleetWide, canon: func(s string) string { return s }}
+			for _, dev := range []string{"mapped", "off-roster", store.UnattributedIssueID} {
+				if err := db.InsertTokenEvent(t.Context(), store.TokenEvent{
+					Developer: dev, Model: "claude-sonnet-4", Source: source,
+					CostMicro: 1_000_000, Fidelity: "daily", Timestamp: now,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				win.devScores = append(win.devScores, scoring.DeveloperScore{Developer: dev, TotalCostUSD: 1})
+			}
+			census, err := h.kanonCensusFor(t.Context(), db, win,
+				map[string]bool{"mapped": true, store.UnattributedIssueID: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(census.counted) != 1 || !census.counted["mapped"] ||
+				census.uncountedActive != (uncountedActiveIDsJSON{NotOnRoster: 1}) {
+				t.Fatalf("census = %+v; want only the mapped person counted, off-roster excluded, pseudo-developer ignored", census)
+			}
+			costs, err := db.DeveloperIssueCostsWindow(t.Context(), win.since, win.until, win.scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(costs) != 3 {
+				t.Fatalf("captured share query returned %d rows, want all three developers", len(costs))
+			}
+			for _, cost := range costs {
+				if cost.CapturedNonRealtimeMicro != 1_000_000 || cost.CapturedRealtimeMicro != 0 {
+					t.Fatalf("daily captured cost must count for its share: %+v", cost)
+				}
+			}
+		})
+	}
+}
 
 // rosterOnly puts dev on the roster in team, with no activity.
 func rosterOnly(t *testing.T, db *store.DB, team, dev string) {

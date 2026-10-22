@@ -156,3 +156,38 @@ func TestDoctorCostConsistencyTotalsExcludeUnrepairablePoller(t *testing.T) {
 		t.Fatalf("poller repaired: %d", cost)
 	}
 }
+
+func TestDoctorCostConsistencyCursorAdminExcludedFromRepairTotals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cursor.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := store.TokenEvent{Developer: "alice", Model: "claude-sonnet-4-5", Source: "cursor-admin", InputTok: 300000, CostMicro: 900000, PricingBasis: store.PricingTokenDerived, Timestamp: time.Now()}
+	if err := db.InsertTokenEvent(t.Context(), e); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"", "--dry-run", "--apply"} {
+		var out, stderr bytes.Buffer
+		args := []string{"--db", path}
+		if mode != "" {
+			args = append(args, "--version", strconv.Itoa(store.ActivePriceTableInfo().Version), mode)
+		}
+		if rc := runCostConsistency(args, &out, &stderr); rc != 0 {
+			t.Fatalf("rc=%d %s", rc, stderr.String())
+		}
+		var result struct {
+			Rows                                   []store.CostConsistencyRow
+			GrossIncreaseMicro, GrossDecreaseMicro int64
+		}
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Rows) != 1 || result.Rows[0].Class != "cursor_admin_cost_mismatch" || result.Rows[0].StoredMicro != 900000 || result.Rows[0].ExpectedMicro != 1800000 || result.GrossIncreaseMicro != 0 || result.GrossDecreaseMicro != 0 {
+			t.Fatalf("cursor per-request sum counted as repair (%s): %s", mode, out.String())
+		}
+	}
+}

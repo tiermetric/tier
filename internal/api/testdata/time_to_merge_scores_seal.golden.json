@@ -1,0 +1,63 @@
+{
+  "body": {
+    "aggregation": "team",
+    "data_quality": {
+      "aggregate_pricing": {
+        "approximation_notice": "Provider daily remainders, if present, use base-rate aggregate approximations and may understate genuine long-context cost, raising TIER. Historical provider aggregates can differ from request-level billing in either direction. Provider remainders use pseudo-developer attribution and are excluded from identified-group denominators. Population and cost ceilings are not shown in this mode.",
+        "ceiling_status": "not_shown",
+        "cutover": "aggregate-approx-v1-2026-10-14"
+      },
+      "attributed_outcome_share": 1,
+      "attribution_coverage": "not_shown",
+      "cost_coverage_start": "2026-04-15T00:00:00Z",
+      "excludes_unattributed_spend": true,
+      "interval_status": "not_shown",
+      "partition_diagnostics": "not_shown",
+      "window_predates_cost_capture": false
+    },
+    "developers": [],
+    "price_table": "\u003cprice_table\u003e",
+    "quality_evidence": {
+      "status": "not_shown"
+    },
+    "rubric": {
+      "version": 1
+    },
+    "since": "2026-05-01",
+    "teams": [
+      {
+        "actual_paid_usd": 0,
+        "cost_per_point": 5.175,
+        "coverage_pct": 100,
+        "ranked": true,
+        "spend_leverage": 0,
+        "team": "big",
+        "tier": 193.23671497584542,
+        "total_cost_usd": 62.1,
+        "weighted_points": 12
+      },
+      {
+        "actual_paid_usd": 0,
+        "cost_per_point": 0.74,
+        "coverage_pct": 100,
+        "ranked": false,
+        "spend_leverage": 0,
+        "team": "other",
+        "tier": 1351.3513513513512,
+        "total_cost_usd": 3.7,
+        "weighted_points": 5
+      }
+    ],
+    "total": {
+      "actual_paid_usd": 0,
+      "cost_per_point": 3.870588235294118,
+      "coverage_pct": 100,
+      "ranked": true,
+      "spend_leverage": 0,
+      "tier": 258.3586626139817,
+      "total_cost_usd": 65.80000000000001,
+      "weighted_points": 17
+    }
+  },
+  "config_digest": "sha256:cb7134969755ce4518953ec6197ab3e71062d21b5d14861e46ea4752a9782536"
+}

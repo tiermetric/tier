@@ -338,8 +338,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
 			h.logger.Warn("webhook body read deadline expired; manually redeliver this delivery; headers are unauthenticated",
 				"event", label, "delivery", logSafeStr(r.Header.Get("X-GitHub-Delivery")))
-			http.Error(w, "read error", http.StatusBadRequest)
+			http.Error(w, "read deadline expired", http.StatusBadRequest)
 		default:
+			h.logger.Warn("webhook body read error; headers are unauthenticated",
+				"event", label, "delivery", logSafeStr(r.Header.Get("X-GitHub-Delivery")), "err", logsafe.Err(err))
 			http.Error(w, "read error", http.StatusBadRequest)
 		}
 		return
@@ -440,7 +442,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// unwrapped value is a log-injection sink. CodeQL flagged exactly this
 		// line (go/log-injection) when it was first written bare. logSafeStr is
 		// a measured CodeQL barrier — wrapping is the fix, NOT a dismissal.
-		if errors.Is(handlerErr, store.ErrWriteLockUnavailable) {
+		if onlyWriteLockErrors(handlerErr) {
 			h.logger.Warn("webhook handler: write lock unavailable; the delivery was not fully processed and GitHub does not redeliver it automatically — redeliver it from the webhook's Recent Deliveries",
 				"event", logSafeStr(event), "delivery", logSafeStr(deliveryID), "err", logsafe.Err(handlerErr))
 			w.Header().Set("Retry-After", "1")
@@ -459,6 +461,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// onlyWriteLockErrors requires every independent failure to be contention;
+// errors.Join branches are always wrapped. The store's contention error carries
+// the sentinel as a direct %w operand, annotating it with its cause.
+func onlyWriteLockErrors(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errs := joined.Unwrap()
+		if len(errs) == 0 {
+			return false
+		}
+		for _, child := range errs {
+			if child == store.ErrWriteLockUnavailable {
+				return true
+			}
+		}
+		for _, child := range errs {
+			if !onlyWriteLockErrors(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyWriteLockErrors(wrapped.Unwrap())
+	}
+	return errors.Is(err, store.ErrWriteLockUnavailable)
 }
 
 // deliveryWindow bounds the dedup set. GitHub never redelivers on its own, so
@@ -1390,7 +1419,7 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		}
 		return nil
 	}
-	var lastErr error
+	var errs []error
 	prMergeSeen := false
 	for _, c := range p.Commits {
 		if prMergeRE.MatchString(gitCommitSubject(c.Message)) {
@@ -1412,8 +1441,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		if m := footer; m != nil {
 			o, ok, err := h.store.OutcomeByMergeCommit(ctx, m[1])
 			if err != nil {
-				h.logger.Error("lookup outcome by merge commit", "err", err, "sha", logSafeStr(m[1]))
-				lastErr = err
+				h.logger.Error("lookup outcome by merge commit", "err", logsafe.Err(err), "sha", logSafeStr(m[1]), "commit", logSafeStr(c.ID))
+				errs = append(errs, fmt.Errorf("commit %s: lookup outcome by merge commit: %w", logSafeStr(c.ID), err))
 				continue
 			}
 			if ok {
@@ -1440,7 +1469,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 			} else if issueID != "" {
 				candidates, legacyOnly, err := h.store.RevertIssueCandidates(ctx, canonicalRepo(p.Repository.FullName), issueID, eventTS.Add(-revertObservationWindow), eventTS)
 				if err != nil {
-					lastErr = fmt.Errorf("lookup revert candidates: %w", err)
+					h.logger.Error("candidate lookup", "err", logsafe.Err(err), "commit", logSafeStr(c.ID))
+					errs = append(errs, fmt.Errorf("commit %s: candidate lookup: %w", logSafeStr(c.ID), err))
 					continue
 				}
 				if len(candidates) == 1 {
@@ -1449,7 +1479,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 					// The surviving candidate retains the original decision's event row.
 					events, err := h.store.QualityEventsForOutcome(ctx, origin.ID)
 					if err != nil {
-						lastErr = fmt.Errorf("read prior revert decision: %w", err)
+						h.logger.Error("candidate lookup: read prior revert decision", "err", logsafe.Err(err), "commit", logSafeStr(c.ID))
+						errs = append(errs, fmt.Errorf("commit %s: candidate lookup: read prior revert decision: %w", logSafeStr(c.ID), err))
 						continue
 					}
 					for _, event := range events {
@@ -1465,7 +1496,8 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 						// neither adds a penalty nor repairs an old one (no historical backfill).
 						_, err := h.store.AppendQualityEvent(ctx, store.QualityEvent{OutcomeID: candidate.ID, Developer: candidate.Developer, IssueID: candidate.IssueID, EventType: quality.EventRevertAmbiguous, SourceRef: c.ID, EventTS: eventTS, Reason: reason})
 						if err != nil {
-							lastErr = fmt.Errorf("append ambiguous revert: %w", err)
+							h.logger.Error("ambiguous revert append", "err", logsafe.Err(err), "commit", logSafeStr(c.ID), "outcome", candidate.ID)
+							errs = append(errs, fmt.Errorf("commit %s: ambiguous revert append: %w", logSafeStr(c.ID), err))
 						}
 					}
 				} else if legacyOnly {
@@ -1491,22 +1523,22 @@ func (h *Handler) handlePush(ctx context.Context, body []byte) error {
 		// message; source_ref = the revert commit SHA makes replays idempotent.
 		eventType := quality.ClassifyRevert(c.Message)
 		if err := h.appendAndResolve(ctx, origin, eventType, c.ID, eventTS); err != nil {
-			h.logger.Error("apply revert quality event", "err", err, "issue", logSafeStr(origin.IssueID), "commit", logSafeStr(c.ID))
-			lastErr = err
+			h.logger.Error("apply revert quality event", "err", logsafe.Err(err), "issue", logSafeStr(origin.IssueID), "commit", logSafeStr(c.ID))
+			errs = append(errs, fmt.Errorf("commit %s: apply revert quality event: %w", logSafeStr(c.ID), err))
 		}
 	}
 
 	// Push-to-default-branch capture (#196) runs AFTER revert handling and only
 	// when explicitly enabled (outcomes.push_capture). When disabled, only
 	// default-branch revert detection runs. A capture error is folded into
-	// lastErr so a store failure fails the delivery (5xx) rather than reporting
+	// errs so a store failure fails the delivery (5xx) rather than reporting
 	// it as processed; GitHub does not redeliver it automatically.
 	if h.pushCapture {
-		if err := h.capturePushOutcomes(ctx, p); err != nil && lastErr == nil {
-			lastErr = err
+		if err := h.capturePushOutcomes(ctx, p); err != nil {
+			errs = append(errs, fmt.Errorf("capture push outcomes: %w", err))
 		}
 	}
-	return lastErr
+	return errors.Join(errs...)
 }
 
 func (h *Handler) warnRevertUnresolved(commit, subject, repo, author, reason string) {
@@ -1556,7 +1588,7 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 		return nil
 	}
 	pushedAt, pushedAtOK := parsePushedAt(p.Repository.PushedAt)
-	var lastErr error
+	var errs []error
 	var captured, unordered int
 	var prMergeSeen bool
 	for _, c := range p.Commits {
@@ -1657,7 +1689,7 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 				level = slog.LevelWarn
 			}
 			h.logger.Log(ctx, level, "push capture: record commit", "err", logSafeStr(err.Error()), "issue", logSafeStr(issueID), "day", day, "commit", logSafeStr(c.ID))
-			lastErr = err
+			errs = append(errs, fmt.Errorf("commit %s: %w", logSafeStr(c.ID), err))
 			continue
 		}
 		switch status {
@@ -1685,14 +1717,14 @@ func (h *Handler) capturePushOutcomes(ctx context.Context, p pushPayload) error 
 	// once per push, only when this delivery captured something (so a redelivery
 	// does not count it again) and only when it fully succeeded (a failed one is
 	// answered 5xx and may be sent again, capturing the rest then).
-	if prMergeSeen && captured > 0 && lastErr == nil {
+	if prMergeSeen && captured > 0 && len(errs) == 0 {
 		h.logger.Warn("push capture: push carries a PR merge commit and captured other commits beside it; those may be the merged PR's branch commits, also counted by the PR's outcome (#934)",
 			"captured", captured, "repo", logSafeStr(p.Repository.FullName))
 		if h.pushMergeLeak != nil {
 			h.pushMergeLeak.Inc()
 		}
 	}
-	return lastErr
+	return errors.Join(errs...)
 }
 
 // gitCommitSubject mirrors git pretty.c's %s: skip leading blank lines, trim

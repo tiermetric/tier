@@ -193,6 +193,8 @@ func TestShippableSourceAnswersForEveryKnownSource(t *testing.T) {
 		SourceProxy:          false, // captured server-side; a client cannot assert it
 		SourceAnthropicAdmin: false, // org poller
 		SourceOpenAIUsage:    false, // org poller
+		SourceCopilotBilling: false, // org poller holding vendor admin credentials
+		SourceCursorAdmin:    false, // org poller holding vendor admin credentials
 	}
 	all := AllSources()
 	if len(want) != len(all) {
@@ -212,8 +214,8 @@ func TestShippableSourceAnswersForEveryKnownSource(t *testing.T) {
 		t.Errorf("ShippableSources() = %v, want %v", gotList, wantList)
 	}
 
-	// Unsupported and unknown sources remain rejected after removing the unused
-	// Copilot declaration. This preserves the shipping wire contract.
+	// Legacy copilot-api and unknown sources remain rejected. The distinct
+	// SourceCopilotBilling feed is enumerated in AllSources() but cannot ship.
 	for _, source := range []string{"copilot-api", "some-future-collector"} {
 		if ShippableSource(source) {
 			t.Errorf("ShippableSource(%q) = true; an unenumerated source must never ship", source)

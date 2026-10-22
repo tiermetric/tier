@@ -1,0 +1,87 @@
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+function element(id) { return {id, children: [], style: {}, title: '', textContent: ''}; }
+const nodes = {}, ctx = {document: {getElementById(id) { return nodes[id] ||= element(id); }}, console};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync('assets/dashboard.js', 'utf8').split('// --- Wiring')[0], ctx);
+const tile = ctx.$('kpi-time-to-merge'), row = ctx.$('kpi-row'), value = ctx.$('kpi-time-to-merge-value');
+const headline = element('headline'), spend = element('spend');
+row.children = [headline, tile, spend];
+const report = {total: {count: 10, median_seconds: 7200, p90_seconds: 14400, null_reason: ''}, excluded: {count: 3}};
+const withheld = {total: {count: null, median_seconds: null, p90_seconds: null, null_reason: 'withheld_with_group'}, excluded: {count: 99}};
+(async () => {
+  ctx.renderTimeToMerge(report);
+  assert.equal(value.textContent, 'median 2.0 h · 10 of 13 merged PRs measured');
+  assert.equal(tile.title, 'p90 4.0 h');
+  assert.equal(ctx.$('kpi-time-to-merge-p90').textContent, 'p90 4.0 h');
+  assert.doesNotMatch(value.textContent, /p90/);
+  ctx.renderTimeToMerge({...report, total: {...report.total, count: 5, p90_seconds: null, null_reason: 'n<10'}});
+  assert.equal(tile.title, '');
+  assert.equal(ctx.$('kpi-time-to-merge-p90').textContent, '');
+  assert.equal(value.textContent, 'median 2.0 h · 5 of 8 merged PRs measured');
+  // Even a malformed short-sample response must not display a p90 hover.
+  ctx.renderTimeToMerge({...report, total: {...report.total, count: 5}});
+  assert.equal(tile.title, '');
+  for (const malformed of [null, {}, {excluded: {count: 0}}, {...report, total: {}},
+    {...report, total: {...report.total, count: '10'}}, {...report, total: {...report.total, median_seconds: NaN}}]) {
+    ctx.renderTimeToMerge(malformed);
+    assert.equal(value.textContent, 'Time to merge: unavailable');
+  }
+  const noPRs = {count: null, median_seconds: null, p90_seconds: null, null_reason: 'no_prs'};
+  ctx.renderTimeToMerge({total: noPRs, excluded: {count: 0}});
+  assert.equal(value.textContent, 'Time to merge: no merged PRs measured');
+  ctx.renderTimeToMerge({total: noPRs, excluded: {count: null, reasons: null, null_reason: 'no_prs'}});
+  assert.equal(value.textContent, 'Time to merge: no merged PRs measured');
+  ctx.renderTimeToMerge({...report, excluded: {count: null, reasons: null, null_reason: 'authors<k'}});
+  assert.equal(value.textContent, 'Time to merge: withheld to protect small groups');
+  assert.doesNotMatch(value.textContent, /of|\d/);
+  ctx.resetViews();
+  ctx.renderTimeToMerge(withheld);
+  assert.equal(value.textContent, 'Time to merge: withheld to protect small groups');
+  assert.equal(tile.style.display, '');
+  assert.equal(row.style.display, '');
+  assert.equal(headline.style.display, 'none');
+  assert.equal(spend.style.display, 'none');
+  assert.equal(tile.title, '');
+  assert.doesNotMatch(value.textContent, /99|median|\d/);
+  ctx.resetViews();
+  assert.equal(row.style.display, 'none');
+  assert.equal(tile.style.display, 'none');
+  assert.equal(headline.style.display, '');
+  assert.equal(spend.style.display, '');
+  assert.equal(value.textContent, '');
+  let calls = [], resolve, reject;
+  ctx.fetchJSON = q => {calls.push(q); return new Promise((r,j) => {resolve = r; reject = j;});};
+  ctx.sealedMode = true;
+  ctx.$('period-select').value = '2026-10';
+  ctx.loadTimeToMerge(undefined, undefined, 0);
+  assert.equal(calls.length, 0, 'a render without window evidence must not fetch');
+  assert.equal(tile.style.display, 'none');
+  ctx.loadTimeToMerge('2026-10-01', '2026-11-01', 0);
+  assert.equal(calls[0], '/api/v1/time-to-merge?period=2026-10');
+  ctx.loadGen = 1; resolve(report); await new Promise(setImmediate);
+  assert.equal(tile.style.display, 'none', 'stale success must not paint');
+  ctx.$('period-select').value = '';
+  ctx.loadTimeToMerge('2026-10-01', '', 1);
+  assert.equal(calls[1], '/api/v1/time-to-merge');
+  resolve(withheld); await new Promise(setImmediate);
+  assert.equal(tile.style.display, '');
+  assert.equal(value.textContent, 'Time to merge: withheld to protect small groups');
+  ctx.loadTimeToMerge('2026-10-01', '', 1);
+  reject(Object.assign(new Error('forbidden'), {status: 403})); await new Promise(setImmediate);
+  assert.equal(tile.style.display, 'none', 'real-data developer mode must hide tile');
+  ctx.sealedMode = false;
+  ctx.loadTimeToMerge('2026-10-01', '', 1);
+  assert.equal(calls[calls.length - 1], '/api/v1/time-to-merge?since=2026-10-01');
+  resolve(report); await new Promise(setImmediate);
+  assert.match(value.textContent, /10 of 13/); // synthetic demo 200 is allowed
+  ctx.loadTimeToMerge('2026-10-01', '2026-11-01', 1);
+  assert.equal(calls[calls.length - 1], '/api/v1/time-to-merge?since=2026-10-01&until=2026-11-01');
+  ctx.loadGen = 2; reject(new Error('old request')); await new Promise(setImmediate);
+  assert.equal(tile.style.display, 'none', 'stale failure must not paint');
+  ctx.loadTimeToMerge('2026-10-01', '', 2);
+  reject(new Error('offline')); await new Promise(setImmediate);
+  assert.equal(value.textContent, 'Time to merge: unavailable');
+  assert.equal(tile.title, '');
+  assert.ok(!tile.className || !/yield|warn|danger|up|down/.test(tile.className));
+  console.log('PASS time-to-merge denominator, privacy, p90 hover, dates and stale-response guards');
+})().catch(e => {console.error(e); process.exit(1);});

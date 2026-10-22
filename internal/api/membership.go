@@ -140,6 +140,8 @@ type devLabel struct {
 
 // windowGroups is one window split by dated membership at one level.
 type windowGroups struct {
+	// outcomeLabels retains the very same dated placement for descriptive reads.
+	outcomeLabels map[int64]string
 	// rows is one scoring row per (canonical developer, label) with any figure,
 	// in (developer, label) order — the input to the k-anon folds.
 	rows []scoring.LabeledScore
@@ -171,14 +173,16 @@ func (h *Handler) groupWindow(ctx context.Context, r windowReader, win windowSco
 	// active is every raw id with a cost event or an outcome in the window.
 	active := map[string]bool{}
 	outcomesBy := map[devLabel][]scoring.Outcome{}
+	outcomeLabels := map[int64]string{}
 	for i, o := range win.outcomes {
 		active[o.Developer] = true
 		so := win.scoredOutcomes[i]
 		k := devLabel{so.Developer, tl.labelAt(o.Developer, o.Timestamp, label)}
+		outcomeLabels[o.ID] = k.label
 		outcomesBy[k] = append(outcomesBy[k], so)
 	}
 
-	g := windowGroups{roster: map[string]bool{}}
+	g := windowGroups{roster: map[string]bool{}, outcomeLabels: outcomeLabels}
 	costMicro := map[devLabel]int64{}
 	realtimeMicro := map[devLabel]int64{}
 	capturedRealtimeMicro := map[devLabel]int64{}

@@ -2,16 +2,17 @@
 
 > **The one rule.** A team gets better together by sharing *what someone
 > changed and what happened* -- a practice -- not by comparing frozen
-> individual numbers. Everything this page uses already ships: `/scores`, the
-> dashboard and `/scores/compare`. The levers name nobody, but only a
-> `developer`-mode server publishes them, and that server names every developer.
+> individual numbers. For real data in v0.6.2, use team or division reports
+> over sealed months. The levers retro is a post-#826 practice: its figures
+> can be previewed only in the synthetic demo (`tierd demo`), which invents
+> its own data in a private temporary database and cannot load yours.
 
 TIER coaches the **practice, not the person** (see the
 [project README](../README.md) and
 [docs/legal-and-privacy.md](legal-and-privacy.md)). This page shows a team lead
-how to run peer learning on that principle: read the name-free levers as
-discussion prompts, agree one practice change, then measure honestly whether it
-helped.
+how to run peer learning on that principle: agree one practice change, then
+measure honestly whether it helped. The name-free levers will be discussion
+prompts when developer mode ships (#826); today they are a synthetic-demo preview.
 
 ## Table of contents
 
@@ -26,7 +27,7 @@ helped.
 
 ## What this is
 
-**v0.6.1 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 Practice transfer, not number transfer. When one part of a team has learned to
 get more yield per $1,000 -- higher cache reuse, less premium-model spend on
@@ -34,30 +35,33 @@ routine work, less spend that TIER could not link to an issue -- the thing
 worth spreading is the
 *habit that produced it*, described in words, not a leaderboard cell.
 
-TIER supports this with three shipped surfaces and nothing else:
+The method uses these three surfaces, with the levers available only in the
+synthetic demo until developer mode ships (#826):
 
 | Surface | What it gives the retro | Names anyone? |
 |---|---|---|
-| `GET /api/v1/scores` + the dashboard | The **levers** and work-type segments (`developer` mode only) | The levers do not; the same response and dashboard name every developer |
+| `GET /api/v1/scores` + the dashboard | Team/division rows today; **levers** and work-type segments only in the synthetic demo until #826 | Real-data reports name no individual; the synthetic demo names invented developers |
 | `GET /api/v1/scores/compare` (#277) | A before/after **delta** with an unvalidated non-overlap field; inference not established | Not in team/division mode |
 | Your team's own runbook | The **narrative**: what changed, why, what happened | Written by humans, not TIER |
 
-> **Who sees what.** `developer` mode is meant for a developer and their
-> manager, looking at the same numbers so the manager can coach. Today anyone
-> with read or dashboard access sees every developer's numbers; per-viewer
-> access is planned (#826). TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The levers below name nobody, but they are published only beside
-> every developer's named row. See [Coaching, not appraisal](#coaching-not-appraisal).
+> **Who sees what.** Real-data servers in v0.6.2 run `team` or `division`;
+> `tierd serve --aggregation developer` exits 1 with no bypass. When developer
+> mode ships (#826), named-viewer, audit and retention controls will govern
+> individual rows. TIER is built for coaching, not for evaluating developers.
+> Per-person figures are not accurate enough to judge an individual. The
+> synthetic demo shows invented named rows beside the levers. See
+> [Coaching, not appraisal](#coaching-not-appraisal).
 
 ---
 
 ## The levers retro
 
-Run this as a standing team retro (monthly or per-cycle). It uses only the
-**name-free levers** on `GET /api/v1/scores` -- the same numbers the dashboard
-renders in its cost-composition panel. None of them names an individual, but
-they are published in `developer` aggregation mode only, where the same response
-and dashboard name every developer (see the note below the steps). Share the
-lever figures, not the dashboard.
+After developer mode ships (#826), run this as a standing team retro (monthly
+or per-cycle). It uses the **name-free levers** on `GET /api/v1/scores` and the
+dashboard's cost-composition panel. Today these figures are available only in
+the synthetic demo, beside invented named rows. On real data today, compare
+your team's sealed months and discuss with the team what changed in their
+practice. When the levers become available, share the lever figures, not individual pages.
 
 **The levers, and the question each one prompts:**
 
@@ -74,7 +78,8 @@ because it was recorded on `main` or `master`.
 
 **How to run it:**
 
-1. Open the dashboard (served at `http://127.0.0.1:8080/` by default) or fetch
+1. In the synthetic demo today, or after developer mode ships (#826), open the
+   dashboard (served at `http://127.0.0.1:8080/` by default) or fetch
    `GET /api/v1/scores` for the window, and read the cost-composition panel plus
    the work-type segments.
 2. Treat each lever as a **prompt, not a verdict**. A high
@@ -96,10 +101,10 @@ and the total, because a second breakdown can be subtracted from the first: team
 totals minus work-type totals recovered a 3-person group's spend in testing, and
 a model only one developer used showed that developer's spend in the per-model
 rows. Naming no one is not enough to be safe. In `team` or `division` mode, run
-the retro on the team rows alone. The levers exist only in `developer` mode, where
-the same response and dashboard name every developer, so never change an
-install's mode to get them. #937 tracks an audit that would let the levers come
-back in anonymized modes.
+the retro on the team rows alone. The levers are a post-#826 practice for real
+data; only the synthetic demo publishes them today. Real-data developer-mode
+startup is refused. #937 tracks an audit that would let the levers come back
+in anonymized modes.
 
 ---
 
@@ -111,25 +116,28 @@ You changed one practice. Did it help? Test it with
 
 Every delta is **B - A**. In **developer mode**, the endpoint reuses the exact
 windowed computation as `/scores`, so a compared number never diverges from what
-`/scores` reports for the same window. In **team/division mode**, it refolds both
+`/scores` reports for the same window; this is a synthetic-demo preview until
+#826 ships. In **team/division mode**, it refolds both
 sealed months with the intersection k floor: a group is named only if it clears
 k in both months, and each month's residual must also reach k or the whole
 comparison is withheld. Compared rows can therefore differ from `/scores`.
 
-**Worked example (illustrative, developer-mode only).** Say the team adopted "cheaper model for
-routine refactors" on 2026-06-01. Compare the month before against the month
-after:
+**Worked example (synthetic demo only; real-data developer mode planned with #826).**
+Say the invented team adopted "cheaper model for routine refactors" on
+`CHANGE_DATE`. Point the command at the synthetic demo and compare the 8 days
+before against the 8 days after. The demo's merges sit 7 to 19 days before the
+day it started, so with that day as `S`, replace `BEFORE_START` with `S` minus
+22 days, `CHANGE_DATE` with `S` minus 14 days and `AFTER_END` with `S` minus 6
+days, all as UTC dates:
 
 ```
-GET /api/v1/scores/compare?since_a=2026-05-01&until_a=2026-06-01\
-&since_b=2026-06-01&until_b=2026-07-01
+GET /api/v1/scores/compare?since_a=BEFORE_START&until_a=CHANGE_DATE\
+&since_b=CHANGE_DATE&until_b=AFTER_END
 ```
 
 ```bash
-# the read-only viewer token's VALUE (a password you generated for --read-token;
-# see README → What you need before you start) is enough for this GET
-curl -sS -H "Authorization: Bearer $TIER_READ_TOKEN" \
-  "http://127.0.0.1:8080/api/v1/scores/compare?since_a=2026-05-01&until_a=2026-06-01&since_b=2026-06-01&until_b=2026-07-01"
+# Synthetic demo only; TIER_HOST points at the running tierd demo.
+curl -sS "$TIER_HOST/api/v1/scores/compare?since_a=BEFORE_START&until_a=CHANGE_DATE&since_b=CHANGE_DATE&until_b=AFTER_END"
 ```
 
 **Reading the result honestly** is the whole point:
@@ -209,10 +217,9 @@ do*.
 
 ## Coaching, not appraisal
 
-TIER coaches the **practice, not the person**. In `developer` mode a developer
-and their manager see the same numbers, with the same caveats. Use it to coach
-practice -- which model for which job, how to reuse context, starting work
-from an issue.
+TIER coaches the **practice, not the person**. When developer mode ships (#826),
+a developer and their manager will see the same numbers, with the same caveats.
+Today, coach from team rows, or preview the per-developer view in `tierd demo`.
 
 - TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.
 - **Talk about the habit, not the number.** A coaching conversation looks at
@@ -229,21 +236,22 @@ from an issue.
 
 **TIER cannot enforce this.** It shows numbers; it cannot stop someone from
 copying one into a review. Only your own written policy, or a works agreement
-where one applies, can. Write the purpose down before you turn `developer` mode
-on.
+where one applies, can. Write the purpose down before adopting the developer
+mode planned with #826.
 
-**What TIER does today, and what is planned.** Today, in `developer` mode,
-anyone who can read the API or the dashboard can see every developer's
-numbers. The dashboard lists developers in identifier order and never sorts
-them by TIER (v0.4.1 and earlier listed ranked rows first, highest TIER first),
-but everyone's figures still sit on one page, so limit who can see it. Issue #826 plans the controls that make "only the
-developer and their manager" a property of the deployment rather than a habit
-(**planned, not yet built**): a separate viewing token for each permitted
-viewer (the developer, their declared manager and an optional skip-level
-manager); a log of who viewed each developer's page, which that developer can
-read; a limit on how long per-developer data is kept in `developer` mode
-(90 days by default, at most 365 days, enough for a full annual coaching
-cycle); and a list with no TIER order.
+**What TIER does today, and what is planned.** Real-data servers in v0.6.2
+publish only team or division rows. In the synthetic demo, anyone who can read
+the API or dashboard sees every invented developer's numbers in identifier
+order, never sorted by TIER. Developer mode is planned with #826: a separate
+viewing token for each permitted viewer (the developer, their declared manager
+and an optional skip-level manager); a log of who viewed each developer's page,
+which that developer can read; a limit on how long per-developer data is kept
+(90 days by default, at most 365 days, enough for a full annual coaching cycle);
+and a list with no TIER order. These controls are planned, not yet built.
+Every mode stores per-developer identifiers; score data is not automatically
+deleted today and stays until an admin erases the person. Raw webhook payloads
+have separate retention and are not rewritten by an erase (see
+[privacy.md](privacy.md#data-subject-rights-access-and-erasure-gdpr-art-15--art-17)).
 
 Deployments in co-determined jurisdictions have a *legal* reason for this too --
 see [docs/legal-and-privacy.md](legal-and-privacy.md) for works-council, DPIA,

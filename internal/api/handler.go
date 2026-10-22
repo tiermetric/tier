@@ -426,6 +426,8 @@ type Handler struct {
 	// names developers exactly as before. cmd/tierd sets it explicitly from the
 	// REQUIRED --aggregation setting; there is no silent default there.
 	aggregation scoring.AggregationMode
+	// syntheticDemo is armed only by tierd demo, which creates its own database.
+	syntheticDemo bool
 	// kAnonymity is the cohort floor applied in EVERY anonymized mode -- team (#185)
 	// and division (#270), i.e. whenever aggregation.Anonymized() is true: a cohort
 	// with fewer than this many contributing developers collapses into the aggregate
@@ -484,6 +486,10 @@ type Option func(*Handler)
 // relying on the Go toolchain's VCS stamps: see Handler.buildCommit for why the
 // container has none.
 func WithCommit(commit string) Option { return func(h *Handler) { h.buildCommit = commit } }
+
+// WithSyntheticDemo permits descriptive reads in developer mode on synthetic data.
+// Only tierd demo may arm this; ordinary serve must leave it unset.
+func WithSyntheticDemo(enabled bool) Option { return func(h *Handler) { h.syntheticDemo = enabled } }
 
 // WithCaptureEngines describes current local capture configuration, never an
 // inference from observed rows. Remote shippers remain unknown.
@@ -682,6 +688,7 @@ func (h *Handler) registerWriteRoutes(mux routeMux) {
 func (h *Handler) registerReadRoutes(mux routeMux) {
 	mux.HandleFunc("GET /api/v1/diagnostics/captured-dollars", h.requireRead(h.handleCapturedDollars))
 	mux.HandleFunc("GET /api/v1/scores", h.requireRead(h.handleGetScores))
+	mux.HandleFunc("GET /api/v1/time-to-merge", h.requireRead(h.handleGetTimeToMerge))
 	// Per-issue reconciliation is a separate developer-only read surface (#1273).
 	mux.HandleFunc("GET /api/v1/issues", h.requireRead(h.handleGetIssueScores))
 	// Before/after period comparison (#277): two half-open windows in, per-row

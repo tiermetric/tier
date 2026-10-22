@@ -57,7 +57,7 @@ func runCostConsistency(args []string, out, errOut io.Writer) int {
 	}
 	var increase, decrease int64
 	for _, r := range rows {
-		if r.Status == "inconsistent" && r.Class != "sealed_cost_mismatch" && r.Class != "poller_cost_mismatch" {
+		if r.Status == "inconsistent" && r.Class != "sealed_cost_mismatch" && r.Class != "poller_cost_mismatch" && r.Class != "cursor_admin_cost_mismatch" {
 			delta := r.ExpectedMicro - r.StoredMicro
 			if delta > 0 {
 				increase += delta

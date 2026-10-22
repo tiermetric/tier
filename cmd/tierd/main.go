@@ -29,6 +29,8 @@ import (
 	"github.com/tiermetric/tier/internal/collector"
 	"github.com/tiermetric/tier/internal/collector/anthropicadmin"
 	"github.com/tiermetric/tier/internal/collector/codexrollout"
+	"github.com/tiermetric/tier/internal/collector/copilotbilling"
+	"github.com/tiermetric/tier/internal/collector/cursoradmin"
 	"github.com/tiermetric/tier/internal/collector/muse"
 	"github.com/tiermetric/tier/internal/collector/openaiusage"
 	"github.com/tiermetric/tier/internal/collector/opencode"
@@ -1020,6 +1022,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	var worktreeAttrCfg *bool
 	var anthropicAdminCfg *config.AnthropicAdminConfig
 	var openaiUsageCfg *config.OpenAIUsageConfig
+	var copilotBillingCfg *config.CopilotBillingConfig
+	var cursorAdminCfg *config.CursorAdminConfig
 	// codexRolloutCfg carries the collectors.codex_rollout block (#464). Unlike
 	// the two pollers this collector DOES have a CLI flag (--codex-rollout),
 	// because it needs no credential — the flag alone is enough to enable it
@@ -1060,6 +1064,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		}
 		anthropicAdminCfg = cfg.Collectors.AnthropicAdmin
 		openaiUsageCfg = cfg.Collectors.OpenAIUsage
+		copilotBillingCfg = cfg.Collectors.CopilotBilling
+		cursorAdminCfg = cfg.Collectors.CursorAdmin
 		codexRolloutCfg = cfg.Collectors.CodexRollout
 		opencodeCfg = cfg.Collectors.Opencode
 		museCfg = cfg.Collectors.Muse
@@ -1220,6 +1226,17 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
+	copilotSettings, err := resolveCopilotBillingConfig(copilotBillingCfg, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	cursorSettings, err := resolveCursorAdminConfig(cursorAdminCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
 	// Same for the Codex rollout-log collector (#464): resolve+validate before
 	// store.Open. Enabled by EITHER --codex-rollout or the config block.
 	codexSettings, err := resolveCodexRolloutConfig(codexRolloutCfg, *codexRollout)
@@ -1281,6 +1298,8 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		*webhookSecret = ""
 		*anthropicTarget, *openaiTarget, *geminiTarget = "", "", ""
 		adminSettings, openaiSettings = nil, nil
+		copilotSettings = nil
+		cursorSettings = nil
 		codexSettings = nil
 		opencodeSettings = nil
 		museSettings = nil
@@ -1453,7 +1472,14 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 		"muse":            museSettings != nil && !*readOnly,
 		"anthropic-admin": adminSettings != nil && !*readOnly,
 		"openai-usage":    openaiSettings != nil && !*readOnly,
-	}), api.WithStoredScoringPolicy(), api.WithCommit(commit), api.WithPolledProviders(startedPollerProviders(adminSettings, openaiSettings)...))
+		"copilot-billing": copilotSettings != nil && !*readOnly,
+		"cursor-admin":    cursorSettings != nil && !*readOnly,
+	}), api.WithStoredScoringPolicy(), api.WithCommit(commit), api.WithPolledProviders(startedPollerProviders(adminSettings, openaiSettings)...), api.WithSyntheticDemo(opts.syntheticDemo))
+	// Cursor covers every model, so provider-based overlap detection cannot
+	// identify manual rows for the same usage.
+	if cursorSettings != nil {
+		logger.Warn("collectors.cursor_admin is enabled: manual POST /api/v1/costs rows for usage made through Cursor would be counted TWICE — Cursor covers every model, so provider-based overlap detection cannot identify these duplicates. Use Cursor Admin ingestion alone for this usage", "collector", collector.SourceCursorAdmin)
+	}
 	apiHandler.SetMetricsRegistry(srvMetrics.reg)
 	// Wire the unjoined-identity gauge (#125), same write-once-before-serve seam
 	// as the registry above; /scores Sets it per read, nil-safe elsewhere.
@@ -1520,7 +1546,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// For the community demo instance on synthetic data behind a rate-limiter.
 	if *readOnly {
 		apiHandler.RegisterReadOnly(mux)
-		logger.Warn("READ-ONLY mode ENABLED (#429): write/ingest/admin API routes, the GitHub webhook, the proxies, the watcher, and the pollers are OFF (404 / not started). Any ingest config is ignored. The webhook payload retention prune still runs, at every database open and daily, and DELETES webhook_payloads rows past its age limit or row cap (unexpired rows too, once the table is over the cap). NOTE: read-only governs WRITES only — the read routes stay OPEN per the token/aggregation config, so public exposure is safe ONLY on synthetic data, or with a read-token + a k-anonymized aggregation (team/division).")
+		logger.Warn("READ-ONLY mode ENABLED (#429): write/ingest/admin API routes, the GitHub webhook, the proxies, the watcher, and the pollers (including Copilot billing and Cursor Admin) are OFF (404 / not started). Any ingest config is ignored. The webhook payload retention prune still runs, at every database open and daily, and DELETES webhook_payloads rows past its age limit or row cap (unexpired rows too, once the table is over the cap). NOTE: read-only governs WRITES only — the read routes stay OPEN per the token/aggregation config, so public exposure is safe ONLY on synthetic data, or with a read-token + a k-anonymized aggregation (team/division).")
 	} else {
 		apiHandler.Register(mux)
 	}
@@ -1645,7 +1671,7 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	// source starts, so a source's first successful pass always finds its row. A
 	// read-only serve starts none and registers nothing.
 	if !*readOnly {
-		sources := sealGatedSources(adminSettings, openaiSettings, subscriptionsCfg, codexSettings, opencodeSettings, museSettings)
+		sources := sealGatedSources(adminSettings, openaiSettings, cursorSettings, subscriptionsCfg, codexSettings, opencodeSettings, museSettings, copilotSettings)
 		if err := registerSealSources(watcherCtx, db, sources, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "register sources for sealing: %v\n", err)
 			return 1
@@ -1801,6 +1827,46 @@ func runServeWithOptions(args []string, opts serveOptions) int {
 	} else {
 		logger.Info("OpenAI Usage poller disabled (no collectors.openai_usage config block)")
 	}
+	// Copilot owns its complete gross-spend feed. It runs in process through
+	// ingester.Store; this source cannot be shipped by developer clients.
+	if copilotSettings != nil {
+		client := copilotSettings.client
+		poller := copilotbilling.NewPoller(copilotbilling.PollerConfig{
+			Client: client, Store: db, Interval: copilotSettings.interval,
+			SettleDays: copilotSettings.settleDays, LookbackDays: copilotSettings.lookbackDays,
+			Logger: logger, Metrics: srvMetrics.copilot,
+			Settled: sealSettled(db, collector.SourceCopilotBilling, logger),
+		})
+		logger.Info("Copilot billing poller enabled (experimental, not live-verified)", "auth_mode", client.AuthMode(), "poll_interval", copilotSettings.interval)
+		go func() {
+			if err := poller.Run(watcherCtx, time.Time{}, ingester.Store(db)); err != nil {
+				logger.Error("copilot-billing poller exited", "err", err)
+			}
+		}()
+	} else {
+		logger.Info("Copilot billing poller disabled (no collectors.copilot_billing config block)")
+	}
+	// Cursor holds an admin credential in-process and emits daily aggregates;
+	// source classification rejects it on the laptop shipping endpoint.
+	if cursorSettings != nil {
+		cursorClient := cursoradmin.NewClient(cursoradmin.ClientConfig{APIKey: cursorSettings.apiKey, BaseURL: cursorSettings.baseURL})
+		cursorPoller := cursoradmin.NewPoller(cursoradmin.PollerConfig{
+			Client: cursorClient, Store: db, Interval: cursorSettings.interval,
+			SettleDays: cursorSettings.settleDays, LookbackDays: cursorSettings.lookbackDays,
+			Logger: logger, Metrics: srvMetrics.cursor,
+			Settled: sealSettled(db, collector.SourceCursorAdmin, logger),
+			Lost:    sealLost(db, collector.SourceCursorAdmin),
+		})
+		logger.Info("Cursor Admin poller enabled", "poll_interval", cursorSettings.interval)
+		go func() {
+			if err := cursorPoller.Run(watcherCtx, time.Time{}, ingester.Store(db)); err != nil {
+				logger.Error("cursor-admin poller exited", "err", logsafe.Err(err))
+			}
+		}()
+	} else {
+		logger.Info("Cursor Admin poller disabled (no collectors.cursor_admin config block)")
+	}
+
 	warnUndeclaredManualCosts(watcherCtx, db, logger, startedPollers(adminSettings, openaiSettings))
 
 	// Subscription flat-fee reconciler (#113/#155): keeps org_actual_spend

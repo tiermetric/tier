@@ -176,6 +176,25 @@ collector keeps its scan position in memory and writes no checkpoint row, so
 <code>tierd ship --muse</code> adds no new <em>category</em> of data to what leaves the machine.</p>
 </li>
 <li>
+<p><strong>Copilot billing</strong> (<code>collectors.copilot_billing</code>, new in v0.6.2,
+experimental): reads GitHub&#39;s organisation AI-credit billing reports. It
+stores the mapped developer identity (the user login when that is the
+canonical developer id), model, product, day and gross amount, plus an
+unattributed organisation remainder. Product is preserved in the
+reconciliation key; queried GitHub logins are not stored separately from
+the mapped developer. It stores no token counts, repository or issue linkage
+from this API.</p>
+</li>
+<li>
+<p><strong>Cursor Admin</strong> (<code>collectors.cursor_admin</code>, new in v0.6.2, experimental):
+reads team usage events and stores the mapped developer, model, day, cost
+and available token counts. Email is used only to look up a case-folded
+alias to a rostered developer and is never stored. A colliding alias,
+unmapped user or service/cloud agent is unattributed. Conversation id is
+neither decoded nor stored. BYO-key events labelled <code>User API Key</code> are
+skipped, including Cursor&#39;s fee on those requests.</p>
+</li>
+<li>
 <p><strong>Reverse-proxy capture</strong> (<code>internal/proxy/proxy.go</code>): the provider response
 parsers read only the message <code>id</code>, the <code>model</code>, and the <code>usage</code> token counts
 from the response body. The client gets the same response content
@@ -958,6 +977,28 @@ happens only for traffic you route through them;</li>
 organization&#39;s usage and cost reports from <code>api.anthropic.com</code> and
 <code>api.openai.com</code> — only when the <code>collectors.anthropic_admin</code> or
 <code>collectors.openai_usage</code> config block is present;</li>
+<li>the <strong>Copilot billing poller</strong>, which calls <code>api.github.com</code> by default for
+organisation AI-credit billing usage and, in GitHub App mode, the installation
+token exchange. It sends the organisation, requested day and, for per-user
+requests, a lowercased query identifier, with a bearer credential. Query
+identifiers come from every rostered developer id and every alias key whose
+canonical target is rostered, if the text matches
+<code>^[A-Za-z0-9][A-Za-z0-9-]{0,38}$</code> with no trailing or doubled hyphen; the reserved
+unattributed developer is excluded. These identifiers can be local OS usernames
+or configured developer ids, not just GitHub logins. An alias key that is a
+local username but happens to be a different org member&#39;s GitHub login is
+queried as that login, so its spend is attributed to the alias&#39;s developer;
+keep alias keys that are not GitHub logins unambiguous. App mode
+sends an App-signed JWT and installation id to obtain the bearer token; the
+private key stays local. It runs only with <code>collectors.copilot_billing</code>
+configured (or a configured doctor probe);</li>
+<li>the <strong>Cursor Admin poller</strong>, which calls <code>api.cursor.com</code> by default for team
+usage events. It sends the team Admin API key as HTTP Basic authentication
+with an empty password, the day&#39;s start/end timestamps and pagination fields.
+It sends no email or conversation id in the request. It runs only with
+<code>collectors.cursor_admin</code> configured (or a configured doctor probe). Both new
+pollers allow an explicit <code>api_base_url</code> override; outbound requests then go
+to that configured origin;</li>
 <li><code>tierd backfill</code>, which reads a repository&#39;s merged pull requests from the
 GitHub REST API (<code>api.github.com</code>, or the <code>--github-api-url</code> you pass) — only
 when you run it;</li>

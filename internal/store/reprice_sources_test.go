@@ -17,10 +17,11 @@ import (
 )
 
 // repriceableBySource is the EXPLICIT classification of every token-event source:
-// true = its cost_micro is derived by the server from token counts, so a reprice
-// may legitimately re-derive it; false = its cost is caller-authoritative and
-// re-deriving it would destroy the figure. Completed poller rows are also frozen
-// by R-2026-10-05-11, even though their original costs are server-derived.
+// true = no source-level exclusion; token-derived rows may be repriced, while
+// row-level guards still preserve authoritative dollars and cost-only rows.
+// false = the entire source is frozen. Completed Anthropic/OpenAI poller rows
+// are frozen by R-2026-10-05-11 even though their original costs are server-derived.
+// Cursor daily aggregates are frozen because their events were priced per request.
 //
 // This map is the point of the test. repriceExcludedWhereSQL is an open DENYLIST
 // (`source = 'api'`), which fails DESTRUCTIVE: a future source whose cost is
@@ -44,7 +45,13 @@ var repriceableBySource = map[string]bool{
 	collector.SourceMuse:           true,
 	collector.SourceAnthropicAdmin: false,
 	collector.SourceOpenAIUsage:    false,
-	// The one caller-authoritative source: POST /api/v1/costs carries a finance
+	// No source-level exclusion for Copilot: its real rows
+	// are covered by the money-without-tokens and caller_authoritative clauses.
+	collector.SourceCopilotBilling: true,
+	// Cursor daily aggregates are frozen at source level: their costs sum
+	// per-request prices, so repricing the summed tokens can cross a tier.
+	collector.SourceCursorAdmin: false,
+	// The manual-import source: POST /api/v1/costs carries a finance
 	// figure (an invoice number), and its token counts are optional.
 	"api": false,
 }
@@ -68,9 +75,9 @@ func TestRepriceClassifiesEverySource(t *testing.T) {
 			t.Errorf("source %q is in collector.AllSources() but is NOT classified in "+
 				"repriceableBySource — decide whether a reprice may re-derive its cost. "+
 				"If its cost_micro is server-derived from token counts, it is repriceable "+
-				"(true); if it carries a caller-authoritative figure, it MUST be added to "+
-				"store.repriceExcludedWhereSQL and classified false here, or a reprice "+
-				"sweep will silently rewrite it.", src)
+				"(true); if the entire source is frozen, classify it false and cover it "+
+				"in store.repriceExcludedWhereSQL. Mixed sources need row-level guards "+
+				"for caller_authoritative and money-without-tokens rows.", src)
 			continue
 		}
 		t.Run(src, func(t *testing.T) {
@@ -144,7 +151,7 @@ func assertRepriceable(t *testing.T, src string, want bool) {
 			"either the classification is wrong or repriceExcludedWhereSQL over-excludes",
 			src, events[0].CostMicro)
 	case !want && moved:
-		t.Errorf("source %q is classified CALLER-AUTHORITATIVE but the reprice rewrote its cost "+
+		t.Errorf("source %q is classified FROZEN but the reprice rewrote its cost "+
 			"%d -> %d — repriceExcludedWhereSQL does not cover it, and a sweep destroys real money",
 			src, wrongCost, events[0].CostMicro)
 	}

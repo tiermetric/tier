@@ -63,8 +63,8 @@ footer.site a { color: var(--muted); }
 <div class="wrap"><main>
 <h1 id="tier--technical-reference">TIER — technical reference</h1>
 <p><strong>Scope from v0.6.1:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
-<h2 id="how-tier-captures-cost-records-outcomes-and-computes-the-number-v061">How TIER captures cost, records outcomes and computes the number (v0.6.1)</h2>
-<p><strong>Reference version:</strong> 1.7 — 2026-10-18 (v0.6.1 release). Describes TIER <strong>v0.6.1</strong> (embedded price table version 14, effective 2026-10-12, 93 models; rubric version 1 by default, which versions the size scale, work types and quality floors, or rubric 2 with Event 3 enabled; Go 1.27.2). Earlier releases lack parts of what follows: v0.4.1, for example, has no Opencode collector, carries price table version 9 and has no <code>tierd prices forget-version</code>. TIER is released under the Apache License 2.0. TIER v0.6.0 includes operator-enabled Event 3 scoring (rubric 2; see <code>CHANGELOG.md</code>, 0.6.0); it remains off by default.</p>
+<h2 id="how-tier-captures-cost-records-outcomes-and-computes-the-number-v062">How TIER captures cost, records outcomes and computes the number (v0.6.2)</h2>
+<p><strong>Reference version:</strong> 1.8 — 2026-10-22 (v0.6.2 release). Describes TIER <strong>v0.6.2</strong> (embedded price table version 14, effective 2026-10-12, 93 models; rubric version 1 by default, which versions the size scale, work types and quality floors, or rubric 2 with Event 3 enabled; Go 1.27.3 for v0.6.2; source builds at this revision or later require Go 1.27.3 or newer, raised for GO-2026-6809). Earlier releases lack parts of what follows: v0.4.1, for example, has no Opencode collector, carries price table version 9 and has no <code>tierd prices forget-version</code>. TIER is released under the Apache License 2.0. TIER v0.6.0 includes operator-enabled Event 3 scoring (rubric 2; see <code>CHANGELOG.md</code>, 0.6.0); it remains off by default.</p>
 <p><strong>What this document is.</strong> The companion to the <a href="whitepaper.html" rel="nofollow">TIER white paper</a>, which says what the number means and which decisions it may and may not inform. This reference holds the mechanics: capture paths, pricing, outcome producers, attribution and windows, aggregation and privacy, statistics, Spend Leverage accounting, team deployment, the API, and the known ways the number misleads. Where the two overlap they say the same thing; where they seem to differ, this reference is the more detailed statement and the white paper is the defect.</p>
 <p><strong>How to read it.</strong> Every behaviour the reference describes is stated in it. Operator procedures it does not reproduce are named with the repository file that holds them each time: request and response schemas, the full configuration schema, backup and restore, the binary download and checksum commands, proxy and TLS hardening, each command&#39;s failure output and full flag list (<code>tierd &lt;command&gt; -h</code>). All file names refer to the public repository, <code>tiermetric/tier</code>. Where a behaviour is configurable, the reference names the flag or setting. &#34;Planned&#34; marks designed work that has an operator ruling behind it; &#34;specified but not enforced&#34; marks design text with no build commitment. Version 1.1 was read against the source of the time during the maintainer&#39;s review; version 1.2 checks each change made since then against the source prepared for v0.5.2. Measured figures carry their date and source.</p>
 <p><strong>Two roles.</strong> The <strong>operator</strong> is the project maintainer, who decides disputed design questions. Each ruling is recorded with its date in the maintainer&#39;s private rulings ledger and on the issue it answers; this reference states in full every ruling it relies on. Issue numbers (#826 and others) refer to the maintainer&#39;s issue tracker, which may not be public; they are provenance only. Whoever installs and runs TIER is the <strong>administrator</strong>.</p>
@@ -83,7 +83,7 @@ footer.site a { color: var(--muted); }
 <p><strong>Unit:</strong> weighted outcome points per $1,000 of list-price AI cost. A TIER of 100 means 100 weighted points for each $1,000 of AI usage. The scale constant 1,000 is fixed in the scoring engine.</p>
 <p>The report also carries two related figures:</p>
 <ul>
-<li><strong><code>cost_per_point</code></strong> = <code>total_cost_usd / weighted_points</code>, in US dollars per weighted point; <code>1000 / TIER</code> whenever both are non-zero. With zero points it is <code>null</code>, so &#34;no accepted outcome&#34; never reads as the most efficient score. With points at zero recorded cost, TIER is 0 and <code>cost_per_point</code> is 0; the dashboard shows that case as &#34;FREE&#34; (Section 7.1), because a <code>tier</code> of 0 alone cannot tell it from nothing accepted.</li>
+<li><strong><code>cost_per_point</code></strong> = <code>total_cost_usd / weighted_points</code>, in US dollars per weighted point; <code>1000 / TIER</code> whenever both are non-zero. With zero points it is <code>null</code>, so &#34;no accepted outcome&#34; never reads as the most efficient score. With points at zero recorded cost, TIER is 0 and <code>cost_per_point</code> is 0; the dashboard shows that case as &#34;No recorded AI cost&#34; (Section 7.1), because a <code>tier</code> of 0 alone cannot tell it from nothing accepted. Zero recorded cost is often a capture gap rather than free work; neither zero is an efficiency reading.</li>
 <li><strong>Spend Leverage</strong> = <code>total_cost_usd / actual_paid_usd</code>, the list-price value of the usage divided by what finance actually paid (Section 8).</li>
 </ul>
 <p><strong>Which figure a decision uses.</strong> The pooled figure divides the window&#39;s points by <strong>all</strong> of its recorded cost: accepted work, abandoned and unfinished work, and spend not linked to any issue. Each per-work-type segment (Section 4.3) divides that type&#39;s points by the cost linked to that type&#39;s outcomes <strong>only</strong>, so it leaves out abandoned work and unlinked spend, and it usually reads higher (it can read lower when its own mix of outcomes differs). The segment answers &#34;what did accepted work of this kind cost&#34;; the pooled figure answers &#34;what did we spend per accepted point&#34;. A decision about one kind of work compares its segment across two windows, and reads the pooled <code>no_outcome</code> and unattributed amounts from <code>segment_reconciliation</code> beside it (Section 5.3), because a change that moves spend into abandoned work lowers the pooled figure and leaves the segment unchanged. Segments and <code>segment_reconciliation</code> are served only in <code>developer</code> mode (Section 6.2).</p>
@@ -180,8 +180,92 @@ total                                          $0.875  (stored as 875,000 micro-
 </ul>
 <p><code>tierd serve</code> warns at startup in the two double-counting cases: Codex capture with <code>/openai/</code> mounted, and Opencode capture with any proxy route mounted.</p>
 <p><strong>Manual REST.</strong> <code>POST /api/v1/costs</code> stores one event, for scripts and imports. Its <code>source</code> must be <code>&#34;api&#34;</code> or omitted (omitted means <code>api</code>); any other value is a <code>400</code>. Every cost event carries a <code>fidelity</code>: <code>realtime</code> (captured per call, by the log readers and the proxy), <code>daily</code> (a daily total) or <code>estimated</code>. On <code>/costs</code> it may be <code>daily</code> or <code>estimated</code> (default <code>estimated</code>); <code>realtime</code> is refused. Unlike every other path, <code>/costs</code> stores the caller&#39;s dollar figure (<code>cost_usd</code>) as given, so an import must apply list pricing itself. With an <code>idempotency_key</code>, a repeat of the same cost is ignored and a different cost is a <code>409</code> unless the request sets <code>override</code> (an audited correction); a keyed post whose developer, issue, model, source or fidelity differs from the stored row is also a <code>409</code> and writes nothing (#871). On a server running the Anthropic Admin or OpenAI Usage poller, a row for that provider&#39;s models is refused with <code>400</code> unless it declares <code>&#34;billed_to&#34;: &#34;other&#34;</code>, for spend billed where the poller cannot see it (Claude Max seats, Bedrock or Vertex, another organisation); the declaration is stored and exported, and <code>serve</code> warns at startup with the count and dollar sum of undeclared manual rows on days a poller covered (#854). <code>model</code>, <code>developer</code> and <code>issue_id</code> are required; <code>issue_id</code> is stored as sent, so it joins only if written the way TIER stores issue ids. A negative cost is a <code>400</code>. The body has no timestamp field: the server stamps the time it arrives, so an import of past spend lands in the current window. The row is stamped with the loaded table&#39;s <code>price_version</code> although that table did not price it, and <code>tierd reprice</code> never rewrites it.</p>
-<p>A score&#39;s cost can mix four bases: token counts priced from the table; token counts priced by the unknown-model guess; provider daily remainders priced as an approximation; and dollars a caller supplied through /costs (stored as given, never repriced). Token-derived reference cost may use published rates or an explicit operator estimate. Caller-supplied dollars and a price-version stamp do not establish published-rate derivation. <code>/events</code> shows each row&#39;s <code>source</code>, <code>fidelity</code> and <code>billing_mode</code>; <code>/scores</code> does not yet break the total down.</p>
+<p>Recorded cost can combine token-derived table rates, unknown-model guesses, approximate provider remainders, Copilot gross dollars, Cursor vendor-cent fallbacks and caller-supplied <code>/costs</code> dollars (stored as given, never repriced). Token-derived reference cost may use published rates or an explicit operator estimate. Provider- or caller-supplied dollars and a price-version stamp do not establish derivation from TIER&#39;s rate table. <code>/events</code> shows each row&#39;s <code>source</code>, <code>fidelity</code> and <code>billing_mode</code>; <code>/scores</code> does not yet break the total down.</p>
 <p><strong>Org-level pollers (off by default).</strong> Two pollers read an organisation&#39;s usage and cost from the Anthropic Admin API and the OpenAI Usage API, one day at a time, once that day ended at least 24 hours ago. They write two things. First, a remainder event per model and day: for each token class, the provider&#39;s total minus what the Claude Code, Codex, Opencode and proxy paths recorded for that model and day, never below zero, priced with the table. It is stored under developer <code>unattributed</code>, issue <code>unattributed</code> and fidelity <code>daily</code>, with no repository. These reach the denominator and cannot be split per person. Each poll re-reads every day from the first of the previous month. Completed day/model rows retain their counts, costs and basis on re-poll, including when later capture or provider totals differ. Newly started poll days after installation cutover <code>aggregate-approx-v1-2026-10-14</code> price the remainder with request thresholds disabled and store <code>pricing_basis=aggregate_approx</code>; missing models on an existing day inherit its original policy. Request pricing stays unchanged. Aggregate views disclose the approximation, its possible long-context under-statement and historical uncertainty; <a href="how-it-works.html#pricing-provenance-and-daily-approximations-1231-1232" rel="nofollow">pricing provenance and daily approximations</a> describes original-rate ceilings and explicit repair. Days older than that window are never revisited. Second, delta rows in <code>org_actual_spend</code> under the source <code>anthropic-admin</code> or <code>openai-usage</code>, which feed Spend Leverage (Section 8). They are enabled by the <code>collectors.anthropic_admin</code> and <code>collectors.openai_usage</code> config blocks, each taking <code>api_key</code> (prefer the <code>@/path/to/file</code> form), <code>org</code> and an optional <code>poll_interval</code> (default 1h, minimum 5m). Do not also post the same provider&#39;s invoice to <code>org_actual_spend</code> by hand for that organisation.</p>
+<h4 id="what-each-source-needs">What each source needs</h4>
+<p>The four local readers use usage records already on the machine, with no collector credential and no billing-plan check. They need access to those files and a watched repository. A remote or hosted session is outside these readers unless its supported local records are available to them. The organisation and team pollers are enabled only when their config block is present; see <code>config.example.yaml</code> for the settings.</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Plan or account type needed</th>
+<th>Credential</th>
+<th>What is recorded</th>
+<th>Per-person attribution</th>
+<th>What is NOT covered</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claude Code JSONL (<code>jsonl</code>)</td>
+<td>Claude Code account producing local session logs; plan not checked</td>
+<td>None for the reader</td>
+<td>Model, token counts, priced cost, time and repository; issue when derived</td>
+<td>Configured developer id, otherwise OS username; aliases can join it to a GitHub login</td>
+<td>Usage outside the selected repository; browser-only Claude usage</td>
+</tr>
+<tr>
+<td><code>codex</code> (<code>collectors.codex_rollout</code>)</td>
+<td>Codex CLI account producing local rollout logs, including subscription or API-key use; plan not checked</td>
+<td>None for the reader</td>
+<td>Model, token counts derived from cumulative snapshots, priced cost, time and repository; issue when derived</td>
+<td>Configured developer id, otherwise OS username; aliases can join it</td>
+<td>Hosted tasks without local rollout logs; sessions outside watched repositories</td>
+</tr>
+<tr>
+<td><code>opencode</code> (<code>collectors.opencode</code>)</td>
+<td>Opencode using the Z.ai coding plan route (<code>zai-coding-plan</code>)</td>
+<td>None for the reader</td>
+<td>Completed messages&#39; model, token counts, priced cost, time and repository</td>
+<td>Configured developer id, otherwise OS username; aliases can join it</td>
+<td>Other provider routes; in-flight messages; issue attribution (no branch in the store)</td>
+</tr>
+<tr>
+<td><code>muse</code> (<code>collectors.muse</code>)</td>
+<td>Muse Code account producing local session logs; plan not checked</td>
+<td>None for the reader</td>
+<td>Billed model-call token counts, model, priced cost, session id, time and repository; issue when derived</td>
+<td>Configured developer id, otherwise OS username; aliases can join it</td>
+<td>Web-search fees; subagent calls without supported parent linkage; sessions outside watched repositories</td>
+</tr>
+<tr>
+<td><code>anthropic_admin</code> (<code>collectors.anthropic_admin</code>)</td>
+<td>Anthropic organisation with access to usage and cost reports</td>
+<td>Org Admin API <code>api_key</code> (supports <code>@/path/to/file</code>) and configured <code>org</code></td>
+<td>Daily per-model token remainders, priced cost and monthly actual-spend deltas</td>
+<td>None: remainder is <code>unattributed</code></td>
+<td>Personal Claude subscriptions; per-person, repository or issue linkage from the aggregate reports</td>
+</tr>
+<tr>
+<td><code>openai_usage</code> (<code>collectors.openai_usage</code>)</td>
+<td>OpenAI API organisation with access to usage and cost reports</td>
+<td>Org admin/owner API <code>api_key</code> (supports <code>@/path/to/file</code>) and configured <code>org</code></td>
+<td>Daily per-model token remainders, priced cost and monthly actual-spend deltas</td>
+<td>None: remainder is <code>unattributed</code></td>
+<td>ChatGPT subscriptions; per-person, repository or issue linkage from the aggregate reports</td>
+</tr>
+<tr>
+<td><code>copilot_billing</code> (<code>collectors.copilot_billing</code>)</td>
+<td>GitHub Copilot organisation AI-credit billing</td>
+<td>GitHub App installed on the org with <strong>Administration: Read-only</strong> (preferred): <code>app_id</code>, <code>installation_id</code>, <code>private_key</code>; or org-admin <code>token</code>; secrets <code>private_key</code> and <code>token</code> support <code>@/path/to/file</code>; configured <code>org</code></td>
+<td>Daily spend using GitHub&#39;s gross amount (before included credits and discounts), by mapped developer, model and product, plus an org-level unattributed remainder</td>
+<td>Login-shaped roster developer ids and alias keys whose canonical targets are rostered are queried and mapped to developers; these can include local OS usernames or configured developer ids; unmapped spend remains in the org remainder</td>
+<td>Individual Copilot Pro (no org billing API); token counts, repository or issue attribution; net invoice spend</td>
+</tr>
+<tr>
+<td><code>cursor_admin</code> (<code>collectors.cursor_admin</code>)</td>
+<td>A Cursor team plan with Admin API access (Teams or Enterprise; Cursor decides which plans include it)</td>
+<td>Team Admin API <code>api_key</code> (supports <code>@/path/to/file</code>)</td>
+<td>Daily developer/model cost and available token counts, priced per event before aggregation</td>
+<td>Email lookup through case-folded aliases to a rostered developer; colliding aliases, unmapped users and service/cloud agents go to <code>unattributed</code>; email is never stored</td>
+<td>Individual accounts; BYO-key events and Cursor&#39;s fee on them; conversation id, repository or issue attribution</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Copilot billing and Cursor Admin are new in v0.6.2 and experimental.</strong> A working credential probe or the dated Cursor BYO observation does not establish complete production capture. <code>tierd doctor --config &lt;path&gt;</code> checks configured credentials: <code>copilot_billing credential</code> reports HTTP status, item count and auth mode; <code>cursor_admin credential</code> reports HTTP status and event count. Doctor probes do not ingest spend. Both collectors use daily fidelity and reconcile changes with signed delta rows; neither feeds <code>org_actual_spend</code> or imports seat fees.</p>
+<p><strong>Copilot billing.</strong> The poller reads GitHub&#39;s organisation AI-credit billing usage, not a personal Copilot Pro account. It requests the organisation total and sends lowercased <code>user=</code> query values for every rostered developer id and every alias key whose canonical target is rostered, when the text matches <code>^[A-Za-z0-9][A-Za-z0-9-]{0,38}$</code> with no trailing or doubled hyphen; the reserved unattributed developer is excluded. These identifiers can be local OS usernames or configured developer ids, not just GitHub logins. An alias key that is a local username but happens to be a different org member&#39;s GitHub login is queried as that login, so its spend is attributed to the alias&#39;s developer; keep alias keys that are not GitHub logins unambiguous. It records the nonnegative organisation remainder as unattributed spend per model and product. Organisation-level totals remain unverified; an unusable organisation response leaves that day incomplete. Keep Opencode&#39;s Copilot provider excluded, and do not also import the same spend manually. Defaults are <code>poll_interval: 6h</code> (minimum <code>15m</code>), <code>settle_days: 2</code> and <code>lookback_days: 7</code>, with <code>1 &lt;= settle_days &lt;= lookback_days &lt;= 31</code>.</p>
+<p><strong>Cursor pricing and identity.</strong> A token-based call on a model with an audited TIER rate is valued at list rate, whether included-plan or usage-based; any other event uses Cursor&#39;s reported cents. The reported-cents fields are <code>tokenUsage.totalCents</code> for token calls and <code>chargedCents</code> for non-token calls. Emails are used only for alias lookup, never as stored fallback developer ids; conversation ids are not decoded or stored. A colliding case-folded alias goes to <code>unattributed</code>.</p>
+<p><strong>Cursor BYO keys and uncosted days.</strong> Requests whose kind contains <code>api key</code> (case-insensitive; observed BYO kind: <code>User API Key</code>) are skipped, even when Cursor calls them chargeable. Their provider spend is captured by <code>anthropic_admin</code> or <code>openai_usage</code> only when the matching poller is configured for the billed organisation. Cursor&#39;s small per-request fee on those requests is not counted. If a chargeable event falls back to Cursor&#39;s reported cents and the resulting cost is zero, it is uncosted; this covers non-token calls on any model and token-based calls without an audited TIER rate. An unresolved day is recorded as a lost span, and sealing that month requires <code>tierd seal --skip</code>. For a token call without an audited rate, adding the model&#39;s price and completing a clean re-read can resolve the day before it leaves <code>lookback_days</code> and before a loss is recorded. Late discovery records a loss immediately; a fresh process treats prior certification as possibly complete. Defaults are <code>poll_interval: 1h</code> (also the minimum), <code>settle_days: 1</code> and <code>lookback_days: 7</code>, with <code>1 &lt;= settle_days &lt;= lookback_days</code>. The Admin key can write team settings at Cursor; TIER uses it only to read usage.</p>
 <p><strong>Event issue rules.</strong> The optional <code>POST /api/v1/events</code> wire field <code>issue_rule</code>
 is client-asserted extractor provenance. Only the closed set in
 <a href="api-compatibility.html#post-apiv1events" rel="nofollow"><code>POST /api/v1/events</code></a> is retained;
@@ -192,7 +276,7 @@ unknown-field HTTP 400, the shipper uses its existing single resend with the
 rejected optional field omitted; no capabilities endpoint is involved.</p>
 <p><strong>The laptop shipper, <code>tierd ship</code>.</strong> When developers work on laptops and the server runs centrally, <code>tierd ship --server &lt;url&gt; --repo &lt;path&gt;</code> sends locally captured events to <code>POST /api/v1/events</code>. The server prices each event again with its own loaded table. <code>ship</code> keeps no state (the server deduplicates on keys), reads the last 90 days by default, and exits 1 when it finds nothing unless <code>--allow-empty</code> is passed. Every run resends everything in its window, in batches of 500 events, and the server keeps one row per key; a scheduled job can pass a shorter <code>--since</code> to send less. A batch that fails after three retries ends the run with exit 1; batches already sent stay stored. The project has not measured the server load of frequent full resends. <code>--codex-rollout</code>, <code>--opencode</code> and <code>--muse</code> are off by default on <code>ship</code> too. Without them, a central server records a laptop&#39;s Codex, Opencode or Muse Code outcomes and none of their cost, so that work reads as free and TIER reads high for exactly the developers who moved to those tools.</p>
 <h3 id="32-pricing-list-prices-and-why">3.2 Pricing: list prices, and why</h3>
-<p>Captured tokens are converted to dollars with a <strong>reference price table</strong> embedded in the binary (<code>internal/store/prices.yaml</code>), never with the organisation&#39;s invoice. The aim: <strong>price what the provider would charge at its published list rates, including its charging mechanics.</strong> Four exceptions are stated where they apply: an unknown model is priced by a guess (Section 3.3); Opencode reasoning tokens are priced at the output rate by assumption (Section 3.1); <code>/costs</code> stores the caller&#39;s figure (Section 3.1); and fast mode, below.</p>
+<p>Token-derived costs use a <strong>reference price table</strong> embedded in the binary (<code>internal/store/prices.yaml</code>), rather than the organisation&#39;s invoice. Copilot billing records GitHub&#39;s gross AI-credit dollars; Cursor falls back to vendor cents when a token call has no audited TIER rate or a call is not token-based (Section 3.1). The aim: <strong>price what the provider would charge at its published list rates, including its charging mechanics.</strong> Other pricing limits are stated where they apply: an unknown model is priced by a guess (Section 3.3); Opencode reasoning tokens are priced at the output rate by assumption (Section 3.1); <code>/costs</code> stores the caller&#39;s figure (Section 3.1); and fast mode, below.</p>
 <ul>
 <li><strong>Mechanics count in the denominator:</strong> cache-read and cache-write multipliers, long-context re-pricing above a model&#39;s threshold (Section 3.3), and thinking or reasoning tokens where a provider reports them (priced at the output rate).</li>
 <li><strong>Procurement does not:</strong> enterprise discounts, batch discounts and subscription fees leave the denominator unchanged. They are recorded as paid spend and show up in Spend Leverage (Section 8).
@@ -260,7 +344,7 @@ TIER prices recorded token classes using its reference table. Coverage depends o
 </tbody>
 </table>
 <p>A 2026-10-14 check of provider pricing pages found gpt-5.6 rates differing from table v14 and a promotional window through 2026-11-21 whose model applicability remains unconfirmed. These are unresolved source discrepancies, not verified replacement rates or verified expiry applicability. A human-confirmed primary-source read is required before changing those cells. Until resolved, identify the affected cells separately from verified standard-rate cells.</p>
-<p>The table describes v0.6.1 limitations. The aggregate approximation is prospective; v0.5.2 and completed historical rows keep their original pricing. The encoded rates are in <code>internal/store/prices.yaml</code> and <a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a>. No assessment exposure percentage is presented as a fresh measurement here.</p>
+<p>The table describes v0.6.2 limitations. The aggregate approximation is prospective; v0.5.2 and completed historical rows keep their original pricing. The encoded rates are in <code>internal/store/prices.yaml</code> and <a href="reference-price-table.html" rel="nofollow">reference-price-table.md</a>. No assessment exposure percentage is presented as a fresh measurement here.</p>
 <table>
 <thead>
 <tr>
@@ -864,7 +948,7 @@ zero. The other tags count observations in the receipt snapshot and may overlap.
 <p>Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for the subscription routes used here. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated, TIER scores read high, and Claude looks relatively cheaper in cross-vendor comparisons.</p>
 <hr>
 <h3 id="57-developer-mode-per-issue-report-1273">5.7 Developer-mode per-issue report (#1273)</h3>
-<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours. Team/division requests return <code>403</code>.</p>
+<p><strong>v0.6.2 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours. Team/division requests return <code>403</code>.</p>
 <p>Use the server&#39;s stored outcomes and policy to read cost, points and TIER per
 <code>(repo, issue_id)</code>:</p>
 <pre><code>TIER_API_TOKEN=... tierd issues --server http://127.0.0.1:8080 --since 2026-10-01
@@ -949,7 +1033,7 @@ fields, refusal semantics and strict scope disclosure.</p>
 <p>The evidence floor can reject some suspicious readings, but passing it does not verify the inputs or establish statistical adequacy.</p>
 <p>A team or division row applies the same three conditions to its <strong>summed</strong> inputs. Five developers with one outcome and $2 each are each below the floor; their team, with 5 outcomes and $10, clears it, and at the default k of 5 it is also named (Section 6.2).</p>
 <p><strong>Order.</strong> The API returns developer rows in identifier order and team rows in name order (the <code>other</code> row last). The dashboard keeps that order: &#34;Rows are listed alphabetically, not by TIER.&#34; A developer row below the floor shows its TIER muted, tagged &#34;below evidence floor&#34;, with no bar drawn. In the dashboard&#39;s per-work-type panels the floor is tested against that segment&#39;s own cost and outcomes.</p>
-<p><strong>The dashboard headline</strong> is the rollup over every row (the <code>total</code> block). It shows a word instead of a number in four cases and keeps the measured inputs on screen in each: &#34;NO SCORE&#34; when the window has no weighted points (nothing accepted is the absence of a score, not a score of zero); &#34;FREE&#34; when it has points at zero recorded cost; and, when the rollup is below the floor, &#34;NOT ENOUGH SPEND TO SCORE&#34; under $5.00 or &#34;NOT ENOUGH EVIDENCE TO SCORE&#34; otherwise. &#34;NO SCORE&#34; and &#34;FREE&#34; also appear on individual rows.</p>
+<p><strong>The dashboard headline</strong> is the rollup over every row (the <code>total</code> block). It shows a word instead of a number in four cases and keeps the measured inputs on screen in each: &#34;NO SCORE&#34; when the window has no weighted points (nothing accepted is the absence of a score, not a score of zero); &#34;No recorded AI cost&#34; when it has points at zero recorded cost (often a capture gap rather than free work); and, when the rollup is below the floor, &#34;NOT ENOUGH SPEND TO SCORE&#34; under $5.00 or &#34;NOT ENOUGH EVIDENCE TO SCORE&#34; otherwise. &#34;NO SCORE&#34; and &#34;No recorded AI cost&#34; also appear on individual rows.</p>
 <p>Separately from the floor, the dashboard qualifies the headline by attribution coverage: when <code>data_quality.attributed_cost_share</code> is below 0.5, the value is dimmed and labelled &#34;provisional — N% attribution coverage&#34;, and the attribution banner turns to a warning. It says most of the cost joined no issue; Section 5.3 says what that does and does not imply. Team and division reports do not publish <code>attributed_cost_share</code> (Section 6.2), so their headline is labelled &#34;provisional — coverage not shown&#34;, without the dimming. A row can clear the floor and be provisional, or the reverse.</p>
 <p>The <strong>zero-token check</strong> is the third condition. An outcome is flagged when its developer recorded fewer than <strong>1,000</strong> tokens (input, output and every cache class summed) on its (repository, issue) in the <strong>attributable window</strong>: the 14 days up to and including the timestamp of the latest outcome on that (repository, issue) in the scored window, by any developer. That window may start before <code>since</code>; the check reads those tokens even though they are outside the scored window. Several outcomes on one issue (for example daily push-capture outcomes) share one window. The flagged outcome keeps its full points; the developer&#39;s row falls below the floor. The check sees only recorded tokens, so it cannot tell its causes apart: AI work TIER never captured (off-books usage, G-02 in Section 11), broken identity mapping, spend that cannot join an issue (Opencode, Section 3.1), session logs that are gone (Section 5.5), or a PR written without AI. The project accepts flagging the last case, because missing uncaptured AI use would be worse. In a large group, where almost any window holds one such outcome, this keeps the group row and headline below the floor; the project has no remedy for that beyond linking branches to issues and capturing every tool. The flag propagates: a team or division row is below the floor unless its members&#39; flagged count is zero, so <strong>one flagged outcome from any member takes the whole group row below the floor</strong>, and the headline with it. In team mode the per-developer list is suppressed and a name-free <code>zero_token_outcome_count</code> is emitted.</p>
 <p>Developer-mode <code>data_quality.partition_diagnostics</code> (#1233, v0.6.1)
@@ -1006,18 +1090,19 @@ unchanged. Team and division modes return <code>partition_diagnostics: &#34;not_
 <hr>
 <h2 id="9-how-to-use-it-install-demo-see-spend-full-score">9. How to use it: install, demo, see spend, full score</h2>
 <h3 id="91-install">9.1 Install</h3>
-<p>Build v0.6.1 from source (Go 1.27.2 or newer, <code>make</code>, <code>git</code>):</p>
-<pre><code>git clone --branch v0.6.1 https://github.com/tiermetric/tier.git
+<p>Build v0.6.2 from source (Go 1.27.3; this revision or later requires Go 1.27.3 or newer, raised for GO-2026-6809; <code>make</code>, <code>git</code>):</p>
+<pre><code>git clone --branch v0.6.2 https://github.com/tiermetric/tier.git
 cd tier
 make build                       # produces ./bin/tierd
 </code></pre>
 <p>Or install without cloning:</p>
-<pre><code>go install github.com/tiermetric/tier/cmd/tierd@v0.6.1
+<pre><code>go install github.com/tiermetric/tier/cmd/tierd@v0.6.2
 tierd version
 </code></pre>
 <p>Both commands pin the tag. <code>@latest</code> or a clone of <code>main</code> can give you a version whose flags and defaults differ from the ones documented here.</p>
 <p>Each release on the <code>tiermetric/tier</code> releases page publishes per-platform tarballs (darwin and linux on amd64 and arm64, and windows on amd64), each with a <code>.sha256</code> checksum and a SLSA (Supply-chain Levels for Software Artifacts) build-provenance attestation you can check with <code>gh attestation verify &lt;file&gt; --repo tiermetric/tier</code>. It also publishes a container image to the GitHub Container Registry (GHCR) as <code>ghcr.io/tiermetric/tierd</code>, built for linux/amd64 only (on arm64, use the arm64 binaries).</p>
-<p>The macOS binaries are not yet Developer-ID signed or notarized; by the operator&#39;s ruling of 2026-09-26 (issue #822), notarization and a Homebrew tap come in a later release. A binary downloaded with a web browser is marked as downloaded, and macOS&#39;s Gatekeeper may refuse to run it. Remove the mark once with <code>sudo xattr -d com.apple.quarantine /usr/local/bin/tierd</code> (use the path where you put it). A binary built from source or with <code>go install</code> carries no such mark. The download, checksum and extraction commands are in <code>docs/quickstart.md</code>. The Windows archive is built but untested: there is no Windows test run, and the database file-permission protection does not apply there. Treat Windows as unsupported. The default log locations are built from the home directory, so they resolve on Windows too.</p>
+<p>Homebrew (macOS): <code>brew install tiermetric/tap/tierd</code> builds tierd from source.</p>
+<p>The macOS binaries are not yet Developer-ID signed or notarized. A binary downloaded with a web browser is marked as downloaded, and macOS&#39;s Gatekeeper may refuse to run it. Remove the mark once with <code>sudo xattr -d com.apple.quarantine /usr/local/bin/tierd</code> (use the path where you put it). A binary built from source or with <code>go install</code> carries no such mark. The download, checksum and extraction commands are in <code>docs/quickstart.md</code>. The Windows archive is built but untested: there is no Windows test run, and the database file-permission protection does not apply there. Treat Windows as unsupported. The default log locations are built from the home directory, so they resolve on Windows too.</p>
 <p>The commands in this section write <code>tierd</code>, meaning the binary on your <code>PATH</code>. <code>go install</code> puts it in Go&#39;s binary directory (<code>$(go env GOPATH)/bin</code> unless <code>GOBIN</code> is set); add that directory to <code>PATH</code> if <code>tierd version</code> is not found. From a source checkout, use the full path to <code>bin/tierd</code> instead, for example <code>~/tier/bin/tierd</code>; the relative <code>./bin/tierd</code> works only while your current directory is the checkout.</p>
 <h3 id="92-see-it-in-one-command-synthetic-data">9.2 See it in one command (synthetic data)</h3>
 <pre><code>tierd demo                       # then open http://127.0.0.1:8080
@@ -1078,7 +1163,7 @@ tierd serve --aggregation team --addr 0.0.0.0:8080 --db /var/lib/tier/tier.db
 <p>A config file (<code>tierd serve --config config.yaml</code>) mirrors the flags; precedence is CLI flag &gt; environment variable &gt; config file &gt; built-in default. This reference does not reproduce the full schema: the repository&#39;s <code>config.example.yaml</code> lists every key, including the hierarchy, pollers, repository slugs and size-label overrides. For Docker, the image (linux/amd64 only, Section 9.1) runs <code>tierd</code> as non-root uid 65532 on a static base with no shell; it must bind <code>0.0.0.0</code> with a token. The image sets <code>HOME=/data</code> and declares <code>/data</code> a volume, so the default database is <code>/data/.tier/tier.db</code>:</p>
 <pre><code>docker run -d -p 8080:8080 -v tier-data:/data -v /etc/tier:/etc/tier:ro \
   -e TIER_API_TOKEN=@/etc/tier/api-token \
-  ghcr.io/tiermetric/tierd:0.6.1 serve --aggregation team --addr 0.0.0.0:8080
+  ghcr.io/tiermetric/tierd:0.6.2 serve --aggregation team --addr 0.0.0.0:8080
 </code></pre>
 <p>The token file must be readable by uid 65532. It ships only <code>tierd</code> (no <code>git</code>, no host logs), so feed a stock container with <code>tierd ship</code> or the proxy; watching inside a container needs the session-log directory and the repository mounted, and commit-based attribution is unavailable without <code>git</code>.</p>
 <h3 id="96-the-other-commands">9.6 The other commands</h3>
@@ -1255,7 +1340,7 @@ existing table rows; the identifier-free cutover marker remains.</p>
 <li><strong>Quality is partial.</strong> TIER does not measure the fraction reversed. A partial reversal that matches its supported revert rule receives the same message-selected floor as a full reversal—0.1 or 0.8. Other partial reversals can remain unobserved. Footer matching identifies recorded merge or squash SHAs, not constituent-commit ancestry. Incidents, hotfix detection and downstream failures are not enforced in v0.6.0; backfill does not reconstruct historical quality events. CI floors do not reach push-captured outcomes, and without the Workflow runs subscription CI failures are invisible. Corrective-work accounting (Event 3) ships in v0.6.0 and is off by default; the operator chooses whether to enable it.</li>
 <li><strong>Coverage of tools.</strong> Capture completeness is unknown. Unsupported populations and deployment gaps differ:
 <ul>
-<li>Cursor, GitHub Copilot and ChatGPT Team: no collector.</li>
+<li>Individual Cursor and Copilot Pro accounts: not covered by the team/organisation pollers. ChatGPT Team: no collector. Cursor teams with Admin API access and Copilot organisation billing have experimental opt-in pollers in v0.6.2 (Section 3.1).</li>
 <li>Codex cloud / Desktop cloud tasks, Claude Code hosted web tasks and Managed Agents: no collector for the hosted services.</li>
 <li>Gemini CLI without the proxy: no collector.</li>
 <li>Opencode non-Z.ai providers: excluded by design from this collector.</li>
@@ -1325,11 +1410,11 @@ existing table rows; the identifier-free cutover marker remains.</p>
 <p>Constants and rules from the body, for tools. Where a value here and the body differ, the body is right and this appendix is a defect.</p>
 <pre><code>document:
   title: &#34;TIER — technical reference&#34;
-  version: &#34;1.7&#34;
-  companion: &#34;whitepaper.md (version 2.6)&#34;
-  revision_note: &#34;v0.6.1 release&#34;
-  date: &#34;2026-10-18&#34;
-  describes: &#34;tiermetric/tier v0.6.1; Event 3 off by default, operator opt-in&#34;
+  version: &#34;1.8&#34;
+  companion: &#34;whitepaper.md (version 2.7)&#34;
+  revision_note: &#34;v0.6.2 release&#34;
+  date: &#34;2026-10-22&#34;
+  describes: &#34;tiermetric/tier v0.6.2; Event 3 off by default, operator opt-in&#34;
   licence: &#34;Apache-2.0&#34;
 formula:                                  # §2.1
   tier: &#34;sum(weight * quality) / (total_cost_usd / 1000)&#34;
@@ -1366,8 +1451,10 @@ pricing:                                  # §3.2–§3.4
   store_conflict: &#34;same key: coherent larger counts kept, token-derived cost recomputed at original basis; incompatible observations retained as conflicts&#34;
   billing_mode_changes_cost: false
 capture:                                  # §3.1
-  producers: [claude_code_jsonl, codex_rollout, opencode, muse_code, proxy, post_costs, anthropic_admin_poller, openai_usage_poller]
-  defaults: {claude_code: on, codex_rollout: off, opencode: off, muse_code: off, proxy: mounted, pollers: off}
+  producers: [claude_code_jsonl, codex_rollout, opencode, muse_code, proxy, post_costs, anthropic_admin_poller, openai_usage_poller, copilot_billing_poller, cursor_admin_poller]
+  defaults: {claude_code: on, codex_rollout: off, opencode: off, muse_code: off, proxy: mounted, pollers: off, copilot_billing: off, cursor_admin: off}
+  copilot_billing: {introduced: v0.6.2, status: experimental, poll_interval: &#34;6h&#34;, settle_days: 2, lookback_days: 7}
+  cursor_admin: {introduced: v0.6.2, status: experimental, poll_interval: &#34;1h&#34;, settle_days: 1, lookback_days: 7}
   worktree_attribution: {default: off, flag: &#34;--worktree-attribution&#34;, env: TIER_WORKTREE_ATTRIBUTION, config: &#34;watch.worktree_attribution (serve only)&#34;, status: &#34;opt-in preview; parents never carry; activation needs recorded gates, operator rulings and explicit decision; no new accuracy measured; see docs/how-it-works.md&#34;, stored_attribution: permanent}   # §5.1
   opencode_routes: [zai-coding-plan]
   counted_twice: [&#34;codex via /openai/ + --codex-rollout&#34;, &#34;opencode via proxy + --opencode&#34;, &#34;POST /costs re-posted without idempotency_key&#34;, &#34;POST /costs rows declared billed_to=other for usage a running poller also reports, and manual rows for a poller-covered provider stored before v0.5.2&#34;]
@@ -1399,7 +1486,7 @@ spend_leverage:                           # §8.1
   org_invoice_without_hierarchy: &#34;allocated to no one&#34;
   finance_posts_idempotent: false
 use:                                      # §6.3
-  permitted: &#34;coaching conversations; per-developer views and the per-issue report are not available on real data in v0.6.1 (#826), only in the synthetic tierd demo using its own invented data in a private temporary database that cannot load yours&#34;
+  permitted: &#34;coaching conversations; per-developer views and the per-issue report are not available on real data in v0.6.2 (#826), only in the synthetic tierd demo using its own invented data in a private temporary database that cannot load yours&#34;
   stance: &#34;TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.&#34;
   planned_not_built: [per_viewer_tokens, view_log, developer_mode_retention_90d_default_365d_ceiling, name_free_rollup, coaching_page]
 retention_today: &#34;nothing deleted by age except raw webhook bodies (90 days, 50,000 rows, at database open and every 24 hours while serve runs)&#34;
@@ -1408,10 +1495,10 @@ windows:                                  # §5, §10
   defaults_days: {api: 90, dashboard: 30, backfill: 90, ship: 90, score: 90}   # api and dashboard: developer mode
   read_first: [window_predates_cost_capture, cost_coverage_safe_since]
 install:                                  # §9.1
-  source: &#34;git clone --branch v0.6.1 https://github.com/tiermetric/tier.git &amp;&amp; cd tier &amp;&amp; make build&#34;
-  go: &#34;go install github.com/tiermetric/tier/cmd/tierd@v0.6.1&#34;
-  image: &#34;ghcr.io/tiermetric/tierd:0.6.1 (linux/amd64)&#34;
-  go_version: &#34;1.27.2 or newer (v0.6.1)&#34;
+  source: &#34;git clone --branch v0.6.2 https://github.com/tiermetric/tier.git &amp;&amp; cd tier &amp;&amp; make build&#34;
+  go: &#34;go install github.com/tiermetric/tier/cmd/tierd@v0.6.2&#34;
+  image: &#34;ghcr.io/tiermetric/tierd:0.6.2 (linux/amd64)&#34;
+  go_version: &#34;1.27.3 or newer (v0.6.2; raised for GO-2026-6809)&#34;
 </code></pre>
 <p><strong>Seal timing disclosure.</strong> Sealed reports show the actual UTC seal timestamp,
 configured grace (or “not recorded” for legacy seals) and elapsed days after
@@ -1636,6 +1723,29 @@ coverage as <code>not_established</code>.</p>
 <h4 id="not-shipped">Not shipped</h4>
 <p>Automatic nomination of undeclared repairs is planned, not shipped. TIER does
 not detect undeclared repairs; they remain outside this accounting.</p>
+<h2 id="time-to-merge-v062">Time to merge (v0.6.2)</h2>
+<p>Time to merge is a separate descriptive figure: <strong>PR created → merged (includes
+draft time)</strong>, calculated only from captured <code>created_at</code> and <code>merged_at</code>,
+including backfill evidence. It shares the score window, aliases, dated groups
+and census; each published figure additionally needs k counted PR authors.
+A score group failing this extra floor keeps null figures and does not move to
+the residual. The integer median averages the two middle durations for even n;
+p90 uses nearest rank and is absent for n &lt; 10. Exclusion counts are org-wide
+and are null below k counted population authors or when the score residual is
+suppressed. A residual appears only when the shared fold emits <code>other</code>; a
+cohort with no included PRs has null figures with reason <code>no_prs</code> and does not
+withhold the total. The org total is withheld whenever a cohort with included
+PRs fails its floor, or the org has fewer than k counted PR authors. The neutral
+headline tile
+shows the median and N of M merged PRs measured (M = measured + excluded), or
+explicitly states that the figure is withheld to protect small groups.
+In anonymised modes the read-scoped <code>/api/v1/time-to-merge</code> endpoint accepts
+only a sealed calendar month through the same gate as <code>/scores</code>. Its figures
+are computed from stored outcomes at read time, are not part of the sealed
+report and are not covered by <code>verify</code>; real-data developer mode is refused.
+See the
+<a href="api-compatibility.html#time-to-merge-1342-v062" rel="nofollow">frozen API contract</a>.</p>
+<p>Smaller or later-created PRs merge faster; time to merge is not a quality measure.</p>
 
 </main></div>
 <footer class="site">Generated from the TIER markdown documentation. <a href="README.html">Back to the docs index</a>.</footer>

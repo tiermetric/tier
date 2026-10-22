@@ -137,7 +137,9 @@ func u4ServeRubric(t *testing.T, dbPath, envValue, cfgValue string, args ...stri
 	defer func() {
 		if !exited {
 			_ = cmd.Process.Kill()
-			<-done
+			if err := <-done; err != nil {
+				t.Logf("tierd exit after kill: %v", err)
+			}
 		}
 	}()
 	client := &http.Client{Timeout: time.Second}

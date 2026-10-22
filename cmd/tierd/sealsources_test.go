@@ -24,6 +24,8 @@ import (
 var gatedSourceConsts = map[string]string{
 	"SourceAnthropicAdmin":  collector.SourceAnthropicAdmin,
 	"SourceOpenAIUsage":     collector.SourceOpenAIUsage,
+	"SourceCopilotBilling":  collector.SourceCopilotBilling,
+	"SourceCursorAdmin":     collector.SourceCursorAdmin,
 	"subscriptionFeeSource": subscriptionFeeSource,
 	"SourceCodexRollout":    collector.SourceCodexRollout,
 	"SourceOpencode":        collector.SourceOpencode,
@@ -34,8 +36,8 @@ var gatedSourceConsts = map[string]string{
 // pulled source serve can start is registered when configured, and none when
 // nothing is.
 func TestSealGatedSources_EveryConfiguredSource(t *testing.T) {
-	all := sealGatedSources(&anthropicAdminSettings{}, &openAIUsageSettings{}, []config.Subscription{{RoutePrefix: "p"}},
-		&codexRolloutSettings{}, &opencodeSettingsT{}, &museSettingsT{})
+	all := sealGatedSources(&anthropicAdminSettings{}, &openAIUsageSettings{}, &cursorAdminSettings{}, []config.Subscription{{RoutePrefix: "p"}},
+		&codexRolloutSettings{}, &opencodeSettingsT{}, &museSettingsT{}, &copilotBillingSettings{})
 	var want []string
 	for _, v := range gatedSourceConsts {
 		want = append(want, v)
@@ -45,7 +47,7 @@ func TestSealGatedSources_EveryConfiguredSource(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("every source configured: %v, want %v", got, want)
 	}
-	if none := sealGatedSources(nil, nil, nil, nil, nil, nil); len(none) != 0 {
+	if none := sealGatedSources(nil, nil, nil, nil, nil, nil, nil, nil); len(none) != 0 {
 		t.Errorf("nothing configured: %v, want none", none)
 	}
 }
@@ -56,7 +58,8 @@ func TestSealGatedSources_EveryConfiguredSource(t *testing.T) {
 // each argument of that call is the settings variable the source it registers
 // is started from. Deleting one source's Settled, naming the wrong source, or
 // passing another value for a source's settings fails here. Each local
-// collector is also given sealLost for its own name (#913-D9 ruling R-8).
+// collector and Cursor Admin are also given sealLost for their own names
+// (#913-D9 ruling R-8).
 func TestServe_EverySealGatedSourceSettles(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -66,6 +69,8 @@ func TestServe_EverySealGatedSourceSettles(t *testing.T) {
 	sites := map[string]string{
 		"anthropicadmin.PollerConfig":  "SourceAnthropicAdmin",
 		"openaiusage.PollerConfig":     "SourceOpenAIUsage",
+		"copilotbilling.PollerConfig":  "SourceCopilotBilling",
+		"cursoradmin.PollerConfig":     "SourceCursorAdmin",
 		"codexrollout.Config":          "SourceCodexRollout",
 		"opencode.Config":              "SourceOpencode",
 		"muse.Config":                  "SourceMuse",
@@ -74,8 +79,9 @@ func TestServe_EverySealGatedSourceSettles(t *testing.T) {
 	// Each site's settings variable, in sealGatedSources' parameter order.
 	settings := []struct{ site, name string }{
 		{"anthropicadmin.PollerConfig", "adminSettings"}, {"openaiusage.PollerConfig", "openaiSettings"},
-		{"runSubscriptionFeeReconciler", "subscriptionsCfg"}, {"codexrollout.Config", "codexSettings"},
+		{"cursoradmin.PollerConfig", "cursorSettings"}, {"runSubscriptionFeeReconciler", "subscriptionsCfg"}, {"codexrollout.Config", "codexSettings"},
 		{"opencode.Config", "opencodeSettings"}, {"muse.Config", "museSettings"},
+		{"copilotbilling.PollerConfig", "copilotSettings"},
 	}
 	reads := map[string]map[string]bool{}
 	identsIn := func(n ast.Node) map[string]bool {
@@ -157,7 +163,7 @@ func TestServe_EverySealGatedSourceSettles(t *testing.T) {
 			t.Errorf("%s in runServeWithOptions settles %q, want sealSettled(db, %s, logger)", site, settled[site], want)
 		}
 	}
-	for _, site := range []string{"codexrollout.Config", "opencode.Config", "muse.Config"} {
+	for _, site := range []string{"codexrollout.Config", "opencode.Config", "muse.Config", "cursoradmin.PollerConfig"} {
 		if lost[site] != sites[site] {
 			t.Errorf("%s in runServeWithOptions records lost spend as %q, want sealLost(db, %s)", site, lost[site], sites[site])
 		}

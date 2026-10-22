@@ -400,8 +400,10 @@ func validateSizeLabels(m map[string]float64) error {
 // pointer (nil) is unambiguously distinct from a present-but-empty block, matching
 // the present-vs-absent discipline the rest of this package uses.
 type CollectorsConfig struct {
+	CopilotBilling *CopilotBillingConfig `yaml:"copilot_billing,omitempty"`
 	AnthropicAdmin *AnthropicAdminConfig `yaml:"anthropic_admin,omitempty"`
 	OpenAIUsage    *OpenAIUsageConfig    `yaml:"openai_usage,omitempty"`
+	CursorAdmin    *CursorAdminConfig    `yaml:"cursor_admin,omitempty"`
 	CodexRollout   *CodexRolloutConfig   `yaml:"codex_rollout,omitempty"`
 	Opencode       *OpencodeConfig       `yaml:"opencode,omitempty"`
 	Muse           *MuseConfig           `yaml:"muse,omitempty"`
@@ -562,6 +564,44 @@ type OpenAIUsageConfig struct {
 	APIKey       *string `yaml:"api_key,omitempty"`
 	Org          *string `yaml:"org,omitempty"`
 	PollInterval *string `yaml:"poll_interval,omitempty"` // e.g. "1h"; default 1h; min 5m
+}
+
+// CopilotBillingConfig enables the GitHub Copilot AI-credit gross-spend poller
+// when present. Org and exactly one of Token or the complete App credential
+// triple are required. Token and PrivateKey support @/path/to/file indirection
+// through cmd/tierd's resolveSecretFlag; credentials never enter logs.
+//
+// Single owner: this poller owns Copilot spend. Opencode's Copilot provider must
+// stay excluded, and the same spend must not also be imported manually. Rows
+// are cost-only daily aggregates; no tokens, repository or issue are inferred.
+// Org-level totals remain unverified: unusable responses skip the remainder.
+type CopilotBillingConfig struct {
+	Org            *string `yaml:"org,omitempty"`
+	AppID          *string `yaml:"app_id,omitempty"`
+	InstallationID *string `yaml:"installation_id,omitempty"`
+	PrivateKey     *string `yaml:"private_key,omitempty"`
+	Token          *string `yaml:"token,omitempty"`
+	APIBaseURL     *string `yaml:"api_base_url,omitempty"`
+	PollInterval   *string `yaml:"poll_interval,omitempty"` // default 6h; min 15m
+	SettleDays     *int    `yaml:"settle_days,omitempty"`   // default 2; min 1
+	LookbackDays   *int    `yaml:"lookback_days,omitempty"` // default 7; >= settle_days
+}
+
+// CursorAdminConfig enables the read-only Cursor team usage poller when present.
+// APIKey is required and supports @file via resolveSecretFlag. An admin key can
+// WRITE spend limits, members and model access; this poller only reads usage.
+// BYO-key Cursor traffic may already be counted by Anthropic/OpenAI pollers or
+// the proxy. This poller skips kinds containing "api key" (case insensitive).
+// See cursoradmin/poller.go for the live-verified BYO marker observation.
+// Unmapped users and service/cloud agents are unattributed; emails are discarded.
+// Days inside the lookback reflect the active price table through reconciliation
+// delta rows when prices change; older days are frozen.
+type CursorAdminConfig struct {
+	APIKey       *string `yaml:"api_key,omitempty"`
+	APIBaseURL   *string `yaml:"api_base_url,omitempty"`
+	PollInterval *string `yaml:"poll_interval,omitempty"` // default/minimum 1h
+	SettleDays   *int    `yaml:"settle_days,omitempty"`   // default 1; minimum 1
+	LookbackDays *int    `yaml:"lookback_days,omitempty"` // default 7; >= settle_days
 }
 
 // HTTPConfig groups listen-address and the secret fields. Bearer-token auth

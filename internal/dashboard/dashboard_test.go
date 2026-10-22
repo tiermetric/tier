@@ -436,12 +436,15 @@ func TestDashboard_LeverageLabelIsMeteredCost(t *testing.T) {
 // paths + guards that make the fields render when present, degrade when absent,
 // and stay XSS-safe.
 
-// K3 U53 specifies this completeness marker, not the rest of the caption prose.
+// K3 U53 and #1335 require both the completeness marker and the uncaptured-tool limit.
 func TestDashboardFidelityTileCaptionNamesCompleteness(t *testing.T) {
 	_, body := get(t, "/")
 	caption := regexp.MustCompile(`<span[^>]*id="kpi-fidelity-sub"[^>]*>([^<]*)</span>`).FindStringSubmatch(body)
 	if len(caption) != 2 || !strings.Contains(caption[1], "not capture completeness") {
 		t.Error("Capture-Fidelity caption must carry the 'not capture completeness' marker (#1228)")
+	}
+	if len(caption) != 2 || !strings.Contains(caption[1], "cannot see spend in uncaptured tools") {
+		t.Error("Capture-Fidelity caption must explain it cannot see spend in uncaptured tools (#1335)")
 	}
 }
 
@@ -696,8 +699,9 @@ func TestDashboard_HTMLHasCostPerPointAndProvenanceElements(t *testing.T) {
 
 // TestDashboard_ScriptRendersCostPerPoint pins the $/point render path: the value
 // cell stacks cost_per_point under TIER via buildCostPerPoint, gates the "--"
-// placeholder on weighted_points (a zero-POINT row has no interpretable unit), and
-// carries the self-relative CI fields on hover.
+// placeholder on weighted_points (a zero-POINT row has no interpretable unit)
+// and recorded cost (a capture gap is not an efficiency reading), and carries
+// the self-relative CI fields on hover.
 func TestDashboard_ScriptRendersCostPerPoint(t *testing.T) {
 	_, body := get(t, jsPath)
 	for _, marker := range []string{
@@ -710,14 +714,44 @@ func TestDashboard_ScriptRendersCostPerPoint(t *testing.T) {
 			t.Errorf("dashboard.js missing cost-per-point marker %q", marker)
 		}
 	}
-	// The zero-point "--" placeholder must gate on weighted_points, NOT on
-	// cost_per_point: a genuine free (zero-cost) but non-zero-point row is an
-	// honest "$0.00/pt", only a zero-POINT row is the undefined-unit case.
+	// The zero-point "--" placeholder must gate on weighted_points, not on
+	// cost_per_point: a zero-POINT row has no denominator. Zero recorded cost
+	// also withholds the ratio because it can reflect a capture gap.
 	if !strings.Contains(body, "num(d.weighted_points)") {
 		t.Error("cost-per-point placeholder must gate on weighted_points (zero-point => no unit)")
 	}
 	if !strings.Contains(body, "points <= 0") {
 		t.Error("cost-per-point must render the '--' placeholder when weighted_points <= 0")
+	}
+}
+
+// TestDashboard_CostPerPointNoRecordedCost pins #1335: positive points with no
+// recorded cost must return a placeholder before any $/point reading is built.
+func TestDashboard_CostPerPointNoRecordedCost(t *testing.T) {
+	_, js := get(t, jsPath)
+	fn, ok := jsBlockAfter(js, "function buildCostPerPoint(d, teamMode, isRanked) {")
+	if !ok {
+		t.Fatal("buildCostPerPoint not found")
+	}
+	const gate = "if (num(d.total_cost_usd) <= 0) {"
+	branch, ok := jsBlockAfter(fn, gate)
+	if !ok {
+		t.Fatal("buildCostPerPoint must withhold cost-per-point when no AI cost was recorded (#1335)")
+	}
+	if !strings.Contains(branch, `el('div', 'ybar-cpp num', '\u2014')`) || !strings.Contains(branch, "return none;") {
+		t.Error("zero recorded cost must return the existing em-dash placeholder")
+	}
+	if strings.Contains(branch, "/pt") {
+		t.Error("zero recorded cost must not produce a /pt reading")
+	}
+	for _, meaning := range []string{"no recorded AI cost", "cost-per-point is not shown", "capture gap"} {
+		if !strings.Contains(branch, meaning) {
+			t.Errorf("zero recorded cost title must explain %q", meaning)
+		}
+	}
+	readingAt := strings.Index(fn, "var cpp =")
+	if readingAt < 0 || strings.Index(fn, gate) > readingAt {
+		t.Error("zero recorded cost must return before the cost-per-point reading is built")
 	}
 }
 
@@ -1000,26 +1034,59 @@ func TestDashboard_KPINoScore(t *testing.T) {
 	}
 }
 
-// TestDashboard_ScriptRendersFree pins #499: a row/org with real points but ZERO
-// recorded cost has unbounded yield, not zero, so it must read "FREE" — never the
-// literal "0.0" the engine leaves (it divides only when cost>0). The NO SCORE
-// gate must come FIRST, so a row with neither points nor cost is NO SCORE, not
-// FREE.
-func TestDashboard_ScriptRendersFree(t *testing.T) {
+// TestDashboard_NoRecordedAICostMakesNoEfficiencyClaim pins #1335: missing cost
+// capture must never be presented as unlimited efficiency. Strip comments so an
+// unrelated implementation comment about an unbounded list remains allowed.
+func TestDashboard_NoRecordedAICostMakesNoEfficiencyClaim(t *testing.T) {
 	_, body := get(t, jsPath)
+	visible := strings.ToLower(jsStrip(body))
+	if strings.Contains(visible, "unbounded") {
+		t.Error("dashboard.js must not claim unbounded efficiency in user-visible strings (#1335)")
+	}
+}
+
+// TestDashboard_ScriptRendersNoRecordedAICost pins #499/#1335: accepted points
+// with zero recorded cost get a capture-gap label, never an efficiency reading.
+// The NO SCORE gate must come first when both points and recorded cost are zero.
+func TestDashboard_ScriptRendersNoRecordedAICost(t *testing.T) {
+	_, body := get(t, jsPath)
+	for _, tc := range []struct{ header, label string }{
+		{"} else if (orgFree) {", "setText('kpi-tier', 'No recorded AI cost');"},
+		{"function buildTierReading(d, teamMode, isRanked) {", "el('div', 'ybar-tier ybar-noscore', 'No recorded AI cost')"},
+		{"function buildTeamRollupTier(d) {", "text = 'No recorded AI cost';"},
+	} {
+		branch, ok := jsBlockAfter(body, tc.header)
+		if !ok || !strings.Contains(branch, tc.label) {
+			t.Errorf("%s must render No recorded AI cost (#1335)", tc.header)
+		}
+	}
+	for _, tc := range []struct{ header, pattern string }{
+		{"} else if (orgFree) {", `setText\('kpi-tier-ci', '([^']*)'\);`},
+		{"function buildTierReading(d, teamMode, isRanked) {", `free\.title = '([^']*)';`},
+		{"} else if (num(d.total_cost_usd) <= 0) {", `row\.appendChild\(el\('span', 'cmp-db-sr', '([^']*)'\)\);`},
+	} {
+		branch, ok := jsBlockAfter(body, tc.header)
+		match := regexp.MustCompile(tc.pattern).FindStringSubmatch(branch)
+		if !ok || len(match) != 2 || !strings.Contains(match[1], "capture gap") || strings.Contains(strings.ToLower(match[1]), "unbounded") {
+			t.Errorf("dashboard.js must explain the capture gap without an efficiency claim at %s", tc.pattern)
+		}
+	}
+	zeroCostBranch, _ := jsBlockAfter(body, "} else if (num(d.total_cost_usd) <= 0) {")
+	if strings.Contains(zeroCostBranch, "aria-label") {
+		t.Error("the no-recorded-cost branch must use screen-reader text instead of an aria-label on a generic div (#1335)")
+	}
 	for _, marker := range []string{
-		"'FREE'",
+		"'No recorded AI cost'",
 		"num(d.total_cost_usd) <= 0",
 		"num(total.total_cost_usd) <= 0",
-		"yield unbounded",
 	} {
 		if !strings.Contains(body, marker) {
-			t.Errorf("dashboard.js missing FREE marker %q", marker)
+			t.Errorf("dashboard.js missing No recorded AI cost marker %q", marker)
 		}
 	}
 	// Ordering guard: inside buildTierReading, the no-score (weighted_points) gate
-	// MUST precede the free (cost) gate, or a zero-points/zero-cost row mislabels
-	// as FREE instead of NO SCORE. This is the ONE place the order is load-bearing
+	// MUST precede the zero-cost gate, or a zero-points/zero-cost row mislabels
+	// as No recorded AI cost instead of NO SCORE. This is the ONE place the order is load-bearing
 	// (renderKPIs guards orgFree with !noScore, so it is order-independent there).
 	//
 	// Scope the search to buildTierReading's body: the same two gate strings also
@@ -1035,7 +1102,23 @@ func TestDashboard_ScriptRendersFree(t *testing.T) {
 	noScoreAt := strings.Index(fnBody, "num(d.weighted_points) <= 0")
 	freeAt := strings.Index(fnBody, "num(d.total_cost_usd) <= 0")
 	if noScoreAt < 0 || freeAt < 0 || noScoreAt > freeAt {
-		t.Error("in buildTierReading, the weighted_points (NO SCORE) gate must come before the cost (FREE) gate (#499)")
+		t.Error("in buildTierReading, the weighted_points (NO SCORE) gate must come before the cost (No recorded AI cost) gate (#499)")
+	}
+}
+
+func TestDashboard_NoScoreLabelsWrap(t *testing.T) {
+	_, html := get(t, "/")
+	for _, selector := range []string{".kpi .kpi-value.kpi-noscore {", ".ybar-noscore {"} {
+		style, ok := jsBlockAfter(html, selector)
+		if !ok {
+			t.Errorf("missing no-score label rule %q", selector)
+			continue
+		}
+		for _, declaration := range []string{"white-space: normal;", "overflow-wrap: anywhere;", "line-height: 1.3;"} {
+			if !strings.Contains(style, declaration) {
+				t.Errorf("%s must contain %q so no-score labels wrap legibly (#1335)", selector, declaration)
+			}
+		}
 	}
 }
 
@@ -2761,7 +2844,7 @@ func TestDashboard_KPISuppressesUnrankedRatio(t *testing.T) {
 		"Check token capture.",
 		// Criterion 4 is only satisfied if the spend is legible. '$0.00' is not:
 		// the canonical #502 window is $0.0001, and rounded it is both invisible
-		// as evidence and indistinguishable from the FREE band one gate above.
+		// as evidence and indistinguishable from the No recorded AI cost band one gate above.
 		"spendTextFor(totalCost)",
 	} {
 		if !strings.Contains(body, marker) {
@@ -2828,8 +2911,8 @@ func TestDashboard_UnrankedAdviceIsScopedToTheSpendArm(t *testing.T) {
 //
 //   - It is never a bare "$0.00". The canonical #502 window is $0.0001; rounded to
 //     the cent, criterion 4's "measured input on screen" is not on screen, and it
-//     is visually identical to the FREE band one gate above, where cost is
-//     genuinely zero and the yield is unbounded — a different reading entirely.
+//     is visually identical to the No recorded AI cost band one gate above,
+//     a likely capture gap — a different reading entirely.
 //   - It TRUNCATES rather than rounds. At totalCost in [4.995, 5.00) rounding
 //     renders "$5.00 of measured AI spend — below the $5.00 evidence floor", a
 //     sentence that contradicts itself. Truncating down cannot cross the floor.
@@ -2862,8 +2945,8 @@ func TestDashboard_UnrankedCauseLineShowsTheThinSpend(t *testing.T) {
 	usd = squashSpace(jsStrip(usd))
 	if !strings.Contains(usd, "'<$0.01'") {
 		t.Error("usdText has no sub-cent form — the canonical #502 window ($0.0001) renders as " +
-			"'$0.00', which is both invisible as evidence and indistinguishable from the FREE " +
-			"band, where cost is genuinely zero and yield is unbounded")
+			"'$0.00', which is both invisible as evidence and indistinguishable from the No recorded AI cost " +
+			"band, where no cost is recorded, often because of a capture gap")
 	}
 	if !strings.Contains(usd, "Math.floor(") {
 		t.Error("usdText no longer truncates; a ROUNDING formatter lets a figure print as " +
@@ -2973,7 +3056,7 @@ func TestDashboard_SpendTileAndCauseLineAgree(t *testing.T) {
 func TestDashboard_UnrankedGuardCatchesTheDefect(t *testing.T) {
 	const prefix = "function renderKPIs(data, pooled, teamMode) {\n" +
 		"  if (noScore) {\n    setText('kpi-tier', 'NO SCORE');\n  } else if (orgFree) {\n" +
-		"    setText('kpi-tier', 'FREE');\n"
+		"    setText('kpi-tier', 'No recorded AI cost');\n"
 	const suffix = "  } else {\n    setText('kpi-tier', orgTIER.toFixed(1));\n  }\n}\n"
 
 	mustCatch := []struct{ name, branch string }{
@@ -3249,12 +3332,12 @@ func TestDashboard_UnrankedGuardCatchesTheDefect(t *testing.T) {
 // TestDashboard_KPIGateOrderIsMonotoneInCost pins the ORDER of the three
 // withheld-headline gates, which is what keeps the tile monotone in cost.
 //
-// Reading left to right as spend rises with points held: $0.00 is FREE (the
-// ratio is UNDEFINED, not small — the engine never divides), $0.01–$4.99 is
+// Reading left to right as spend rises with points held: $0.00 is No recorded AI cost (the
+// ratio is withheld — the engine never divides), $0.01–$4.99 is
 // below-floor (defined but too thin to publish), $5.00+ headlines the number.
 // The presentation never goes scored → unscored → scored: everything below the
-// floor is one unranked band, and FREE is the more specific reading inside it.
-// Swap orgFree and orgUnranked and a genuinely free org gets the "not enough
+// floor is one unranked band, and No recorded AI cost is the more specific reading inside it.
+// Swap orgFree and orgUnranked and an org with no recorded cost gets the "not enough
 // spend" caption, which is true but strictly less informative; put orgUnranked
 // ahead of noScore and an org that merged nothing gets told to check its token
 // capture instead of being told nothing shipped.
@@ -7428,10 +7511,10 @@ func loadGenerationViolations(js string) (bad []string) {
 		bad = append(bad, fmt.Sprintf("`var loadGen = 0;` is declared %d times, want 1", n))
 	}
 	total := len(regexp.MustCompile(`\bloadGen\b`).FindAllStringIndex(code, -1))
-	if want := 1 + 2*len(dashboardLoaders) + len(dashboardLoaders) + detailLoadGenTouches + manifestLoadGenTouches + correctionLoadGenTouches + issueLoadGenTouches; total != want {
+	if want := 1 + 2*len(dashboardLoaders) + len(dashboardLoaders) + detailLoadGenTouches + manifestLoadGenTouches + correctionLoadGenTouches + issueLoadGenTouches + timeToMergeLoadGenTouches; total != want {
 		bad = append(bad, fmt.Sprintf("loadGen is touched %d times, want %d (one declaration, "+
 			"one capture per loader, one comparison per callback, showDetail's read-only "+
-			"capture and two comparisons, readManifest's capture and two comparisons, corrective-context's capture and two comparisons, and issue-report's capture and two comparisons)", total, want))
+			"capture and two comparisons, readManifest's capture and two comparisons, corrective-context's capture and two comparisons, issue-report's capture and two comparisons, and time-to-merge's capture and two comparisons)", total, want))
 	}
 
 	for _, l := range dashboardLoaders {
@@ -8347,7 +8430,7 @@ if (typeof d.tier !== 'number' || !isFinite(d.tier)) {
 } else if (num(d.weighted_points) <= 0) {
   text = 'NO SCORE';
 } else if (num(d.total_cost_usd) <= 0) {
-  text = 'FREE';
+  text = 'No recorded AI cost';
 } else if (!d.ranked) {
   text = BELOW_FLOOR_TAG;
 } else {
@@ -8804,7 +8887,7 @@ func TestDashboard_TeamRollupGuardCatchesTheDefect(t *testing.T) {
 	tierEnd := tierAt + strings.Index(js[tierAt:], "\n}\n")
 	reworded := js[:tierAt] + regexp.MustCompile(`\btext\b`).ReplaceAllString(js[tierAt:tierEnd], "label") + js[tierEnd:]
 	for old, new := range map[string]string{"'No team'": "'Unassigned'", "'Org total'": "'Whole org'",
-		"' of org cost'": "' of all cost'", "label = 'FREE';": "label = 'NO COST';"} {
+		"' of org cost'": "' of all cost'", "label = 'No recorded AI cost';": "label = 'NO COST';"} {
 		if !strings.Contains(reworded, old) {
 			t.Fatalf("mutation fixture: %s not found", old)
 		}

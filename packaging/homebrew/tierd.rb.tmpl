@@ -1,0 +1,19 @@
+class Tierd < Formula
+  desc "Measure outcome per token in software development"
+  homepage "https://tiermetric.org"
+  url "https://github.com/tiermetric/tier/archive/refs/tags/@@TAG@@.tar.gz"
+  sha256 "@@SHA256@@"
+  license "Apache-2.0"
+
+  depends_on "go" => :build
+
+  def install
+    ENV["CGO_ENABLED"] = "0"
+    ldflags = "-s -w -X main.version=@@TAG@@ -X main.commit=@@COMMIT@@"
+    system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/tierd"
+  end
+
+  test do
+    assert_match "tierd @@TAG@@ ", shell_output("#{bin}/tierd version")
+  end
+end

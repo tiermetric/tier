@@ -69,7 +69,7 @@ running; installing one, and getting spend and merged work into it, are covered
 in the project <a href="https://github.com/tiermetric/tier/blob/main/README.md" rel="nofollow">README</a>. For what the number itself means, start
 with <a href="understanding-tier.html" rel="nofollow">understanding-tier.md</a>.</p>
 <h2 id="what-do-i-need-before-i-run-these-commands">What do I need before I run these commands?</h2>
-<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
+<p><strong>v0.6.2 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
 <p>Three values. Ask the person who runs your TIER server for them.</p>
 <ul>
 <li>
@@ -89,9 +89,9 @@ read-only token does.</p>
 </li>
 <li>
 <p><strong>The read-only token.</strong> An optional second password (<code>--read-token</code> or
-<code>TIER_READ_TOKEN</code>). It can read scores and open the dashboard; in <code>developer</code>
-mode it can also download the raw records behind the scores (see the next
-question). The server refuses it for every admin request, including loading
+<code>TIER_READ_TOKEN</code>). It can read scores and open the dashboard. Raw-record
+access will use #826&#39;s named-viewer controls, not the shared read-only token
+(see <a href="#can-i-see-my-developers-names" rel="nofollow">Can I see my developers&#39; names?</a>). The server refuses it for every admin request, including loading
 teams and reading the team list back. If your server has no read-only token,
 use the admin token wherever this page reads <code>~/.tier/read-token</code>.</p>
 </li>
@@ -134,8 +134,23 @@ full setup is in the project README under
 <p>Start with one question: <strong>which tools do the engineers use?</strong> TIER can read
 local usage records from the <strong>Claude Code, Codex CLI, Opencode and Meta Muse
 Code CLIs</strong> on each laptop. Claude Code, Codex and Muse write session logs;
-Opencode keeps its per-call records in a local SQLite store. Claude used inside
-<strong>Cursor, Copilot or the claude.ai website is not captured by this laptop path</strong>.
+Opencode keeps its per-call records in a local SQLite store. These readers do
+not capture Claude usage inside <strong>Cursor, Copilot or the claude.ai website</strong>.
+New in v0.6.2, two <strong>experimental</strong>, separately configured server pollers cover
+GitHub Copilot organisation AI-credit gross spend (<code>collectors.copilot_billing</code>)
+and usage on a Cursor team plan with Admin API access (Teams or Enterprise;
+Cursor decides which plans include it) (<code>collectors.cursor_admin</code>). Copilot
+needs
+an installed GitHub App with <strong>Administration: Read-only</strong> (preferred), or an
+org-admin token; Cursor needs a team Admin API key. Individual Copilot Pro and
+individual Cursor accounts are not covered by these pollers; ChatGPT Team
+remains uncaptured. Copilot maps GitHub logins to developers; Cursor maps emails
+through aliases and never stores those emails. Neither poller links spend to
+a PR or issue. Cursor skips BYO-key requests and their Cursor fee; provider
+spend is captured by <code>anthropic_admin</code> or <code>openai_usage</code> only when the matching
+poller is configured for the billed organisation. See the
+<a href="technical-reference.html#what-each-source-needs" rel="nofollow">source requirements and pricing limits</a>.
+Missing usage can make the ratio read high when some cost is recorded.
 Your Anthropic account&#39;s billed totals per engineer cannot, on their own, be
 split by PR, issue or feature: they contain no work linkage.</p>
 <p>Plan the first report around a <strong>full calendar month</strong>. Recovery works only
@@ -147,13 +162,13 @@ cost; the other tools depend on their own retained files. <code>ship</code> and 
 default to 90 days, which does not recover deleted logs. Set the same recent
 <code>--since</code> when loading costs and merged work, and check the report&#39;s cost-capture
 horizon; reading a team report requires a sealed calendar month (step 6).</p>
-<p><strong>v0.6.1 is for a trusted team.</strong> Every laptop gets one shared, send-only ingest
+<p><strong>v0.6.2 is for a trusted team.</strong> Every laptop gets one shared, send-only ingest
 token: it opens only <code>POST /api/v1/events</code>. The server does not yet bind a laptop
 to one developer; a holder can post, inflate or suppress spend under any
 developer id (#1145, gated on #826; <a href="security.html#the-ingest-token-1144" rel="nofollow">trust limits</a>). Real-data
 <code>--aggregation developer</code> startup is refused with exit 1 until #826&#39;s named-viewer,
 audit and retention controls ship (#1253). Team mode has no per-issue view.
-Per-developer views and the per-issue report are not available on real data in v0.6.1 (#826); to see what they look like, run the synthetic demo (<code>tierd demo</code>), which generates its own invented data in a private temporary database and cannot load yours. TIER is
+Per-developer views and the per-issue report are not available on real data in v0.6.2 (#826); to see what they look like, run the synthetic demo (<code>tierd demo</code>), which generates its own invented data in a private temporary database and cannot load yours. TIER is
 built for coaching, not for evaluating developers. Per-person figures are not
 accurate enough to judge an individual. Agree to coach the practice, never rank
 people (<a href="peer-learning.html#coaching-not-appraisal" rel="nofollow">peer learning</a>).</p>
@@ -270,10 +285,12 @@ enter the read token and select the same <strong>Sealed month</strong>.
 <strong>Capture Fidelity is not completeness</strong>: it measures how captured spend arrived,
 and says nothing about usage TIER never saw.</p>
 <h2 id="can-i-see-my-developers-names">Can I see my developers&#39; names?</h2>
-<p><strong>v0.6.1 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
-<p>That depends on one setting, chosen by whoever starts the server.
-<code>tierd serve</code>, the command that starts TIER&#39;s server, will not start without
-<code>--aggregation</code>, and there is no default
+<p><strong>v0.6.2 availability:</strong> Per-developer views and the per-issue report are not available on real data until #826 ships; <code>tierd demo</code> shows them read-only using its own invented data in a private temporary database and cannot load yours.</p>
+<p>No, not on real data in v0.6.2. A real-data server runs <code>team</code> or <code>division</code>;
+<code>tierd serve --aggregation developer</code> exits 1, with no bypass. Developer mode
+is planned with #826&#39;s named-viewer, audit and retention controls and can be
+previewed only in the synthetic demo (<code>tierd demo</code>). <code>tierd serve</code> requires
+<code>--aggregation</code>, with no default
 (<a href="quickstart.html#5-the-full-tier-score" rel="nofollow">quickstart.md</a>):</p>
 <table>
 <thead>
@@ -285,7 +302,7 @@ and says nothing about usage TIER never saw.</p>
 <tbody>
 <tr>
 <td><code>developer</code></td>
-<td>Every developer, one row each, on the dashboard and in <code>GET /api/v1/scores</code>.</td>
+<td>Planned with #826; preview only in the synthetic demo. Named rows on the dashboard and in <code>GET /api/v1/scores</code>, subject to the planned viewer controls below.</td>
 </tr>
 <tr>
 <td><code>team</code></td>
@@ -297,18 +314,23 @@ and says nothing about usage TIER never saw.</p>
 </tr>
 </tbody>
 </table>
-<p>In <code>developer</code> mode, anyone with the read-only token sees every developer&#39;s
-row, and that includes you as their manager. The same token can also download
-the raw records behind the rows (<code>GET /api/v1/events</code>): each recorded AI
-message&#39;s time, model, repository, issue and session id, per developer. A token
-cannot be limited to one team: one server holds one set of data for everyone it
-records. The manager
-and the developer see the same page. TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. TIER cannot enforce that stance; your policy or works agreement (a
-written agreement with your works council or other employee representatives)
-has to support it (see <a href="#how-do-i-use-this-to-help-my-team-get-better" rel="nofollow">How do I use this to help my team get better?</a>).</p>
-<p><strong>Planned, not yet built.</strong> Developer mode will stop relying on one
-shared read token. Each developer&#39;s page will open only to that developer, their
-declared manager and, if the operator turns it on, a skip-level manager, and the
+<p>When developer mode ships (#826), named-viewer controls will determine who sees
+which developer&#39;s rows; the shared read-only token will keep only name-free
+reports. In v0.6.2 team and division mode, the read-only token cannot be limited
+to one team: one server holds one set of data for everyone it records.
+The synthetic demo currently shows every invented developer&#39;s row.
+<code>GET /api/v1/events</code> exposes the raw records behind those rows: each recorded AI
+message&#39;s time, model, repository, issue and session id, per developer. Real-data
+access to these records will need #826&#39;s named-viewer controls, not the shared
+read-only token. In v0.6.2 team and division mode, <code>/api/v1/events</code> returns
+HTTP 403. TIER is built for coaching, not for evaluating developers. Per-person
+figures are not accurate enough to judge an individual. TIER cannot enforce
+that stance; your policy or works agreement (a written agreement with your
+works council or other employee representatives) has to support it (see
+<a href="#how-do-i-use-this-to-help-my-team-get-better" rel="nofollow">How do I use this to help my team get better?</a>).</p>
+<p><strong>Planned with #826, not yet built.</strong> Developer mode will use named-viewer
+access rather than one shared read token. Each developer&#39;s page will open only
+to that developer, their declared manager and, if the operator turns it on, a skip-level manager, and the
 developer will be able to read the log of who viewed it. The shared token will
 keep only the pages with no names on them. Per-developer rows will be kept for
 90 days by default, and an operator will be able to raise that to at most 365
@@ -395,23 +417,27 @@ minus work-type totals recovered a 3-person group&#39;s spend in testing, and a 
 only one developer used showed that developer&#39;s spend in the model breakdown.
 Issue #937 tracks an audit that would let those views come back. The per-developer endpoint
 <code>GET /api/v1/scores/{developer}</code> answers not found (HTTP 404) for every name in
-these modes; in <code>developer</code> mode it returns that one developer&#39;s score.</p>
-<p>In <code>developer</code> mode the &#34;name&#34; is an identifier, not a person&#39;s real name. On
-the spend side it is the developer&#39;s OS username (what <code>whoami</code> prints on their
+these modes. In the synthetic demo it returns that invented developer&#39;s score;
+real-data per-developer views are planned with #826.</p>
+<p>Every mode stores per-developer identifiers in the database. When developer
+mode ships (#826), its displayed &#34;name&#34; will be an identifier, not a person&#39;s
+real name. On the spend side it is the developer&#39;s OS username (what <code>whoami</code> prints on their
 machine), unless they send spend with <code>tierd ship --developer &lt;name&gt;</code>. Two
 people with the same username on different machines would share one
 identifier, so give one of them a different <code>--developer</code>. On the merged-work
 side it is the GitHub login of the pull request&#39;s author. When those differ,
-map them once (next section) so each person appears as one row.</p>
+map them once (next section) so each person is counted once in group reports
+and will appear as one row when developer mode ships (#826).</p>
 <p>To see which mode a server is running:</p>
 <pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
   curl -fsS -H @- &#34;$TIER_HOST/api/v1/scores&#34; |
   jq &#39;{error, aggregation, developers: (.developers | length)}&#39;
 </code></pre>
 <p>An <code>error</code> that is not <code>null</code> means the request failed; read it before the
-other two fields. <code>&#34;aggregation&#34;: null</code> means developer mode, because a team or division server
-always fills that field in. In developer mode, a <code>developers</code> count of 0 means
-the server has no data for the last 90 days yet. <code>&#34;team&#34;</code> or <code>&#34;division&#34;</code> means
+other two fields. On a v0.6.2 real-data server, expect <code>&#34;team&#34;</code> or <code>&#34;division&#34;</code>.
+<code>&#34;aggregation&#34;: null</code> is the developer-mode response shape seen in the synthetic
+demo, not a real-data setting you can enable. In that demo, a <code>developers</code> count
+of 0 means no invented data in the API&#39;s default 90-day window. <code>&#34;team&#34;</code> or <code>&#34;division&#34;</code> means
 names are off; in those modes the <code>developers</code> count is always 0, because no
 individual rows are sent. If the command prints nothing, read curl&#39;s error
 line: the request failed. On a <code>team</code> or <code>division</code> server a 404 there means no
@@ -429,9 +455,11 @@ page. Two things to know before you decide:</p>
 <li>Team mode removes names from reports. The database still stores
 per-developer identifiers, and admin requests such as
 <code>GET /api/v1/org_hierarchy</code> still list them.</li>
-<li>Changing modes means restarting the server with a different flag. It changes
-who is named in every report from then on, so we recommend clearing it with
-the people it covers first; the consultation steps are in the same document.</li>
+<li>Changing between <code>team</code> and <code>division</code> means restarting the server with a
+different flag; both keep the roster, <em>k</em> floor and sealed-month rules.
+Restarting with <code>--aggregation developer</code> is refused on real data in v0.6.2.
+Any move to the developer mode planned with #826 will need consultation with
+the people it covers first; the steps are in the same document.</li>
 </ul>
 <h2 id="can-i-keep-names-and-teams-in-a-file-and-load-them">Can I keep names and teams in a file and load them?</h2>
 <p>You can keep teams in a spreadsheet and load them as a CSV file. There is no
@@ -493,9 +521,10 @@ earlier spend counts toward (see below).</p>
 <p>If you skip this, that person shows up as two identifiers: one with spend and no
 merged work, the other with merged work and no spend, and neither score means
 anything. <code>GET /api/v1/scores</code> lists identifiers found on only one side under
-<code>data_quality.unjoined_developers</code> (developer mode shows the identifiers; team
-mode shows only counts). That list also includes anyone who simply had no merged
-work in the window yet, so check each name before you add an alias.</p>
+<code>data_quality.unjoined_developers</code> (team and division reports show only counts;
+the synthetic demo shows invented identifiers). The per-identifier view is
+planned with #826. Missing merged work may simply mean the person has not merged
+anything in the window yet, so check your source records before adding an alias.</p>
 <p><strong>Step 2: write the team file.</strong> Make a spreadsheet with this header row and one
 row per developer, then export it as CSV (Google Sheets: File &gt; Download &gt; CSV;
 Excel: Save As &gt; CSV UTF-8):</p>
@@ -604,8 +633,9 @@ them. Request and response shapes for all of these requests are in
 per team (or division), and <code>GET /api/v1/scores</code> returns them in the <code>teams</code>
 array. Teams under the <em>k</em> floor appear inside <code>other</code>.</p>
 <p>In these modes, choose a sealed calendar month with <code>?period=YYYY-MM</code>; leave
-the parameter out to read the latest sealed month. <code>since=</code> and <code>until=</code> work
-only in <code>developer</code> mode. For September 2026:</p>
+the parameter out to read the latest sealed month. Arbitrary <code>since=</code> and
+<code>until=</code> windows are available only in the synthetic demo; real-data developer
+mode is planned with #826. For September 2026:</p>
 <pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
   curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;period=2026-09&#34; |
   jq -c &#39;{predates: .data_quality.window_predates_cost_capture},
@@ -632,23 +662,24 @@ mode, use the division name instead:</p>
 (at list price), <code>cost_per_point</code> and <code>ranked</code>. If the team has no named row that
 month, <code>jq</code> prints nothing: it may have no data, be folded into <code>other</code>, or be
 withheld. <code>predates</code> means the same as above.</p>
-<p>In <code>developer</code> mode, the dashboard lists developers and also has a table headed
+<p>In the synthetic demo, the dashboard lists invented developers and has a table headed
 &#34;Where the points and spend went, by team&#34;. It splits the company total by team,
-in team-name order, with a &#34;No team&#34; row for developers you have not assigned.
-The read-only token reads the same split from <code>team_rollups</code>. Developer mode
-rejects <code>?period=</code> with HTTP 400. Use this command, replacing <code>since</code> with the
+in team-name order, with a &#34;No team&#34; row for invented developers without a team.
+The demo API exposes the same split in <code>team_rollups</code> and rejects <code>?period=</code>
+with HTTP 400. This is a preview of developer mode planned with #826, not an
+alternative for real-data servers. The following command is for that synthetic
+demo only; point <code>TIER_HOST</code> at it, replacing <code>since</code> with the
 dashboard&#39;s <strong>From</strong> date; if <strong>To</strong> has a date, add <code>--data-urlencode &#34;until=…&#34;</code>
 in <code>YYYY-MM-DD</code> form:</p>
-<pre><code>printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
-  curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;since=2026-08-28&#34; |
+<pre><code>curl -fsS -G &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;since=2026-08-28&#34; |
   jq -c &#39;{window_predates_cost_capture: .data_quality.window_predates_cost_capture,
     cost_coverage_safe_since: .data_quality.cost_coverage_safe_since},
     ((.team_rollups // [])[] | {team, unassigned, tier, weighted_points, total_cost_usd, ranked})&#39;
 </code></pre>
 <p>The dashboard defaults to 30 days back; the API defaults to midnight UTC 90 days
 ago through now. Match the window to compare figures. Spend counts when it was
-spent, merged work when it merged. In <code>developer</code> mode, add
-<code>--data-urlencode &#34;team=platform&#34;</code> to the curl command and read <code>.team</code> in <code>jq</code>
+spent, merged work when it merged. In the synthetic demo only, add
+<code>--data-urlencode &#34;team=Platform&#34;</code> to the curl command and read <code>.team</code> in <code>jq</code>
 for that team&#39;s roll-up; <code>team_rollups</code> stays unchanged. If
 <code>data_quality.window_predates_cost_capture</code> is <code>true</code>, move <code>since</code> to
 <code>data_quality.cost_coverage_safe_since</code> or later. Both fields are absent (printed
@@ -658,7 +689,8 @@ and no team name. It also holds spend that could not be tied to any person, such
 as proxy calls that named no developer, recorded under <code>unattributed</code>.</p>
 <p>In <code>team</code> and <code>division</code> mode <code>?team=</code> is refused with a 400. It rolls up a single team with
 no minimum group size, so honouring it there would expose a one-person team. In
-<code>developer</code> mode every developer is already named, so it reveals nothing new.</p>
+the synthetic demo every invented developer is already named, so it reveals
+nothing new. Real-data developer mode is planned with #826.</p>
 <p>Read <code>ranked</code> before you quote a team&#39;s number. Despite its name, it does not put
 anyone in order; it says whether there is enough evidence to read the number.
 <code>ranked: false</code> means the team has too little evidence behind it in this window:
@@ -669,7 +701,7 @@ together) against that issue in the 14 days before it merged. The number is
 still reported, but do not present it as a headline figure.</p>
 <h2 id="what-happens-when-tier-cannot-tell-which-merge-a-revert-undid">What happens when TIER cannot tell which merge a revert undid?</h2>
 <p>When a footerless revert&#39;s issue matches several eligible outcomes in the same
-repository, v0.6.0 penalises no one for that check and marks each
+repository, TIER penalises no one for that check and marks each
 candidate outcome <code>unknown</code> (revert ambiguous). Its numeric quality stays as it
 was; a clean outcome stays at 1.0. The JSON outcomes export and quality-event
 exports expose the unresolved status; the dashboard does not display it.
@@ -743,8 +775,9 @@ assigned to a team. In <code>team</code> or <code>division</code> mode, whenever
 <a href="#can-i-see-my-developers-names" rel="nofollow">Can I see my developers&#39; names?</a>), the <code>total</code>
 is withheld along with every team row.</p>
 <p>The pooled <code>total</code> mixes every kind of work, so it is not a fair way to compare
-teams that do different work. For comparisons, use <code>work_types</code> in the same
-response (in <code>developer</code> mode; <code>team</code> and <code>division</code> mode do not publish it). It scores each category (<code>feature</code>, <code>bug</code>, <code>security</code>, <code>incident</code>,
+teams that do different work. Per-work-type comparisons are a post-#826
+practice on real data: <code>work_types</code> is available only in the synthetic demo
+today; team and division reports do not publish it. It scores each category (<code>feature</code>, <code>bug</code>, <code>security</code>, <code>incident</code>,
 <code>tech-debt</code>, <code>research</code>, <code>compliance</code>) separately; compare bug work with bug
 work. How a pull request gets its category is in <a href="rubric.html" rel="nofollow">rubric.md</a>. There
 is also no absolute &#34;good&#34; TIER. The fair comparison is a team against itself
@@ -841,21 +874,22 @@ that type, so they read high while much spend is unlinked.</p>
 <p>Where to see it:</p>
 <ul>
 <li>The dashboard&#39;s <strong>Attribution coverage</strong> banner turns red below 50%, and the
-panel under it breaks the unlinked spend down by the labels above (the panel
-in <code>developer</code> mode only). In <code>team</code> and <code>division</code> mode the share is not
-published, so the banner says coverage is not shown, and the headline reads
+panel under it breaks the unlinked spend down by the labels above. The panel
+is available only in the synthetic demo today; real-data developer mode is
+planned with #826. In <code>team</code> and <code>division</code> mode the share is not published, so the banner says coverage is not shown, and the headline reads
 &#34;provisional&#34;; that means unknown, not low.</li>
 <li>In the API, <code>data_quality.attributed_cost_share</code> is the linked fraction,
 <code>data_quality.unattributed_buckets</code> is the breakdown, and
 <code>data_quality.exploratory_cost_share</code> is the <code>main</code> and <code>master</code> share on its
 own; all are shares of the window&#39;s list-price cost. The last two appear in
-<code>developer</code> mode only, and are left out when the window has no unattributed
-spend. In <code>team</code> and <code>division</code> mode the first does not appear either, and
+the synthetic demo today, with real-data developer mode planned with #826,
+and are left out when the window has no unattributed spend. In <code>team</code> and
+<code>division</code> mode the first does not appear either, and
 <code>data_quality.attribution_coverage</code> reads <code>&#34;not_shown&#34;</code> (see
 <a href="api-compatibility.html#get-apiv1scores" rel="nofollow">api-compatibility.md</a>).</li>
 <li>A developer can check their own machine with
 <code>tierd doctor --repo ~/src/your-repo</code> (the path to their checkout). It reads
-the last 7 days; in <code>developer</code> mode the banner reads the dashboard&#39;s window,
+the last 7 days; in the synthetic demo the banner reads the dashboard&#39;s window,
 30 days unless you change the From date. Its &#34;issue attribution&#34; line reports
 how much feature-branch spend is tied to an issue. That is a different share
 from the banner&#39;s, which is taken over all spend. It fails below 50%, warns between 50%
@@ -882,30 +916,36 @@ linked too.</li>
 review. TIER keeps it in the cost and shows it as its own share, so the team
 can decide whether that amount is intended.</li>
 </ol>
-<p>These practice changes affect future capture. There is no supported correction of an already assigned issue; renaming a branch does not move a wrong assignment. In v0.6.0, server-side PR and branch fills can assign previously unlinked rows without overwriting an assigned issue or revising sealed reports.</p>
+<p>These practice changes affect future capture. There is no supported correction of an already assigned issue; renaming a branch does not move a wrong assignment. Server-side PR and branch fills can assign previously unlinked rows without overwriting an assigned issue or revising sealed reports.</p>
 <h2 id="how-do-i-use-this-to-help-my-team-get-better">How do I use this to help my team get better?</h2>
-<p>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is <strong>grade the work, not the worker</strong>, by policy rather than by mechanism. In <code>developer</code> mode anyone with report access can see individual rows; the access boundary is separate from the coaching stance.</p>
+<p>See <a href="#what-do-i-need-before-i-run-these-commands" rel="nofollow">v0.6.2 availability</a>. The levers retro below is a post-#826 practice for real data; today use team or division reports over sealed months.</p>
+<p>TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is <strong>grade the work, not the worker</strong>, by policy rather than by mechanism. When developer mode ships (#826), named-viewer, audit and retention controls will govern access to individual rows; the coaching stance will still depend on your policy.</p>
 <p>Do not rank developers against each other or build a leaderboard from these
-figures. The dashboard lists developers in identifier order and never sorts
-them by TIER; a row with too little evidence stays in its place with a &#34;below
-evidence floor&#34; tag. Compare a person or a team with their own earlier periods,
-within one kind of work. Before the number itself, read the attribution
-coverage and, where there are bounds, their limitations: in v0.6.1, #1233 withholds intervals when the row&#39;s own attributed-cost share is below 50%. Each ranked developer
-row in <code>developer</code> mode at or above that share carries bootstrap bounds (<code>ci_low</code> and <code>ci_high</code>, drawn as a
+figures. In the synthetic demo the dashboard lists invented developers in
+identifier order and never sorts them by TIER; a row with too little evidence
+stays in its place with a &#34;below evidence floor&#34; tag. For real data today,
+compare a team with its own sealed months, accounting for work mix; per-person
+and per-work-type comparisons are a post-#826 practice. Before the number
+itself, read the available coverage warnings and the bounds&#39; limitations. In
+the synthetic demo, #1233 withholds intervals when the row&#39;s own attributed-cost
+share is below 50%. Each ranked invented developer row at or above that share carries bootstrap bounds (<code>ci_low</code> and <code>ci_high</code>, drawn as a
 whisker on the dashboard bar; nominal 95% percentile bootstrap; coverage unvalidated), and team rows and the company <code>total</code> carry none.</p>
-<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. When shown, the bounds are the 2.5th and 97.5th percentiles of the stated bootstrap resampling procedure. Their 95% repeated-sampling coverage has not been validated. They exclude uncertainty from uncaptured usage, incorrect attribution and unattributed spend. Spend is counted when usage happened and points when the work merged, so work that crosses a period boundary can move the ratio either way. Team scores carry no interval, and month-to-month noise is large: TIER has not established how large a change must be to stand out from ordinary variation. Treat a small difference as no evidence either way, and a large one as a prompt to investigate, not a measured effect. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. &#39;Not shown&#39; is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain. When shown in v0.6.1 (#1233), the interval is labelled &#34;excludes uncertainty from unattributed spend&#34;. The floor uses the row&#39;s cost paired with resampled outcomes; exactly 50% passes. Team and division rows carry no interval and reveal no floor status. v0.6.0 itself did not apply the withholding rule.</p>
+<p>Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several outcomes share one issue, they covered the true value less often than 95%. When shown, the bounds are the 2.5th and 97.5th percentiles of the stated bootstrap resampling procedure. Their 95% repeated-sampling coverage has not been validated. They exclude uncertainty from uncaptured usage, incorrect attribution and unattributed spend. Spend is counted when usage happened and points when the work merged, so work that crosses a period boundary can move the ratio either way. Team scores carry no interval, and month-to-month noise is large: TIER has not established how large a change must be to stand out from ordinary variation. Treat a small difference as no evidence either way, and a large one as a prompt to investigate, not a measured effect. Group reports do not disclose exact cost-attribution or quality-evidence shares. Capture-fidelity and cost-horizon warnings are different signals; they do not establish complete capture or observed quality coverage. &#39;Not shown&#39; is neither a clean bill of health nor evidence that coverage is low. Ask the operator which diagnostics were run, what they found, and which capture or attribution gaps remain. When shown in the v0.6.1 synthetic demo (#1233), the interval is labelled &#34;excludes uncertainty from unattributed spend&#34;. The floor uses the row&#39;s cost paired with resampled outcomes; exactly 50% passes. Team and division rows carry no interval and reveal no floor status.</p>
 <p><a href="peer-learning.html" rel="nofollow">peer-learning.md</a> is the full method for a team. In four
 steps:</p>
 <ol>
 <li>
-<p>Hold a team review of the levers. Read the name-free figures on the dashboard
+<p>After developer mode ships (#826), hold a team review of the levers. Preview
+this practice only with invented data in the synthetic demo today. Read the
+name-free figures on the dashboard
 or in <code>/api/v1/scores</code>: cache reuse (<code>cost_composition.cache_read_share</code>, the
 share of input tokens read from the provider&#39;s cache), spend on premium
 models (<code>cost_composition.premium_model_share</code>, the share of spend on models
 whose list input price is $4 or more per million tokens), work on <code>main</code>
 (<code>data_quality.exploratory_cost_share</code>), and yield within each work type
-(<code>work_types</code>). These are published in <code>developer</code> mode only; a server in
-<code>team</code> or <code>division</code> mode shows the team rows and the total. Ask the team
+(<code>work_types</code>). These figures are available only in the synthetic demo today;
+their real-data use awaits developer mode planned with #826. A real-data
+server in <code>team</code> or <code>division</code> mode shows the team rows and the total. Ask the team
 what explains each one. Some can be missing, for
 the reasons given under &#34;Where to see it&#34; in
 <a href="#why-does-most-of-our-spend-say-no-issue-attached-did-we-never-merge-that-work" rel="nofollow">Why does most of our spend say &#34;no issue attached&#34;? Did we never merge that work?</a>.
@@ -924,19 +964,21 @@ Work paid for before the start that merges inside the period adds points
 without its spend, and reads high. Spend near the end whose work merges after
 the period adds cost without points, and reads low. A short period has less
 in the middle to outweigh its edges, so it moves more
-(<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>). In <code>developer</code>
-mode, ask for the team&#39;s roll-up once per period:</p>
-<pre><code>for period in 2026-05-04,2026-06-01 2026-06-01,2026-06-29; do
-  printf &#39;Authorization: Bearer %s\n&#39; &#34;$(cat ~/.tier/read-token)&#34; |
-    curl -fsS -G -H @- &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;team=platform&#34; \
+(<a href="interpreting-the-number.html" rel="nofollow">interpreting-the-number.md</a>). Arbitrary-window
+team roll-ups are a post-#826 practice on real data. The following command
+is for the synthetic demo only, with <code>TIER_HOST</code> pointing at that demo. The
+demo&#39;s merges sit 7 to 19 days before the day it started, so with that day
+as <code>S</code>, replace <code>BEFORE_START</code> with <code>S</code> minus 22 days, <code>CHANGE_DATE</code> with
+<code>S</code> minus 14 days and <code>AFTER_END</code> with <code>S</code> minus 6 days, all as UTC dates:</p>
+<pre><code>for period in BEFORE_START,CHANGE_DATE CHANGE_DATE,AFTER_END; do
+  curl -fsS -G &#34;$TIER_HOST/api/v1/scores&#34; --data-urlencode &#34;team=Platform&#34; \
       --data-urlencode &#34;since=${period%,*}&#34; --data-urlencode &#34;until=${period#*,}&#34; |
     jq -c &#39;{tier: .team.tier, ranked: .team.ranked, predates: .data_quality.window_predates_cost_capture, safe_since: .data_quality.cost_coverage_safe_since}&#39;
 done
 </code></pre>
 <p>Each period is a start date and an end date, written <code>YYYY-MM-DD</code>, in UTC.
 The start date is included and the end date is not, so
-<code>2026-06-01,2026-06-29</code> is June 1 through June 28, the same 28 days as the
-first period.</p>
+<code>CHANGE_DATE,AFTER_END</code> covers 8 days, the same length as the first period.</p>
 <p>In <code>team</code> or <code>division</code> mode the server refuses <code>?team=</code>, <code>since</code> and <code>until</code>
 with a 400: it answers one sealed calendar month per call. Compare two
 months instead, and read the team&#39;s row:</p>
@@ -969,7 +1011,7 @@ roll-ups carry no bootstrap bounds. Check that <code>ranked</code> is <code>true
 periods; if either is <code>false</code>, there is too little evidence to read the
 change. If <code>predates</code> is <code>true</code> for the earlier period, it started before
 TIER was recording spend: its merged work counts but the spend before that
-point does not, so its score reads too high. In <code>developer</code> mode, pick a
+point does not, so its score reads too high. In the synthetic demo only, pick a
 start date on or after the <code>safe_since</code> date the command prints
 (<code>data_quality.cost_coverage_safe_since</code>); it is <code>null</code> when no coverage
 horizon was available, including when no spend was recorded or the coverage

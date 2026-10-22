@@ -15,6 +15,13 @@ import (
 // Keep this implementation available when adding another rule; unknown rules fail closed.
 const PricingRuleV1 = "request-v1"
 
+// PricingTokenDerived labels list prices; PricingCallerAuthoritative preserves
+// supplied vendor dollars, including token-bearing Cursor fallback aggregates.
+const PricingTokenDerived = "token_derived"
+
+// PricingCallerAuthoritative preserves imported dollars rather than pricing tokens.
+const PricingCallerAuthoritative = "caller_authoritative"
+
 // The companion policy marker distinguishes retirement from an old migration
 // actually having repriced/stamped rows. Legacy markers also keep older binaries
 // from applying those automatic transformations after this policy activates.
@@ -48,6 +55,10 @@ func usage(e TokenEvent) CostUsage {
 func tokenVector(e TokenEvent) [5]int {
 	return [5]int{e.InputTok, e.OutputTok, e.CacheRead, e.CacheWrite5m, e.CacheWrite1h}
 }
+
+// isPoller identifies the frozen Anthropic/OpenAI daily remainder feeds only.
+// copilot-billing is cost-only/caller-authoritative; cursor-admin prices events
+// before aggregation. Neither uses this aggregate-pricing or replay policy.
 func isPoller(s string) bool { return s == "anthropic-admin" || s == "openai-usage" }
 
 // Unique keys lead with the eventual tenant partition; no global version key is added.
@@ -108,10 +119,12 @@ func retainRate(ctx context.Context, tx *sql.Tx, e TokenEvent) (string, error) {
 	if e.PricingBasis == PricingAggregateApprox {
 		rule = AggregateRuleV1
 	}
+	// Cursor's daily totals and signed corrections are sums of request prices;
+	// replay must not infer a new request threshold from their aggregate tokens.
 	expected, _ := clampTokenEventCost(basisCost(p, usage(e), e.PricingBasis))
 	supplied, _ := clampTokenEventCost(e.CostMicro)
 	return saveRateSnapshot(ctx, tx, rateSnapshot{Rule: rule, TableHash: ActivePriceTableInfo().TableHash, Version: ActivePriceTableInfo().Version, Rate: snapshotPrice(p), Guessed: !exact,
-		PreserveCost: !e.TokenDerived && !isPoller(e.Source) && supplied != expected})
+		PreserveCost: (!e.TokenDerived || e.Source == "cursor-admin") && !isPoller(e.Source) && supplied != expected})
 }
 func saveRateSnapshot(ctx context.Context, tx *sql.Tx, s rateSnapshot) (string, error) {
 	raw, err := json.Marshal(s)
@@ -228,7 +241,7 @@ func insertPricedToken(ctx context.Context, tx *sql.Tx, e TokenEvent) (sql.Resul
 		return nil, err
 	}
 	if err == nil {
-		if old.Developer != e.Developer || isPoller(old.Source) || isPoller(e.Source) {
+		if old.Developer != e.Developer || isPoller(old.Source) || isPoller(e.Source) || old.Source == "cursor-admin" || e.Source == "cursor-admin" {
 			return tx.ExecContext(ctx, `UPDATE token_events SET id=id WHERE 0`)
 		}
 		a, b := tokenVector(old), tokenVector(e)
@@ -347,6 +360,11 @@ func insertPricedToken(ctx context.Context, tx *sql.Tx, e TokenEvent) (sql.Resul
 	// corrections mark their authority explicitly in CorrectManualCostEvent.
 	if e.Source == "api" || (e.CostMicro != 0 && tokenVector(e) == [5]int{}) {
 		basis = "caller_authoritative"
+	}
+	// Cursor reconciles sums of per-request prices and vendor-cents fallbacks.
+	// Preserve its explicit basis even on signed or tokenless correction rows.
+	if e.Source == "cursor-admin" && (e.PricingBasis == PricingCallerAuthoritative || e.PricingBasis == PricingTokenDerived) {
+		basis = e.PricingBasis
 	}
 	// Resolve an omitted mode for a new token-derived observation from its own
 	// active table, just as ingestion does. Never infer historical modes from it.
@@ -499,7 +517,7 @@ func costConsistency(ctx context.Context, tx *sql.Tx, version int, apply bool) (
 		if err != nil {
 			return nil, err
 		}
-		if apply && r.Status == "inconsistent" && !protected && !isPoller(e.Source) {
+		if apply && r.Status == "inconsistent" && !protected && !isPoller(e.Source) && e.Source != "cursor-admin" {
 			next := e
 			next.CostMicro = r.ExpectedMicro
 			if snapshot.PreserveCost {
@@ -521,6 +539,11 @@ func costConsistency(ctx context.Context, tx *sql.Tx, version int, apply bool) (
 		}
 		if protected && r.Status == "inconsistent" {
 			r.Class = "sealed_cost_mismatch"
+		}
+		if e.Source == "cursor-admin" && r.Status == "inconsistent" {
+			// Daily sums retain per-request tier decisions; the aggregate token vector
+			// cannot reconstruct them, and only the poller may reconcile these rows.
+			r.Class = "cursor_admin_cost_mismatch"
 		}
 		out = append(out, r)
 	}

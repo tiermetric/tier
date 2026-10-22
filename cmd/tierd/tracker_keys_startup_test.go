@@ -97,7 +97,9 @@ func TestServeTrackerKeysStartupLine(t *testing.T) {
 			defer func() {
 				if !exited {
 					_ = cmd.Process.Kill()
-					<-done
+					if err := <-done; err != nil {
+						t.Logf("tierd exit after kill: %v", err)
+					}
 				}
 			}()
 			ready := false

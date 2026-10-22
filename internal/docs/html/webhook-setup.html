@@ -256,10 +256,10 @@ default <code>gh auth login</code> does not grant: add it with
 <p>You can compute a signature by hand and post a synthetic merged-PR payload
 (the key file must be the same file given to <code>tierd serve --webhook-secret</code>):</p>
 <p>This writes an outcome for the fake login <code>__tier_webhook_test__</code> and issue
-<code>WEBHOOKTEST-000000</code> into the receiving server&#39;s store. The row persists there
+<code>issue-999999999</code> into the receiving server&#39;s store. The row persists there
 and can affect reports; this is not a dry run. Use a test server if you do not
 want synthetic data in your live store.</p>
-<pre><code>PAYLOAD=&#39;{&#34;action&#34;:&#34;closed&#34;,&#34;pull_request&#34;:{&#34;number&#34;:999999999,&#34;merged&#34;:true,&#34;merge_commit_sha&#34;:&#34;tier-webhook-test-not-a-real-merge&#34;,&#34;user&#34;:{&#34;login&#34;:&#34;__tier_webhook_test__&#34;},&#34;body&#34;:&#34;closes WEBHOOKTEST-000000&#34;,&#34;labels&#34;:[{&#34;name&#34;:&#34;size/m&#34;}],&#34;additions&#34;:10,&#34;deletions&#34;:2,&#34;changed_files&#34;:3}}&#39;
+<pre><code>PAYLOAD=&#39;{&#34;action&#34;:&#34;closed&#34;,&#34;pull_request&#34;:{&#34;number&#34;:999999999,&#34;merged&#34;:true,&#34;merge_commit_sha&#34;:&#34;tier-webhook-test-not-a-real-merge&#34;,&#34;user&#34;:{&#34;login&#34;:&#34;__tier_webhook_test__&#34;},&#34;body&#34;:&#34;closes #999999999&#34;,&#34;labels&#34;:[{&#34;name&#34;:&#34;size/m&#34;}],&#34;additions&#34;:10,&#34;deletions&#34;:2,&#34;changed_files&#34;:3}}&#39;
 SIG=&#34;sha256=$(printf &#39;%s&#39; &#34;$PAYLOAD&#34; | perl -MDigest::SHA=hmac_sha256_hex -e &#39;
   local $/;
   open my $fh, &#34;&lt;&#34;, &#34;$ENV{HOME}/.tier/webhook-secret&#34; or die $!;

@@ -62,7 +62,7 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="understanding-tier">Understanding TIER</h1>
-<p><strong>v0.6.1 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
+<p><strong>v0.6.2 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
 <p>TIER (Token Impact &amp; Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.</p>
 <ol>
@@ -131,7 +131,7 @@ Layer 2 explains both.</p>
 <p><strong>Historical self-measurement; original inputs and run settings are not publicly reproducible.</strong> The maintainer reported <strong>221</strong> points per $1,000 across 152 merged PRs, trailing 30 days to 2026-07-21, and <strong>72.1%</strong> of spend unlinked. It was computed from backfilled history; no quality events were recorded for it, so it is size-weighted only. It illustrates the dashboard, not independent validation. Unlinked spend remains in the denominator.</p>
 <p>The maintainer has exercised TIER&#39;s CI and revert rules in manual test runs; the project&#39;s automated webhook tests exercise the same rules. The inspected historical 221 figure has no recorded quality-event receipt.</p>
 <p>Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for the subscription routes used here. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated and TIER scores read high. If Claude&#39;s logs undercount more than Codex&#39;s, Claude looks relatively cheaper.</p>
-<p><strong>Try it.</strong> Install TIER with Go 1.27.2 or newer
+<p><strong>Try it.</strong> Install TIER with Go 1.27.3 or newer
 (<code>go install github.com/tiermetric/tier/cmd/tierd@latest</code>), or download a
 release; <a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a> covers both. Then run
 <code>tierd demo</code> and open <code>http://127.0.0.1:8080</code> in a browser. The demo fills the
@@ -352,7 +352,7 @@ steps load a team/division server; reports also require a sealed month and
 enough contributors. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the full setup.</p>
 <ol>
 <li>
-<p><strong>Install.</strong> Go 1.27.2 or newer, or a release download:
+<p><strong>Install.</strong> Go 1.27.3 or newer, or a release download:
 <a href="quickstart.html#1-install" rel="nofollow">quickstart.md §1</a>.</p>
 </li>
 <li>

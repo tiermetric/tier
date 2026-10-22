@@ -126,7 +126,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	// placeholder in --help output, so `tierd serve --config` would render as
 	// the placeholder instead of the conventional "string" (verified: it
 	// printed literally as "-config tierd serve --config").
-	configPath := fs.String("config", "", "path to the same YAML config file passed to 'tierd serve --config' (#452); when its collectors.anthropic_admin / collectors.openai_usage blocks are present, doctor makes one live authenticated probe against each configured collector's endpoint so a missing or expired Admin/Usage key is caught here, not discovered later as a silently-empty Spend Leverage tile")
+	configPath := fs.String("config", "", "path to the same YAML config file passed to 'tierd serve --config' (#452); when its collectors.anthropic_admin / collectors.openai_usage / collectors.copilot_billing / collectors.cursor_admin blocks are present, doctor makes one live authenticated probe against each configured collector's endpoint so a missing or expired Admin/Usage key is caught here, not discovered later as a silently-empty Spend Leverage tile")
 	apiToken := fs.String("api-token", "", "API token for --server, sent as Authorization: Bearer. When the flag is not given, TIER_API_TOKEN is used. Prefer TIER_API_TOKEN or @/path/to/file (#37)")
 	minAttribution := fs.Float64("min-attribution", defaultMinAttribution, "named-branch attribution floor in [0,1]: below this fraction of feature-branch SPEND resolving to an issue, the attribution check FAILs (non-zero exit) instead of merely warning (#352, #488). Spend recorded on main or master, on a detached HEAD, or uncategorized is excluded and reported separately")
 	if err := fs.Parse(args); err != nil {
@@ -251,21 +251,22 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// --- Collector credential checks (#452): one live probe per CONFIGURED
-	// actual-cost collector, so a missing/expired Admin or Usage key is caught
+	// actual-cost collector (anthropic_admin, openai_usage, copilot_billing),
+	// so a missing/expired Admin, Usage or Copilot credential is caught
 	// at doctor time instead of surfacing later as a silently-empty Spend
 	// Leverage tile. Only runs with --config, and only for blocks actually
-	// present in it — mirrors resolveAnthropicAdminConfig/resolveOpenAIUsageConfig's
+	// present in it — mirrors resolveAnthropicAdminConfig/resolveOpenAIUsageConfig/resolveCopilotBillingConfig's
 	// own "(nil, nil) means disabled" contract exactly, so doctor never reports
 	// on a collector `tierd serve` itself would not have started.
 	if *configPath == "" {
 		// Same "invisible check reads as a passing one" reasoning as the --server
 		// WARN above: an operator who configured collectors.anthropic_admin/
-		// openai_usage but forgot --config here would otherwise see an all-green
+		// openai_usage/copilot_billing but forgot --config here would otherwise see an all-green
 		// doctor report that checked nothing about the credential.
 		results = append(results, checkResult{
 			name:   "collector credentials",
 			status: statusWarn,
-			detail: "not checked — pass --config to verify a configured anthropic_admin/openai_usage collector credential is live",
+			detail: "not checked — pass --config to verify a configured anthropic_admin/openai_usage/copilot_billing/cursor_admin collector credential is live",
 			hint:   "re-run with --config /path/to/tierd.yaml (the same file passed to tierd serve) to confirm the poller's key actually authenticates against the provider",
 		})
 	} else {
@@ -406,6 +407,9 @@ func checkCollectorConfigsAt(ctx context.Context, cfg *config.Config, anthropicB
 		results = append(results, checkCollectorCredential("openai_usage credential", "collectors.openai_usage.api_key",
 			credentialProbeResult{statusCode: res.StatusCode, err: res.Err, authorized: res.Authorized(), unauthorized: res.Unauthorized()}))
 	}
+
+	results = append(results, checkCopilotBillingConfig(ctx, cfg.Collectors.CopilotBilling)...)
+	results = append(results, checkCursorAdminConfig(ctx, cfg.Collectors.CursorAdmin)...)
 
 	return results
 }

@@ -75,7 +75,9 @@ func TestCorrectionReview_R2ServeReadOnly(t *testing.T) {
 			defer func() {
 				if !stopped {
 					_ = cmd.Process.Kill()
-					<-done
+					if err := <-done; err != nil {
+						t.Logf("tierd exit after kill: %v", err)
+					}
 				}
 			}()
 			client := http.Client{Timeout: 100 * time.Millisecond}
@@ -84,7 +86,8 @@ func TestCorrectionReview_R2ServeReadOnly(t *testing.T) {
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				select {
-				case <-done:
+				case err := <-done:
+					t.Logf("tierd exited before livez answered: %v", err)
 					stopped = true
 					exited = true
 				default:

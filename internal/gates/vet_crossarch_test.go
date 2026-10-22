@@ -83,7 +83,7 @@ func TestVet386_MakeCheckWiring(t *testing.T) {
 			// Override only unrelated recipes in a second makefile. Preserve the
 			// real check dependencies and vet-386 recipe; never recurse into tests
 			// or run real lint/build/docs work. No private fragment is installed.
-			fixture := "expect-head lint build test docs-test docs-html docs-html-check cve-rescan-selftest e2e-summary-selftest go-test-timeout-selftest: ; @:\n"
+			fixture := "expect-head lint build test docs-test docs-html docs-html-check cve-rescan-selftest e2e-summary-selftest go-test-timeout-selftest homebrew-formula-selftest: ; @:\n"
 			if err := os.WriteFile(filepath.Join(dir, "fixture.mk"), []byte(fixture), 0o644); err != nil {
 				t.Fatal(err)
 			}

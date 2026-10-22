@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -62,7 +63,7 @@ func (h *Handler) readBody(w http.ResponseWriter, r *http.Request, event string)
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(largeBodyReadTimeout)); err != nil {
 		if !errors.Is(err, http.ErrNotSupported) {
-			return nil, release, err
+			return nil, release, fmt.Errorf("set webhook body read deadline: %w", err)
 		}
 		// A real net/http server supplies LocalAddrContextKey; in-memory
 		// ResponseRecorders do not and are allowed to lack deadline support.

@@ -905,6 +905,10 @@ func TestConvertedSiteTableIsAnExhaustiveCensus(t *testing.T) {
 		// and projection queries use batches of at most 400 outcomes. Read-only,
 		// so these do not belong in convertedSites().
 		"AllOutcomesWindow": true, "DeveloperOutcomes": true, "ListOutcomes": true,
+		// #1342: timestamp evidence for one outcome window and repo scope. A
+		// pure read under beginRead, like AllOutcomesWindow; no writes, so no
+		// convertedSites() entry or writer contention arm is needed.
+		"TimeToMergeOutcomesWindow": true,
 		// #1235 U2: operator detail combines relation, assessment, component
 		// allocation and audit reads under one snapshot, each capped at 1001
 		// rows (rejecting more than 1000). Read-only; no writer contention arm.

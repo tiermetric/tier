@@ -18,8 +18,8 @@ const subscriptionFeeSource = "subscription-fees"
 // any, and a month is sealed only once each has settled past its end. The JSONL
 // watcher, webhooks, `tierd ship` and /costs pushes are not pulled, and only
 // report_grace covers them.
-func sealGatedSources(admin *anthropicAdminSettings, oai *openAIUsageSettings, subs []config.Subscription,
-	codex *codexRolloutSettings, oc *opencodeSettingsT, muse *museSettingsT) []string {
+func sealGatedSources(admin *anthropicAdminSettings, oai *openAIUsageSettings, cursor *cursorAdminSettings, subs []config.Subscription,
+	codex *codexRolloutSettings, oc *opencodeSettingsT, muse *museSettingsT, copilot *copilotBillingSettings) []string {
 	var out []string
 	for _, s := range []struct {
 		on   bool
@@ -27,6 +27,8 @@ func sealGatedSources(admin *anthropicAdminSettings, oai *openAIUsageSettings, s
 	}{
 		{admin != nil, collector.SourceAnthropicAdmin},
 		{oai != nil, collector.SourceOpenAIUsage},
+		{copilot != nil, collector.SourceCopilotBilling},
+		{cursor != nil, collector.SourceCursorAdmin},
 		{len(subs) > 0, subscriptionFeeSource},
 		{codex != nil, collector.SourceCodexRollout},
 		{oc != nil, collector.SourceOpencode},

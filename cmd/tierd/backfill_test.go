@@ -113,6 +113,7 @@ func TestDispatch_BackfillRedirectPolicy(t *testing.T) {
 type fakePR struct {
 	number        int
 	updatedAt     string // RFC3339; "" ⇒ omitted
+	createdAt     string // RFC3339; "" ⇒ unknown
 	mergedAt      string // RFC3339; "" ⇒ null (closed-unmerged)
 	title         string
 	mergeSHA      string
@@ -162,7 +163,7 @@ func newFakeGitHub(t *testing.T, prs []fakePR) *httptest.Server {
 				"title":            p.title,
 				"body":             p.body,
 				"merged_at":        mergedAt,
-				"created_at":       p.mergedAt,
+				"created_at":       p.createdAt,
 				"merge_commit_sha": p.mergeSHA,
 				"head":             map[string]any{"ref": p.branch, "repo": map[string]string{"full_name": fakeHeadRepo(p)}},
 				"base":             map[string]any{"repo": map[string]string{"default_branch": p.defaultBranch}},
@@ -204,12 +205,12 @@ func newFakeGitHub(t *testing.T, prs []fakePR) *httptest.Server {
 // stops list pagination). Ordered updated-desc as GitHub would return them.
 func standardPRs() []fakePR {
 	return []fakePR{
-		{number: 101, updatedAt: "2026-03-01T10:00:00Z", mergedAt: "2026-03-01T10:00:00Z",
+		{number: 101, createdAt: "2026-02-27T09:00:00Z", updatedAt: "2026-03-01T10:00:00Z", mergedAt: "2026-03-01T10:00:00Z",
 			mergeSHA: "sha101", branch: "feature/55-x", body: "Closes #55", login: "alice",
 			labels: []string{"size/m"}, adds: 10, dels: 2, changed: 3},
 		{number: 102, updatedAt: "2026-02-20T10:00:00Z", mergedAt: "",
 			mergeSHA: "", branch: "feature/60-y", body: "Closes #60", login: "carol"},
-		{number: 103, updatedAt: "2026-02-10T10:00:00Z", mergedAt: "2026-02-10T10:00:00Z",
+		{number: 103, createdAt: "2026-02-09T08:00:00Z", updatedAt: "2026-02-10T10:00:00Z", mergedAt: "2026-02-10T10:00:00Z",
 			mergeSHA: "sha103", branch: "bugfix/x", body: "fixes #77", login: "bob", userType: "Bot",
 			labels: nil, adds: 40, dels: 10, changed: 3},
 		{number: 104, updatedAt: "2025-12-01T10:00:00Z", mergedAt: "2025-12-01T10:00:00Z",
@@ -261,8 +262,21 @@ func TestDispatch_BackfillReconstructsOutcomes(t *testing.T) {
 		t.Fatalf("backfill issue_rule = %+v", exp.Outcomes[0])
 	}
 	metadata := exp.Outcomes[0]
+	measured, err := db.TimeToMergeOutcomesWindow(ctx, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Time{}, store.FleetWide)
+	if err != nil || len(measured) != 2 {
+		t.Fatalf("time-to-merge backfill evidence: %+v %v", measured, err)
+	}
+	for _, row := range measured {
+		if row.CreatedAt == nil || row.MergedAt == nil {
+			t.Fatalf("backfill row omitted by descriptive read: %+v", row)
+		}
+	}
+	wantCreatedAt, err := time.Parse(time.RFC3339, standardPRs()[0].createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantHash := issueref.BranchHash("owner/repo", "feature/55-x")
-	if metadata.HeadBranchHash == nil || *metadata.HeadBranchHash != *wantHash || metadata.CreatedAt == nil || metadata.MergedAt == nil || !metadata.CreatedAt.Equal(*metadata.MergedAt) {
+	if metadata.HeadBranchHash == nil || *metadata.HeadBranchHash != *wantHash || metadata.CreatedAt == nil || metadata.MergedAt == nil || !metadata.CreatedAt.Equal(wantCreatedAt) {
 		t.Fatalf("backfill metadata: %+v", metadata)
 	}
 	o101, ok, err := db.OutcomeByMergeCommit(ctx, "sha101")
@@ -609,7 +623,8 @@ func TestBackfillBranchEvidenceWithoutFill(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			merged := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
-			srv := newFakeGitHub(t, []fakePR{{number: 42, updatedAt: merged.Format(time.RFC3339), mergedAt: merged.Format(time.RFC3339), mergeSHA: "branch-evidence", branch: tc.branch, headRepo: tc.headRepo, defaultBranch: tc.defaultBranch, body: "closes #42", login: "alice"}})
+			created := merged.Add(-24 * time.Hour)
+			srv := newFakeGitHub(t, []fakePR{{number: 42, createdAt: created.Format(time.RFC3339), updatedAt: merged.Format(time.RFC3339), mergedAt: merged.Format(time.RFC3339), mergeSHA: "branch-evidence", branch: tc.branch, headRepo: tc.headRepo, defaultBranch: tc.defaultBranch, body: "closes #42", login: "alice"}})
 			defer srv.Close()
 			path := filepath.Join(t.TempDir(), "tier.db")
 			db, err := store.Open(path)
@@ -635,8 +650,8 @@ func TestBackfillBranchEvidenceWithoutFill(t *testing.T) {
 			if tc.wantHash && *o.HeadBranchHash != *issueref.BranchHash("owner/repo", tc.branch) {
 				t.Errorf("wrong hash: %s", *o.HeadBranchHash)
 			}
-			if o.CreatedAt == nil || o.MergedAt == nil {
-				t.Errorf("missing timestamps: %+v", o)
+			if o.CreatedAt == nil || !o.CreatedAt.Equal(created) || o.MergedAt == nil || !o.MergedAt.Equal(merged) {
+				t.Errorf("wrong timestamps: %+v", o)
 			}
 			if exp.TokenEvents[0].IssueID != store.UnattributedIssueID {
 				t.Errorf("backfill branch-filled event: %s", exp.TokenEvents[0].IssueID)

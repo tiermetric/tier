@@ -20,21 +20,23 @@ module github.com/tiermetric/tier
 //
 // Raised 1.26.9 -> 1.27.2 after v0.5.2 (#1140). Keep all build pins in
 // lockstep; Go 1.27.0 and 1.27.1 carry the nine advisories above.
+// Raised 1.27.2 -> 1.27.3 (#1344, GO-2026-6809)
+// Fixes crypto/x509, reachable via io.Copy -> x509.Certificate.Verify.
 //
 // A toolchain raise does not retroactively fix an already-published image:
 // Measured 2026-10-08: ghcr.io/tiermetric/tierd:latest (0.4.1, go1.26.6)
 // carried those nine advisories; rebuilding and releasing v0.5.2 fixed it (#683).
 //
-// A `toolchain go1.27.2` line is ignored under GOTOOLCHAIN=local, so it would
+// A `toolchain go1.27.3` line is ignored under GOTOOLCHAIN=local, so it would
 // let someone silently build a tierd that links the vulnerable stdlib. The
-// `go` directive hard-fails instead: `go.mod requires go >= 1.27.2`. Fail loud.
+// `go` directive hard-fails instead: `go.mod requires go >= 1.27.3`. Fail loud.
 //
 // The usual objection — "a patch-version floor burdens downstream importers" —
 // does not apply: every package here is under internal/ or cmd/, so nothing in
 // this module is externally importable. The only consumers are people building
 // or `go install`-ing tierd, and those are exactly the people who must not end
 // up with a vulnerable binary.
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1

@@ -2,7 +2,7 @@
 
 **Audience:** anyone who wants to run TIER against a repository for the first time.
 
-**Version scope:** installation examples name the tagged v0.6.1 release. The developer-mode startup guard, demo isolation, issue-attributed spend share and trusted-use scope below apply from v0.6.1.
+**Version scope:** installation examples name the tagged v0.6.2 release. The developer-mode startup guard, demo isolation, issue-attributed spend share and trusted-use scope below apply from v0.6.1.
 
 **Who this release is for (from v0.6.1).** This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every ingest/admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt. Solo users can run `tierd score` for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.
 
@@ -28,7 +28,7 @@ The team/division k-floor is not robust against an untrusted ingest holder until
 
 ## 1. Install
 
-Building v0.6.1 requires **Go 1.27.2 or newer**. Download a release
+Building from source at this revision or later requires **Go 1.27.3 or newer** (raised for GO-2026-6809); v0.6.1 shipped with Go 1.27.2. Download a release
 archive below if you do not have a Go toolchain.
 
 ```sh
@@ -37,7 +37,7 @@ go install github.com/tiermetric/tier/cmd/tierd@latest
 
 `@latest` resolves to the newest tagged release — it does **not** track `main`,
 so you always get a published, reproducible version. Pin an exact tag instead
-(`@v0.6.1`, the release used as the example below) when you need a build that never moves, e.g. in CI.
+(`@v0.6.2`, the release used as the example below) when you need a build that never moves, e.g. in CI.
 
 `go install` puts the binary in `$(go env GOPATH)/bin` — usually `~/go/bin` —
 or in `GOBIN` if you have set it. If the next command says `command not found`,
@@ -52,13 +52,15 @@ Each release carries one archive per platform, named
 each with a `.sha256` checksum beside it. The archive unpacks to a folder of the
 same name holding a single file, `tierd` (`tierd.exe` on Windows); move it
 somewhere on your `PATH`. `<version>` is the newest tag on the Releases page —
-`v0.6.1` at the time of writing, used below as the example:
+`v0.6.2` at the time of writing, used below as the example:
 
 ```sh
-tar -xzf tierd-v0.6.1-darwin-arm64.tar.gz
-sudo mv tierd-v0.6.1-darwin-arm64/tierd /usr/local/bin/
-# optional: gh attestation verify tierd-v0.6.1-darwin-arm64.tar.gz --repo tiermetric/tier
+tar -xzf tierd-v0.6.2-darwin-arm64.tar.gz
+sudo mv tierd-v0.6.2-darwin-arm64/tierd /usr/local/bin/
+# optional: gh attestation verify tierd-v0.6.2-darwin-arm64.tar.gz --repo tiermetric/tier
 ```
+
+Homebrew (macOS): `brew install tiermetric/tap/tierd` builds tierd from source.
 
 **macOS:** if you downloaded the archive with a web browser, macOS marks the
 binary as downloaded, and because it is not notarized the system stops it from

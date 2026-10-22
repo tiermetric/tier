@@ -1,10 +1,27 @@
 # TIER — Token Impact & Efficiency Ratio
 
 ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Go 1.27.2+](https://img.shields.io/badge/go-1.27.2%2B-00ADD8)
+![Go 1.27.3+](https://img.shields.io/badge/go-1.27.3%2B-00ADD8)
 ![Status: pre-v1](https://img.shields.io/badge/status-pre--v1-orange)
 
 **Merged work per $1,000 of captured AI usage, priced at list rates: an observational ratio, not a causal estimate.**
+
+> **What TIER does not measure. Read this before relying on a number.**
+> - **Capture depends on the account and settings.** New in v0.6.2, experimental `collectors.copilot_billing` can capture GitHub Copilot organisation AI-credit gross spend, and `collectors.cursor_admin` can capture usage on a Cursor team plan with Admin API access (Teams or Enterprise; Cursor decides which plans include it). Individual Copilot Pro and individual Cursor accounts are not covered by these pollers; ChatGPT Team is still not captured. See the [source requirements](docs/technical-reference.md#what-each-source-needs). Work done with them still earns points, so partial capture makes the ratio read high: 20 points over $200 of usage is a TIER of 100, but if only $50 of that usage is captured it reads 400. ([white paper §4.2](docs/whitepaper.md#42-what-is-missing-and-in-which-direction-it-moves-the-number))
+> - **Size, not value.** Points are size-weighted accepted work. With no size label, a 5-line fix in one file earns 0.5 and a change of 1,000 lines across 10 files earns 8, whatever each is worth to the business. ([§3](docs/whitepaper.md#3-what-a-point-is-and-is-not-worth))
+> - **How work is split.** That 1,000-line change earns 8 as one PR and 25 as five PRs of 200 lines across 2 files each. Size labels are trusted, not checked. ([§10](docs/whitepaper.md#10-known-limits))
+> - **AI cost only.** Human time is not in the denominator, so doing more by hand and less with AI raises the ratio. ([P-03](docs/adversarial-analysis.md#p-03-token-free-approaches-incentivized-even-when-ai-is-superior))
+> - **Not causal.** TIER links recorded usage to merged work by developer, repository and issue reference. It does not detect whether AI wrote a change, or how much AI helped. ([§7.3](docs/whitepaper.md#73-limits-on-interpretation))
+
+**Is TIER right for you?**
+TIER helps a team follow merged work per $1,000 of captured AI usage over time, priced at list rates so every plan reads on one scale. It counts accepted work, mainly merged pull requests that reference an issue (plus opt-in direct commits and outcomes posted through its API), weighted by size and adjusted for CI failures and reverts where TIER observes them.
+Beside the ratio it shows time to merge (PR created → merged), a separate figure that is not a quality measure.
+Check the [per-plan source requirements](docs/technical-reference.md#what-each-source-needs) before a pilot; the Copilot and Cursor pollers are experimental and require organisation or team credentials.
+
+TIER does not, today:
+- credit results to individual models. It reports spend by model; the separate Model Report compares models on declared tasks.
+- measure review rounds or human interventions.
+- give a useful ratio when most of your AI use runs through tools it does not capture; the ratio then reads high.
 
 TIER measures size-weighted outcome points, adjusted for quality where TIER
 observes CI failures and reverts, per $1,000 of captured AI usage priced at list
@@ -148,7 +165,7 @@ The team/division k-floor is not robust against an untrusted ingest holder until
 
 ## Prerequisites
 
-TIER builds from source. You need **Go 1.27.2+**
+TIER builds from source. You need **Go 1.27.3+**
 (the floor `go.mod` sets, for standard-library security fixes), **make**, and **git**. Some examples also use
 `openssl`, `curl`, Docker or cron. Clone
 the repo and build the `tierd` binary once:
@@ -163,7 +180,7 @@ The commands below assume you are in the repo root with `./bin/tierd` built.
 Where an example calls plain `tierd`, it means the same binary: use
 `./bin/tierd` from the repo root, or put it on your `PATH`.
 
-**Two ways to skip the clone.**
+**Three ways to skip the clone.**
 `go install github.com/tiermetric/tier/cmd/tierd@latest` still needs Go (it
 compiles for you) and puts `tierd` in `$(go env GOPATH)/bin` (usually
 `~/go/bin`; `GOBIN` overrides it) — if the shell says `command not found`, add
@@ -178,6 +195,8 @@ no Windows CI, and the guarantee that the database file is readable only by its
 owner (mode 0600, re-applied every time tierd opens it) does not hold
 there ([docs/security.md §4](docs/security.md)); treat it as unsupported until
 someone reports it working.
+
+Homebrew (macOS): `brew install tiermetric/tap/tierd` builds tierd from source.
 
 ## What you need before you start
 

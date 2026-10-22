@@ -7,13 +7,14 @@
 // package set, so this isolation is structural, not conventional.
 module github.com/tiermetric/tier/tools/docgen
 
+// Raised 1.27.2 -> 1.27.3 (#1344, GO-2026-6809)
 // Kept in LOCKSTEP with the parent module's floor (#694). The parent hard-fails
-// below 1.27.2, and `make check` cds in here, so a lower floor here can never be
+// below 1.27.3, and `make check` cds in here, so a lower floor here can never be
 // the binding constraint for anyone building this repo — it would only be a
 // second number to forget. This module ships no binary (the release export
 // removes any stray `tools/docgen/docgen`), so the bump is for consistency,
 // not a CVE fix.
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/microcosm-cc/bluemonday v1.0.27

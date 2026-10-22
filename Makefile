@@ -13,7 +13,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse HEAD 2>/dev/null || echo "")
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: build lint test check check-full clean docker event3-replay seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest e2e-summary e2e-summary-selftest go-test-timeout-selftest expect-head vet-386
+.PHONY: build lint test check check-full clean docker event3-replay seam-exercise docs-html docs-html-check docs-test cve-rescan cve-rescan-selftest e2e-summary e2e-summary-selftest go-test-timeout-selftest homebrew-formula-selftest expect-head vet-386
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/tierd
@@ -160,7 +160,7 @@ expect-head:
 # target of the first rule in the file, so hoisting these names above `build`
 # silently turns a bare `make` into `make lint`.
 lint build test docs-html docs-test docs-html-check cve-rescan-selftest \
-e2e-summary-selftest go-test-timeout-selftest: expect-head
+e2e-summary-selftest go-test-timeout-selftest homebrew-formula-selftest: expect-head
 
 # Optional fragment, present only in the maintainers' own checkout: it sets
 # PRIVATE_CHECKS (selftests of tooling that is not published) and defines their
@@ -172,7 +172,7 @@ e2e-summary-selftest go-test-timeout-selftest: expect-head
 # expect-head is FIRST here too — belt and braces with the edges above, and it is
 # what makes the serial ordering readable at a glance. `check-full: check` below
 # means check-full inherits it. Do not move it down the list.
-check: expect-head lint vet-386 build test docs-test docs-html-check cve-rescan-selftest e2e-summary-selftest go-test-timeout-selftest $(PRIVATE_CHECKS)
+check: expect-head lint vet-386 build test docs-test docs-html-check cve-rescan-selftest e2e-summary-selftest go-test-timeout-selftest homebrew-formula-selftest $(PRIVATE_CHECKS)
 
 vet-386: expect-head ; @"$(CURDIR)/scripts/vet-386.sh"
 
@@ -227,6 +227,9 @@ e2e-summary:
 # other. Same wiring as cve-rescan-selftest below.
 e2e-summary-selftest:
 	"$(CURDIR)/scripts/e2e-summary.sh" --selftest
+
+homebrew-formula-selftest:
+	@"$(CURDIR)/scripts/render-homebrew-formula-selftest.sh"
 
 go-test-timeout-selftest:
 	@make -n check-full EXPECT_HEAD= | bash "$(CURDIR)/scripts/go-test-timeout-selftest.sh" $(GO_TEST_TIMEOUT)

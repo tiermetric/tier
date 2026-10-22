@@ -196,12 +196,12 @@ You can compute a signature by hand and post a synthetic merged-PR payload
 (the key file must be the same file given to `tierd serve --webhook-secret`):
 
 This writes an outcome for the fake login `__tier_webhook_test__` and issue
-`WEBHOOKTEST-000000` into the receiving server's store. The row persists there
+`issue-999999999` into the receiving server's store. The row persists there
 and can affect reports; this is not a dry run. Use a test server if you do not
 want synthetic data in your live store.
 
 ```sh
-PAYLOAD='{"action":"closed","pull_request":{"number":999999999,"merged":true,"merge_commit_sha":"tier-webhook-test-not-a-real-merge","user":{"login":"__tier_webhook_test__"},"body":"closes WEBHOOKTEST-000000","labels":[{"name":"size/m"}],"additions":10,"deletions":2,"changed_files":3}}'
+PAYLOAD='{"action":"closed","pull_request":{"number":999999999,"merged":true,"merge_commit_sha":"tier-webhook-test-not-a-real-merge","user":{"login":"__tier_webhook_test__"},"body":"closes #999999999","labels":[{"name":"size/m"}],"additions":10,"deletions":2,"changed_files":3}}'
 SIG="sha256=$(printf '%s' "$PAYLOAD" | perl -MDigest::SHA=hmac_sha256_hex -e '
   local $/;
   open my $fh, "<", "$ENV{HOME}/.tier/webhook-secret" or die $!;

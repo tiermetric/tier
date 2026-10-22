@@ -1,6 +1,6 @@
 # Understanding TIER
 
-**v0.6.1 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+**v0.6.2 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
 TIER (Token Impact & Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.
@@ -79,7 +79,7 @@ The maintainer has exercised TIER's CI and revert rules in manual test runs; the
 
 Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for the subscription routes used here. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If the logs undercount, costs are understated and TIER scores read high. If Claude's logs undercount more than Codex's, Claude looks relatively cheaper.
 
-**Try it.** Install TIER with Go 1.27.2 or newer
+**Try it.** Install TIER with Go 1.27.3 or newer
 (`go install github.com/tiermetric/tier/cmd/tierd@latest`), or download a
 release; [quickstart.md §1](quickstart.md#1-install) covers both. Then run
 `tierd demo` and open `http://127.0.0.1:8080` in a browser. The demo fills the
@@ -288,7 +288,7 @@ Solo users can stop after step 3 for local Claude Code costs. The remaining
 steps load a team/division server; reports also require a sealed month and
 enough contributors. See the [quickstart](quickstart.md) for the full setup.
 
-1. **Install.** Go 1.27.2 or newer, or a release download:
+1. **Install.** Go 1.27.3 or newer, or a release download:
    [quickstart.md §1](quickstart.md#1-install).
 2. **Check capture.** In your repository's folder, run `tierd doctor --repo .`.
    It reports what TIER can read on this machine and how much of your spend it

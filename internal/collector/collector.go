@@ -27,6 +27,8 @@ const (
 	SourceProxy          = "proxy"           // TIER reverse proxy (real-time)
 	SourceAnthropicAdmin = "anthropic-admin" // Anthropic Admin usage report API
 	SourceOpenAIUsage    = "openai-usage"    // OpenAI org Usage/Costs API poller (#139)
+	SourceCopilotBilling = "copilot-billing" // GitHub Copilot org AI-credit billing API
+	SourceCursorAdmin    = "cursor-admin"    // Cursor team Admin usage-events API
 	// SourceCodexRollout is the Codex CLI's local rollout logs
 	// (~/.codex/sessions/**/rollout-*.jsonl), read by
 	// internal/collector/codexrollout (#464). It is the Codex analogue of
@@ -78,6 +80,8 @@ var allSources = []string{
 	SourceProxy,
 	SourceAnthropicAdmin,
 	SourceOpenAIUsage,
+	SourceCopilotBilling,
+	SourceCursorAdmin,
 	SourceCodexRollout,
 	SourceOpencode,
 	SourceMuse,
@@ -97,8 +101,9 @@ func AllSources() []string { return slices.Clone(allSources) }
 //   - SourceProxy is captured server-side by the receiving tierd itself. A
 //     client claiming source=proxy would be asserting something only the server
 //     can know.
-//   - The org-level pollers (SourceAnthropicAdmin, SourceOpenAIUsage)
-//     emit daily AGGREGATES, not per-call events. Admitting
+//   - The org-level pollers (SourceAnthropicAdmin, SourceOpenAIUsage,
+//     SourceCopilotBilling, SourceCursorAdmin) hold vendor admin credentials and
+//     emit daily aggregates. Admitting
 //     them here would double-count against the same org's poller rows and mix
 //     fidelities inside one endpoint; manual imports belong on /api/v1/costs.
 //

@@ -81,6 +81,9 @@ func (d *DB) AggregatePricingWindow(ctx context.Context, since, until time.Time,
 }
 func (r reader) AggregatePricingWindow(ctx context.Context, since, until time.Time, scope RepoScope) (AggregatePricingDisclosure, error) {
 	where, args := digestPredicate(since, until, scope)
+	// Only Anthropic/OpenAI remainder feeds lack request-level pricing evidence.
+	// copilot-billing reports dollars and cursor-admin prices each event before
+	// aggregation, so neither belongs in this daily-approximation disclosure.
 	rows, err := r.q.QueryContext(ctx, `SELECT input_tok,output_tok,cache_read,cache_write_5m,cache_write_1h,cost_micro,price_version,billing_mode,COALESCE(pricing_basis,''),COALESCE(rate_snapshot,''),s.body FROM token_events LEFT JOIN pricing_rate_snapshots s ON s.id=token_events.rate_snapshot `+" WHERE "+where+` AND source IN ('anthropic-admin','openai-usage')`, args...)
 	if err != nil {
 		return AggregatePricingDisclosure{}, err

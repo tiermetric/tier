@@ -404,6 +404,65 @@ outcomes:
     # 'manual' and the summed read would double-count). The poller owns the
     # OpenAI feed; record only other providers' spend manually.
 
+  # GitHub Copilot AI-credit gross-spend poller (#1336). EXPERIMENTAL:
+  # org-level totals remain unverified; unusable responses skip the remainder.
+  # Absent this block, the poller is DISABLED. Config-file only.
+  #
+  # SINGLE OWNER: this poller is the single owner of Copilot spend. Keep
+  # Opencode's Copilot provider excluded and do not also import this spend
+  # manually. Rows are cost-only daily aggregates; no tokens, repository or
+  # issue attribution are inferred.
+  # copilot_billing:
+    # Per-key daily ceiling: $10,000; oversized deltas are skipped and the day remains incomplete.
+    # GitHub organization login. Required.
+    # org: "myorg"
+
+    # App auth is preferred, with org permission "Administration: Read-only".
+    # Configure all three App fields, or token below, never both auth modes.
+    # Secrets use the "@/path/to/file" indirection so they stay out of this file.
+    # app_id: "12345"
+    # installation_id: "67890"
+    # private_key: "@/etc/tier/copilot-app-private-key.pem"
+
+    # Alternative token auth: omit all three App fields when using this key.
+    # token: "@/etc/tier/copilot-billing-token"
+
+    # API origin. Optional; default https://api.github.com. HTTPS required
+    # except for loopback test servers; no path, query or embedded credentials.
+    # api_base_url: "https://api.github.com"
+
+    # Poll cadence. Optional; default 6h; minimum 15m (validated at startup).
+    # poll_interval: "6h"
+
+    # Settled-day window. Optional; defaults 2 and 7 days respectively.
+    # Require 1 <= settle_days <= lookback_days <= 31.
+    # settle_days: 2
+    # lookback_days: 7
+
+  # Cursor Admin API poller (#1336). EXPERIMENTAL; disabled when this block is
+  # absent. Requires a TEAM Admin API key, not a personal key, on a Teams or
+  # Enterprise plan (verified on Teams 2026-10-21). The key can WRITE spend
+  # limits, members and model access, but TIER only reads usage.
+  # cursor_admin:
+    # Required secret. Use "@/path/to/file" so the key stays out of this file.
+    # api_key: "@/etc/tier/cursor-admin-key"
+
+    # API origin. Optional; default https://api.cursor.com.
+    # api_base_url: "https://api.cursor.com"
+
+    # Poll cadence. Optional; default and minimum 1h.
+    # poll_interval: "1h"
+
+    # Settlement lag in days. Optional; default and minimum 1.
+    # settle_days: 1
+
+    # Reconciliation lookback in days. Optional; default 7; >= settle_days.
+    # An uncosted day (unknown model and zero vendor cents) is recorded as a
+    # lost span requiring `tierd seal --skip`, unless the model's price is added
+    # before the day leaves lookback_days. Late discovery records the loss at
+    # once; a fresh process also treats prior certification as possibly complete.
+    # lookback_days: 7
+
   # Codex rollout-log collector (#464). UNLIKE the two pollers above this is a
   # LOCAL, per-developer, per-call capture path with NO credential: it reads the
   # rollout logs the Codex CLI already writes to

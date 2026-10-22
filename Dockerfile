@@ -5,7 +5,7 @@
 # base — no libc, no shell, no package manager.
 
 # --- build stage ---
-# golang:1.27.2 satisfies go.mod's `go 1.27.2`. This build stage is what links the
+# golang:1.27.3 satisfies go.mod's `go 1.27.3`. This build stage is what links the
 # stdlib into the static binary, so a LOCAL govulncheck pass does NOT make the
 # shipped artifact clean.
 #
@@ -25,10 +25,13 @@
 # encoder race crash), -6613, -6612, -6611, -6610, -6605, -6603 (net/http),
 # -6608 (net/textproto), -6607 (crypto/tls); all fixed in 1.26.9.
 # Raised 1.26.9 -> 1.27.2 after v0.5.2 (#1140), in lockstep with the module floors.
-# Measured 2026-10-09: `crane digest golang:1.27.2` ->
-# sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c;
-# `crane config --platform linux/amd64 golang:1.27.2` and
-# `crane config --platform linux/arm64 golang:1.27.2` both report GOLANG_VERSION=1.27.2.
+# Raised 1.27.2 -> 1.27.3 (#1344, GO-2026-6809)
+# Fixes crypto/x509, reachable via io.Copy -> x509.Certificate.Verify.
+# Measured 2026-10-21T16:05:52Z: `crane digest golang:1.27.3` ->
+# sha256:f24164268fc1e741bbdc0066dbadcf1c8426c5a8489f0729c02c3905a53032fd;
+# `crane config --platform linux/amd64 golang:1.27.3@<that digest>` and
+# `crane config --platform linux/arm64 golang:1.27.3@<that digest>`
+# both report GOLANG_VERSION=1.27.3 GOTOOLCHAIN=local.
 # A toolchain raise does not retroactively fix an already-published image:
 # Measured 2026-10-08: ghcr.io/tiermetric/tierd:latest (0.4.1, go1.26.6)
 # carried those nine advisories; rebuilding and releasing v0.5.2 fixed it (#683).
@@ -40,7 +43,7 @@
 #   RESOLVE (once, to obtain a candidate):  crane digest golang:<tag>
 #   VERIFY  (always, before committing it): docker run --rm golang@sha256:<d> go version
 # ⚠️ Docker official-image tags are re-pushed when their base OS updates, so
-# `crane digest golang:1.27.2` may stop matching the digest below at any time.
+# `crane digest golang:1.27.3` may stop matching the digest below at any time.
 # (Measured 2026-08-22: `crane digest golang:1.26.5` already returns 705e964a…,
 # NOT the 079e5980… this line pinned before 2026-08-22; both are genuine 1.26.5,
 # verified by running them.) A match is definitive; only a MISMATCH is ambiguous,
@@ -49,18 +52,18 @@
 #
 # 🔴 THAT REASONING IS SCOPED TO THIS LINE AND DOES NOT TRANSFER TO THE RUNTIME
 # BASE PIN BELOW. That one IS the shipped filesystem, so a moved tag there is a
-# real question, not a shrug. (Measured 2026-08-22: it has in fact drifted —
-# `cgr.dev/chainguard/static:latest` now resolves to f68e3a82…, not the 77d8b892…
-# pinned below. Scanned the PINNED digest at every severity: 0 findings, so this
-# is not an exposure — but do not file it under "the pin working".)
+# real question, not a shrug. (History: on 2026-08-22 `latest` had drifted to
+# f68e3a82… from the then-pin 77d8b892…, which scanned 0 findings that day; the
+# same 77d8b892… later carried a HIGH, CVE-2026-111943, and was replaced in #1357.
+# A clean scan is a reading at a date, not a property of the pin.)
 #
 # ⚠️ And note the limit of the verification above: `go version` proves the
 # TOOLCHAIN, which is all this stage contributes. It cannot see base-OS content,
 # so it is not a general "this digest is fine" check.
-# Verified 2026-10-09: `docker run --rm --platform linux/amd64|linux/arm64 golang@sha256:5bc7f572… go version`
-# -> go1.27.2 on both; the pin is the multi-platform index digest, which also covers
-# the linux/amd64 the release lane builds.
-FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS build
+# Measured 2026-10-21T16:05:52Z: the pinned config on linux/amd64 and linux/arm64
+# reports GOLANG_VERSION=1.27.3 GOTOOLCHAIN=local; the pin is the multi-platform
+# index digest, which also covers the linux/amd64 the release lane builds.
+FROM golang:1.27.3@sha256:f24164268fc1e741bbdc0066dbadcf1c8426c5a8489f0729c02c3905a53032fd AS build
 WORKDIR /src
 
 # Module cache layer — only re-downloads when go.mod/go.sum change.
@@ -95,7 +98,10 @@ RUN install -d -o 65532 -g 65532 /out/data
 # api.openai.com), and runs as non-root uid 65532 by default — matching the
 # /data ownership below. Digest-pinned per D2 (mandatory). Refresh the digest:
 # `crane digest cgr.dev/chainguard/static:latest`.
-FROM cgr.dev/chainguard/static:latest@sha256:77d8b8925dc27970ec2f48243f44c7a260d52c49cd778288e4ee97566e0cb75b
+# Measured 2026-10-22 (trivy, HIGH,CRITICAL, --ignore-unfixed): the previous pin
+# 77d8b892… carried ca-certificates-bundle 20260413-r0 (CVE-2026-111943, HIGH);
+# this digest scans 0 fixable HIGH/CRITICAL (#1357).
+FROM cgr.dev/chainguard/static:latest@sha256:17367e4d3ae2b46c3290858e483fac09be085c92b372360fe3bf6a6150848fde
 # Only the tierd binary is shipped in the runtime image.
 COPY --from=build /out/tierd /usr/local/bin/tierd
 COPY --from=build --chown=65532:65532 /out/data /data

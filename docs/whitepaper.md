@@ -4,7 +4,7 @@
 
 ## A white paper: accepted software changes per dollar of recorded AI usage
 
-**Paper version:** 2.6 — 2026-10-18 (v0.6.1 release). Describes TIER **v0.6.1**, an open-source tool released under the Apache License 2.0. The paper is written for two readers with no background: a skeptical engineer and a chief financial officer (CFO). It says what TIER measures, what the number is worth, which decisions it may and may not inform, how complete its inputs are, and how to try it. The mechanics behind every statement here are in the companion [technical reference](technical-reference.md); Section 13 says what it covers. Where this paper and the reference disagree, the reference is correct.
+**Paper version:** 2.7 — 2026-10-22 (v0.6.2 release). Describes TIER **v0.6.2**, an open-source tool released under the Apache License 2.0. The paper is written for two readers with no background: a skeptical engineer and a chief financial officer (CFO). It says what TIER measures, what the number is worth, which decisions it may and may not inform, how complete its inputs are, and how to try it. The mechanics behind every statement here are in the companion [technical reference](technical-reference.md); Section 13 says what it covers. Where this paper and the reference disagree, the reference is correct.
 
 **Two roles.** The **operator** is the project maintainer, who decides disputed design questions; the rulings this paper relies on are stated in full where they apply. Issue numbers (#826 and others) point to the maintainer's issue tracker, which may not be public; they are provenance only, and nothing here requires opening them. Whoever installs and runs TIER is the **administrator**, usually an engineer. A CFO does not install or run TIER; finance's part is posting what was paid (Section 8).
 
@@ -12,13 +12,13 @@
 
 ## 0. Summary for finance and leadership
 
-**v0.6.1 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 **What the number is.** TIER measures merged work per $1,000 of captured AI usage, priced at list rates: an observational ratio, not a causal estimate. Its numerator is size-weighted outcome points, adjusted for quality where TIER observes CI failures and reverts. `cost_per_point` expresses the ratio in dollars per point. Accepted outcomes are merged pull requests, opt-in direct commits to the default branch, or API-posted outcomes. For GitHub PR ingestion, an outcome requires a recognised issue reference in the branch name or PR description; TIER does not verify that the referenced tracker record exists. The strict grammar uses the first branch slot, closing directives and explicit references; tracker keys require configuration, with OP built in (Section 2).
 
 **What a point is worth.** A small change that merged with no failure afterwards is one point; the standard sizes run from 0.5 to 8. A point has **no dollar value** (Section 3).
 
-**What the headline can show.** On the dashboard the headline is a number only when the figure clears an evidence floor. Otherwise it shows a word: "NO SCORE" (nothing accepted), "FREE" (accepted work but no recorded cost), "NOT ENOUGH SPEND TO SCORE" or "NOT ENOUGH EVIDENCE TO SCORE". A number labelled "provisional" rests mostly on spend that could not be linked to a piece of work (Section 5).
+**What the headline can show.** On the dashboard the headline is a number only when the figure clears an evidence floor. Otherwise it shows a word: "NO SCORE" (nothing accepted), "No recorded AI cost" (accepted work but no recorded cost, often a capture gap), "NOT ENOUGH SPEND TO SCORE" or "NOT ENOUGH EVIDENCE TO SCORE". A number labelled "provisional" rests mostly on spend that could not be linked to a piece of work (Section 5).
 
 **How a figure may be compared.** Mainly with the same team's or organisation's own history, for one kind of work (per kind only in the per-developer mode; Section 9), under the same price table and scoring rules. Two teams in one organisation compare only weakly. Two organisations never compare (Section 6).
 
@@ -26,7 +26,7 @@
 
 **Coaching stance.** TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is **grade the work, not the worker**, by policy rather than by mechanism. TIER cannot enforce an organisation's use of the figures (Section 7).
 
-**How complete the cost side is today.** TIER sees only the usage it captures (Section 4). By default it reads Claude Code's session logs. The administrator can turn on capture for Codex (OpenAI's command-line coding agent), for Opencode (an open-source coding agent) when it uses the Z.ai coding plan (Z.ai sells the GLM models; the coding plan is its flat-fee subscription), for Muse Code (Meta's command-line coding agent; its token mapping was measured on one real Muse Code 1.4.0 session), and for organisation-level API usage reported by Anthropic and OpenAI. A built-in proxy records any calls a client chooses to send through it. Cursor, GitHub Copilot and ChatGPT Team are not captured. Usage TIER does not capture looks free, so TIER reads high (when any cost is recorded at all). Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for subscriptions such as Claude Max seats. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If a Codex log undercount understates its priced cost while other spending and positive outcome points stay fixed, the TIER ratio reads high when recorded total cost remains positive, and Codex looks relatively cheaper than Claude in that cross-vendor cost comparison. The size of any missing usage remains unknown; issue #837 tracks validation.
+**How complete the cost side is today.** TIER sees only the usage it captures (Section 4). By default it reads Claude Code's session logs. The administrator can turn on capture for Codex (OpenAI's command-line coding agent), for Opencode (an open-source coding agent) when it uses the Z.ai coding plan (Z.ai sells the GLM models; the coding plan is its flat-fee subscription), for Muse Code (Meta's command-line coding agent; its token mapping was measured on one real Muse Code 1.4.0 session), and for organisation-level API usage reported by Anthropic and OpenAI. A built-in proxy records any calls a client chooses to send through it. New in v0.6.2, experimental pollers can also capture GitHub Copilot organisation AI-credit gross spend (`collectors.copilot_billing`) and usage on a Cursor team plan with Admin API access (Teams or Enterprise; Cursor decides which plans include it) (`collectors.cursor_admin`). Individual Copilot Pro and individual Cursor accounts are not covered by these pollers; ChatGPT Team is still not captured. Usage TIER does not capture looks free, so TIER reads high (when any cost is recorded at all). Claude costs are derived from deduplicated Claude Code usage logs. Their completeness against independent provider accounting remains unvalidated, including for subscriptions such as Claude Max seats. Missing usage would understate those costs. Codex costs use logged cumulative counters; those counters do not independently establish complete capture. If a Codex log undercount understates its priced cost while other spending and positive outcome points stay fixed, the TIER ratio reads high when recorded total cost remains positive, and Codex looks relatively cheaper than Claude in that cross-vendor cost comparison. The size of any missing usage remains unknown; issue #837 tracks validation.
 
 **Spend Leverage** is the list-price value of recorded usage divided by what finance posted as paid (Section 8). Above 1, the organisation paid less than list; near 1 is metered billing at list; below 1, it paid more than list, for example for an under-used flat plan. It is not a saving, and it never changes TIER.
 
@@ -84,7 +84,7 @@ Weighted points = 3.0 + 0.7 + 4.0 = **7.7**. TIER = 7.7 / (35.00 / 1000) = 7.7 /
 
 ### 2.4 The companion figures
 
-- **`cost_per_point`** = cost ÷ points, in dollars per weighted point. With zero points it is empty (`null`), so "nothing accepted" never reads as the most efficient score. With points but zero recorded cost, TIER is 0 and `cost_per_point` is 0. Those two zeros mean "no recorded cost", not the least or the most efficient result; the dashboard shows the case as "FREE", and neither number should be read.
+- **`cost_per_point`** = cost ÷ points, in dollars per weighted point. With zero points it is empty (`null`), so "nothing accepted" never reads as the most efficient score. With points but zero recorded cost, TIER is 0 and `cost_per_point` is 0. Those two zeros mean "no recorded cost", not the least or the most efficient result; the dashboard shows the case as "No recorded AI cost", often a capture gap rather than free work, and neither number should be read as efficiency.
 - **Spend Leverage** = list-price cost ÷ what was actually paid (Section 8).
 
 ### 2.5 Which figure a decision uses
@@ -139,6 +139,8 @@ Cost reaches TIER by these paths:
 | Muse Code session logs | off | Muse Code usage, when turned on; some subagent spend is left out, with a warning |
 | Reverse proxy | listening | only the calls a client is configured to send through it; it stores usage counts, not request or response text |
 | Organisation pollers | off | daily API usage from Anthropic's and OpenAI's organisation reports, for the part the paths above did not record |
+| GitHub Copilot billing (v0.6.2, experimental) | off | GitHub's gross amount (before included credits and discounts) for organisation AI-credit usage per mapped developer and model, plus an unattributed organisation remainder; requires an installed GitHub App with Administration: Read-only (preferred), or an org-admin token |
+| Cursor Admin (v0.6.2, experimental) | off | Usage events from a Cursor team plan with Admin API access (Teams or Enterprise; Cursor decides which plans include it) with a team Admin API key; token-based calls on models with an audited TIER rate valued at list rate, whether included-plan or usage-based; any other event uses Cursor's reported cents; BYO-key events skipped |
 | Manual cost API | available | whatever a script posts, at the dollar figure it gives |
 
 A priced call, as an illustration using version 14's rates shipped in v0.6.0. `claude-sonnet-5` is listed at $2.00 per million input tokens and $10.00 per million output tokens; Anthropic charges cache reads at 0.10× the input rate and five-minute cache writes at 1.25×. A call with 200,000 input tokens, 1,500,000 cache-read tokens, 50,000 cache-write tokens and 5,000 output tokens costs 0.2 × $2.00 + 1.5 × $2.00 × 0.10 + 0.05 × $2.00 × 1.25 + 0.005 × $10.00 = $0.400 + $0.300 + $0.125 + $0.050 = **$0.875**. Cache reuse therefore matters: for the same tokens on the same model, less reuse costs more and scores lower, which is why the API reports the share of tokens that were cache reads beside the score.
@@ -147,7 +149,8 @@ A developer's laptop sends its captured cost to a central server with `tierd shi
 
 ### 4.2 What is missing, and in which direction it moves the number
 
-- **Tools with no capture.** Cursor, GitHub Copilot and ChatGPT Team are not captured, nor is any other tool not listed above. Their usage looks free, so TIER reads high. If a window has no recorded cost at all, TIER is 0 instead.
+- **Accounts and tools outside capture.** Individual Copilot Pro accounts have no organisation billing API; individual Cursor accounts are outside the team Admin poller. ChatGPT Team is not captured, nor is any other tool not listed above. Their usage looks free, so TIER reads high. If a window has no recorded cost at all, TIER is 0 instead.
+- **Cursor limits.** Events whose kind contains `api key` (case-insensitive; observed BYO kind: `User API Key`) are skipped: the provider spend is captured by `anthropic_admin` or `openai_usage` only when the matching poller is configured for the billed organisation. Cursor's per-request fee on those events is not counted. If a chargeable event falls back to Cursor's reported cents and the resulting cost is zero, it is uncosted; this covers non-token calls on any model and token-based calls without an audited TIER rate. An unresolved day becomes a lost span and sealing its month requires `tierd seal --skip`. For a token call without an audited rate, adding the model's price before the day leaves `lookback_days` can resolve it on a clean re-read before a loss is recorded; late discoveries can record a loss immediately. See the [source requirements](technical-reference.md#what-each-source-needs).
 - **Tools not turned on.** Codex, Opencode or Muse Code work done on a laptop whose `ship` does not include those tools records outcomes with no cost, so it too reads high.
 
 Bot- and agent-produced changes can earn points even when their AI usage is not captured. Account type does not establish whether a change used AI, and missing usage can make the ratio read high.
@@ -183,7 +186,7 @@ The dashboard headline shows a word instead of a number in four cases, checked i
 | Word | Meaning |
 |---|---|
 | NO SCORE | the window has no accepted points; nothing accepted is the absence of a score, not a score of zero |
-| FREE | accepted points but zero recorded cost; often a capture gap rather than free work |
+| No recorded AI cost | accepted points but zero recorded cost; often a capture gap rather than free work |
 | NOT ENOUGH SPEND TO SCORE | below the floor, with under $5.00 of recorded cost |
 | NOT ENOUGH EVIDENCE TO SCORE | below the floor for any other reason |
 
@@ -294,12 +297,12 @@ Known limits, and whether each is filed for a fix:
 
 ## 11. Quick install and first run, for one person
 
-This trial is for an engineer: it runs on one laptop, in team mode, with Claude Code as the AI tool and a GitHub repository. The v0.6.1 trial needs Go 1.27.2 or newer (plus `git` and `make` only to build from a clone), or a downloaded release (the download and checksum steps are in the repository's `docs/quickstart.md`). Everything below uses TIER's default database file, `~/.tier/tier.db`, and its default address, `127.0.0.1:8080`, which only this computer can reach.
+This trial is for an engineer: it runs on one laptop, in team mode, with Claude Code as the AI tool and a GitHub repository. The v0.6.2 trial needs Go 1.27.3 (Go 1.27.3 or newer for source builds at this revision or later, raised for GO-2026-6809; plus `git` and `make` only to build from a clone), or a downloaded release (the download and checksum steps are in the repository's `docs/quickstart.md`). Everything below uses TIER's default database file, `~/.tier/tier.db`, and its default address, `127.0.0.1:8080`, which only this computer can reach.
 
 **1. Install.**
 
 ```sh
-go install github.com/tiermetric/tier/cmd/tierd@v0.6.1
+go install github.com/tiermetric/tier/cmd/tierd@v0.6.2
 tierd version
 ```
 

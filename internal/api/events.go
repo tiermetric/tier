@@ -290,10 +290,10 @@ func validateEventRequest(req eventRequest, now time.Time) (store.TokenEvent, er
 	// collector.ShippableSource: "jsonl", "codex-rollout", "opencode" and "muse") all label every event
 	// with --developer or collector.OSUsername(), whose own no-identity fallback is
 	// "unknown", never "unattributed". The producers that DO assign the developer
-	// sentinel — the anthropic-admin and openai-usage org pollers — are excluded from
-	// this endpoint twice over: their sources are not shippable, and cmd/tierd wires
-	// them into ingester.Store(db) in-process so they never cross an HTTP boundary at
-	// all. So the /events capture-outage hazard that forced validateShippedIssueID's
+	// sentinel — the anthropic-admin, openai-usage, copilot-billing and cursor-admin
+	// org pollers — cannot use this endpoint: their sources are not shippable.
+	// Admin-credential ingestion belongs in-process through ingester.Store(db).
+	// So the /events capture-outage hazard that forced validateShippedIssueID's
 	// allowlist does not exist on this column, and an allowlist here would only make
 	// forging as effective as honesty.
 	if err := validateDeveloper(req.Developer); err != nil {

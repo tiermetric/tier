@@ -59,8 +59,8 @@ function pct(fraction) {
 //     contradicts itself. Truncating down cannot cross the floor.
 //   - Below a cent, say "<$0.01", never "$0.00". The canonical #502 window is
 //     $0.0001; as "$0.00" the evidence the reader is meant to weigh is not on
-//     screen at all, and it is indistinguishable from a genuine zero-cost row,
-//     which is the FREE reading — unbounded yield, the opposite meaning.
+//     screen at all, and it is indistinguishable from a zero-recorded-cost row,
+//     which reads as no recorded cost / likely capture gap.
 //
 // USD *amounts* on this page go through here — the SPEND tile, the
 // cost-composition total, the per-model and per-bucket costs, the unattributed
@@ -75,7 +75,7 @@ function pct(fraction) {
 // to the displayed total. TestDashboard_MoneyHasOneFormatter pins the list.
 //
 // A true zero renders "$0.00", which is the honest figure there, and that branch
-// IS exercised: the SPEND tile is in renderKPIs' common tail, so a FREE or
+// IS exercised: the SPEND tile is in renderKPIs' common tail, so a no-recorded-cost or
 // no-spend window reaches it, as does a fully-attributed window's unattributed
 // figure. num() maps NaN/Infinity/absent to 0; the domain is non-negative
 // (total_cost_usd is a sum of non-negative micro-USD values) and negatives are not
@@ -124,9 +124,9 @@ function usdUnder(v, floor) {
   // evidence floor' -- rebuilding the exact #502 sentence this function exists to
   // delete. '>=' cannot be read as agreeing with the floor.
   //
-  // NaN never arrives (num maps it to 0) but 0 would read as a MEASURED zero, i.e.
-  // the FREE meaning, which is the opposite reading. It is unreachable only
-  // because every caller sits behind an earlier cost<=0 FREE gate, not because 0
+  // NaN never arrives (num maps it to 0) but 0 would read as no recorded cost,
+  // a likely capture gap rather than the measured spend here. It is unreachable
+  // because every caller sits behind an earlier cost<=0 gate, not because 0
   // is a safe answer here.
   if (num(v) >= num(floor)) { return '\u2265' + usdText(floor); }
   var s = usdText(v);
@@ -355,7 +355,7 @@ function quarterStartISO() {
 // fills. Also drops the retained levers-export payload so a stale window can
 // never be exported.
 function resetViews() {
-  var hide = ['partition-diagnostics', 'issue-report', 'correction-context', 'seal-disclosure', 'kpi-row', 'provenance', 'segments-note', 'segments-retro',
+  var hide = ['partition-diagnostics', 'kpi-time-to-merge', 'issue-report', 'correction-context', 'seal-disclosure', 'kpi-row', 'provenance', 'segments-note', 'segments-retro',
               'detail-card', 'aggregate-pricing', 'trust-strip', 'unattr-breakdown', 'attr-coverage',
               'unjoined-strip', 'cost-comp', 'team-rollups', 'compare-view', 'cmp-total',
               // cost-horizon (#512) MUST be in this list. It is the only banner
@@ -371,6 +371,14 @@ function resetViews() {
               // a specific claim about a window that is no longer on screen.
               'dq-band'];
   for (var i = 0; i < hide.length; i++) { $(hide[i]).style.display = 'none'; }
+  // A withheld score may have shown only the descriptive tile. Restore its
+  // siblings under the hidden parent before rendering the next window.
+  Array.prototype.forEach.call($('kpi-row').children, function(tile) {
+    if (tile.id !== 'kpi-time-to-merge') { tile.style.display = ''; }
+  });
+  $('kpi-time-to-merge').title = '';
+  setText('kpi-time-to-merge-value', '');
+  setText('kpi-time-to-merge-p90', '');
   $('segments').textContent = '';
   lastScores = null;
   lastSince = '';
@@ -616,6 +624,7 @@ function renderScores(data, since, until) {
   var teamMode = Array.isArray(data.teams);
   loadCorrectionContext(since, until, loadGen, teamMode);
   loadIssueReport(data.since || since, until, loadGen, teamMode);
+  loadTimeToMerge(data.since || since, until, loadGen);
 
   var pooled = (teamMode ? data.teams : data.developers) || [];
 
@@ -666,6 +675,92 @@ function renderScores(data, since, until) {
   renderTeamRollups(data, teamMode);
   renderSegments(data, teamMode, since, until);
   showStatus('');
+}
+
+// This read shares the selected dates and the server's aggregation setting,
+// including a sealed month's dates. It is a live descriptive measure; its own
+// author floor and complementary suppression decide whether a total is shown.
+function loadTimeToMerge(since, until, gen) {
+  var tile = $('kpi-time-to-merge');
+  tile.style.display = 'none';
+  tile.title = '';
+  // A render without window evidence must not start an unrelated fetch.
+  if (!since) { return; }
+  var selectedPeriod = sealedMode ? $('period-select').value : '';
+  var q = sealedMode ? '/api/v1/time-to-merge' + (selectedPeriod ? '?period=' + encodeURIComponent(selectedPeriod) : '')
+        : '/api/v1/time-to-merge?since=' + encodeURIComponent(since)
+        + (until ? '&until=' + encodeURIComponent(until) : '');
+  fetchJSON(q)
+    .then(function(report) {
+      if (gen !== loadGen) { return; }
+      renderTimeToMerge(report);
+    })
+    .catch(function(e) {
+      if (gen !== loadGen) { return; }
+      // The server alone knows whether developer mode is synthetic. A 403
+      // hides the tile in real-data developer mode; it is never shown as zero.
+      if (e.status === 403) { return; }
+      showTimeToMerge('Time to merge: unavailable');
+    });
+}
+
+function renderTimeToMerge(report) {
+  function finite(value) { return typeof value === 'number' && isFinite(value); }
+  var total = report && report.total;
+  var exclusions = report && report.excluded;
+  if (!total || !exclusions) {
+    showTimeToMerge('Time to merge: unavailable');
+    return;
+  }
+  var excluded = exclusions.count;
+  if (total.null_reason === 'no_prs' && total.count === null && total.median_seconds === null
+      && (excluded === 0 || (excluded === null && exclusions.null_reason === 'no_prs'))) {
+    showTimeToMerge('Time to merge: no merged PRs measured');
+    return;
+  }
+  var privateTotal = total.count === null && total.median_seconds === null
+    && (total.null_reason === 'authors<k' || total.null_reason === 'withheld_with_group');
+  var privateExcluded = excluded === null && exclusions.null_reason === 'authors<k';
+  var emptyExcluded = excluded === null && exclusions.null_reason === 'no_prs';
+  var validTotal = finite(total.count) && total.count > 0 && Math.floor(total.count) === total.count
+    && finite(total.median_seconds) && total.median_seconds >= 0;
+  var emptyTotal = total.count === null && total.median_seconds === null && total.null_reason === 'no_prs';
+  if ((!validTotal && !privateTotal && !emptyTotal)
+      || (!finite(excluded) && !privateExcluded && !emptyExcluded)
+      || (finite(excluded) && (excluded < 0 || Math.floor(excluded) !== excluded))) {
+    showTimeToMerge('Time to merge: unavailable');
+    return;
+  }
+  if (privateTotal || privateExcluded) {
+    showTimeToMerge('Time to merge: withheld to protect small groups');
+    return;
+  }
+  if (!validTotal || !finite(excluded)) {
+    showTimeToMerge('Time to merge: unavailable');
+    return;
+  }
+  showTimeToMerge('median ' + (total.median_seconds / 3600).toFixed(1) + ' h · '
+    + total.count + ' of ' + (total.count + excluded) + ' merged PRs measured');
+  // p90 is on hover and available to screen readers for n >= 10.
+  if (total.count >= 10 && finite(total.p90_seconds)) {
+    var p90 = 'p90 ' + (total.p90_seconds / 3600).toFixed(1) + ' h';
+    $('kpi-time-to-merge').title = p90;
+    setText('kpi-time-to-merge-p90', p90);
+  }
+}
+
+function showTimeToMerge(text) {
+  var row = $('kpi-row');
+  // /scores may have withheld its entire KPI row. Keep that suppression while
+  // still explaining why this separate figure is withheld.
+  if (row.style.display === 'none') {
+    Array.prototype.forEach.call(row.children, function(tile) { tile.style.display = 'none'; });
+    row.style.display = '';
+  }
+  $('kpi-time-to-merge').title = '';
+  setText('kpi-time-to-merge-p90', '');
+  setText('kpi-time-to-merge-value', text);
+  $('kpi-time-to-merge').style.display = '';
 }
 
 // --- DATA-QUALITY BAND (#520) ------------------------------------------------
@@ -959,15 +1054,14 @@ function renderKPIs(data, pooled, teamMode) {
     provisionalEl.textContent = '';
     provisionalEl.style.display = 'none';
   } else if (orgFree) {
-    // Accepted work at $0 recorded cost: yield is unbounded, but the engine
-    // leaves org TIER at a literal 0.0 (it divides only when cost>0). Headlining
-    // "0.0" would flip the most efficient possible org into the worst-looking one
-    // — the mirror of the NO SCORE case (#499). Same faint-label treatment; the
-    // spend/leverage/fidelity tiles still render.
-    setText('kpi-tier', 'FREE');
+    // Accepted work with no recorded AI cost is often a capture gap, not free
+    // work. The engine leaves TIER at 0.0 (it divides only when cost>0); neither
+    // that zero nor the missing cost supports an efficiency claim. Use the same
+    // faint-label treatment; the spend/leverage/fidelity tiles still render.
+    setText('kpi-tier', 'No recorded AI cost');
     tierValueEl.classList.add('kpi-noscore');
     tierValueEl.classList.remove('provisional');
-    setText('kpi-tier-ci', 'accepted work at $0 recorded AI cost — yield unbounded');
+    setText('kpi-tier-ci', 'accepted work with no recorded AI cost — often a capture gap (an uncaptured tool), not free work; no ratio is shown');
     provisionalEl.textContent = '';
     provisionalEl.style.display = 'none';
   } else if (orgUnranked) {
@@ -1376,8 +1470,8 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
     // NO SCORE label says, so the reason is not a sighted-only affordance.
     row.setAttribute('aria-label', 'no score: no accepted outcomes in this window');
   } else if (num(d.total_cost_usd) <= 0) {
-    // Same, for a FREE row: voice the label the sighted reader sees.
-    row.setAttribute('aria-label', 'free: accepted work at zero recorded AI cost, yield unbounded');
+    // Same, for a no-recorded-cost row: voice the visible label and explanation.
+    row.appendChild(el('span', 'cmp-db-sr', 'No recorded AI cost: accepted work with no recorded AI cost — often a capture gap (an uncaptured tool), not free work; no ratio is shown'));
   }
   // WCAG 2.1 SC 1.4.1 (Use of Color): every below-floor row, in both modes, states
   // its verdict in words where a bar would be, instead of relying on muted colour.
@@ -1420,14 +1514,13 @@ function buildYieldBar(d, teamMode, isRanked, scale, since, until) {
 //   - weighted_points == 0 -> NO SCORE. No work was accepted, so
 //     cost-per-accepted-outcome is undefined, not bad; "TIER 0.0" would read as
 //     the worst performer on the board when nothing was merged to score.
-//   - total_cost_usd == 0 (with points) -> FREE. Yield is points-per-dollar, and
-//     at zero cost that is UNBOUNDED, not zero — the best possible efficiency,
-//     yet the engine leaves TIER at a literal 0.0 (it only divides when cost>0).
-//     Rendering that 0.0 flips the most efficient row into the worst-looking one.
-//     Such a row is already below the evidence floor (MinRankedCostUSD), so it
-//     draws no bar; FREE is a faint label, not a comparable number (#499).
+//   - total_cost_usd == 0 (with points) -> No recorded AI cost, often a capture
+//     gap rather than free work. The engine leaves TIER at 0.0 (it only divides
+//     when cost>0), but no efficiency ratio is shown. Such a row is already below
+//     the evidence floor (MinRankedCostUSD), so it draws no bar and uses a faint
+//     label instead of a comparable number (#499).
 // The NO SCORE gate comes first: a row with neither points nor cost is NO SCORE,
-// not FREE. Gating on weighted_points mirrors buildCostPerPoint's "--", so the
+// not No recorded AI cost. Gating on weighted_points mirrors buildCostPerPoint's "--", so the
 // two sub-readings always agree.
 function rowIntervalNote(d) {
   return d.ci_note || '';
@@ -1440,8 +1533,8 @@ function buildTierReading(d, teamMode, isRanked) {
     return none;
   }
   if (num(d.total_cost_usd) <= 0) {
-    var free = el('div', 'ybar-tier ybar-noscore', 'FREE');
-    free.title = 'accepted work at $0 recorded AI cost — yield is unbounded, not zero (TIER is undefined when cost is 0)';
+    var free = el('div', 'ybar-tier ybar-noscore', 'No recorded AI cost');
+    free.title = 'accepted work with no recorded AI cost — often a capture gap (an uncaptured tool), not free work; no ratio is shown';
     return free;
   }
   var tier = el('div', 'ybar-tier num', num(d.tier).toFixed(1));
@@ -1484,9 +1577,9 @@ function buildTierReading(d, teamMode, isRanked) {
 // team, and per-work-type segment. A zero-POINT row has no denominator, so the
 // API emits cost_per_point 0/absent there and we render the no-value placeholder
 // ("--", the glyph the KPI tiles already use) rather than a misleading "$0.00/pt"
-// -- gating on weighted_points, not on cost_per_point, so a genuine free (zero-
-// cost) but non-zero-point row still reads an honest "$0.00/pt". A ranked
-// developer row also carries a self-relative 95% CI (cost_per_point_ci_low/high,
+// -- gating on weighted_points and total_cost_usd, not on cost_per_point:
+// no recorded AI cost can reflect a capture gap, so it also withholds the ratio.
+// A ranked developer row also carries a self-relative 95% CI (cost_per_point_ci_low/high,
 // #239), surfaced on hover/title so it does not clutter the row. All text reaches
 // the DOM via el()'s textContent.
 function buildCostPerPoint(d, teamMode, isRanked) {
@@ -1494,6 +1587,11 @@ function buildCostPerPoint(d, teamMode, isRanked) {
   if (points <= 0) {
     var none = el('div', 'ybar-cpp num', '\u2014');
     none.title = 'no weighted points in this window — cost-per-point undefined';
+    return none;
+  }
+  if (num(d.total_cost_usd) <= 0) {
+    var none = el('div', 'ybar-cpp num', '\u2014');
+    none.title = 'no recorded AI cost — cost-per-point is not shown (often a capture gap)';
     return none;
   }
   var cpp = el('div', 'ybar-cpp num', '$' + num(d.cost_per_point).toFixed(2) + '/pt');
@@ -1599,7 +1697,7 @@ function teamRollupShare(part, whole) {
 // buildTeamRollupTier is the ONLY place this panel reads `tier`, and it reads the
 // row's own field. No field, no number: nothing is derived from points and cost.
 // Otherwise the same gates as the KPI headline, in the same order: NO SCORE with
-// no accepted points, FREE at zero cost, and below the evidence floor the ratio
+// no accepted points, No recorded AI cost at zero cost, and below the floor the ratio
 // is withheld (#502) -- a table cell is read on its own like a headline, and this
 // list has no ordering or divider to carry a muted number's meaning.
 function buildTeamRollupTier(d) {
@@ -1610,7 +1708,7 @@ function buildTeamRollupTier(d) {
   } else if (num(d.weighted_points) <= 0) {
     text = 'NO SCORE';
   } else if (num(d.total_cost_usd) <= 0) {
-    text = 'FREE';
+    text = 'No recorded AI cost';
   } else if (!d.ranked) {
     text = BELOW_FLOOR_TAG;
   } else {

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/metrics"
 	"github.com/tiermetric/tier/internal/store"
 )
@@ -280,7 +281,7 @@ func TestWebhook_LargeBodyTrickleDeadlineReleasesSlot(t *testing.T) {
 			}
 			defer func() { _ = resp.Body.Close() }()
 			got, err := io.ReadAll(resp.Body)
-			if err != nil || resp.StatusCode != http.StatusBadRequest || string(got) != "read error\n" {
+			if err != nil || resp.StatusCode != http.StatusBadRequest || string(got) != "read deadline expired\n" {
 				t.Fatalf("slow sender: status=%d body=%q err=%v", resp.StatusCode, got, err)
 			}
 			if elapsed := time.Since(started); elapsed > largeBodyReadTimeout+2*time.Second {
@@ -643,11 +644,15 @@ func TestWebhook_LargeBodyDeadlineWarnsSafely(t *testing.T) {
 			r.Header.Set("X-GitHub-Delivery", "delivery\nforged\x1b[31m")
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			if w.Code != http.StatusBadRequest || w.Body.String() != "read error\n" {
-				t.Fatalf("status=%d body=%q, want 400 read error", w.Code, w.Body.String())
+			wantMessage := "read error\n"
+			if tc.warn {
+				wantMessage = "read deadline expired\n"
+			}
+			if w.Code != http.StatusBadRequest || w.Body.String() != wantMessage {
+				t.Errorf("status=%d body=%q, want 400 %q", w.Code, w.Body.String(), wantMessage)
 			}
 			if !tc.warn {
-				if logs.Len() != 0 {
+				if strings.Contains(logs.String(), "deadline expired") {
 					t.Errorf("non-timeout read error logged deadline warning: %s", &logs)
 				}
 				return
@@ -666,6 +671,66 @@ func TestWebhook_LargeBodyDeadlineWarnsSafely(t *testing.T) {
 				t.Errorf("missing recovery instruction: %v", fields["msg"])
 			}
 		})
+	}
+}
+
+func TestWebhook_DefaultReadErrorLogsSafely(t *testing.T) {
+	for _, event := range []string{"push", "unknown\nforged"} {
+		t.Run(event, func(t *testing.T) {
+			var logs bytes.Buffer
+			h := New(newFakeStore(), testSecret, slog.New(slog.NewJSONHandler(&logs, nil)))
+			readErr := errors.New("connection failed\nforged\r\x1b[31m")
+			r := boundedRequest(event, bodyReadFailure{readErr})
+			r.Header.Set("X-GitHub-Delivery", "delivery\nforged\x1b[31m")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest || w.Body.String() != "read error\n" {
+				t.Errorf("status=%d body=%q, want 400 read error", w.Code, w.Body.String())
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &fields); err != nil {
+				t.Fatalf("expected one read-error log: %v; logs=%q", err, &logs)
+			}
+			if fields["level"] != "WARN" {
+				t.Errorf("read-error level=%v, want WARN", fields["level"])
+			}
+			if fields["event"] != eventLabel(event) || fields["delivery"] != logSafeStr(r.Header.Get("X-GitHub-Delivery")) || fields["err"] != logsafe.Err(readErr) {
+				t.Errorf("missing or unsafe read-error attributes: %v", fields)
+			}
+			if msg, ok := fields["msg"].(string); !ok || !strings.Contains(msg, "webhook body read error") || !strings.Contains(msg, "headers are unauthenticated") {
+				t.Errorf("missing read-error diagnostic: %v", fields["msg"])
+			}
+		})
+	}
+}
+
+type writerWithReadDeadlineError struct {
+	http.ResponseWriter
+	err error
+}
+
+func (w writerWithReadDeadlineError) SetReadDeadline(time.Time) error { return w.err }
+
+func TestWebhook_SetReadDeadlineFailureIdentified(t *testing.T) {
+	var logs bytes.Buffer
+	h := New(newFakeStore(), testSecret, slog.New(slog.NewJSONHandler(&logs, nil)))
+	deadlineErr := errors.New("injected deadline setup failure")
+	w := httptest.NewRecorder()
+	writer := writerWithReadDeadlineError{w, deadlineErr}
+	r := boundedRequest("push", io.LimitReader(spaceBody{}, smallBodyLimit+1))
+	_, release, err := h.readBody(writer, r, "push")
+	if release != nil {
+		release()
+	}
+	if !errors.Is(err, deadlineErr) || !strings.Contains(err.Error(), "set webhook body read deadline") {
+		t.Errorf("readBody error=%v, want wrapped deadline setup failure", err)
+	}
+	h.ServeHTTP(writer, boundedRequest("push", io.LimitReader(spaceBody{}, smallBodyLimit+1)))
+	if w.Code != http.StatusBadRequest || w.Body.String() != "read error\n" {
+		t.Errorf("status=%d body=%q, want 400 read error", w.Code, w.Body.String())
+	}
+	if !strings.Contains(logs.String(), "set webhook body read deadline") || !strings.Contains(logs.String(), deadlineErr.Error()) {
+		t.Errorf("missing deadline setup diagnostic: %s", &logs)
 	}
 }
 

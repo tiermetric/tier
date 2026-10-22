@@ -38,6 +38,10 @@ var inPollerBaselineBySource = map[string]bool{
 	// subtract its own prior output and converge to zero.
 	collector.SourceAnthropicAdmin: false,
 	collector.SourceOpenAIUsage:    false,
+	// These vendors bill their own spend, outside the polled Anthropic/OpenAI
+	// accounts. Even per_token rows must not reduce either provider's remainder.
+	collector.SourceCopilotBilling: false,
+	collector.SourceCursorAdmin:    false,
 	// POST /api/v1/costs: reconciled invoice cost, not per-request capture
 	// (#854 tracks whether pollers should net these rows out).
 	"api": false,
@@ -48,8 +52,8 @@ var inPollerBaselineBySource = map[string]bool{
 // classification disagrees with what CapturedTokensByDayModel actually returns
 // for a row of that source.
 func TestPollerBaselineClassifiesEverySource(t *testing.T) {
-	// Legacy rows retain their existing baseline treatment even though no
-	// Copilot collector exists or is advertised in the source inventory.
+	// Legacy copilot-api rows retain their existing baseline treatment;
+	// SourceCopilotBilling is the distinct Copilot feed in AllSources().
 	assertInPollerBaseline(t, "copilot-api", false)
 	known := append(collector.AllSources(), "api")
 	for _, src := range known {
@@ -93,6 +97,7 @@ func assertInPollerBaseline(t *testing.T, src string, want bool) {
 			Developer: "alice", IssueID: "issue-1", Model: tc.model,
 			InputTok: 700, OutputTok: 30, CostMicro: 1,
 			Source: src, Fidelity: "realtime", Timestamp: day.Add(3 * time.Hour),
+			BillingMode:    store.BillingPerToken,
 			IdempotencyKey: "key-" + src + "-" + tc.provider,
 		}); err != nil {
 			t.Fatalf("InsertTokenEvent(%s/%s): %v", src, tc.model, err)
