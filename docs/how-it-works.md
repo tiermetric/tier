@@ -27,7 +27,7 @@
 
 TIER prices recorded AI usage, attributes captured calls to GitHub issues where possible, and divides recorded shipped outcomes by recorded AI reference cost to produce a TIER score. Capture completeness and inference validity require separate evidence; a healthy collector does not establish either.
 
-> **Current startup and report scope:** `tierd serve --watch-repo <path> --aggregation team` captures Claude Code JSONL live. Real-data developer mode is refused until #826 ships; team/division dashboards publish sealed calendar months, rather than live spend. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for the trusted-use scope, capture, outcome loading and sealing steps.
+> **Current startup and report scope:** `tierd serve --watch-repo <path> --aggregation team` captures Claude Code JSONL live. Real-data developer mode is refused until #826 ships; team/division dashboards publish sealed calendar months, rather than live spend. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for the trusted-use scope, capture, outcome loading and sealing steps.
 
 ---
 

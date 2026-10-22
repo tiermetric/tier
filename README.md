@@ -14,6 +14,8 @@
 > - **Not causal.** TIER links recorded usage to merged work by developer, repository and issue reference. It does not detect whether AI wrote a change, or how much AI helped. ([§7.3](docs/whitepaper.md#73-limits-on-interpretation))
 
 **Is TIER right for you?**
+Working alone today, you get your own Claude Code cost table and the issue-attributed share of that spend, plus the dashboard on invented data (`tierd demo`). A TIER number on your own real data is not built yet. Team reports show a group's TIER, never one person's, once at least k people in the group (default 5, minimum 3) have captured AI spend and at least k have merged work in a sealed calendar month.
+A local personal score is planned (#1362); it has no date.
 TIER helps a team follow merged work per $1,000 of captured AI usage over time, priced at list rates so every plan reads on one scale. It counts accepted work, mainly merged pull requests that reference an issue (plus opt-in direct commits and outcomes posted through its API), weighted by size and adjusted for CI failures and reverts where TIER observes them.
 Beside the ratio it shows time to merge (PR created → merged), a separate figure that is not a quality measure.
 Check the [per-plan source requirements](docs/technical-reference.md#what-each-source-needs) before a pilot; the Copilot and Cursor pollers are experimental and require organisation or team credentials.
@@ -157,7 +159,7 @@ datastore, and no message bus.
 
 Run it for one team or one organization at a time.
 
-**Who this release is for (from v0.6.1).** This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt. Solo users can run `tierd score` for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.
+**Who this release is for (from v0.6.1).** This release requires that every credential holder and database owner be you, or someone every participant wholly trusts. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt and shows the dashboard on invented data. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`; it has no outcome join, cannot evaluate server ranking and does not give a TIER number on their own real data.
 
 The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.
 
@@ -388,7 +390,7 @@ Pick the one that matches what you want right now:
 | Path | You get | Effort |
 |---|---|---|
 | [See it in 60 seconds](#see-it-in-60-seconds) | A populated dashboard on synthetic data | One command |
-| [Score your own repo](#score-your-own-repo) | A real TIER score for your own history | Four commands, two terminals, a GitHub token ([how to get one](#what-you-need-before-you-start)) |
+| [Score your own repo](#score-your-own-repo) | Your own cost table now; a team TIER once a group of at least k people (default 5, minimum 3) has a sealed month | Four commands, two terminals, a GitHub token ([how to get one](#what-you-need-before-you-start)) |
 | [Run it for a team](#run-it-for-a-team) | A shared server recording outcomes live | Server or container deployment |
 
 **[docs/quickstart.md](docs/quickstart.md)** has the same steps as copy-paste
@@ -424,6 +426,11 @@ that token too.
 ---
 
 ## Score your own repo
+
+**Working alone, this path ends at your own cost table and the issue-attributed
+share of that spend.** Team reports withhold a group smaller than k (default 5,
+minimum 3), so one person gets no TIER number on their own real data; a local
+personal score is planned (#1362).
 
 **What this costs you:** four commands across two terminals (`export`,
 `backfill`, `serve`, `ship`), one mandatory GitHub token, and three pitfalls,
@@ -564,7 +571,9 @@ export TIER_GITHUB_TOKEN=@$HOME/.tier/github-token   # the file you saved it in
 > ⚠️ **GOTCHA 3 — solo or small cohort?** Team/division reports withhold
 > numbers below the k floor (default 5, hard minimum 3). From v0.6.1, developer
 > mode on real data is refused. Use `tierd score --repo /path/to/local/checkout`
-> for a local Claude Code cost view, or `tierd demo` for an invented developer board.
+> for your own Claude Code cost table and the issue-attributed share of that spend,
+> plus `tierd demo` for the dashboard on invented data. Neither gives a TIER number
+> on your own real data.
 
 Team/division dashboards publish closed, sealed calendar months only, after
 sealing is armed and the grace period has elapsed. Follow the

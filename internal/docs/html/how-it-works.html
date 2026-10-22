@@ -83,7 +83,7 @@ footer.site a { color: var(--muted); }
 <h2 id="1-what-this-tool-does-in-one-sentence">1. What this tool does in one sentence</h2>
 <p>TIER prices recorded AI usage, attributes captured calls to GitHub issues where possible, and divides recorded shipped outcomes by recorded AI reference cost to produce a TIER score. Capture completeness and inference validity require separate evidence; a healthy collector does not establish either.</p>
 <blockquote>
-<p><strong>Current startup and report scope:</strong> <code>tierd serve --watch-repo &lt;path&gt; --aggregation team</code> captures Claude Code JSONL live. Real-data developer mode is refused until #826 ships; team/division dashboards publish sealed calendar months, rather than live spend. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the trusted-use scope, capture, outcome loading and sealing steps.</p>
+<p><strong>Current startup and report scope:</strong> <code>tierd serve --watch-repo &lt;path&gt; --aggregation team</code> captures Claude Code JSONL live. Real-data developer mode is refused until #826 ships; team/division dashboards publish sealed calendar months, rather than live spend. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with <code>tierd score</code>, plus the dashboard on invented data with <code>tierd demo</code>; they do not get a TIER number on their own real data. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the trusted-use scope, capture, outcome loading and sealing steps.</p>
 </blockquote>
 <hr>
 <h2 id="2-what-llms-it-works-for">2. What LLMs it works for</h2>

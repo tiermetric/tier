@@ -4,7 +4,7 @@
 
 **Version scope:** installation examples name the tagged v0.6.2 release. The developer-mode startup guard, demo isolation, issue-attributed spend share and trusted-use scope below apply from v0.6.1.
 
-**Who this release is for (from v0.6.1).** This release is for solo or wholly trusted use only. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every ingest/admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt. Solo users can run `tierd score` for local Claude Code costs and the issue-attributed spend share; it has no outcome join and cannot evaluate server ranking.
+**Who this release is for (from v0.6.1).** This release requires that every credential holder and database owner be you, or someone every participant wholly trusts. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt and shows the dashboard on invented data. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`; it has no outcome join, cannot evaluate server ranking and does not give a TIER number on their own real data.
 
 The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.
 
@@ -487,7 +487,9 @@ not show live spend. This preserves the privacy floor: overlapping date windows
 could be subtracted to isolate one person's figures even when each group clears
 k-anonymity. Team/division mode withholds numbers when fewer than k contributing
 developers are present (default k = 5, minimum 3). A solo user or a team smaller
-than k sees no numbers; use `tierd score` for local Claude Code costs. Sealing
+than k gets no TIER number on their own real data; each person can use `tierd score`
+for their own Claude Code cost table and the issue-attributed share of that spend, plus
+`tierd demo` for the dashboard on invented data. Sealing
 does not remove that floor; from v0.6.1, developer mode on real data is refused.
 
 Before the first seal, `GET /api/v1/scores` returns `404` with this `error`:

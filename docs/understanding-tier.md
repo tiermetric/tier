@@ -1,6 +1,6 @@
 # Understanding TIER
 
-**v0.6.2 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+**v0.6.2 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
 TIER (Token Impact & Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.
@@ -239,7 +239,8 @@ uncounted people back. Folding drops nothing: the folded spend and points stay i
 in the totals. If `other` is itself below the floor, it is withheld along with
 the totals, because subtracting the named rows from the totals would reveal
 it, and TIER says so rather than showing an empty page. If you are evaluating
-TIER on your own, use `tierd score --repo <path>` for local Claude Code costs.
+TIER on your own, use `tierd score --repo <path>` for your own Claude Code cost table and
+the issue-attributed share of that spend; it gives no TIER number on your own real data.
 Non-synthetic developer mode is refused until #826 ships; team/division reports
 withhold a cohort of one and publish only sealed calendar months. Follow
 [quickstart.md §7](quickstart.md#7-viewing-the-dashboard-from-another-machine)
@@ -284,7 +285,9 @@ today, read [how-it-works.md](how-it-works.md) alongside it.
 
 ### From install to a first real score
 
-Solo users can stop after step 3 for local Claude Code costs. The remaining
+Solo users can stop after step 3 for their own Claude Code cost table and the
+issue-attributed share of that spend, and run `tierd demo` for the dashboard on
+invented data. They do not get a TIER number on their own real data. The remaining
 steps load a team/division server; reports also require a sealed month and
 enough contributors. See the [quickstart](quickstart.md) for the full setup.
 

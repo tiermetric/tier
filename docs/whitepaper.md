@@ -1,6 +1,6 @@
 # TIER — Token Impact & Efficiency Ratio
 
-**Scope from v0.6.1:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users can inspect local Claude Code costs with `tierd score`. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+**Scope from v0.6.1:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
 ## A white paper: accepted software changes per dollar of recorded AI usage
 
@@ -22,7 +22,7 @@
 
 **How a figure may be compared.** Mainly with the same team's or organisation's own history, for one kind of work (per kind only in the per-developer mode; Section 9), under the same price table and scoring rules. Two teams in one organisation compare only weakly. Two organisations never compare (Section 6).
 
-**What it may inform.** How AI is used: which model or route handles which work, whether a tool trial went with cheaper accepted work, whether a team's change in practice moved its cost per point, and whether a flat-fee plan's recorded usage is worth its fee at list prices. A manager may look at an individual developer's numbers in order to coach them (Section 7).
+**What it may inform.** How AI is used: which model or route handles which work, whether a tool trial went with cheaper accepted work, whether a team's change in practice moved its cost per point, and whether a flat-fee plan's recorded usage is worth its fee at list prices. Once developer mode ships (#826), a manager may look at an individual developer's numbers in order to coach them (Section 7); real-data reports today show only eligible groups.
 
 **Coaching stance.** TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is **grade the work, not the worker**, by policy rather than by mechanism. TIER cannot enforce an organisation's use of the figures (Section 7).
 
@@ -365,7 +365,8 @@ aggregate remains withheld by the k floor even after sealing.
 **What to expect.** This one-person team-mode trial withholds the aggregate
 because it is below the k-anonymity floor (default 5, hard minimum 3). Team
 reports also require an armed seal and an eligible sealed month (reference, Section 6.2).
-Use `tierd score --repo ~/src/your-repo` for local Claude Code costs and
+Use `tierd score --repo ~/src/your-repo` for your own Claude Code cost table
+and the issue-attributed share of that spend, and
 `tierd demo` to preview a populated synthetic dashboard. Neither evaluates
 this laptop's real server TIER: `score` has no outcome join, and demo data is
 invented.

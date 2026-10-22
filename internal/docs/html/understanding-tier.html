@@ -62,7 +62,7 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="understanding-tier">Understanding TIER</h1>
-<p><strong>v0.6.2 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users can inspect local Claude Code costs with <code>tierd score</code>. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
+<p><strong>v0.6.2 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with <code>tierd score</code>, plus the dashboard on invented data with <code>tierd demo</code>; they do not get a TIER number on their own real data. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
 <p>TIER (Token Impact &amp; Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.</p>
 <ol>
@@ -309,7 +309,8 @@ uncounted people back. Folding drops nothing: the folded spend and points stay i
 in the totals. If <code>other</code> is itself below the floor, it is withheld along with
 the totals, because subtracting the named rows from the totals would reveal
 it, and TIER says so rather than showing an empty page. If you are evaluating
-TIER on your own, use <code>tierd score --repo &lt;path&gt;</code> for local Claude Code costs.
+TIER on your own, use <code>tierd score --repo &lt;path&gt;</code> for your own Claude Code cost table and
+the issue-attributed share of that spend; it gives no TIER number on your own real data.
 Non-synthetic developer mode is refused until #826 ships; team/division reports
 withhold a cohort of one and publish only sealed calendar months. Follow
 <a href="quickstart.html#7-viewing-the-dashboard-from-another-machine" rel="nofollow">quickstart.md §7</a>
@@ -347,7 +348,9 @@ this layer says what the program does, gives each rule&#39;s key numbers in brie
 and links the page that owns it, so each rule has one copy to keep correct. For a code-grounded account of what the tool does and does not do
 today, read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> alongside it.</p>
 <h3 id="from-install-to-a-first-real-score">From install to a first real score</h3>
-<p>Solo users can stop after step 3 for local Claude Code costs. The remaining
+<p>Solo users can stop after step 3 for their own Claude Code cost table and the
+issue-attributed share of that spend, and run <code>tierd demo</code> for the dashboard on
+invented data. They do not get a TIER number on their own real data. The remaining
 steps load a team/division server; reports also require a sealed month and
 enough contributors. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the full setup.</p>
 <ol>
