@@ -2,17 +2,15 @@
 
 > **The one rule.** A team gets better together by sharing *what someone
 > changed and what happened* -- a practice -- not by comparing frozen
-> individual numbers. For real data in v0.6.2, use team or division reports
-> over sealed months. The levers retro is a post-#826 practice: its figures
-> can be previewed only in the synthetic demo (`tierd demo`), which invents
-> its own data in a private temporary database and cannot load yours.
+> individual numbers. Use name-free team or division levers on real data
+> over sealed months. The per-person coaching card is still coming with #826.
 
 TIER coaches the **practice, not the person** (see the
 [project README](../README.md) and
 [docs/legal-and-privacy.md](legal-and-privacy.md)). This page shows a team lead
 how to run peer learning on that principle: agree one practice change, then
-measure honestly whether it helped. The name-free levers will be discussion
-prompts when developer mode ships (#826); today they are a synthetic-demo preview.
+measure honestly whether it helped. The name-free levers are discussion prompts
+for the team.
 
 ## Table of contents
 
@@ -27,7 +25,7 @@ prompts when developer mode ships (#826); today they are a synthetic-demo previe
 
 ## What this is
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**Availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 Practice transfer, not number transfer. When one part of a team has learned to
 get more yield per $1,000 -- higher cache reuse, less premium-model spend on
@@ -35,16 +33,15 @@ routine work, less spend that TIER could not link to an issue -- the thing
 worth spreading is the
 *habit that produced it*, described in words, not a leaderboard cell.
 
-The method uses these three surfaces, with the levers available only in the
-synthetic demo until developer mode ships (#826):
+The method uses these three surfaces:
 
 | Surface | What it gives the retro | Names anyone? |
 |---|---|---|
-| `GET /api/v1/scores` + the dashboard | Team/division rows today; **levers** and work-type segments only in the synthetic demo until #826 | Real-data reports name no individual; the synthetic demo names invented developers |
+| `GET /api/v1/scores` | Team/division rows with three name-free shares over sealed months | Real-data reports name no individual; the synthetic demo names invented developers |
 | `GET /api/v1/scores/compare` (#277) | A before/after **delta** with an unvalidated non-overlap field; inference not established | Not in team/division mode |
 | Your team's own runbook | The **narrative**: what changed, why, what happened | Written by humans, not TIER |
 
-> **Who sees what.** Real-data servers in v0.6.2 run `team` or `division`;
+> **Who sees what.** Real-data servers run `team` or `division`;
 > `tierd serve --aggregation developer` exits 1 with no bypass. When developer
 > mode ships (#826), named-viewer, audit and retention controls will govern
 > individual rows. TIER is built for coaching, not for evaluating developers.
@@ -56,38 +53,23 @@ synthetic demo until developer mode ships (#826):
 
 ## The levers retro
 
-After developer mode ships (#826), run this as a standing team retro (monthly
-or per-cycle). It uses the **name-free levers** on `GET /api/v1/scores` and the
-dashboard's cost-composition panel. Today these figures are available only in
-the synthetic demo, beside invented named rows. On real data today, compare
-your team's sealed months and discuss with the team what changed in their
-practice. When the levers become available, share the lever figures, not individual pages.
+Run this as a monthly team retro using the cache share on each published
+team or division row in `GET /api/v1/scores?period=YYYY-MM`. These levers work
+on real data. The per-person coaching card is still coming with #826.
 
 **The levers, and the question each one prompts:**
 
 | Lever (field on `/scores`) | Reads as | Discussion prompt |
 |---|---|---|
-| `cost_composition.cache_read_share` | Cache-hit share of input-side tokens | Are we re-reading context we could cache? Who has a workflow that keeps this high? |
-| `cost_composition.premium_model_share` | Spend share on frontier/reasoning models | Are we reaching for a premium model on routine work a cheaper one handles? |
-| `data_quality.exploratory_cost_share` | Share of spend recorded on `main` or `master`, so TIER could not link it to an issue | What work are we doing on `main` without a branch, and should it have one? |
-| `work_types[]` | Yield **within** one work category (#187) | Compared like-for-like (bugfix vs bugfix), where is the practice gap? |
-
-The name `exploratory_cost_share` is misleading and kept for compatibility. It
-does not measure exploration: it measures spend TIER could not link to an issue
-because it was recorded on `main` or `master`.
+| `teams[].cache_read_share` | Cache-read tokens / all input-side tokens | Are we re-reading context we could cache? Which workflow keeps this high? |
 
 **How to run it:**
 
-1. In the synthetic demo today, or after developer mode ships (#826), open the
-   dashboard (served at `http://127.0.0.1:8080/` by default) or fetch
-   `GET /api/v1/scores` for the window, and read the cost-composition panel plus
-   the work-type segments.
-2. Treat each lever as a **prompt, not a verdict**. A high
-   `premium_model_share` is not "bad" -- it is a question: is the premium spend
-   buying premium outcomes, or is it habit?
-3. Compare **within a work type** (`work_types[]`), never across types. The
-   pooled top-level `total` is back-compat only and is explicitly **not** a
-   cross-type ranking.
+1. Fetch the team's sealed month and read its cache share.
+2. Treat the lever as a **prompt, not a verdict**. Ask which workflows could
+   reuse cached context.
+3. Compare similar work over finished months. Discuss task mix and context;
+   the pooled team figure is not a cross-type ranking.
 4. Treat a move to a cheaper model as a hypothesis to investigate. Compare similar work over finished periods, record other changes (task mix, acceptance criteria, pricing and capture), and inspect acceptance and repair evidence beside cost. A before/after change in TIER cannot show that the model change caused the difference, and TIER does not credit merged work to a model, so it cannot say whether the cheaper model did the work as well.
 
 > **Honesty caveat.** Yield reflects task mix and context, not raw talent. A
@@ -95,16 +77,25 @@ because it was recorded on `main` or `master`.
 > Read the levers to find *practices to copy*, never to rank people. There is
 > deliberately no absolute good/bad band (see [docs/rubric.md](rubric.md)).
 
-A server in an anonymized (`team`/`division`) mode does **not** publish these
-levers (#864). It shows one breakdown of the window, the team (or division) rows
-and the total, because a second breakdown can be subtracted from the first: team
-totals minus work-type totals recovered a 3-person group's spend in testing, and
-a model only one developer used showed that developer's spend in the per-model
-rows. Naming no one is not enough to be safe. In `team` or `division` mode, run
-the retro on the team rows alone. The levers are a post-#826 practice for real
-data; only the synthetic demo publishes them today. Real-data developer-mode
-startup is refused. #937 tracks an audit that would let the levers come back
-in anonymized modes.
+Levers are available on real data in `teams[]` over sealed months. Every
+published group, including folded `other`, needs at least k distinct counted
+seats with both captured spend and merged work in that group during the month.
+Bots and spend-only people cannot lift this floor. If any published group fails,
+all levers over that population are withheld. k is never below 3.
+
+The cache share also needs at least k contributors with cache reads and at
+least k without them. Count distinct contributors in the row's cost population
+with positive input-side tokens (input + cache read + cache write), including
+bots and spend-only people. Zero-input contributors count on neither side.
+A person with mixed cached and uncached input belongs to the cache-read side.
+A share failing this check is omitted.
+
+Withheld keys are absent, never zero or null. `data_quality.team_levers_withheld`
+is true with `team_levers_withheld_reason` of `group_seats_below_k`
+or `category_seats_below_k`. Existing residual suppression still withholds the whole response (#593, #864). Detailed per-model,
+token-class and work-type tables
+remain unavailable in team/division mode; `cache_read_share` is the permitted
+cache summary. Live windows and anonymized `/scores/compare` carry no levers.
 
 ---
 
@@ -239,9 +230,9 @@ copying one into a review. Only your own written policy, or a works agreement
 where one applies, can. Write the purpose down before adopting the developer
 mode planned with #826.
 
-**What TIER does today, and what is planned.** Real-data servers in v0.6.2
-publish only team or division rows. In the synthetic demo, anyone who can read
-the API or dashboard sees every invented developer's numbers in identifier
+**What TIER does today, and what is planned.** Real-data servers publish
+team or division rows with the three name-free shares. In the synthetic demo,
+anyone who can read the API or dashboard sees every invented developer's numbers in identifier
 order, never sorted by TIER. Developer mode is planned with #826: a separate
 viewing token for each permitted viewer (the developer, their declared manager
 and an optional skip-level manager); a log of who viewed each developer's page,

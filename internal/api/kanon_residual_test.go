@@ -659,3 +659,50 @@ func TestKAnonResidual_CompareEndpointPollerPseudoDeveloper(t *testing.T) {
 		t.Errorf("kanon_suppressed = %+v, want developers 4 at k_anonymity 5", ks)
 	}
 }
+
+// The earlier SegmentSuppressionEscalatesBothWays test no longer exists after
+// #864 removed segments. Extend its subtraction argument to each lever and its
+// complement: neither share*cost nor (1-share)*cost may isolate one person.
+func TestKAnonResidual_SegmentSuppressionEscalatesBothWays_TeamLevers(t *testing.T) {
+	for _, mode := range anonymisedModes {
+		for _, premiumPeople := range []int{1, 5} {
+			t.Run(fmt.Sprintf("%s/premium-%d", mode, premiumPeople), func(t *testing.T) {
+				h, db := newTestHandler(t)
+				h.SetAggregation(mode, 3)
+				for i := 0; i < 6; i++ {
+					dev := fmt.Sprintf("e%d", i)
+					enrolIn(t, db, "eng", dev)
+					cost := 10.0
+					// The singleton has $7.77 in either direction of the split.
+					if (premiumPeople == 1 && i == 0) || (premiumPeople == 5 && i == 5) {
+						cost = 7.77
+					}
+					c := store.TokenEvent{Developer: dev, IssueID: "i-" + dev, Repo: repoAlpha, Model: "claude-sonnet-4", CostMicro: store.DollarsToMicro(cost), InputTok: 100, Source: "jsonl", Fidelity: "realtime", Timestamp: time.Now().UTC()}
+					if i < premiumPeople {
+						c.Model, c.IssueID, c.CacheRead = "claude-opus-4-8", store.UnattributedMainBucket, 100
+					}
+					if err := db.InsertTokenEvent(t.Context(), c); err != nil {
+						t.Fatal(err)
+					}
+					seedOutcomeAt(t, db, dev, "i-"+dev, 1, 1, time.Now().UTC())
+				}
+				raw, body := leverBody(t, h)
+				rows, _ := raw["teams"].([]any)
+				if len(rows) != 1 || raw["total"] == nil {
+					t.Fatalf("control: pooled team and total must publish: %s", body)
+				}
+				assertNoLevers(t, body)
+				if raw["work_types"] != nil || raw["cost_composition"] != nil {
+					t.Fatalf("second breakdown escaped: %s", body)
+				}
+				row := rows[0].(map[string]any)
+				cost := row["total_cost_usd"].(float64)
+				for _, name := range leverNames {
+					if share, ok := row[name].(float64); ok && (math.Abs(share*cost-7.77) < 1e-6 || math.Abs((1-share)*cost-7.77) < 1e-6) {
+						t.Errorf("%s isolates singleton by share or complement: %s", name, body)
+					}
+				}
+			})
+		}
+	}
+}

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -176,5 +177,69 @@ func TestRecomputeSealedBody_SealsNothing(t *testing.T) {
 	seedLateMayRow(t, db)
 	if again, err := h.RecomputeSealedBody(ctx, sealMay); err != nil || bytes.Equal(again, sealed) {
 		t.Errorf("after a late May row the recompute still equals the sealed body (err %v)", err)
+	}
+}
+
+func TestRefoldSealed_LeverBearingMonth(t *testing.T) {
+	h, db := newTestHandler(t)
+	registerGated(t, db)
+	h.SetAggregation(scoring.AggregationTeam, 3)
+	seedLeverGroup(t, db, "eng", 6, sealMay.Start.AddDate(0, 0, 2))
+	seedCostAt(t, db, "eng-0", "horizon", 1, sealMay.Start.AddDate(0, 0, -1))
+	s := newTestSealer(h)
+	body, _, err := s.sealOrLoad(t.Context(), sealMay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range leverNames {
+		if !bytes.Contains(body, []byte(`"`+key+`"`)) {
+			t.Fatalf("control: sealed body missing %s: %s", key, body)
+		}
+	}
+	rep, err := db.SealedReport(t.Context(), "month", sealMay.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollups, persons, err := db.SealedFoldInputs(t.Context(), rep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := bytes.Clone(rep.Body)
+	if err := RefoldSealed(rep, rollups, persons); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, rep.Body) {
+		t.Fatal("verification changed immutable body")
+	}
+	for name, body := range map[string][]byte{
+		"extra field":        bytes.Replace(original, []byte(`"team":"eng"`), []byte(`"extra":0,"team":"eng"`), 1),
+		"missing zero field": bytes.ReplaceAll(original, []byte(`"actual_paid_usd":0,`), nil),
+	} {
+		if bytes.Equal(body, original) {
+			t.Fatalf("%s mutation did not change the body", name)
+		}
+		changed := rep
+		changed.Body = body
+		if err := RefoldSealed(changed, rollups, persons); !errors.Is(err, ErrSealedRefoldDiffers) {
+			t.Errorf("%s outside lever fields accepted: %v", name, err)
+		}
+	}
+	// Excluding lever fields must not hide a change to any fold-produced value.
+	rollups[0].TotalCostUSD++
+	if err := RefoldSealed(rep, rollups, persons); !errors.Is(err, ErrSealedRefoldDiffers) {
+		t.Fatalf("altered cost accepted: %v", err)
+	}
+	// The in-transaction comparison accepts served rows with additive shares too.
+	var resp scoresResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	check, err := refoldCheck(3, resp.Teams, scoring.KAnonSuppression{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollups[0].TotalCostUSD--
+	if err := check(rollups, persons); err != nil {
+		t.Fatalf("in-transaction lever comparison: %v", err)
 	}
 }

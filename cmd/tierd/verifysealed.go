@@ -288,7 +288,7 @@ func recomputeSealed(ctx context.Context, db *store.DB, p api.Period, rep store.
 	}
 	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, options...)
 	h.SetAggregation(mode, rep.K)
-	body, err := h.RecomputeSealedBody(ctx, p)
+	body, err := h.RecomputeSealedBodyForReport(ctx, p, rep)
 	if err != nil {
 		return "NOT RUN: " + logsafe.Err(err) + " (" + provenance + ")"
 	}

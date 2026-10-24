@@ -41,6 +41,7 @@ import (
 	"github.com/tiermetric/tier/internal/ingester"
 	"github.com/tiermetric/tier/internal/logsafe"
 	"github.com/tiermetric/tier/internal/metrics"
+	"github.com/tiermetric/tier/internal/prderive"
 	"github.com/tiermetric/tier/internal/proxy"
 	"github.com/tiermetric/tier/internal/scoring"
 	"github.com/tiermetric/tier/internal/store"
@@ -99,7 +100,7 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 	case "issues":
 		return runIssues(args[1:], stdout, stderr)
 	case "score":
-		runScore(args[1:])
+		return runScoreCmd(args[1:], stdout, stderr)
 	// "score-log": price ONE session log file in isolation — no store, no
 	// daemon, no repo, no attribution (#465). Distinct from "score", which
 	// scans ~/.claude/projects/ and joins to a repo's git log.
@@ -404,6 +405,17 @@ func loadPricesOverride(path string) (store.PriceTableInfo, bool) {
 }
 
 func runScore(args []string) {
+	if code := runScoreCmd(args, os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func runScoreCmd(args []string, stdout, stderr io.Writer) int {
+	return runScoreWithClient(args, stdout, stderr, nil)
+}
+
+// client is injected only by offline GitHub API tests.
+func runScoreWithClient(args []string, stdout, stderr io.Writer, client *http.Client) int {
 	// NOTE(#185): the --aggregation team|developer gate does NOT apply to `tierd
 	// score`, and that is a CONSCIOUS carve-out. `score` is a LOCAL, single-operator
 	// CLI that reads the invoking user's own Claude Code JSONL and prints to their
@@ -411,27 +423,67 @@ func runScore(args []string) {
 	// k-anonymity floor or required-mode gate. Team-only aggregation is enforced on
 	// `tierd serve` (GET /scores, the dashboard, GET /scores/{developer}), which are
 	// the surfaces an organization actually consumes.
-	fs := flag.NewFlagSet("score", flag.ExitOnError)
+	fs := flag.NewFlagSet("score", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	trackerKeys := addTrackerKeysFlag(fs)
 	repo := fs.String("repo", ".", "path to the git repository")
 	repoSlug := fs.String("repo-slug", "", `canonical "owner/repo" identity for --repo (#231). Omit to read remote.origin.url. REQUIRED ON A FORK: origin names the fork, while the upstream webhook records outcomes against the upstream, so without this your cost never joins your outcomes`)
 	sinceStr := fs.String("since", "", "start date, e.g. 2026-01-01 (default: 90 days ago)")
-	developer := fs.String("developer", "", "developer ID override (default: OS username)")
+	developer := fs.String("developer", "", "developer ID override (default: OS username; refused with --outcomes)")
 	claudeDir := fs.String("claude-dir", "", "override ~/.claude directory (for testing)")
 	pricesPath := fs.String("prices", os.Getenv("TIER_PRICES"), "path to a price-table YAML override (#68); empty uses the embedded default. A bad file fails the command")
 	configPath := fs.String("config", "", "path to a tierd config YAML (#154); `score` reads prices_file, subscriptions and attribution.tracker_keys from it. --prices wins over the file's prices_file")
 	worktreeAttr := fs.Bool(worktreeAttrFlag, false, "report with #823 worktree attribution on, as `tierd ship --"+worktreeAttrFlag+"` would ship it, then print a dry-run audit of what it changes against the flag off: counts per rule and per repo, and a bounded sample of changed messages (session id, time, old and new issue; never content or paths). Stores nothing. The counts compare against a local flag-off scan: the server keeps the first issue, repo and rule it stored for a message, so turning the flag on changes only messages not yet stored. Reads only this flag or env "+worktreeAttrEnv+", never --config")
-	_ = fs.Parse(args)
+	outcomes := fs.Bool("outcomes", false, "join your own merged GitHub PRs and print personal TIER and data-quality flags; temporary local storage only, no team band")
+	token := fs.String("token", "", "GitHub token via @/path/to/file or TIER_GITHUB_TOKEN only; used with --outcomes")
+	apiURL := fs.String("github-api-url", "https://api.github.com", "GitHub REST API base URL for --outcomes (HTTPS only)")
+	personal, flagErr := personalScoreFlags(fs, args)
+	if personal {
+		_, _ = fmt.Fprintln(stdout, personalScoreCaveat)
+	}
+	if flagErr != nil {
+		_, _ = fmt.Fprintln(stderr, "score:", flagErr)
+		return 1
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		if !personal {
+			return 2
+		}
+		return 1
+	}
+	if *outcomes && fs.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "score: unexpected positional arguments")
+		return 1
+	}
+	if !*outcomes {
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "token" {
+				_, _ = fmt.Fprintln(stderr, "WARNING: --token is ignored without --outcomes")
+			}
+		})
+	}
+	var gh *githubClient
+	if *outcomes {
+		var err error
+		gh, err = personalGitHubClient(*token, *apiURL, client)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "score:", err)
+			return 1
+		}
+	}
 	grammar, grammarErr := resolveTrackerGrammar(fs, *trackerKeys, *configPath)
 	if grammarErr != nil {
-		fmt.Fprintf(os.Stderr, "tracker keys: %v\n", grammarErr)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "tracker keys: %v\n", grammarErr)
+		return 1
 	}
 
 	wtSetting, err := resolveWorktreeAttribution(fs, *worktreeAttr, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "--%s: %v\n", worktreeAttrFlag, err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "--%s: %v\n", worktreeAttrFlag, err)
+		return 1
 	}
 
 	// Resolve the effective price table BEFORE Collect, which prices events.
@@ -446,47 +498,63 @@ func runScore(args []string) {
 	// the config file, which wins over the embedded default.
 	resolvedPrices := *pricesPath
 	var subscriptionsCfg []config.Subscription
+	var sizeLabels map[string]float64
 	if *configPath != "" {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "config: %v\n", err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "config: %v\n", err)
+			return 1
 		}
 		if resolvedPrices == "" && cfg.PricesFile != nil {
 			resolvedPrices = *cfg.PricesFile
 		}
 		subscriptionsCfg = cfg.Subscriptions
+		sizeLabels = prderive.NormalizeSizeLabels(cfg.Outcomes.SizeLabels)
 	}
 
 	// A bad --prices file fails the command (never a silent fallback). No override
 	// → the embedded default stays active. Note which table priced the report to
 	// stderr (audit: "which prices produced these numbers"), mirroring the
 	// structured log `tierd serve` emits.
-	info, overridden := loadPricesOverride(resolvedPrices)
+	var info store.PriceTableInfo
+	overridden := resolvedPrices != ""
 	if overridden {
-		fmt.Fprintf(os.Stderr, "price table: override %s (version %d, %s, %d models)\n",
+		var err error
+		info, err = store.LoadPriceTable(resolvedPrices)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "--prices: %v\n", err)
+			return 1
+		}
+	}
+	priceOutput := stderr
+	var priceNotices strings.Builder
+	if *outcomes {
+		priceOutput = &priceNotices // flush on success; refusals keep one-line reasons
+	}
+	if overridden {
+		_, _ = fmt.Fprintf(priceOutput, "price table: override %s (version %d, %s, %d models)\n",
 			resolvedPrices, info.Version, info.EffectiveDate, info.ModelCount)
 	} else {
 		info = store.ActivePriceTableInfo()
-		fmt.Fprintf(os.Stderr, store.EmbeddedPriceStampFormat+"\n",
+		_, _ = fmt.Fprintf(priceOutput, store.EmbeddedPriceStampFormat+"\n",
 			info.Version, info.EffectiveDate, info.ModelCount)
 	}
 	// Content identity of whichever table the line above named (#713), on its
 	// OWN line — EmbeddedPriceStampFormat is pinned verbatim by the README guard
 	// and must not grow fields that change on every price edit.
-	fmt.Fprintf(os.Stderr, store.PriceIdentityStampFormat+"\n", info.TableHash, info.FileHash)
+	_, _ = fmt.Fprintf(priceOutput, store.PriceIdentityStampFormat+"\n", info.TableHash, info.FileHash)
 	// Name the subscription-billed routes in the active table alongside the
 	// provenance line (#154). Their cost_micro is a comparable-list-rate
 	// VALUATION of flat-fee tokens, not a metered price, and this report shows
 	// dollars with no billing_mode column — so the one honest place to say so is
 	// here, next to the table that produced them.
 	if routes := store.SubscriptionRouteSummary(); len(routes) > 0 {
-		fmt.Fprintln(os.Stderr, "subscription-billed routes in this table:")
+		_, _ = fmt.Fprintln(priceOutput, "subscription-billed routes in this table:")
 		for _, r := range routes {
-			fmt.Fprintf(os.Stderr, "  %s\n", r)
+			_, _ = fmt.Fprintf(priceOutput, "  %s\n", r)
 		}
 	}
-	// `score` never POSTS a fee — it has no database and reports no Spend
+	// `score` never POSTS a fee — its optional database is temporary and reports no Spend
 	// Leverage — but it must not be SILENT about a `subscriptions:` block that
 	// `serve` would refuse to start on. Left silent, the same typo is fatal on one
 	// surface and invisible on the other, and an operator who reaches for the CLI
@@ -499,19 +567,23 @@ func runScore(args []string) {
 		if len(store.SubscriptionRoutesWithPrefix(s.RoutePrefix)) > 0 {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "WARNING: config subscriptions route_prefix %q matches no billing_mode: subscription entry in this price table — `tierd serve` would REFUSE to start on this config. (score posts no fee either way, so this report is unaffected.)\n", s.RoutePrefix)
+		_, _ = fmt.Fprintf(priceOutput, "WARNING: config subscriptions route_prefix %q matches no billing_mode: subscription entry in this price table — `tierd serve` would REFUSE to start on this config. (score posts no fee either way, so this report is unaffected.)\n", s.RoutePrefix)
 	}
 
 	since, err := parseSince(*sinceStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid --since value: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "invalid --since value: %v\n", err)
+		return 1
 	}
 
+	if *outcomes {
+		// /scores accepts whole UTC days; collect precisely that same window.
+		since, _ = time.Parse("2006-01-02", since.UTC().Format("2006-01-02"))
+	}
 	repoPath, err := resolveRepo(*repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot resolve repo: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "cannot resolve repo: %v\n", err)
+		return 1
 	}
 
 	c := &collector.JSONLCollector{
@@ -526,44 +598,58 @@ func runScore(args []string) {
 	defer cancel()
 	events, err := c.Collect(ctx, since)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "collect error: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "collect error: %v\n", err)
+		return 1
 	}
 	var offEvents []collector.TokenEvent
 	if wtSetting.on {
-		fmt.Fprintf(os.Stderr, "score: %s\n", wtSetting)
+		_, _ = fmt.Fprintf(stderr, "score: %s\n", wtSetting)
 		offEvents = events
 		c.SetWorktreeAttribution(wtSetting.attribution([]string{repoPath}))
 		if events, err = c.Collect(ctx, since); err != nil {
-			fmt.Fprintf(os.Stderr, "collect error (worktree attribution): %v\n", err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "collect error (worktree attribution): %v\n", err)
+			return 1
 		}
 	}
+	if *outcomes {
+		gh.grammar = grammar
+		gh.logger = slog.New(slog.NewTextHandler(stderr, nil))
+		slug := *repoSlug
+		if slug == "" {
+			slug = collector.RepoSlugFromGitConfig(repoPath)
+		}
+		if err := runPersonalScore(ctx, gh, events, slug, since, sizeLabels, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintln(stderr, "score:", err)
+			return 1
+		}
+		_, _ = fmt.Fprint(stderr, priceNotices.String())
+		return 0
+	}
 	if len(events) == 0 {
-		fmt.Println("No billable messages inside the --since window for the given repo.")
-		fmt.Printf("Searched: ~/.claude/projects/ for sessions since %s\n", since.Format("2006-01-02"))
-		fmt.Println("Make sure TIER is running in the correct git repository directory.")
-		fmt.Println("Note: `tierd score` reads Claude Code sessions only — it captures neither Codex CLI nor Opencode spend. For Codex, run `tierd serve --aggregation <mode> --watch-repo <path> --codex-rollout` (or `tierd ship --server <url> --repo <path> --codex-rollout`); replace <path> with your git repository path, <mode> with team or division (anonymized aggregates; developer mode is reserved for the synthetic demo), and <url> with your central tierd base URL with TIER_API_TOKEN set; for Opencode, the same with --opencode; the embedded price table covers glm-5.3 and glm-5.3-flash, and any other GLM model needs a --prices table carrying its rate (#492, #719, #786).")
-		return
+		_, _ = fmt.Fprintln(stdout, "No billable messages inside the --since window for the given repo.")
+		_, _ = fmt.Fprintf(stdout, "Searched: ~/.claude/projects/ for sessions since %s\n", since.Format("2006-01-02"))
+		_, _ = fmt.Fprintln(stdout, "Make sure TIER is running in the correct git repository directory.")
+		_, _ = fmt.Fprintln(stdout, "Note: `tierd score` reads Claude Code sessions only — it captures neither Codex CLI nor Opencode spend. For Codex, run `tierd serve --aggregation <mode> --watch-repo <path> --codex-rollout` (or `tierd ship --server <url> --repo <path> --codex-rollout`); replace <path> with your git repository path, <mode> with team or division (anonymized aggregates; developer mode is reserved for the synthetic demo), and <url> with your central tierd base URL with TIER_API_TOKEN set; for Opencode, the same with --opencode; the embedded price table covers glm-5.3 and glm-5.3-flash, and any other GLM model needs a --prices table carrying its rate (#492, #719, #786).")
+		return 0
 	}
 
-	// Without a live server we have no outcome data, so `tierd score` shows cost
-	// attribution only — the "day-one value" mode: see where AI money is going
+	// Without --outcomes, `tierd score` shows cost attribution only — the "day-one value" mode: see where AI money is going
 	// before the 14-day rework windows that full TIER scoring needs have elapsed.
 	// Both reports re-aggregate straight from events; full per-developer TIER is
 	// computed server-side (tierd serve), where outcomes and the actual_spend
 	// ledger exist.
 
-	// Print cost-only summary (outcomes not yet available in zero-setup mode).
-	printCostReport(os.Stdout, events, since)
+	// Print the cost-only summary when --outcomes was not requested.
+	printCostReport(stdout, events, since)
 
 	// Show issue-level cost breakdown.
-	printIssueCosts(os.Stdout, events)
+	printIssueCosts(stdout, events)
 	if wtSetting.on {
-		printWorktreeAudit(os.Stdout, offEvents, events)
+		printWorktreeAudit(stdout, offEvents, events)
 	}
 
-	fmt.Print(scoreClosingTip())
+	_, _ = fmt.Fprint(stdout, scoreClosingTip())
+	return 0
 }
 
 // scoreClosingTip is the last line of the zero-setup `tierd score` summary. It
@@ -573,7 +659,7 @@ func runScore(args []string) {
 // refuse without flags the quickstart supplies — and points at `tierd demo`,
 // which serves /docs/ on defaultListenAddr with no setup.
 func scoreClosingTip() string {
-	return "\nTip: to record PR outcomes and compute full TIER scores, follow the quickstart (it gives the flags `tierd backfill` and `tierd serve` need). Read it now with `tierd demo`, then open http://" +
+	return "\nTip: use `tierd score --outcomes` for your local personal TIER. To record PR outcomes and compute full TIER scores, follow the quickstart (it gives the flags `tierd backfill` and `tierd serve` need). Read it now with `tierd demo`, then open http://" +
 		defaultListenAddr + "/docs/quickstart.html (the default address).\n"
 }
 

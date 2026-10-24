@@ -7,6 +7,19 @@ reaches v1.
 
 ## Unreleased
 
+## 0.6.3 - 2026-10-23
+
+**Upgrade from v0.6.2:** No database schema change or migration; schema version stays 12. Source builds require Go 1.27.3 or newer. Months sealed before this upgrade remain immutable and carry no team levers; verification/recompute ignores only the newly available lever fields and their withholding notice for those bodies.
+
+### Added
+
+- **Local personal score.** `tierd score --outcomes` joins local Claude Code spend with the GitHub token owner's merged PRs, bound via `GET /user`; persists nothing, shows no team band and prints the coaching caveat on every run (#1362, #1369).
+- **Name-free team/division levers.** Publish only `teams[].cache_read_share` on real data over sealed months. Each published group (including folded `other`) needs at least k distinct counted seats with both captured spend and merged work in that group during the month; if any published group fails, withhold all levers. The cache partition also needs at least k contributors with cache reads and k without them, counting the row's distinct cost contributors with positive input-side tokens (input + cache read + cache write), including bots and spend-only people. Zero-input contributors count on neither side. A contributor with mixed cached and uncached input belongs to the cache-read side. k is never below 3. Absent keys are explained by `data_quality.team_levers_withheld` and `team_levers_withheld_reason` (`group_seats_below_k` or `category_seats_below_k`). Live windows and anonymized comparisons carry no levers (#1368, #1375).
+
+### Fixed
+
+- Backfill accepts a root-level database path such as `--db /tier.db` (audit finding, #1368).
+
 ## 0.6.2 - 2026-10-22
 
 **Upgrade from v0.6.1:** No database schema change or migration; schema version stays 12. Source builds require Go 1.27.3 or newer.

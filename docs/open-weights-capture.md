@@ -1,6 +1,6 @@
 # Capturing open-weights / self-hosted models
 
-**v0.6.2 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+**v0.6.3 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, and can get a local personal TIER number with `tierd score --outcomes`, joining that spend to the GitHub token owner’s merged PRs without persistence or a team band. `tierd demo` shows the dashboard on invented data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
 **Audience:** operators who run open-weights models (Llama, Qwen, DeepSeek, Mixtral)
 through a hosted per-token API (OpenRouter, Together, Fireworks, Groq, DeepInfra) or a

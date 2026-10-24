@@ -2,9 +2,9 @@
 
 **Scope from v0.6.1:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
-## How TIER captures cost, records outcomes and computes the number (v0.6.2)
+## How TIER captures cost, records outcomes and computes the number (v0.6.3)
 
-**Reference version:** 1.8 — 2026-10-22 (v0.6.2 release). Describes TIER **v0.6.2** (embedded price table version 14, effective 2026-10-12, 93 models; rubric version 1 by default, which versions the size scale, work types and quality floors, or rubric 2 with Event 3 enabled; Go 1.27.3 for v0.6.2; source builds at this revision or later require Go 1.27.3 or newer, raised for GO-2026-6809). Earlier releases lack parts of what follows: v0.4.1, for example, has no Opencode collector, carries price table version 9 and has no `tierd prices forget-version`. TIER is released under the Apache License 2.0. TIER v0.6.0 includes operator-enabled Event 3 scoring (rubric 2; see `CHANGELOG.md`, 0.6.0); it remains off by default.
+**Reference version:** 1.9 — 2026-10-23 (v0.6.3 release). Describes TIER **v0.6.3** (embedded price table version 14, effective 2026-10-12, 93 models; rubric version 1 by default, which versions the size scale, work types and quality floors, or rubric 2 with Event 3 enabled; Go 1.27.3 for v0.6.3; source builds at this revision or later require Go 1.27.3 or newer, raised for GO-2026-6809). Earlier releases lack parts of what follows: v0.4.1, for example, has no Opencode collector, carries price table version 9 and has no `tierd prices forget-version`. TIER is released under the Apache License 2.0. TIER v0.6.0 includes operator-enabled Event 3 scoring (rubric 2; see `CHANGELOG.md`, 0.6.0); it remains off by default.
 
 **What this document is.** The companion to the [TIER white paper](whitepaper.md), which says what the number means and which decisions it may and may not inform. This reference holds the mechanics: capture paths, pricing, outcome producers, attribution and windows, aggregation and privacy, statistics, Spend Leverage accounting, team deployment, the API, and the known ways the number misleads. Where the two overlap they say the same thing; where they seem to differ, this reference is the more detailed statement and the white paper is the defect.
 
@@ -196,7 +196,7 @@ TIER prices recorded token classes using its reference table. Coverage depends o
 
 A 2026-10-14 check of provider pricing pages found gpt-5.6 rates differing from table v14 and a promotional window through 2026-11-21 whose model applicability remains unconfirmed. These are unresolved source discrepancies, not verified replacement rates or verified expiry applicability. A human-confirmed primary-source read is required before changing those cells. Until resolved, identify the affected cells separately from verified standard-rate cells.
 
-The table describes v0.6.2 limitations. The aggregate approximation is prospective; v0.5.2 and completed historical rows keep their original pricing. The encoded rates are in `internal/store/prices.yaml` and [reference-price-table.md](reference-price-table.md). No assessment exposure percentage is presented as a fresh measurement here.
+The table describes v0.6.3 limitations. The aggregate approximation is prospective; v0.5.2 and completed historical rows keep their original pricing. The encoded rates are in `internal/store/prices.yaml` and [reference-price-table.md](reference-price-table.md). No assessment exposure percentage is presented as a fresh measurement here.
 
 | Capture route | Recorded classes / reasoning convention | Independent live accounting status |
 |---|---|---|
@@ -707,7 +707,7 @@ The published rounded totals decompose to about 4.76 points per recorded PR and 
 
 ### 5.7 Developer-mode per-issue report (#1273)
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours. Team/division requests return `403`.
+**v0.6.3 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours. Team/division requests return `403`.
 
 Use the server's stored outcomes and policy to read cost, points and TIER per
 `(repo, issue_id)`:
@@ -919,10 +919,10 @@ How to use TIER for the decisions the white paper says it may inform:
 
 ### 9.1 Install
 
-Build v0.6.2 from source (Go 1.27.3; this revision or later requires Go 1.27.3 or newer, raised for GO-2026-6809; `make`, `git`):
+Build v0.6.3 from source (Go 1.27.3; this revision or later requires Go 1.27.3 or newer, raised for GO-2026-6809; `make`, `git`):
 
 ```sh
-git clone --branch v0.6.2 https://github.com/tiermetric/tier.git
+git clone --branch v0.6.3 https://github.com/tiermetric/tier.git
 cd tier
 make build                       # produces ./bin/tierd
 ```
@@ -930,7 +930,7 @@ make build                       # produces ./bin/tierd
 Or install without cloning:
 
 ```sh
-go install github.com/tiermetric/tier/cmd/tierd@v0.6.2
+go install github.com/tiermetric/tier/cmd/tierd@v0.6.3
 tierd version
 ```
 
@@ -940,7 +940,7 @@ Each release on the `tiermetric/tier` releases page publishes per-platform tarba
 
 Homebrew (macOS): `brew install tiermetric/tap/tierd` builds tierd from source.
 
-The macOS binaries are not yet Developer-ID signed or notarized. A binary downloaded with a web browser is marked as downloaded, and macOS's Gatekeeper may refuse to run it. Remove the mark once with `sudo xattr -d com.apple.quarantine /usr/local/bin/tierd` (use the path where you put it). A binary built from source or with `go install` carries no such mark. The download, checksum and extraction commands are in `docs/quickstart.md`. The Windows archive is built but untested: there is no Windows test run, and the database file-permission protection does not apply there. Treat Windows as unsupported. The default log locations are built from the home directory, so they resolve on Windows too.
+The macOS binaries are not yet Developer-ID signed or notarized. A binary downloaded with a web browser is marked as downloaded, and macOS's Gatekeeper may refuse to run it. Remove the mark once with `sudo xattr -d com.apple.quarantine /usr/local/bin/tierd` (use the path where you put it). A binary built from source or with `go install` carries no such mark. The download, checksum and extraction commands are in `docs/quickstart.md`. The Windows archive passed a command-line smoke test of tierd v0.6.2 on Windows 11 (2026-10-22, synthetic data only). Scoring populated data and the dashboard against a real server are not yet tested there, there is no Windows CI, and the database file-permission protection does not apply; the full list is in `docs/quickstart.md`. Treat Windows as experimental. The default log locations are built from the home directory, so they resolve on Windows too.
 
 The commands in this section write `tierd`, meaning the binary on your `PATH`. `go install` puts it in Go's binary directory (`$(go env GOPATH)/bin` unless `GOBIN` is set); add that directory to `PATH` if `tierd version` is not found. From a source checkout, use the full path to `bin/tierd` instead, for example `~/tier/bin/tierd`; the relative `./bin/tierd` works only while your current directory is the checkout.
 
@@ -1038,7 +1038,7 @@ A config file (`tierd serve --config config.yaml`) mirrors the flags; precedence
 ```sh
 docker run -d -p 8080:8080 -v tier-data:/data -v /etc/tier:/etc/tier:ro \
   -e TIER_API_TOKEN=@/etc/tier/api-token \
-  ghcr.io/tiermetric/tierd:0.6.2 serve --aggregation team --addr 0.0.0.0:8080
+  ghcr.io/tiermetric/tierd:0.6.3 serve --aggregation team --addr 0.0.0.0:8080
 ```
 
 The token file must be readable by uid 65532. It ships only `tierd` (no `git`, no host logs), so feed a stock container with `tierd ship` or the proxy; watching inside a container needs the session-log directory and the repository mounted, and commit-based attribution is unavailable without `git`.
@@ -1096,7 +1096,7 @@ from later NULL rows. The developer access export includes the stored nullable
 value, rendering SQL NULL as JSON `null`. Both columns are erased with their
 existing table rows; the identifier-free cutover marker remains.
 
-A developer row in `/scores` (`developers[]`, developer mode) carries (with `ci_note` added in v0.6.1 by #1233): `developer`, `tier`, `weighted_points`, `total_cost_usd`, `actual_paid_usd`, `spend_leverage`, `coverage_pct`, `exploratory_cost_share`, `cost_per_point` (`null` on zero points), `sample_n` (the developer's outcomes in the window, flagged ones included), `ci_low`, `ci_high`, `cost_per_point_ci_low`, `cost_per_point_ci_high`, `ranked`, `ci_note`, `flagged_outcomes` (outcomes that failed the zero-token check). A team or division row (`teams[]`) carries `team`, `tier`, `weighted_points`, `total_cost_usd`, `actual_paid_usd`, `spend_leverage`, `coverage_pct`, `cost_per_point`, `ranked`, and no interval. Rows come in identifier or name order (in team and division mode, the `other` row last), and the dashboard keeps that order (Section 7.1). In developer mode the response also carries `team_rollups` (Section 6.1).
+A developer row in `/scores` (`developers[]`, developer mode) carries (with `ci_note` added in v0.6.1 by #1233): `developer`, `tier`, `weighted_points`, `total_cost_usd`, `actual_paid_usd`, `spend_leverage`, `coverage_pct`, `exploratory_cost_share`, `cost_per_point` (`null` on zero points), `sample_n` (the developer's outcomes in the window, flagged ones included), `ci_low`, `ci_high`, `cost_per_point_ci_low`, `cost_per_point_ci_high`, `ranked`, `ci_note`, `flagged_outcomes` (outcomes that failed the zero-token check). A team or division row (`teams[]`) carries `team`, `tier`, `weighted_points`, `total_cost_usd`, `actual_paid_usd`, `spend_leverage`, `coverage_pct`, `cost_per_point`, `ranked`, and no interval. Over sealed months it may also carry `cache_read_share`. Every published group, including folded `other`, needs k distinct counted seats with both captured spend and merged work; if any fails, all levers are omitted. The cache partition counts distinct contributors in the row's cost population with positive input-side tokens (input + cache read + cache write), including bots and spend-only people. At least k must have cache reads and k must have none; zero-input contributors count on neither side. Otherwise the cache key is absent. k is never below 3. The share uses the same cost population as the group row. `data_quality.team_levers_withheld` and `team_levers_withheld_reason` (`group_seats_below_k` or `category_seats_below_k`) explain omissions. Live windows and anonymized comparisons carry no levers. Rows come in identifier or name order (in team and division mode, the `other` row last), and the dashboard keeps that order (Section 7.1). In developer mode the response also carries `team_rollups` (Section 6.1).
 
 The `/scores` response carries, beside the rows: `price_table {version, effective_date, table_hash, file_hash}`; `rubric {version}`; `total` (a pooled rollup); `work_types[]`; `cost_composition` (name-free: `cache_read_share`, `premium_model_share` for models whose base input rate is at or above $4.00 per million tokens (a constant in the code, lowered from $5 to $4 in v0.5.2 (#786) so that `claude-opus-5-5` at $4.00 counts as premium; while Sonnet, Haiku and the flash/mini tiers do not; the over-threshold long-context rates play no part), `by_model`, and `by_class`, which holds token counts, not dollars, for input, output, cache read and cache write); `segment_reconciliation` (`outcome_linked + no_outcome + unattributed == window`, exact on the integer fields); and `data_quality` (attribution shares, unattributed buckets, `exploratory_cost_share`, `unjoined_developers`, zero-token flags, `mixed_price_versions`, the cost-horizon fields, `kanon_suppressed`, and `repo_scope`, which echoes the repository when `?repo=` is set). A team or division report leaves out `work_types[]`, `cost_composition`, `segment_reconciliation` and the `data_quality` fields Section 6.2 lists, and carries `attribution_coverage` and `excludes_unattributed_spend`, plus `uncounted_active_ids` when an identifier did not count toward k.
 
@@ -1119,7 +1119,7 @@ The project publishes its own adversarial analysis (`docs/adversarial-analysis.m
 - **The diff heuristic has no semantics.** A five-line concurrency fix and a five-line typo fix weigh the same unless labelled, and generated churn inflates unlabelled PRs.
 - **Quality is partial.** TIER does not measure the fraction reversed. A partial reversal that matches its supported revert rule receives the same message-selected floor as a full reversal—0.1 or 0.8. Other partial reversals can remain unobserved. Footer matching identifies recorded merge or squash SHAs, not constituent-commit ancestry. Incidents, hotfix detection and downstream failures are not enforced in v0.6.0; backfill does not reconstruct historical quality events. CI floors do not reach push-captured outcomes, and without the Workflow runs subscription CI failures are invisible. Corrective-work accounting (Event 3) ships in v0.6.0 and is off by default; the operator chooses whether to enable it.
 - **Coverage of tools.** Capture completeness is unknown. Unsupported populations and deployment gaps differ:
-  - Individual Cursor and Copilot Pro accounts: not covered by the team/organisation pollers. ChatGPT Team: no collector. Cursor teams with Admin API access and Copilot organisation billing have experimental opt-in pollers in v0.6.2 (Section 3.1).
+  - Individual Cursor and Copilot Pro accounts: not covered by the team/organisation pollers. ChatGPT Team: no collector. Cursor teams with Admin API access and Copilot organisation billing have experimental opt-in pollers in v0.6.3 (Section 3.1).
   - Codex cloud / Desktop cloud tasks, Claude Code hosted web tasks and Managed Agents: no collector for the hosted services.
   - Gemini CLI without the proxy: no collector.
   - Opencode non-Z.ai providers: excluded by design from this collector.
@@ -1194,11 +1194,11 @@ Constants and rules from the body, for tools. Where a value here and the body di
 ```yaml
 document:
   title: "TIER — technical reference"
-  version: "1.8"
-  companion: "whitepaper.md (version 2.7)"
-  revision_note: "v0.6.2 release"
-  date: "2026-10-22"
-  describes: "tiermetric/tier v0.6.2; Event 3 off by default, operator opt-in"
+  version: "1.9"
+  companion: "whitepaper.md (version 2.8)"
+  revision_note: "v0.6.3 release"
+  date: "2026-10-23"
+  describes: "tiermetric/tier v0.6.3; Event 3 off by default, operator opt-in"
   licence: "Apache-2.0"
 formula:                                  # §2.1
   tier: "sum(weight * quality) / (total_cost_usd / 1000)"
@@ -1270,7 +1270,7 @@ spend_leverage:                           # §8.1
   org_invoice_without_hierarchy: "allocated to no one"
   finance_posts_idempotent: false
 use:                                      # §6.3
-  permitted: "coaching conversations; per-developer views and the per-issue report are not available on real data in v0.6.2 (#826), only in the synthetic tierd demo using its own invented data in a private temporary database that cannot load yours"
+  permitted: "coaching conversations; per-developer views and the per-issue report are not available on real data in v0.6.3 (#826), only in the synthetic tierd demo using its own invented data in a private temporary database that cannot load yours"
   stance: "TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual."
   planned_not_built: [per_viewer_tokens, view_log, developer_mode_retention_90d_default_365d_ceiling, name_free_rollup, coaching_page]
 retention_today: "nothing deleted by age except raw webhook bodies (90 days, 50,000 rows, at database open and every 24 hours while serve runs)"
@@ -1279,10 +1279,10 @@ windows:                                  # §5, §10
   defaults_days: {api: 90, dashboard: 30, backfill: 90, ship: 90, score: 90}   # api and dashboard: developer mode
   read_first: [window_predates_cost_capture, cost_coverage_safe_since]
 install:                                  # §9.1
-  source: "git clone --branch v0.6.2 https://github.com/tiermetric/tier.git && cd tier && make build"
-  go: "go install github.com/tiermetric/tier/cmd/tierd@v0.6.2"
-  image: "ghcr.io/tiermetric/tierd:0.6.2 (linux/amd64)"
-  go_version: "1.27.3 or newer (v0.6.2; raised for GO-2026-6809)"
+  source: "git clone --branch v0.6.3 https://github.com/tiermetric/tier.git && cd tier && make build"
+  go: "go install github.com/tiermetric/tier/cmd/tierd@v0.6.3"
+  image: "ghcr.io/tiermetric/tierd:0.6.3 (linux/amd64)"
+  go_version: "1.27.3 or newer (v0.6.3; raised for GO-2026-6809)"
 ```
 
 **Seal timing disclosure.** Sealed reports show the actual UTC seal timestamp,

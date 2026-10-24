@@ -13,7 +13,7 @@
 
 TIER attributes AI token spend to outcomes. `developer` mode reports that
 attribution **per named developer** (developer: synthetic demo only until #826).
-v0.6.2 refuses developer-mode startup on real data, including loopback
+v0.6.3 refuses developer-mode startup on real data, including loopback
 and read-only operation. Use `team` or `division` for real data. In several of TIER's target markets, measuring the performance of
 named employees is legally constrained — sometimes requiring prior
 co-determination or works-council
@@ -249,7 +249,7 @@ mandatory-DPIA lists.
 
 ## Works-council consultation prerequisites (checklist)
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.3 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 Where a works council or equivalent body exists, treat the following as
 prerequisites **before** per-developer TIER goes live. Adapt to local law with
@@ -324,8 +324,8 @@ means reporting that never surfaces an individual developer's performance.
 | **France (FR)** | **Team-only** | Prior CSE information-and-consultation; advance employee notice; DPIA | Monitoring tools require CSE consultation and transparency (Code du travail L2312-38; CNIL guidance). |
 | **Netherlands (NL)** | **Team-only** | OR consent under WOR Art. 27; DPIA | Personnel-monitoring arrangements need works-council consent before adoption. |
 | **Other EU / EEA** | **Team-only (default)** | Local works-council consultation; DPIA; lawful basis + transparency | Most member states have analogous monitoring-consultation regimes; confirm locally. |
-| **UK** | Team-only. Per-developer: not available in v0.6.2 (#826) | UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance | No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring. |
-| **US (at-will, non-union)** | Team-only. Per-developer: not available in v0.6.2 (#826) | Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. | Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties. |
+| **UK** | Team-only. Per-developer: not available in v0.6.3 (#826) | UK GDPR lawful basis + DPIA; transparency; ICO employment-monitoring guidance | No works-council co-determination regime, but ICO expects a DPIA and proportionality for monitoring. |
+| **US (at-will, non-union)** | Team-only. Per-developer: not available in v0.6.3 (#826) | Internal policy; transparency; TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. | Fewer statutory constraints, but the coaching-not-appraisal stance still applies; state privacy laws may add duties. |
 | **Anywhere with a collective agreement / union** | Follow the agreement | Whatever the agreement requires | A collective bargaining agreement can impose obligations beyond statute regardless of country. |
 
 **How to read this table:** in every EU/EEA row the safe default is **team-only

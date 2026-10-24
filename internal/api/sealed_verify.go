@@ -65,14 +65,17 @@ func RefoldSealed(rep store.SealedReport, rollups []store.SealedRollup, persons 
 	if body.DataQuality != nil {
 		gotSup = body.DataQuality.KAnonSuppressed
 	}
-	gotTeams := body.Teams
-	if gotTeams == nil {
-		gotTeams = json.RawMessage("null")
+	gotTeams, err := foldTeamsJSON(body.Teams)
+	if err != nil {
+		return fmt.Errorf("decode sealed teams: %w", err)
 	}
 	teams, sup := scoring.AggregateFolded(inputs, rep.K)
 	want := []byte("null")
 	if !sup.Any() {
 		if want, err = json.Marshal(teamRows(teams)); err != nil {
+			return err
+		}
+		if want, err = foldTeamsJSON(want); err != nil {
 			return err
 		}
 	}
@@ -93,17 +96,55 @@ func RefoldSealed(rep store.SealedReport, rollups []store.SealedRollup, persons 
 	return nil
 }
 
+// foldTeamsJSON compares only fold-produced fields. Lever inputs are absent
+// from sealed rollups; the original body's digest still protects those shares.
+// Raw values retain missing, extra and zero-valued fields for an exact check.
+func foldTeamsJSON(raw []byte) ([]byte, error) {
+	var rows []map[string]json.RawMessage
+	if raw != nil {
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, err
+		}
+	}
+	for _, row := range rows {
+		delete(row, "cache_read_share")
+	}
+	return json.Marshal(rows)
+}
+
+// RecomputeSealedBodyForReport preserves the additive lever shape of a stored
+// report. Pre-upgrade bodies have neither shares nor a withholding notice; a
+// recompute must not report drift solely because this binary can add them.
+func (h *Handler) RecomputeSealedBodyForReport(ctx context.Context, p Period, rep store.SealedReport) ([]byte, error) {
+	var body struct {
+		Teams       []teamScoreJSON  `json:"teams"`
+		DataQuality *dataQualityJSON `json:"data_quality"`
+	}
+	if err := json.Unmarshal(rep.Body, &body); err != nil {
+		return nil, fmt.Errorf("decode sealed body: %w", err)
+	}
+	hasLevers := body.DataQuality != nil && body.DataQuality.TeamLeversWithheld
+	for _, row := range body.Teams {
+		hasLevers = hasLevers || row.CacheReadShare != nil
+	}
+	return h.recomputeSealedBody(ctx, p, !hasLevers)
+}
+
 // RecomputeSealedBody computes period p's body from the rows as they are now,
 // the way a first seal would (every read through one snapshot), and seals
 // nothing: a verifier reports whether a seal today would differ, never changes
 // what was sealed.
 func (h *Handler) RecomputeSealedBody(ctx context.Context, p Period) ([]byte, error) {
+	return h.recomputeSealedBody(ctx, p, false)
+}
+
+func (h *Handler) recomputeSealedBody(ctx context.Context, p Period, legacyLevers bool) ([]byte, error) {
 	ctx = store.WithReadTimeRecovery(ctx, false)
 	start, end := p.Bounds()
 	var resp scoresResponse
 	err := h.store.ReadSnapshot(ctx, func(snap *store.Snapshot) error {
 		var err error
-		resp, _, err = h.scoresForWindow(ctx, snap, scoresQuery{since: start, until: end, scope: store.FleetWide}, true)
+		resp, _, err = h.scoresForWindow(ctx, snap, scoresQuery{since: start, until: end, scope: store.FleetWide, legacyLevers: legacyLevers}, true)
 		return err
 	})
 	if err != nil {

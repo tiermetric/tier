@@ -49,6 +49,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -273,10 +274,7 @@ func isLoopbackHost(host string) bool {
 // dbDir returns the directory component of a db path, or "." when there is none,
 // so os.MkdirAll never receives an empty string (mirrors runServe's MkdirAll).
 func dbDir(path string) string {
-	if i := strings.LastIndexByte(path, os.PathSeparator); i >= 0 {
-		return path[:i]
-	}
-	return "."
+	return filepath.Dir(path)
 }
 
 // backfillStats is the reconstruction tally reported to the operator.
@@ -343,6 +341,10 @@ func backfillOutcomes(ctx context.Context, gh *githubClient, ins outcomeInserter
 				continue
 			}
 
+			if gh.ownerLogin != "" && !strings.EqualFold(it.User.Login, gh.ownerLogin) {
+				continue
+			}
+
 			// A merged, in-window PR: count it, then partition by reconstruction
 			// result so merged == inserted + skipped + excluded + unattributed always holds.
 			stats.merged++
@@ -382,6 +384,14 @@ func (gh *githubClient) reconstructOutcome(ctx context.Context, ins outcomeInser
 	pr, err := gh.getPR(ctx, repo, number)
 	if err != nil {
 		return false, false, false, err
+	}
+	// Personal score is bound to the verified token owner. Check the detail
+	// author before recording any outcome, declaration or exclusion.
+	if gh.ownerLogin != "" {
+		if !strings.EqualFold(pr.User.Login, gh.ownerLogin) {
+			return false, false, false, nil
+		}
+		pr.User.Login = gh.ownerLogin
 	}
 	// Guard against a list/detail race: only reconstruct genuinely-merged PRs.
 	if pr.MergedAt == nil || pr.MergeCommitSHA == "" {
@@ -510,16 +520,21 @@ const (
 // exists rather than a dependency because the hard constraint is zero new deps
 // (tasks/README.md): net/http + encoding/json cover the two endpoints used.
 type githubClient struct {
-	grammar issueref.Grammar
-	http    *http.Client
-	baseURL string
-	token   string
-	logger  *slog.Logger
+	// Set only by local score after GET /user, never by an author override.
+	ownerLogin string
+	grammar    issueref.Grammar
+	http       *http.Client
+	baseURL    string
+	token      string
+	logger     *slog.Logger
 }
 
 var errRedirectRefused = errors.New("refusing GitHub API redirect")
 
 type ghListItem struct {
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
 	Number    int     `json:"number"`
 	UpdatedAt string  `json:"updated_at"`
 	MergedAt  *string `json:"merged_at"` // null for closed-but-unmerged PRs
@@ -561,8 +576,8 @@ type ghPR struct {
 
 // listClosedPRs fetches one page of closed PRs sorted updated-descending. Diff stats
 // (additions/deletions/changed_files) are intentionally absent from the list payload —
-// GitHub serves them only on the per-PR detail endpoint — so only the fields needed
-// for windowing (number, updated_at, merged_at) are decoded here.
+// GitHub serves them only on the per-PR detail endpoint — so only window bounds and
+// author identity (for local personal score) are decoded here.
 func (gh *githubClient) listClosedPRs(ctx context.Context, repo string, page int) ([]ghListItem, error) {
 	q := url.Values{}
 	q.Set("state", "closed")

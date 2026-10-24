@@ -140,6 +140,7 @@ type devLabel struct {
 
 // windowGroups is one window split by dated membership at one level.
 type windowGroups struct {
+	timeline *membershipTimeline
 	// outcomeLabels retains the very same dated placement for descriptive reads.
 	outcomeLabels map[int64]string
 	// rows is one scoring row per (canonical developer, label) with any figure,
@@ -182,7 +183,7 @@ func (h *Handler) groupWindow(ctx context.Context, r windowReader, win windowSco
 		outcomesBy[k] = append(outcomesBy[k], so)
 	}
 
-	g := windowGroups{roster: map[string]bool{}, outcomeLabels: outcomeLabels}
+	g := windowGroups{timeline: tl, roster: map[string]bool{}, outcomeLabels: outcomeLabels}
 	costMicro := map[devLabel]int64{}
 	realtimeMicro := map[devLabel]int64{}
 	capturedRealtimeMicro := map[devLabel]int64{}

@@ -12,6 +12,8 @@
     "excludes_unattributed_spend": true,
     "interval_status": "not_shown",
     "partition_diagnostics": "not_shown",
+    "team_levers_withheld": true,
+    "team_levers_withheld_reason": "category_seats_below_k",
     "window_predates_cost_capture": false
   },
   "developers": [],

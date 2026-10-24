@@ -465,7 +465,7 @@ func TestBackfillIsRateLimited(t *testing.T) {
 }
 
 // TestBackfillRateLimitWait pins the backoff duration: Retry-After wins, else
-// X-RateLimit-Reset measured against a fixed now, all clamped to [1s, 5m].
+// X-RateLimit-Reset measured against a fixed now, all clamped to [1s, 65m].
 func TestBackfillRateLimitWait(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	cases := []struct {
@@ -719,6 +719,22 @@ func TestDispatch_BackfillReportsExcludedSeparately(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), "merged=1 inserted=0 skipped=0 excluded=1 unattributed=0") {
 			t.Errorf("run %d: %s", i, out.String())
+		}
+	}
+}
+
+// TestDbDir_RootPathKeepsRoot pins that a root-level --db path yields the root,
+// not an empty string that os.MkdirAll would reject.
+func TestDbDir_RootPathKeepsRoot(t *testing.T) {
+	cases := map[string]string{
+		"/tier.db":         "/",
+		"tier.db":          ".",
+		"/var/lib/tier.db": "/var/lib",
+		"data/tier.db":     "data",
+	}
+	for in, want := range cases {
+		if got := dbDir(in); got != want {
+			t.Errorf("dbDir(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

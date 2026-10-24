@@ -1,6 +1,6 @@
 # Understanding TIER
 
-**v0.6.2 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, plus the dashboard on invented data with `tierd demo`; they do not get a TIER number on their own real data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
+**v0.6.3 scope:** real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic `tierd demo` until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`, and a local personal TIER score with `tierd score --outcomes`, joining that spend to the GitHub token owner’s merged PRs without persisting data or showing a team band. `tierd demo` provides the dashboard on invented data. See the [quickstart](quickstart.md) for trusted-use limits, the k floor and sealing steps.
 
 TIER (Token Impact & Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.
@@ -286,8 +286,10 @@ today, read [how-it-works.md](how-it-works.md) alongside it.
 ### From install to a first real score
 
 Solo users can stop after step 3 for their own Claude Code cost table and the
-issue-attributed share of that spend, and run `tierd demo` for the dashboard on
-invented data. They do not get a TIER number on their own real data. The remaining
+issue-attributed share of that spend. `tierd score --repo . --outcomes` also
+computes a local personal TIER score by joining that spend to the GitHub token
+owner’s merged PRs; it persists nothing and shows no team band. Run `tierd demo`
+for the dashboard on invented data. The remaining
 steps load a team/division server; reports also require a sealed month and
 enough contributors. See the [quickstart](quickstart.md) for the full setup.
 
@@ -330,7 +332,23 @@ enough contributors. See the [quickstart](quickstart.md) for the full setup.
    or which `gh api user -q .login` prints if you have the GitHub CLI. If the
    two are the same, skip this step. If they differ, you appear twice in the
    scores: once with spend and no merged work, once with merged work and no
-   spend. Tell the server they are one person:
+   spend.
+
+   Check before you join them. Inspect your computer login with
+   `curl --fail-with-body "http://127.0.0.1:8080/api/v1/developer/$USER/export"`.
+   The sum of `cost_micro` in `token_events` must be above 0, and `outcomes`
+   must be `null` or empty (no merged work). If you have `jq`, add
+   `| jq '{spend: ([.token_events[]?.cost_micro] | add), outcomes: (.outcomes // [] | length)}'`
+   to the command to print both. If the export fails, spend is absent, or any
+   outcome is present, stop here. Merged work may belong to somebody whose
+   GitHub login matches your computer login. The join moves both spend and
+   merged work, so it would put that person's work into your score. The check
+   covers only merged work loaded so far. After the join, the same export also
+   lists your own merged work, so before any later `backfill`, check that every
+   pull request in its `outcomes` is yours. If one is not, undo the join with
+   `curl --fail-with-body -X DELETE "http://127.0.0.1:8080/api/v1/developer_alias/$USER"`.
+
+   If the check passes, tell the server they are one person:
 
    ```sh
    curl -f -X POST http://127.0.0.1:8080/api/v1/developer_alias \

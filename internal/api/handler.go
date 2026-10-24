@@ -113,6 +113,7 @@ type Store interface {
 	// unattributed spend, and the cache-read/premium-model levers. A whole-window,
 	// name-free aggregate; a zero `until` is open-ended.
 	CostCompositionWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.CostComposition, error)
+	DeveloperCompositionWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.DeveloperComposition, error)
 	// UnattributedBucketCostsWindow returns per-(developer, bucket) unattributed
 	// spend over [since, until) (#refocus, Option B): the honest split of the single
 	// unattributed mass the composition sidecar reports as one number, into the
@@ -2400,10 +2401,12 @@ type developerCostReconciliationJSON struct {
 // only the zero-token outcomes; it is a struct (not an inline slice) so future
 // data-quality signals can be added without another top-level key.
 type dataQualityJSON struct {
-	PartitionDiagnostics any                               `json:"partition_diagnostics,omitempty"`
-	IntervalStatus       string                            `json:"interval_status,omitempty"`
-	JoinReadiness        *joinReadinessJSON                `json:"join_readiness,omitempty"`
-	AggregatePricing     *store.AggregatePricingDisclosure `json:"aggregate_pricing,omitempty"`
+	TeamLeversWithheld       bool                              `json:"team_levers_withheld,omitempty"`
+	TeamLeversWithheldReason string                            `json:"team_levers_withheld_reason,omitempty"`
+	PartitionDiagnostics     any                               `json:"partition_diagnostics,omitempty"`
+	IntervalStatus           string                            `json:"interval_status,omitempty"`
+	JoinReadiness            *joinReadinessJSON                `json:"join_readiness,omitempty"`
+	AggregatePricing         *store.AggregatePricingDisclosure `json:"aggregate_pricing,omitempty"`
 	// ZeroTokenOutcomes lists the flagged (developer, issue) pairs in
 	// per-developer mode. It is omitempty because team-aggregation mode (#185)
 	// suppresses it entirely — the per-developer/issue identities would defeat
@@ -2795,6 +2798,9 @@ type developerScoreJSON struct {
 // array. Do NOT add a Developers field here; a per-developer breakdown belongs on
 // developerScoreJSON, which the anonymized modes never emit.
 type teamScoreJSON struct {
+	// #1368: set only on anonymized Teams, never Total or compare rows. The
+	// #593 final strip removes the whole row whenever any cohort is suppressed.
+	teamLeversJSON
 	// Team is omitempty so the "total" rollup (#25, where the field is
 	// empty by construction) doesn't ship a misleading `"team":""` key.
 	// The filtered ?team= variant always sets a non-empty name and
@@ -3167,6 +3173,7 @@ type windowReader interface {
 	DeveloperEvidenceWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.DeveloperCostEvidence, error)
 	BotDevelopers(ctx context.Context, since, until time.Time) ([]string, error)
 	CostCompositionWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) (store.CostComposition, error)
+	DeveloperCompositionWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.DeveloperComposition, error)
 	UnattributedBucketCostsWindow(ctx context.Context, since, until time.Time, scope store.RepoScope) ([]store.UnattributedBucketCost, error)
 	CostCoverageStart(ctx context.Context, scope store.RepoScope) (time.Time, bool, error)
 	SourceCoverageStart(ctx context.Context, scope store.RepoScope) (map[string]time.Time, error)
@@ -3649,6 +3656,8 @@ type scoresQuery struct {
 	// reportUnjoined sets tier_identity_unjoined and WARNs each unjoined
 	// identity (#125): a live read and a seal do, a verifier's recompute never.
 	reportUnjoined bool
+	teamLevers     bool
+	legacyLevers   bool
 }
 
 // scoresForWindow computes the /scores body for one validated query; every
@@ -3658,6 +3667,7 @@ type scoresQuery struct {
 // keyed by canonical id; the live path keeps AggregateLabeledKAnon, whose
 // residual floats and Ranked flag AggregateFolded does not reproduce.
 func (h *Handler) scoresForWindow(ctx context.Context, r windowReader, q scoresQuery, folded bool) (scoresResponse, []scoring.LabelInput, error) {
+	q.teamLevers = folded && !q.legacyLevers && h.aggregation.Anonymized()
 	data, err := h.loadScoresWindow(ctx, r, q)
 	if err != nil {
 		return scoresResponse{}, nil, err
@@ -3673,6 +3683,7 @@ type scoresWindowData struct {
 	evidenceAt          time.Time
 	corrections         any
 	win                 windowScores
+	groupComposition    map[string][]store.DeveloperComposition
 	costComposition     store.CostComposition
 	unattributedBuckets []store.UnattributedBucketCost
 	groups, teamGroups  windowGroups
@@ -3745,8 +3756,8 @@ func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scores
 	// unattributed, the premium share) and the unattributed-bucket split each break
 	// the window's cost down a second way, and any one category can be carried by
 	// fewer than k people: a model one developer used publishes that developer's
-	// spend. An anonymised install publishes ONE breakdown, so neither is read there,
-	// and every figure derived from them below stays at its zero value and is omitted.
+	// spend. Neither full breakdown is read in anonymized modes. #1368 reads only
+	// the inputs for three per-group shares, gated by the same row census below.
 	var costComposition store.CostComposition
 	var unattributedBuckets []store.UnattributedBucketCost
 	if !h.aggregation.Anonymized() {
@@ -3785,6 +3796,18 @@ func (h *Handler) loadScoresWindow(ctx context.Context, r windowReader, q scores
 			return scoresWindowData{}, err
 		}
 		data.census = &c
+		if q.teamLevers {
+			inputs := scoring.PreFold(data.groups.rows, c.scoring(), func(id string) string { return id })
+			teams, sup := scoring.AggregateFolded(inputs, h.kAnonymity)
+			seats, _ := leverSeats(data, teams)
+			if !sup.Any() && len(teams) > 0 && leverSeatFloor(seats, teams, h.kAnonymity) {
+				data.groupComposition, err = h.loadGroupComposition(ctx, r, win, data.groups)
+				if err != nil {
+					h.logger.Error("query group composition", "err", err)
+					return scoresWindowData{}, err
+				}
+			}
+		}
 	}
 	// Cost horizon (#512), attached in BOTH modes. A horizon lookup failure is
 	// logged and the signal omitted rather than 500-ing the whole response — the
@@ -3896,6 +3919,7 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 	// assignment site). Zero value = nothing suppressed, so developer mode — which
 	// never aggregates — is untouched.
 	var kanonSuppressed scoring.KAnonSuppression
+	var leverWithheldReason string
 	// census is the window's k-anonymity counting rule (#856), set only in an
 	// anonymized mode, where the pooled fold is its one reader (#864).
 	census := data.census
@@ -3940,8 +3964,14 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 		} else {
 			teams, sup = scoring.AggregateLabeledKAnon(data.groups.rows, h.kAnonymity, census.scoring())
 		}
+		var levers map[string]teamLeversJSON
+		if folded && !q.legacyLevers && !sup.Any() && len(teams) > 0 {
+			levers, leverWithheldReason = groupLevers(data, teams, h.kAnonymity)
+		}
 		for _, ts := range teams {
-			resp.Teams = append(resp.Teams, newTeamScoreJSON(ts))
+			row := newTeamScoreJSON(ts)
+			row.teamLeversJSON = levers[ts.Team]
+			resp.Teams = append(resp.Teams, row)
 		}
 		// 🔴 #593: when the residual was withheld, EVERY unfloored aggregate over the
 		// same population must go with it. resp.Total is a rollup of all devScores and
@@ -4011,6 +4041,10 @@ func (h *Handler) buildScoresResponse(data scoresWindowData, q scoresQuery, fold
 		return resp.DataQuality
 	}
 
+	if leverWithheldReason != "" {
+		attachDataQuality().TeamLeversWithheld = true
+		attachDataQuality().TeamLeversWithheldReason = leverWithheldReason
+	}
 	if h.aggregation.Anonymized() {
 		attachDataQuality().PartitionDiagnostics = "not_shown"
 		attachDataQuality().IntervalStatus = "not_shown"

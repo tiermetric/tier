@@ -14,8 +14,7 @@
 > - **Not causal.** TIER links recorded usage to merged work by developer, repository and issue reference. It does not detect whether AI wrote a change, or how much AI helped. ([§7.3](docs/whitepaper.md#73-limits-on-interpretation))
 
 **Is TIER right for you?**
-Working alone today, you get your own Claude Code cost table and the issue-attributed share of that spend, plus the dashboard on invented data (`tierd demo`). A TIER number on your own real data is not built yet. Team reports show a group's TIER, never one person's, once at least k people in the group (default 5, minimum 3) have captured AI spend and at least k have merged work in a sealed calendar month.
-A local personal score is planned (#1362); it has no date.
+Working alone, use `tierd score --outcomes` to join your local Claude Code costs to your own merged GitHub PRs and see your personal TIER. The default `tierd score` still shows the cost table; `tierd demo` shows the dashboard on invented data. Team reports show a group's TIER, never one person's, once at least k people in the group (default 5, minimum 3) have captured AI spend and at least k have merged work in a sealed calendar month.
 TIER helps a team follow merged work per $1,000 of captured AI usage over time, priced at list rates so every plan reads on one scale. It counts accepted work, mainly merged pull requests that reference an issue (plus opt-in direct commits and outcomes posted through its API), weighted by size and adjusted for CI failures and reverts where TIER observes them.
 Beside the ratio it shows time to merge (PR created → merged), a separate figure that is not a quality measure.
 Check the [per-plan source requirements](docs/technical-reference.md#what-each-source-needs) before a pilot; the Copilot and Cursor pollers are experimental and require organisation or team credentials.
@@ -159,7 +158,7 @@ datastore, and no message bus.
 
 Run it for one team or one organization at a time.
 
-**Who this release is for (from v0.6.1).** This release requires that every credential holder and database owner be you, or someone every participant wholly trusts. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt and shows the dashboard on invented data. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with `tierd score`; it has no outcome join, cannot evaluate server ranking and does not give a TIER number on their own real data.
+**Who this release is for (from v0.6.1).** This release requires that every credential holder and database owner be you, or someone every participant wholly trusts. “Wholly trusted” means every participant knowingly accepts the documented identity and administrator-trust limits, and every read, ingest or admin credential holder and database owner is trusted with all retained developer data. Serve real data only in name-free team/division modes; shared-team promotion waits for #826 and #1145. From v0.6.1, the server refuses all non-synthetic developer mode, including loopback and read-only operation, until #826's named-viewer, audit and retention controls ship. The synthetic `tierd demo` remains exempt and shows the dashboard on invented data. Solo users get their own Claude Code cost table with `tierd score`, or their own local TIER with `tierd score --outcomes`. The latter joins only the GitHub token owner’s merged PRs, stores nothing after exit and shows no team band.
 
 The team/division k-floor is not robust against an untrusted ingest holder until #1145 binds uploads to identities. Measured at k=3 in both modes: invented unrostered IDs did not count, but uploads impersonating two rostered IDs with existing outcomes and no spend caused a previously withheld one-spender cohort to publish its aggregate. This pins the current limitation; it does not repair #1145.
 
@@ -192,11 +191,14 @@ that folder to your `PATH`. Or download a release archive from
 `tierd`, which you move somewhere on your `PATH`; this route needs no Go.
 Details, including which archive to pick, are in
 [docs/quickstart.md §1](docs/quickstart.md#1-install). A `windows-amd64` archive
-(`tierd.exe` inside) is published, but TIER is not tested on Windows — there is
-no Windows CI, and the guarantee that the database file is readable only by its
-owner (mode 0600, re-applied every time tierd opens it) does not hold
-there ([docs/security.md §4](docs/security.md)); treat it as unsupported until
-someone reports it working.
+(`tierd.exe` inside) is published. A native command-line smoke test of tierd
+v0.6.2 on Windows 11 Enterprise x64 (2026-10-22, synthetic data only) passed;
+scoring populated data, the dashboard against a real server, a browser download
+(SmartScreen) and these docs' bash/zsh commands are not yet tested there, and
+there is no Windows CI. The owner-only (0600) database guarantee does not hold
+there ([docs/security.md §4](docs/security.md#4-filesystem-hardening)); what was
+observed is in [docs/quickstart.md §1](docs/quickstart.md#1-install). Treat
+Windows as experimental.
 
 Homebrew (macOS): `brew install tiermetric/tap/tierd` builds tierd from source.
 
@@ -334,11 +336,12 @@ any two match), and, like the read-only token, it does nothing without an API
 token. It is for the operator only, never for viewers: see
 [docs/security.md § The metrics token](docs/security.md#the-metrics-token-944).
 
-### The GitHub token (`TIER_GITHUB_TOKEN`, `backfill --token`)
+### The GitHub token (`TIER_GITHUB_TOKEN`, `backfill --token`, `score --outcomes --token`)
 
-Only `tierd backfill` needs it, to read your merged pull requests (it calls
-`GET /repos/<owner>/<name>/pulls` and `GET /repos/<owner>/<name>/pulls/<n>`, and
-nothing else). Create a fine-grained
+`tierd backfill` and `tierd score --outcomes` use it to read your merged pull
+requests via `GET /repos/<owner>/<name>/pulls` and
+`GET /repos/<owner>/<name>/pulls/<n>`. `tierd score --outcomes` first calls
+`GET /user` to bind the report to the token owner. Create a fine-grained
 personal access token at <https://github.com/settings/personal-access-tokens/new>:
 
 - **Resource owner:** the account that owns the repo — your own name, or the
@@ -390,7 +393,7 @@ Pick the one that matches what you want right now:
 | Path | You get | Effort |
 |---|---|---|
 | [See it in 60 seconds](#see-it-in-60-seconds) | A populated dashboard on synthetic data | One command |
-| [Score your own repo](#score-your-own-repo) | Your own cost table now; a team TIER once a group of at least k people (default 5, minimum 3) has a sealed month | Four commands, two terminals, a GitHub token ([how to get one](#what-you-need-before-you-start)) |
+| [Score your own repo](#score-your-own-repo) | Your own cost table or opt-in local personal TIER; team TIER after a sealed month with at least k people | One score command; GitHub token for `--outcomes` ([how to get one](#what-you-need-before-you-start)) |
 | [Run it for a team](#run-it-for-a-team) | A shared server recording outcomes live | Server or container deployment |
 
 **[docs/quickstart.md](docs/quickstart.md)** has the same steps as copy-paste
@@ -427,12 +430,10 @@ that token too.
 
 ## Score your own repo
 
-**Working alone, this path ends at your own cost table and the issue-attributed
-share of that spend.** Team reports withhold a group smaller than k (default 5,
-minimum 3), so one person gets no TIER number on their own real data; a local
-personal score is planned (#1362).
+**Working alone, use `tierd score --outcomes` for your own local TIER.**
+Team reports still withhold groups smaller than k (default 5, minimum 3).
 
-**What this costs you:** four commands across two terminals (`export`,
+**For the team server path below:** four commands across two terminals (`export`,
 `backfill`, `serve`, `ship`), one mandatory GitHub token, and three pitfalls,
 marked GOTCHA 1–3 below.
 (Plus the one-time `make build` under [Prerequisites](#prerequisites).)
@@ -450,6 +451,23 @@ a given repository:
 # exits 0, which reads as success.
 ./bin/tierd score --repo ~/code/your-project    # the last 90 days for that repo
 ```
+
+To include your own merged PRs:
+
+```sh
+# Set TIER_GITHUB_TOKEN privately, or use --token @/path/to/token.
+./bin/tierd score --repo ~/code/your-project --outcomes
+```
+
+This binds outcomes to the token’s `GET /user` login and joins your OS username
+for this run only. It uses the server’s scoring window and prints points, cost,
+TIER and the same data-quality flags. It shows no team band. The private temporary
+SQLite directory is removed on exit, including errors and Ctrl-C. HTTPS is required;
+`--developer`, `--author`, `--db`, `--server` and shipping flags are refused.
+Only Claude Code costs are captured; historical PRs start at quality 1.0, without
+reconstructing later CI failures or reverts. Every outcomes run prints:
+
+> TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual.
 
 > **`--repo` is a local path** for `score`, `ship` and `doctor` — `backfill` alone
 > takes the GitHub repository as `owner/name`, the part of its URL after
@@ -484,7 +502,7 @@ unattributed: branch, no issue #    claude-opus-4-8         344.5618
 issue-127                           claude-opus-4-8          67.8453
 ...
 
-Tip: to record PR outcomes and compute full TIER scores, follow the quickstart (it gives the flags `tierd backfill` and `tierd serve` need). Read it now with `tierd demo`, then open http://127.0.0.1:8080/docs/quickstart.html (the default address).
+Tip: use `tierd score --outcomes` for your local personal TIER. To record PR outcomes and compute full TIER scores, follow the quickstart (it gives the flags `tierd backfill` and `tierd serve` need). Read it now with `tierd demo`, then open http://127.0.0.1:8080/docs/quickstart.html (the default address).
 ```
 
 This is cost-attribution **only** — it has no PR outcomes, so it is not a TIER

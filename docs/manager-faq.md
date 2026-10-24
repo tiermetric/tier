@@ -9,7 +9,7 @@ with [understanding-tier.md](understanding-tier.md).
 
 ## What do I need before I run these commands?
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.3 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 Three values. Ask the person who runs your TIER server for them.
 
@@ -111,13 +111,13 @@ default to 90 days, which does not recover deleted logs. Set the same recent
 `--since` when loading costs and merged work, and check the report's cost-capture
 horizon; reading a team report requires a sealed calendar month (step 6).
 
-**v0.6.2 is for a trusted team.** Every laptop gets one shared, send-only ingest
+**v0.6.3 is for a trusted team.** Every laptop gets one shared, send-only ingest
 token: it opens only `POST /api/v1/events`. The server does not yet bind a laptop
 to one developer; a holder can post, inflate or suppress spend under any
 developer id (#1145, gated on #826; [trust limits](security.md#the-ingest-token-1144)). Real-data
 `--aggregation developer` startup is refused with exit 1 until #826's named-viewer,
 audit and retention controls ship (#1253). Team mode has no per-issue view.
-Per-developer views and the per-issue report are not available on real data in v0.6.2 (#826); to see what they look like, run the synthetic demo (`tierd demo`), which generates its own invented data in a private temporary database and cannot load yours. TIER is
+Per-developer views and the per-issue report are not available on real data in v0.6.3 (#826); to see what they look like, run the synthetic demo (`tierd demo`), which generates its own invented data in a private temporary database and cannot load yours. TIER is
 built for coaching, not for evaluating developers. Per-person figures are not
 accurate enough to judge an individual. Agree to coach the practice, never rank
 people ([peer learning](peer-learning.md#coaching-not-appraisal)).
@@ -251,9 +251,9 @@ and says nothing about usage TIER never saw.
 
 ## Can I see my developers' names?
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.3 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
-No, not on real data in v0.6.2. A real-data server runs `team` or `division`;
+No, not on real data in v0.6.3. A real-data server runs `team` or `division`;
 `tierd serve --aggregation developer` exits 1, with no bypass. Developer mode
 is planned with #826's named-viewer, audit and retention controls and can be
 previewed only in the synthetic demo (`tierd demo`). `tierd serve` requires
@@ -268,13 +268,13 @@ previewed only in the synthetic demo (`tierd demo`). `tierd serve` requires
 
 When developer mode ships (#826), named-viewer controls will determine who sees
 which developer's rows; the shared read-only token will keep only name-free
-reports. In v0.6.2 team and division mode, the read-only token cannot be limited
+reports. In v0.6.3 team and division mode, the read-only token cannot be limited
 to one team: one server holds one set of data for everyone it records.
 The synthetic demo currently shows every invented developer's row.
 `GET /api/v1/events` exposes the raw records behind those rows: each recorded AI
 message's time, model, repository, issue and session id, per developer. Real-data
 access to these records will need #826's named-viewer controls, not the shared
-read-only token. In v0.6.2 team and division mode, `/api/v1/events` returns
+read-only token. In v0.6.3 team and division mode, `/api/v1/events` returns
 HTTP 403. TIER is built for coaching, not for evaluating developers. Per-person
 figures are not accurate enough to judge an individual. TIER cannot enforce
 that stance; your policy or works agreement (a written agreement with your
@@ -395,7 +395,7 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.tier/read-token)" |
 ```
 
 An `error` that is not `null` means the request failed; read it before the
-other two fields. On a v0.6.2 real-data server, expect `"team"` or `"division"`.
+other two fields. On a v0.6.3 real-data server, expect `"team"` or `"division"`.
 `"aggregation": null` is the developer-mode response shape seen in the synthetic
 demo, not a real-data setting you can enable. In that demo, a `developers` count
 of 0 means no invented data in the API's default 90-day window. `"team"` or `"division"` means
@@ -419,7 +419,7 @@ page. Two things to know before you decide:
   `GET /api/v1/org_hierarchy` still list them.
 - Changing between `team` and `division` means restarting the server with a
   different flag; both keep the roster, *k* floor and sealed-month rules.
-  Restarting with `--aggregation developer` is refused on real data in v0.6.2.
+  Restarting with `--aggregation developer` is refused on real data in v0.6.3.
   Any move to the developer mode planned with #826 will need consultation with
   the people it covers first; the steps are in the same document.
 
@@ -861,7 +861,7 @@ These practice changes affect future capture. There is no supported correction o
 
 ## How do I use this to help my team get better?
 
-See [v0.6.2 availability](#what-do-i-need-before-i-run-these-commands). The levers retro below is a post-#826 practice for real data; today use team or division reports over sealed months.
+See [v0.6.3 availability](#what-do-i-need-before-i-run-these-commands). Name-free team levers are available on real data in team or division reports over sealed months; they do not require developer mode (#826).
 
 TIER is built for coaching, not for evaluating developers. Per-person figures are not accurate enough to judge an individual. The positioning is **grade the work, not the worker**, by policy rather than by mechanism. When developer mode ships (#826), named-viewer, audit and retention controls will govern access to individual rows; the coaching stance will still depend on your policy.
 
@@ -881,23 +881,20 @@ Nominal 95% bounds. Coverage is unvalidated: in constructed tests where several 
 [peer-learning.md](peer-learning.md) is the full method for a team. In four
 steps:
 
-1. After developer mode ships (#826), hold a team review of the levers. Preview
-   this practice only with invented data in the synthetic demo today. Read the
-   name-free figures on the dashboard
-   or in `/api/v1/scores`: cache reuse (`cost_composition.cache_read_share`, the
-   share of input tokens read from the provider's cache), spend on premium
-   models (`cost_composition.premium_model_share`, the share of spend on models
-   whose list input price is $4 or more per million tokens), work on `main`
-   (`data_quality.exploratory_cost_share`), and yield within each work type
-   (`work_types`). These figures are available only in the synthetic demo today;
-   their real-data use awaits developer mode planned with #826. A real-data
-   server in `team` or `division` mode shows the team rows and the total. Ask the team
-   what explains each one. Some can be missing, for
-   the reasons given under "Where to see it" in
-   [Why does most of our spend say "no issue attached"? Did we never merge that work?](#why-does-most-of-our-spend-say-no-issue-attached-did-we-never-merge-that-work).
-   If attribution is low, fix that first: the per-type scores in `work_types`
-   count only spend tied to an issue, so they read high while much spend is
-   unlinked.
+1. Hold a team review using `/api/v1/scores?period=YYYY-MM` in team or
+   division mode. Read `teams[].cache_read_share` (the share of input-side tokens
+   read from the provider's cache), available on real data over sealed months.
+   Each published group needs k counted seats with both captured spend and merged
+   work; any failing group withholds all levers. The cache partition also needs
+   k contributors with cache reads and k without, counting the row's distinct
+   cost contributors with positive input-side tokens (input + cache read + cache
+   write), including bots and spend-only people. Zero-input contributors count
+   on neither side. k is never below 3.
+   `data_quality.team_levers_withheld` and `team_levers_withheld_reason` explain
+   withholding; see [peer-learning.md](peer-learning.md) for the exact rules.
+   Ask the team what explains the available cache share. Detailed model, token-class
+   and work-type breakdowns remain synthetic-demo previews pending developer
+   mode (#826); the permitted cache summary is not a detailed token-class table.
 2. Treat a move to a cheaper model as a hypothesis to investigate. Compare similar work over finished periods, record other changes (task mix, acceptance criteria, pricing and capture), and inspect acceptance and repair evidence beside cost. A before/after change in TIER cannot show that the model change caused the difference, and TIER does not credit merged work to a model, so it cannot say whether the cheaper model did the work as well.
 3. Compare the team's score before and after the change, over two periods that
    have both ended and are the same length. Spend and merged work are each

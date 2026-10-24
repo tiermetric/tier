@@ -273,8 +273,16 @@ func TestSeal_BodyTeamsEqualRefoldOfStoredInputs(t *testing.T) {
 	if len(want) < 2 || sup.Any() {
 		t.Fatalf("control: the fixture must publish a named team and the residual; refold gave %d rows, suppression %+v", len(want), sup)
 	}
-	wantJSON, _ := json.Marshal(want)
-	gotJSON, _ := json.Marshal(got.Teams)
+	wantRaw, _ := json.Marshal(want)
+	wantJSON, err := foldTeamsJSON(wantRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRaw, _ := json.Marshal(got.Teams)
+	gotJSON, err := foldTeamsJSON(gotRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(wantJSON, gotJSON) {
 		t.Errorf("sealed body teams differ from the refold of the stored inputs:\nbody   %s\nrefold %s", gotJSON, wantJSON)
 	}

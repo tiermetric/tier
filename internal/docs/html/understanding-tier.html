@@ -62,7 +62,7 @@ footer.site a { color: var(--muted); }
 <header class="site"><div class="bar"><a class="brand" href="README.html"><span class="tier">TIER</span> docs</a></div></header>
 <div class="wrap"><main>
 <h1 id="understanding-tier">Understanding TIER</h1>
-<p><strong>v0.6.2 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with <code>tierd score</code>, plus the dashboard on invented data with <code>tierd demo</code>; they do not get a TIER number on their own real data. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
+<p><strong>v0.6.3 scope:</strong> real-data servers use team/division modes and publish sealed calendar months only. Developer mode is reserved for the synthetic <code>tierd demo</code> until #826 ships. Solo users get their own Claude Code cost table and the issue-attributed share of that spend with <code>tierd score</code>, and a local personal TIER score with <code>tierd score --outcomes</code>, joining that spend to the GitHub token owner’s merged PRs without persisting data or showing a team band. <code>tierd demo</code> provides the dashboard on invented data. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for trusted-use limits, the k floor and sealing steps.</p>
 <p>TIER (Token Impact &amp; Efficiency Ratio) is explained here in three layers. Each
 layer stands on its own, so read only as far as you need.</p>
 <ol>
@@ -349,8 +349,10 @@ and links the page that owns it, so each rule has one copy to keep correct. For 
 today, read <a href="how-it-works.html" rel="nofollow">how-it-works.md</a> alongside it.</p>
 <h3 id="from-install-to-a-first-real-score">From install to a first real score</h3>
 <p>Solo users can stop after step 3 for their own Claude Code cost table and the
-issue-attributed share of that spend, and run <code>tierd demo</code> for the dashboard on
-invented data. They do not get a TIER number on their own real data. The remaining
+issue-attributed share of that spend. <code>tierd score --repo . --outcomes</code> also
+computes a local personal TIER score by joining that spend to the GitHub token
+owner’s merged PRs; it persists nothing and shows no team band. Run <code>tierd demo</code>
+for the dashboard on invented data. The remaining
 steps load a team/division server; reports also require a sealed month and
 enough contributors. See the <a href="quickstart.html" rel="nofollow">quickstart</a> for the full setup.</p>
 <ol>
@@ -406,7 +408,21 @@ is recorded under your GitHub login, which your GitHub profile page shows,
 or which <code>gh api user -q .login</code> prints if you have the GitHub CLI. If the
 two are the same, skip this step. If they differ, you appear twice in the
 scores: once with spend and no merged work, once with merged work and no
-spend. Tell the server they are one person:</p>
+spend.</p>
+<p>Check before you join them. Inspect your computer login with
+<code>curl --fail-with-body &#34;http://127.0.0.1:8080/api/v1/developer/$USER/export&#34;</code>.
+The sum of <code>cost_micro</code> in <code>token_events</code> must be above 0, and <code>outcomes</code>
+must be <code>null</code> or empty (no merged work). If you have <code>jq</code>, add
+<code>| jq &#39;{spend: ([.token_events[]?.cost_micro] | add), outcomes: (.outcomes // [] | length)}&#39;</code>
+to the command to print both. If the export fails, spend is absent, or any
+outcome is present, stop here. Merged work may belong to somebody whose
+GitHub login matches your computer login. The join moves both spend and
+merged work, so it would put that person&#39;s work into your score. The check
+covers only merged work loaded so far. After the join, the same export also
+lists your own merged work, so before any later <code>backfill</code>, check that every
+pull request in its <code>outcomes</code> is yours. If one is not, undo the join with
+<code>curl --fail-with-body -X DELETE &#34;http://127.0.0.1:8080/api/v1/developer_alias/$USER&#34;</code>.</p>
+<p>If the check passes, tell the server they are one person:</p>
 <pre><code>curl -f -X POST http://127.0.0.1:8080/api/v1/developer_alias \
   -H &#34;Content-Type: application/json&#34; \
   -d &#39;{&#34;alias&#34;:&#34;&lt;login-name&gt;&#34;,&#34;canonical&#34;:&#34;&lt;github-login&gt;&#34;}&#39;

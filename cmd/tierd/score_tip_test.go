@@ -14,6 +14,9 @@ import (
 // the URL it prints is on the default serve address (#799).
 func TestScoreClosingTip_DocsPathIsServed(t *testing.T) {
 	tip := scoreClosingTip()
+	if !strings.Contains(tip, "`tierd score --outcomes`") {
+		t.Fatalf("closing tip must name the local personal score option: %q", tip)
+	}
 
 	i := strings.Index(tip, "/docs/")
 	if i < 0 {

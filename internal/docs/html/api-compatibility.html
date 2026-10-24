@@ -3013,6 +3013,24 @@ Sealed reports likewise recompute with their recorded policy, rule and rubric.</
 <h2 id="api-changelog">API changelog</h2>
 <ul>
 <li>
+<p><strong>#1368 / #1375 -- sealed team/division levers (ADDITIVE fields, v0.6.3).</strong>
+<code>GET /api/v1/scores?period=YYYY-MM</code> adds the optional numeric fraction in <code>[0,1]</code>
+<code>teams[].cache_read_share</code> (cache reads / all input-side tokens).
+Every published group, including folded <code>other</code>, first needs k counted seats
+with both captured spend and merged work; failure withholds all groups&#39; levers.
+The cache partition needs k contributors with cache reads and k without them,
+counting distinct cost contributors with positive input-side tokens (input +
+cache read + cache write), including bots and spend-only people. Zero-input
+contributors count on neither side; mixed cached and uncached input puts a
+contributor on the cache-read side. k is clamped to at least 3.
+Optional <code>data_quality.team_levers_withheld</code> is <code>true</code> when levers are withheld;
+<code>data_quality.team_levers_withheld_reason</code> is one of <code>group_seats_below_k</code> or
+<code>category_seats_below_k</code>. Withheld share keys are absent, never zero or null.
+Live windows, anonymized <code>/scores/compare</code> and org totals carry no levers.
+Previously sealed bodies remain immutable; pre-lever bodies are
+verified/recomputed without adding these fields or their notice.</p>
+</li>
+<li>
 <p><strong>#1230 / #1302 -- CI trigger provenance (ADDITIVE field; BEHAVIOURAL evidence/status change).</strong>
 <code>GET /api/v1/quality_events</code> adds nullable JSON <code>trigger_event</code> and appends
 the CSV column after <code>evidence</code>. CI evidence is now push-only: legacy NULL

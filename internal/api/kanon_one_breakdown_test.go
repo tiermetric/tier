@@ -223,6 +223,15 @@ func TestOneBreakdown_E3SingleUserModelPublishesNoPerModelFigure(t *testing.T) {
 					t.Errorf("%s mode: %q is a per-category split of cost and must be absent", mode, key)
 				}
 			}
+			// The sealed-body path may publish safe team shares, but never this
+			// one-person premium category, even while the pooled row publishes.
+			sealed, sealedBody := leverBody(t, h)
+			if rows, _ := sealed["teams"].([]any); len(rows) != 1 || sealed["total"] == nil {
+				t.Fatalf("control: pooled sealed row must publish: %s", sealedBody)
+			}
+			if bytes.Contains(sealedBody, []byte(`"premium_model_share"`)) {
+				t.Errorf("E3: sealed %s mode publishes e6's premium spend via share times cost: %s", mode, sealedBody)
+			}
 		})
 	}
 }

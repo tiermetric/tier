@@ -4,7 +4,7 @@
 
 ## A white paper: accepted software changes per dollar of recorded AI usage
 
-**Paper version:** 2.7 — 2026-10-22 (v0.6.2 release). Describes TIER **v0.6.2**, an open-source tool released under the Apache License 2.0. The paper is written for two readers with no background: a skeptical engineer and a chief financial officer (CFO). It says what TIER measures, what the number is worth, which decisions it may and may not inform, how complete its inputs are, and how to try it. The mechanics behind every statement here are in the companion [technical reference](technical-reference.md); Section 13 says what it covers. Where this paper and the reference disagree, the reference is correct.
+**Paper version:** 2.8 — 2026-10-23 (v0.6.3 release). Describes TIER **v0.6.3**, an open-source tool released under the Apache License 2.0. The paper is written for two readers with no background: a skeptical engineer and a chief financial officer (CFO). It says what TIER measures, what the number is worth, which decisions it may and may not inform, how complete its inputs are, and how to try it. The mechanics behind every statement here are in the companion [technical reference](technical-reference.md); Section 13 says what it covers. Where this paper and the reference disagree, the reference is correct.
 
 **Two roles.** The **operator** is the project maintainer, who decides disputed design questions; the rulings this paper relies on are stated in full where they apply. Issue numbers (#826 and others) point to the maintainer's issue tracker, which may not be public; they are provenance only, and nothing here requires opening them. Whoever installs and runs TIER is the **administrator**, usually an engineer. A CFO does not install or run TIER; finance's part is posting what was paid (Section 8).
 
@@ -12,7 +12,7 @@
 
 ## 0. Summary for finance and leadership
 
-**v0.6.2 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
+**v0.6.3 availability:** Per-developer views and the per-issue report are not available on real data until #826 ships; `tierd demo` shows them read-only using its own invented data in a private temporary database and cannot load yours.
 
 **What the number is.** TIER measures merged work per $1,000 of captured AI usage, priced at list rates: an observational ratio, not a causal estimate. Its numerator is size-weighted outcome points, adjusted for quality where TIER observes CI failures and reverts. `cost_per_point` expresses the ratio in dollars per point. Accepted outcomes are merged pull requests, opt-in direct commits to the default branch, or API-posted outcomes. For GitHub PR ingestion, an outcome requires a recognised issue reference in the branch name or PR description; TIER does not verify that the referenced tracker record exists. The strict grammar uses the first branch slot, closing directives and explicit references; tracker keys require configuration, with OP built in (Section 2).
 
@@ -266,7 +266,7 @@ A high figure on a flat plan says what the plan bought at list prices; it does n
 The server must be started in one of three **reporting modes**, chosen with `--aggregation`, with no default:
 
 - **`developer`**: one row per developer id (from v0.6.1: synthetic demo only until #826; real-data startup is refused). This is the coaching mode of Section 7.
-- **`team`** and **`division`**: rows per team, or per division (a group of teams one level up), from TIER's **team map**: a table the administrator loads that gives each developer id a team, a division and an organisation. A group is named only when at least **k** people count toward it (**k-anonymity**; k is 5 by default and never below 3). A person counts when they are in the team map, are not a bot, and have AI spend that TIER captured or a merged pull request in the period; one person's several ids count once when an alias joins them (Section 4.1). Each figure also needs its own k: a group's cost is shown only if k counted people in it have captured spend, and its points only if k have merged work. Smaller groups are folded into a row called `other`, and when `other` itself is too small the whole report is withheld, named rows included, and the response says so. These reports show only the group rows and the total, with no per-kind segments, no spend by model and no attribution share, because a second breakdown of the same data can be subtracted from the first to reveal a smaller group. Spend that belongs to no person, such as the organisation pollers' remainder, is left out of their figures.
+- **`team`** and **`division`**: rows per team, or per division (a group of teams one level up), from TIER's **team map**: a table the administrator loads that gives each developer id a team, a division and an organisation. A group is named only when at least **k** people count toward it (**k-anonymity**; k is 5 by default and never below 3). A person counts when they are in the team map, are not a bot, and have AI spend that TIER captured or a merged pull request in the period; one person's several ids count once when an alias joins them (Section 4.1). Each figure also needs its own k: a group's cost is shown only if k counted people in it have captured spend, and its points only if k have merged work. Smaller groups are folded into a row called `other`, and when `other` itself is too small the whole report is withheld, named rows included, and the response says so. These reports show only the group rows and the total, with no per-kind segments, no detailed spend by model or attribution breakdown (the gated team shares over sealed months are described in [peer-learning.md](peer-learning.md)), because a second breakdown of the same data can be subtracted from the first to reveal a smaller group. Spend that belongs to no person, such as the organisation pollers' remainder, is left out of their figures.
 
 **Sealed monthly reports.** In `team` and `division` modes a report covers one calendar month, because two overlapping date windows can be subtracted to expose a group smaller than k. Each month is computed once, after it has closed, a grace period (14 days by default) has passed and every configured cost source has reported it; it is then stored and served unchanged, and data that arrives later never alters it. Nothing is reported until the administrator arms sealing, once, after loading any history. Sealing is one-way: a sealed month is never recomputed. The reference, Section 6.2, has the commands. The synthetic demo’s `developer` mode serves arbitrary windows; from v0.6.1, real-data developer startup is refused until #826.
 
@@ -297,12 +297,12 @@ Known limits, and whether each is filed for a fix:
 
 ## 11. Quick install and first run, for one person
 
-This trial is for an engineer: it runs on one laptop, in team mode, with Claude Code as the AI tool and a GitHub repository. The v0.6.2 trial needs Go 1.27.3 (Go 1.27.3 or newer for source builds at this revision or later, raised for GO-2026-6809; plus `git` and `make` only to build from a clone), or a downloaded release (the download and checksum steps are in the repository's `docs/quickstart.md`). Everything below uses TIER's default database file, `~/.tier/tier.db`, and its default address, `127.0.0.1:8080`, which only this computer can reach.
+This trial is for an engineer: it runs on one laptop, in team mode, with Claude Code as the AI tool and a GitHub repository. The v0.6.3 trial needs Go 1.27.3 (Go 1.27.3 or newer for source builds at this revision or later, raised for GO-2026-6809; plus `git` and `make` only to build from a clone), or a downloaded release (the download and checksum steps are in the repository's `docs/quickstart.md`). Everything below uses TIER's default database file, `~/.tier/tier.db`, and its default address, `127.0.0.1:8080`, which only this computer can reach.
 
 **1. Install.**
 
 ```sh
-go install github.com/tiermetric/tier/cmd/tierd@v0.6.2
+go install github.com/tiermetric/tier/cmd/tierd@v0.6.3
 tierd version
 ```
 

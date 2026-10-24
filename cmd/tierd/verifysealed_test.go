@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -402,5 +403,69 @@ func TestVerifySealedRecoverableEventsStayStored(t *testing.T) {
 	code, out, errb := runVerify(t, manifestPath, "--db", path)
 	if code != rcReproduced || !strings.Contains(out, "would be IDENTICAL") {
 		t.Fatalf("verify-report %d: %s %s", code, out, errb)
+	}
+}
+
+func TestVerifySealedRecompute_PreUpgradeLeversAbsent(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var hierarchy []store.HierarchyRow
+	for i := 0; i < 10; i++ {
+		hierarchy = append(hierarchy, store.HierarchyRow{Developer: fmt.Sprint("e", i), Team: "eng", Division: "dev", Org: "acme"})
+	}
+	if err := db.SeedDemoMembershipBaseline(t.Context(), hierarchy); err != nil {
+		t.Fatal(err)
+	}
+	at := sealedMay.AddDate(0, 0, 2)
+	for i := 0; i < 10; i++ {
+		dev := fmt.Sprint("e", i)
+		e := store.TokenEvent{Developer: dev, Repo: "acme/a", IssueID: "i-" + dev, Model: "claude-sonnet-4", CostMicro: 1000000, InputTok: 100, Source: "jsonl", Fidelity: "realtime", Timestamp: at}
+		if i < 5 {
+			e.Model, e.IssueID, e.CacheRead = "claude-opus-4-8", store.UnattributedIssueID, 100
+		}
+		if err := db.InsertTokenEvent(t.Context(), e); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.InsertOutcome(t.Context(), store.Outcome{Developer: dev, Repo: "acme/a", IssueID: "i-" + dev, Weight: 1, Quality: 1, MergeCommitSHA: "sha-" + dev, Timestamp: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := api.New(db, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, version, api.RateLimitConfig{}, api.WithCommit(commit))
+	h.SetAggregation(scoring.AggregationTeam, 5)
+	p, err := api.ParsePeriod("2026-05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := h.RecomputeSealedBody(t.Context(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(current, []byte(`"cache_read_share"`)) {
+		t.Fatalf("control: current body needs levers: %s", current)
+	}
+	// Remove only additive fields while preserving every other byte and field
+	// order from the encoder, exactly as a pre-upgrade body would have looked.
+	legacy := bytes.Clone(current)
+	for _, key := range []string{"cache_read_share"} {
+		legacy = regexp.MustCompile(`"`+key+`":[0-9.e+-]+,`).ReplaceAll(legacy, nil)
+	}
+	if bytes.Equal(legacy, current) {
+		t.Fatal("control: legacy body still has levers")
+	}
+	sum := sha256.Sum256(legacy)
+	rep := store.SealedReport{Level: "team", K: 5, Body: legacy}
+	stored := "sha256:" + hex.EncodeToString(sum[:])
+	if got := recomputeSealed(t.Context(), db, p, rep, stored); !strings.Contains(got, "would be IDENTICAL") {
+		t.Fatal(got)
+	}
+	// No compatibility normalization may hide a genuine cost change.
+	if err := db.InsertTokenEvent(t.Context(), store.TokenEvent{Developer: "e0", Repo: "acme/a", IssueID: "late", Model: "claude-sonnet-4", CostMicro: 1000000, InputTok: 100, Source: "jsonl", Fidelity: "realtime", Timestamp: at}); err != nil {
+		t.Fatal(err)
+	}
+	if got := recomputeSealed(t.Context(), db, p, rep, stored); !strings.Contains(got, "would DIFFER") {
+		t.Fatal(got)
 	}
 }

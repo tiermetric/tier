@@ -896,7 +896,11 @@ func sealedInputs(inputs []scoring.LabelInput) ([]store.SealedRollup, []store.Se
 // refoldCheck is store.SealCheck.Refold for a body folded to teams and sup: the
 // stored inputs must refold at k to exactly both.
 func refoldCheck(k int, teams []teamScoreJSON, sup scoring.KAnonSuppression) (func([]store.SealedRollup, []store.SealedPersonKey) error, error) {
-	want, err := json.Marshal(teams)
+	raw, err := json.Marshal(teams)
+	if err != nil {
+		return nil, err
+	}
+	want, err := foldTeamsJSON(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -907,6 +911,10 @@ func refoldCheck(k int, teams []teamScoreJSON, sup scoring.KAnonSuppression) (fu
 		}
 		teams, gotSup := scoring.AggregateFolded(stored, k)
 		got, err := json.Marshal(teamRows(teams))
+		if err != nil {
+			return err
+		}
+		got, err = foldTeamsJSON(got)
 		if err != nil {
 			return err
 		}
